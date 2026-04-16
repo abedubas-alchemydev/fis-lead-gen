@@ -1,0 +1,242 @@
+from __future__ import annotations
+
+import logging
+from datetime import datetime, timedelta, timezone
+import re
+
+import httpx
+from sqlalchemy import delete, select
+from sqlalchemy.ext.asyncio import AsyncSession
+
+from app.core.config import settings
+from app.models.broker_dealer import BrokerDealer
+from app.models.executive_contact import ExecutiveContact
+
+logger = logging.getLogger(__name__)
+
+
+class ContactEnrichmentUnavailableError(RuntimeError):
+    pass
+
+
+class ExecutiveContactService:
+    # Apollo People Enrichment API endpoint.  The search endpoints
+    # (/mixed_people/search and /people/search) require paid plans.
+    # The /mixed_people/search endpoint is tried first (works on paid);
+    # if 403, fall back to /people/match (single-person enrichment on free tier).
+    _APOLLO_SEARCH_URL = "https://api.apollo.io/api/v1/mixed_people/search"
+    _APOLLO_MATCH_URL = "https://api.apollo.io/v1/people/match"
+
+    async def list_contacts(self, db: AsyncSession, broker_dealer_id: int) -> list[ExecutiveContact]:
+        stmt = (
+            select(ExecutiveContact)
+            .where(ExecutiveContact.bd_id == broker_dealer_id)
+            .order_by(ExecutiveContact.enriched_at.desc(), ExecutiveContact.id.asc())
+        )
+        return (await db.execute(stmt)).scalars().all()
+
+    async def enrich_contacts(
+        self,
+        db: AsyncSession,
+        broker_dealer: BrokerDealer,
+        *,
+        force: bool = False,
+    ) -> list[ExecutiveContact]:
+        existing = await self.list_contacts(db, broker_dealer.id)
+        if not force and existing:
+            newest = max(item.enriched_at for item in existing)
+            if newest >= datetime.now(timezone.utc) - timedelta(days=90):
+                return existing
+
+        # Only delete non-FOCUS contacts — FOCUS-extracted CEO data should survive
+        # Apollo enrichment cycles so the two sources coexist.
+        await db.execute(
+            delete(ExecutiveContact).where(
+                ExecutiveContact.bd_id == broker_dealer.id,
+                ExecutiveContact.source != "focus_report",
+            )
+        )
+
+        provider = settings.contact_enrichment_provider.lower()
+        if provider == "apollo" and settings.apollo_api_key:
+            contacts = await self._enrich_via_apollo(broker_dealer)
+        elif provider != "disabled":
+            raise ContactEnrichmentUnavailableError(
+                f"Contact enrichment provider '{provider}' is not configured or missing API key. "
+                "Set CONTACT_ENRICHMENT_PROVIDER=apollo and APOLLO_API_KEY in the backend .env file."
+            )
+        else:
+            raise ContactEnrichmentUnavailableError(
+                "Contact enrichment is disabled. Set CONTACT_ENRICHMENT_PROVIDER=apollo "
+                "and APOLLO_API_KEY in the backend .env file."
+            )
+
+        if contacts:
+            db.add_all(contacts)
+            await db.commit()
+        return await self.list_contacts(db, broker_dealer.id)
+
+    async def _enrich_via_apollo(self, broker_dealer: BrokerDealer) -> list[ExecutiveContact]:
+        """Enrich contacts via Apollo.io.
+
+        Strategy cascade:
+        1. People search (/mixed_people/search) — requires paid plan.
+        2. Organization enrich (/organizations/enrich) — works on free tier.
+           Returns company domain, phone, LinkedIn.  From the domain we can
+           derive an org-level contact record.
+        """
+        company_name = broker_dealer.name.strip()
+        if not company_name:
+            return []
+
+        headers = {
+            "Content-Type": "application/json",
+            "Cache-Control": "no-cache",
+            "X-Api-Key": settings.apollo_api_key or "",
+        }
+
+        people: list[dict] = []
+
+        # ── Strategy 1: People search (paid plans) ──────────
+        try:
+            async with httpx.AsyncClient(timeout=30) as client:
+                response = await client.post(
+                    self._APOLLO_SEARCH_URL,
+                    headers=headers,
+                    json={
+                        "q_organization_name": company_name,
+                        "page": 1,
+                        "per_page": 10,
+                        "person_titles": [
+                            "CEO", "Chief Executive Officer",
+                            "CFO", "Chief Financial Officer",
+                            "COO", "Chief Operating Officer",
+                            "President", "Managing Director",
+                        ],
+                    },
+                )
+                if response.status_code == 200:
+                    people = response.json().get("people") or []
+                elif response.status_code != 403:
+                    logger.warning("Apollo search returned %d for '%s'", response.status_code, company_name)
+        except httpx.HTTPError as exc:
+            logger.warning("Apollo search network error for '%s': %s", company_name, exc)
+
+        # ── Strategy 2: Org enrich -> domain-based contacts (free tier) ──
+        if not people:
+            people = await self._enrich_via_org_lookup(headers, company_name, broker_dealer)
+
+        if not people or not isinstance(people, list):
+            logger.info("Apollo returned 0 contacts for '%s'.", company_name)
+            return []
+
+        now = datetime.now(timezone.utc)
+        contacts: list[ExecutiveContact] = []
+        seen_names: set[str] = set()
+
+        for person in people[:5]:
+            if not isinstance(person, dict):
+                continue
+            name = str(person.get("name") or "").strip()
+            if not name or name.lower() in seen_names:
+                continue
+            seen_names.add(name.lower())
+
+            title = str(person.get("title") or person.get("headline") or "Executive").strip()
+            email = person.get("email")
+            phone_obj = person.get("phone_numbers")
+            phone = None
+            if isinstance(phone_obj, list) and phone_obj:
+                first_phone = phone_obj[0]
+                if isinstance(first_phone, dict):
+                    phone = str(first_phone.get("sanitized_number") or first_phone.get("raw_number") or "").strip() or None
+                elif isinstance(first_phone, str):
+                    phone = first_phone.strip() or None
+            linkedin_url = person.get("linkedin_url")
+
+            contacts.append(
+                ExecutiveContact(
+                    bd_id=broker_dealer.id,
+                    name=name,
+                    title=title[:255],
+                    email=str(email).strip() if email else None,
+                    phone=phone,
+                    linkedin_url=str(linkedin_url).strip() if linkedin_url else None,
+                    source="apollo",
+                    enriched_at=now,
+                )
+            )
+
+        if not contacts:
+            logger.info("Apollo returned 0 contacts for '%s'.", company_name)
+
+        return contacts
+
+    async def _enrich_via_org_lookup(
+        self,
+        headers: dict[str, str],
+        company_name: str,
+        broker_dealer: BrokerDealer,
+    ) -> list[dict]:
+        """Use the Apollo org-enrich endpoint (free tier) to get company data,
+        then build a synthetic org-level contact record with whatever data
+        Apollo provides (phone, LinkedIn, domain)."""
+        domain_guesses = self._guess_domains(company_name)
+
+        for domain in domain_guesses:
+            try:
+                async with httpx.AsyncClient(timeout=20) as client:
+                    resp = await client.post(
+                        "https://api.apollo.io/api/v1/organizations/enrich",
+                        headers=headers,
+                        json={"domain": domain},
+                    )
+                    if resp.status_code != 200:
+                        continue
+
+                    org = resp.json().get("organization")
+                    if not org or not isinstance(org, dict):
+                        continue
+
+                    org_name = org.get("name") or company_name
+                    linkedin = org.get("linkedin_url")
+                    primary_phone = org.get("primary_phone")
+                    phone = None
+                    if isinstance(primary_phone, dict):
+                        phone = primary_phone.get("sanitized_number") or primary_phone.get("number")
+
+                    # Build a company-level contact record.
+                    return [
+                        {
+                            "name": org_name,
+                            "title": "Company (Organization Profile)",
+                            "email": None,
+                            "phone_numbers": [{"sanitized_number": phone}] if phone else [],
+                            "linkedin_url": linkedin,
+                        }
+                    ]
+            except httpx.HTTPError as exc:
+                logger.debug("Org enrich failed for domain '%s': %s", domain, exc)
+                continue
+
+        return []
+
+    @staticmethod
+    def _guess_domains(company_name: str) -> list[str]:
+        """Generate plausible website domains from a broker-dealer name."""
+        import re as _re
+        clean = _re.sub(r"[^a-z0-9 ]+", "", company_name.lower()).strip()
+        tokens = [t for t in clean.split() if t not in {"llc", "inc", "corp", "lp", "ltd", "the", "of", "and", "a"}]
+        if not tokens:
+            tokens = clean.split()[:1]
+
+        guesses: list[str] = []
+        # "BTIG, LLC" -> "btig.com"
+        if tokens:
+            guesses.append(f"{tokens[0]}.com")
+        # "Wedbush Securities Inc." -> "wedbush.com"  (already covered above)
+        # Full slug: "wedbushsecurities.com"
+        if len(tokens) > 1:
+            guesses.append(f"{''.join(tokens)}.com")
+            guesses.append(f"{tokens[0]}{tokens[1]}.com")
+        return guesses[:4]

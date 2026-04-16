@@ -1,0 +1,10 @@
+import type { ReactNode } from "react";
+
+import { AppShell } from "@/components/layout/app-shell";
+import { getRequiredSession } from "@/lib/auth-server";
+
+export default async function ProtectedAppLayout({ children }: { children: ReactNode }) {
+  const session = await getRequiredSession();
+
+  return <AppShell session={session}>{children}</AppShell>;
+}

@@ -1,0 +1,35 @@
+version: "3.9"
+
+# Production-like compose for testing the Docker build locally
+# before deploying to GCP Cloud Run.
+#
+# Usage:
+#   docker-compose -f docker-compose.prod.yml up --build
+
+services:
+  backend:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
+    env_file:
+      - ./backend/.env
+    ports:
+      - "8001:8000"
+    environment:
+      - ENVIRONMENT=production
+
+  frontend:
+    build:
+      context: ./frontend
+      dockerfile: Dockerfile
+      args:
+        NEXT_PUBLIC_APP_URL: ${NEXT_PUBLIC_APP_URL:-http://localhost:3000}
+    env_file:
+      - ./frontend/.env.local
+    ports:
+      - "3000:3000"
+    environment:
+      - NODE_ENV=production
+      - INTERNAL_API_URL=http://backend:8000
+    depends_on:
+      - backend
