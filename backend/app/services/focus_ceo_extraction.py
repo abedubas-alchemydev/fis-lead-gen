@@ -171,7 +171,7 @@ class FocusCeoExtractionService:
         try:
             pdf_record = await self.downloader.download_latest_x17a5_pdf(broker_dealer)
         except Exception as exc:
-            logger.warning("PDF download failed for BD %d: %s", broker_dealer.id, exc)
+            logger.warning("PDF download failed for BD %d: %s", broker_dealer.id, exc, exc_info=True)
             return FocusCeoExtractionResult(
                 bd_id=broker_dealer.id,
                 ceo_name=None, ceo_title=None, ceo_phone=None, ceo_email=None,
@@ -214,6 +214,7 @@ class FocusCeoExtractionService:
                     prompt=_FOCUS_CEO_PROMPT,
                 )
         except GeminiConfigurationError as exc:
+            logger.warning("Gemini FOCUS CEO extraction skipped for BD %d (config): %s", broker_dealer.id, exc, exc_info=True)
             return FocusCeoExtractionResult(
                 bd_id=broker_dealer.id,
                 ceo_name=None, ceo_title=None, ceo_phone=None, ceo_email=None,
@@ -224,7 +225,7 @@ class FocusCeoExtractionService:
                 extraction_notes=str(exc),
             )
         except GeminiExtractionError as exc:
-            logger.warning("Gemini FOCUS CEO extraction failed for BD %d: %s", broker_dealer.id, exc)
+            logger.warning("Gemini FOCUS CEO extraction failed for BD %d: %s", broker_dealer.id, exc, exc_info=True)
             return FocusCeoExtractionResult(
                 bd_id=broker_dealer.id,
                 ceo_name=None, ceo_title=None, ceo_phone=None, ceo_email=None,
@@ -292,7 +293,7 @@ class FocusCeoExtractionService:
         try:
             pdf_record = await self.downloader.download_latest_x17a5_pdf(fake_bd)
         except Exception as exc:
-            logger.warning("PDF download failed for BD %d: %s", bd_id, exc)
+            logger.warning("PDF download failed for BD %d: %s", bd_id, exc, exc_info=True)
             return FocusCeoExtractionResult(
                 bd_id=bd_id,
                 ceo_name=None, ceo_title=None, ceo_phone=None, ceo_email=None,
@@ -331,7 +332,7 @@ class FocusCeoExtractionService:
                     prompt=_FOCUS_CEO_PROMPT,
                 )
         except (GeminiConfigurationError, GeminiExtractionError) as exc:
-            logger.warning("Gemini vision extraction failed for BD %d: %s", bd_id, exc)
+            logger.warning("Gemini vision extraction failed for BD %d: %s", bd_id, exc, exc_info=True)
             return FocusCeoExtractionResult(
                 bd_id=bd_id,
                 ceo_name=None, ceo_title=None, ceo_phone=None, ceo_email=None,
@@ -454,7 +455,7 @@ class FocusCeoExtractionService:
                             ))
                             await write_db.commit()
                     except Exception as db_exc:
-                        logger.warning("DB write failed for BD %d, data was extracted but not saved: %s", bd_id, db_exc)
+                        logger.warning("DB write failed for BD %d, data was extracted but not saved: %s", bd_id, db_exc, exc_info=True)
 
                 if result.extraction_status == "success":
                     print(
