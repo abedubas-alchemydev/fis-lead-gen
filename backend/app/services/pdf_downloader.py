@@ -2,10 +2,11 @@ from __future__ import annotations
 
 import asyncio
 import base64
+import ipaddress
 import logging
 from datetime import date
 from pathlib import Path
-from urllib.parse import urljoin
+from urllib.parse import urljoin, urlparse
 
 import httpx
 
@@ -14,6 +15,40 @@ from app.models.broker_dealer import BrokerDealer
 from app.services.service_models import DownloadedPdfRecord
 
 logger = logging.getLogger(__name__)
+
+# Allowlist of hosts this service may fetch from. All SEC-owned. Extend only
+# after security review — DB-sourced URLs (broker_dealer.filings_index_url)
+# flow through this validator, so a wider allowlist directly widens the SSRF
+# attack surface. See .claude/focus-fix/diagnosis.md §9 ticket S-1.
+_SEC_ALLOWED_HOSTS = frozenset({"www.sec.gov", "data.sec.gov", "efts.sec.gov"})
+
+
+def _validate_sec_url(url: str) -> None:
+    """Reject non-SEC, non-HTTPS, or private-IP targets before any network call.
+
+    Raises ValueError with a non-sensitive message. The hostname and scheme are
+    safe to log because they originate from the DB (broker_dealer.filings_index_url)
+    or from settings, not from end-user input.
+    """
+    parsed = urlparse(url)
+    if parsed.scheme != "https":
+        raise ValueError(f"Only HTTPS is allowed; got scheme={parsed.scheme!r}.")
+    host = parsed.hostname
+    if not host:
+        raise ValueError(f"URL has no hostname: {url!r}.")
+    if host not in _SEC_ALLOWED_HOSTS:
+        raise ValueError(f"Host {host!r} is not in the SEC allowlist.")
+    # Defense-in-depth: if the host is ever an IP literal (via misconfigured
+    # allowlist or DNS rebind), reject private / loopback / link-local /
+    # reserved / multicast ranges. GCP metadata (169.254.169.254) is caught
+    # by is_link_local below.
+    try:
+        ip = ipaddress.ip_address(host)
+    except ValueError:
+        # Hostname is not an IP literal — already passed the allowlist, OK.
+        return
+    if ip.is_private or ip.is_loopback or ip.is_link_local or ip.is_reserved or ip.is_multicast:
+        raise ValueError(f"IP literal {host!r} targets a private or reserved range.")
 
 class PdfDownloaderService:
     def __init__(self) -> None:
@@ -257,6 +292,11 @@ class PdfDownloaderService:
         return f"{filing_directory_url}{selected_name}"
 
     async def _get_json_with_retries(self, url: str) -> dict[str, object]:
+        # URL validation runs BEFORE the retry loop, so a rejected URL does not
+        # consume a retry slot — it raises ValueError directly to the caller.
+        # The retry loop's ValueError handler below exists solely for
+        # response.json() decode failures on otherwise-successful HTTP fetches.
+        _validate_sec_url(url)
         headers = {
             "User-Agent": settings.sec_user_agent,
             "Accept": "application/json",
@@ -268,7 +308,7 @@ class PdfDownloaderService:
                 async with httpx.AsyncClient(
                     timeout=settings.sec_request_timeout_seconds,
                     headers=headers,
-                    follow_redirects=True,
+                    follow_redirects=False,
                 ) as client:
                     response = await client.get(url)
                 response.raise_for_status()
@@ -285,6 +325,7 @@ class PdfDownloaderService:
         raise RuntimeError("Unable to retrieve SEC JSON payload.") from last_error
 
     async def _download_bytes_with_retries(self, url: str) -> bytes:
+        _validate_sec_url(url)
         headers = {
             "User-Agent": settings.sec_user_agent,
             "Accept": "application/pdf,application/octet-stream;q=0.9,*/*;q=0.8",
@@ -296,7 +337,7 @@ class PdfDownloaderService:
                 async with httpx.AsyncClient(
                     timeout=settings.sec_request_timeout_seconds,
                     headers=headers,
-                    follow_redirects=True,
+                    follow_redirects=False,
                 ) as client:
                     response = await client.get(url)
                 response.raise_for_status()
