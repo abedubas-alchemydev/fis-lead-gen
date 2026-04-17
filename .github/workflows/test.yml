@@ -1,4 +1,4 @@
-name: Tests
+name: CI/CD
 
 on:
   pull_request:
@@ -40,7 +40,7 @@ jobs:
           if find app/tests -name "test_*.py" | grep -q .; then
             pytest app/tests/ -v --tb=short
           else
-            echo "::notice::No test files found — tests will appear once the security/focus-hardening PR merges."
+            echo "::notice::No test files found yet."
           fi
 
   frontend:
@@ -73,3 +73,75 @@ jobs:
 
       - name: Build
         run: npm run build
+
+  deploy:
+    name: Deploy (${{ github.ref == 'refs/heads/main' && 'production' || 'staging' }})
+    needs: [backend, frontend]
+    if: github.event_name == 'push'
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    permissions:
+      id-token: write
+      contents: read
+    steps:
+      - uses: actions/checkout@v4
+
+      - id: auth
+        uses: google-github-actions/auth@v2
+        with:
+          workload_identity_provider: ${{ vars.GCP_WIF_PROVIDER }}
+          service_account: ${{ vars.GCP_SERVICE_ACCOUNT }}
+
+      - uses: google-github-actions/setup-gcloud@v2
+
+      - name: Configure Docker for Artifact Registry
+        run: gcloud auth configure-docker us-central1-docker.pkg.dev --quiet
+
+      - name: Set deploy variables
+        run: |
+          SHORT_SHA=${GITHUB_SHA::7}
+          echo "SHORT_SHA=$SHORT_SHA" >> $GITHUB_ENV
+          if [[ "${{ github.ref }}" == "refs/heads/main" ]]; then
+            echo "ENV=production" >> $GITHUB_ENV
+            echo "BACKEND_SERVICE=fis-backend" >> $GITHUB_ENV
+            echo "FRONTEND_SERVICE=fis-frontend" >> $GITHUB_ENV
+            echo "FRONTEND_URL=https://fis.alchemydev.io" >> $GITHUB_ENV
+          else
+            echo "ENV=staging" >> $GITHUB_ENV
+            echo "BACKEND_SERVICE=fis-backend-staging" >> $GITHUB_ENV
+            echo "FRONTEND_SERVICE=fis-frontend-staging" >> $GITHUB_ENV
+            echo "FRONTEND_URL=https://fis-frontend-staging-136029935063.us-central1.run.app" >> $GITHUB_ENV
+          fi
+
+      - name: Build and push backend
+        run: |
+          docker build \
+            -t ${{ vars.GCP_REGISTRY }}/backend:${{ env.SHORT_SHA }} \
+            -t ${{ vars.GCP_REGISTRY }}/backend:latest-${{ env.ENV }} \
+            -f backend/Dockerfile backend/
+          docker push ${{ vars.GCP_REGISTRY }}/backend --all-tags
+
+      - name: Build and push frontend
+        run: |
+          docker build \
+            --build-arg NEXT_PUBLIC_APP_URL=${{ env.FRONTEND_URL }} \
+            -t ${{ vars.GCP_REGISTRY }}/frontend:${{ env.SHORT_SHA }} \
+            -t ${{ vars.GCP_REGISTRY }}/frontend:latest-${{ env.ENV }} \
+            -f frontend/Dockerfile frontend/
+          docker push ${{ vars.GCP_REGISTRY }}/frontend --all-tags
+
+      - name: Deploy backend to Cloud Run
+        run: |
+          gcloud run deploy ${{ env.BACKEND_SERVICE }} \
+            --image=${{ vars.GCP_REGISTRY }}/backend:${{ env.SHORT_SHA }} \
+            --region=${{ vars.GCP_REGION }} \
+            --project=${{ vars.GCP_PROJECT_ID }} \
+            --labels=commit-sha=${{ env.SHORT_SHA }},environment=${{ env.ENV }}
+
+      - name: Deploy frontend to Cloud Run
+        run: |
+          gcloud run deploy ${{ env.FRONTEND_SERVICE }} \
+            --image=${{ vars.GCP_REGISTRY }}/frontend:${{ env.SHORT_SHA }} \
+            --region=${{ vars.GCP_REGION }} \
+            --project=${{ vars.GCP_PROJECT_ID }} \
+            --labels=commit-sha=${{ env.SHORT_SHA }},environment=${{ env.ENV }}
