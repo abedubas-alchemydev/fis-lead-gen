@@ -167,7 +167,7 @@ export function PipelineAdminClient() {
           </button>
         </div>
         <p className="mt-3 text-xs text-slate-500">
-          "Refresh FINRA details" re-scans all firms for updated owners, officers, and business types (bi-monthly recommended).
+          &ldquo;Refresh FINRA details&rdquo; re-scans all firms for updated owners, officers, and business types (bi-monthly recommended).
         </p>
       </div>
 
