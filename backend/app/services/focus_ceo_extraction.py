@@ -151,7 +151,13 @@ def _render_pdf_pages_to_images(
         return images
 
     except Exception as exc:
-        logger.warning("PDF-to-image rendering failed: %s", exc)
+        # Intentionally NOT logging str(exc) or exc_info=True here: pypdfium2
+        # errors and underlying Python file-open errors routinely include the
+        # local cache path (e.g. /tmp/pdf-cache/<cik>-<accession>.pdf). The
+        # exception class name is enough to triage; caller handles the empty
+        # return by falling back to raw-PDF upload to Gemini at the call site.
+        # Ref: .claude/focus-fix/diagnosis.md §9 ticket S-2.
+        logger.warning("PDF-to-image rendering failed (%s); falling back to raw PDF", type(exc).__name__)
         return []
 
 
