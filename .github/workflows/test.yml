@@ -54,6 +54,7 @@ jobs:
       NEXT_PUBLIC_APP_URL: "http://localhost:3000"
       BETTER_AUTH_SECRET: "ci-dummy-secret-padding-xxxxxxxxxxxxxxxx"
       DATABASE_URL: "postgresql://ci:ci@localhost:5432/ci"
+      RESEND_API_KEY: "re_ci_dummy_key_placeholder"
       NEXT_TELEMETRY_DISABLED: "1"
     steps:
       - uses: actions/checkout@v4
