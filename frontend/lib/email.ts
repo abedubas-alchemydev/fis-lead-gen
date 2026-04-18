@@ -165,3 +165,54 @@ export async function sendVerificationEmail({
 
   console.log(`[EMAIL] Verification email sent to ${user.email}`);
 }
+
+// ─── Admin Approval Request Email ───────────────────────────────────
+export async function sendAdminApprovalRequestEmail({
+  newUser,
+  adminEmails,
+  settingsUrl,
+}: {
+  newUser: { email: string; name: string; createdAt: Date | string };
+  adminEmails: string[];
+  settingsUrl: string;
+}) {
+  const signupTime =
+    typeof newUser.createdAt === "string"
+      ? newUser.createdAt
+      : newUser.createdAt.toISOString();
+
+  const html = buildHtml({
+    preheader: `New signup pending approval: ${newUser.email}`,
+    heading: "New signup pending approval",
+    body: `
+      <p>A new account is awaiting your review before it can sign in.</p>
+      <p>
+        <strong>Name:</strong> ${newUser.name || "(not provided)"}<br />
+        <strong>Email:</strong> ${newUser.email}<br />
+        <strong>Signed up:</strong> ${signupTime}
+      </p>
+      <p>Open the admin panel to approve or reject this account.</p>
+    `,
+    ctaUrl: settingsUrl,
+    ctaLabel: "Open admin panel",
+    footer:
+      "You are receiving this because you hold the admin role in the Lead Gen Engine.",
+  });
+
+  try {
+    await getTransporter().sendMail({
+      from: fromAddress,
+      to: adminEmails.join(", "),
+      subject: "New fis-lead-gen signup pending approval",
+      html,
+    });
+  } catch (error: unknown) {
+    console.error("[EMAIL] Failed to send admin approval request:", error);
+    const message = error instanceof Error ? error.message : String(error);
+    throw new Error(`Email delivery failed: ${message}`);
+  }
+
+  console.log(
+    `[EMAIL] Admin approval request sent to ${adminEmails.length} admin(s)`
+  );
+}
