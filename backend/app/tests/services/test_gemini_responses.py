@@ -56,7 +56,7 @@ class TestInitKeyShapeValidator:
         "bad_key",
         [
             # The incident — shape from a Windows `echo -n` misfire
-            '-n "***REDACTED***"\r\n',
+            '-n "' + _VALID_KEY + '"\r\n',
             "-n " + _VALID_KEY,
             # Too short / too long
             "AIzaSyABC",

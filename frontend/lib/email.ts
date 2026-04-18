@@ -1,7 +1,32 @@
-import { Resend } from "resend";
+import nodemailer, { type Transporter } from "nodemailer";
 
-const resend = new Resend(process.env.RESEND_API_KEY);
-const fromAddress = process.env.EMAIL_FROM ?? "Client Clearing Lead Gen Engine <onboarding@resend.dev>";
+let cachedTransporter: Transporter | null = null;
+
+function getTransporter(): Transporter {
+  if (cachedTransporter) return cachedTransporter;
+
+  const host = process.env.SMTP_HOST;
+  const port = Number(process.env.SMTP_PORT ?? 587);
+  const user = process.env.SMTP_USER;
+  const pass = process.env.SMTP_PASSWORD;
+
+  if (!host || !user || !pass) {
+    throw new Error(
+      "SMTP transport not configured. Missing SMTP_HOST / SMTP_USER / SMTP_PASSWORD."
+    );
+  }
+
+  cachedTransporter = nodemailer.createTransport({
+    host,
+    port,
+    secure: false,
+    requireTLS: true,
+    auth: { user, pass },
+  });
+  return cachedTransporter;
+}
+
+const fromAddress = process.env.EMAIL_FROM ?? "noreply@alchemydev.io";
 const appName = "Client Clearing Lead Gen Engine";
 
 // ─── Shared enterprise email wrapper ────────────────────────────────
@@ -87,16 +112,17 @@ export async function sendPasswordResetEmail({
       "If you did not request a password reset, you can safely ignore this email. Your password will not be changed.",
   });
 
-  const { error } = await resend.emails.send({
-    from: fromAddress,
-    to: user.email,
-    subject: "Reset your password",
-    html,
-  });
-
-  if (error) {
+  try {
+    await getTransporter().sendMail({
+      from: fromAddress,
+      to: user.email,
+      subject: "Reset your password",
+      html,
+    });
+  } catch (error: unknown) {
     console.error("[EMAIL] Failed to send password reset:", error);
-    throw new Error(`Email delivery failed: ${error.message}`);
+    const message = error instanceof Error ? error.message : String(error);
+    throw new Error(`Email delivery failed: ${message}`);
   }
 
   console.log(`[EMAIL] Password reset email sent to ${user.email}`);
@@ -124,16 +150,17 @@ export async function sendVerificationEmail({
       "If you did not create an account, you can safely ignore this email.",
   });
 
-  const { error } = await resend.emails.send({
-    from: fromAddress,
-    to: user.email,
-    subject: "Verify your email address",
-    html,
-  });
-
-  if (error) {
+  try {
+    await getTransporter().sendMail({
+      from: fromAddress,
+      to: user.email,
+      subject: "Verify your email address",
+      html,
+    });
+  } catch (error: unknown) {
     console.error("[EMAIL] Failed to send verification email:", error);
-    throw new Error(`Email delivery failed: ${error.message}`);
+    const message = error instanceof Error ? error.message : String(error);
+    throw new Error(`Email delivery failed: ${message}`);
   }
 
   console.log(`[EMAIL] Verification email sent to ${user.email}`);
