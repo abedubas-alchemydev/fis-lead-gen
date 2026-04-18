@@ -3,7 +3,7 @@
 import type { FormEvent } from "react";
 import { useState, useTransition } from "react";
 import { useRouter } from "next/navigation";
-import { CheckCircle2, Loader2 } from "lucide-react";
+import { Loader2 } from "lucide-react";
 
 import { Input } from "@/components/ui/input";
 import { authClient } from "@/lib/auth-client";
@@ -13,7 +13,6 @@ type AuthFormMode = "login" | "signup";
 export function AuthForm({ mode }: { mode: AuthFormMode }) {
   const router = useRouter();
   const [error, setError] = useState<string | null>(null);
-  const [signupSuccess, setSignupSuccess] = useState(false);
   const [isPending, startTransition] = useTransition();
 
   async function handleSubmit(event: FormEvent<HTMLFormElement>) {
@@ -47,7 +46,8 @@ export function AuthForm({ mode }: { mode: AuthFormMode }) {
         if (mode === "signup") {
           const result = await authClient.signUp.email({ name, email, password });
           if (result.error) throw new Error(result.error.message);
-          setSignupSuccess(true);
+          router.push("/pending-approval");
+          router.refresh();
           return;
         }
 
@@ -59,29 +59,6 @@ export function AuthForm({ mode }: { mode: AuthFormMode }) {
         setError(submissionError instanceof Error ? submissionError.message : "Unable to continue.");
       }
     });
-  }
-
-  if (signupSuccess) {
-    return (
-      <div className="animate-scale-in space-y-5">
-        <div className="flex flex-col items-center rounded-2xl bg-emerald-50 px-6 py-8 text-center">
-          <div className="flex h-12 w-12 items-center justify-center rounded-full bg-success/10">
-            <CheckCircle2 className="h-6 w-6 text-success" />
-          </div>
-          <p className="mt-4 text-base font-semibold text-emerald-800">Account created</p>
-          <p className="mt-2 max-w-xs text-sm leading-relaxed text-emerald-700">
-            A verification email has been sent. Please check your inbox and verify
-            your email to activate your account.
-          </p>
-        </div>
-        <button
-          onClick={() => router.push("/login")}
-          className="w-full rounded-2xl bg-navy px-4 py-3.5 text-sm font-semibold text-white transition hover:bg-[#112b54]"
-        >
-          Continue to sign in
-        </button>
-      </div>
-    );
   }
 
   return (
