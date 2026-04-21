@@ -7,5 +7,7 @@ pydantic-settings==2.7.0
 psycopg[binary]==3.2.13
 python-dotenv==1.0.1
 SQLAlchemy==2.0.45
+pdfplumber>=0.11.0
 pypdf>=4.0.0
+pypdfium2>=4.0.0
 uvicorn[standard]>=0.32.1

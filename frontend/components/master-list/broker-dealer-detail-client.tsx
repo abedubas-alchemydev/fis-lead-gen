@@ -3,6 +3,7 @@
 import Link from "next/link";
 import type { ReactNode } from "react";
 import { useEffect, useMemo, useState } from "react";
+import { useRouter } from "next/navigation";
 
 import { AlertPriorityBadge } from "@/components/alerts/alert-priority-badge";
 import { ClearingTypeBadge } from "@/components/master-list/clearing-type-badge";
@@ -20,7 +21,7 @@ function FinancialTrendChart({ points }: { points: Array<{ label: string; value:
   const viewBoxHeight = 160;
 
   const path = useMemo(() => {
-    if (points.length === 0) return "";
+    if (points.length <= 1) return "";
     const values = points.map((p) => p.value);
     const min = Math.min(...values);
     const max = Math.max(...values);
@@ -38,10 +39,33 @@ function FinancialTrendChart({ points }: { points: Array<{ label: string; value:
     return <div className="rounded-2xl bg-slate-50 px-4 py-10 text-sm text-slate-500">No financial history available yet.</div>;
   }
 
+  // Single data point — show a value card instead of a chart line
+  if (points.length === 1) {
+    return (
+      <div className="space-y-3">
+        <div className="rounded-2xl bg-slate-50 px-4 py-6 text-center">
+          <p className="text-sm text-slate-500">{points[0].label}</p>
+          <p className="mt-2 text-2xl font-semibold text-navy">{formatCurrency(points[0].value)}</p>
+          <p className="mt-2 text-xs text-slate-400">Only one reporting period available. The trend chart will appear when a second year of data is filed.</p>
+        </div>
+      </div>
+    );
+  }
+
   return (
     <div className="space-y-4">
       <svg viewBox={`0 0 ${viewBoxWidth} ${viewBoxHeight}`} className="w-full rounded-2xl bg-slate-50 p-3">
         <path d={path} fill="none" stroke="#1F5FA6" strokeWidth="4" strokeLinecap="round" />
+        {/* Draw dots at each data point */}
+        {points.map((p, i) => {
+          const values = points.map((pt) => pt.value);
+          const min = Math.min(...values);
+          const max = Math.max(...values);
+          const range = Math.max(max - min, 1);
+          const x = (i / Math.max(points.length - 1, 1)) * (viewBoxWidth - 30) + 15;
+          const y = viewBoxHeight - (((p.value - min) / range) * (viewBoxHeight - 30) + 15);
+          return <circle key={p.label} cx={x} cy={y} r="5" fill="#1F5FA6" />;
+        })}
       </svg>
       <div className="grid gap-2 sm:grid-cols-2">
         {points.map((p) => (
@@ -84,6 +108,7 @@ function NicheRestrictedBadge({ isNiche }: { isNiche: boolean }) {
 /* ── Main component ────────────────────────────────────────── */
 
 export function BrokerDealerDetailClient({ brokerDealerId }: { brokerDealerId: string }) {
+  const router = useRouter();
   const [profile, setProfile] = useState<BrokerDealerProfileResponse | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [enrichError, setEnrichError] = useState<string | null>(null);
@@ -94,6 +119,18 @@ export function BrokerDealerDetailClient({ brokerDealerId }: { brokerDealerId: s
   const [isExtractingFocus, setIsExtractingFocus] = useState(false);
   const [focusResult, setFocusResult] = useState<FocusCeoExtractionResponse | null>(null);
   const [focusError, setFocusError] = useState<string | null>(null);
+  const [prevId, setPrevId] = useState<number | null>(null);
+  const [nextId, setNextId] = useState<number | null>(null);
+
+  // Fetch adjacent IDs for Next/Previous Lead navigation
+  useEffect(() => {
+    apiRequest<{ prev_id: number | null; next_id: number | null }>(
+      `/api/v1/broker-dealers/${brokerDealerId}/adjacent`
+    ).then((adj) => {
+      setPrevId(adj.prev_id);
+      setNextId(adj.next_id);
+    }).catch(() => {});
+  }, [brokerDealerId]);
 
   useEffect(() => {
     let active = true;
@@ -199,6 +236,29 @@ export function BrokerDealerDetailClient({ brokerDealerId }: { brokerDealerId: s
 
   return (
     <section className="space-y-6">
+      {/* ── Next/Previous Lead Navigation ── */}
+      <div className="flex items-center justify-between">
+        <button
+          type="button"
+          disabled={!prevId}
+          onClick={() => prevId && router.push(`/master-list/${prevId}`)}
+          className="flex items-center gap-2 rounded-2xl border border-slate-200 bg-white/92 px-4 py-2 text-sm font-medium text-slate-700 transition hover:bg-slate-50 disabled:opacity-40 disabled:cursor-not-allowed"
+        >
+          <span>&#8592;</span> Previous Lead
+        </button>
+        <Link href="/master-list" className="text-sm text-slate-500 hover:text-navy">
+          Back to Master List
+        </Link>
+        <button
+          type="button"
+          disabled={!nextId}
+          onClick={() => nextId && router.push(`/master-list/${nextId}`)}
+          className="flex items-center gap-2 rounded-2xl border border-slate-200 bg-white/92 px-4 py-2 text-sm font-medium text-slate-700 transition hover:bg-slate-50 disabled:opacity-40 disabled:cursor-not-allowed"
+        >
+          Next Lead <span>&#8594;</span>
+        </button>
+      </div>
+
       {/* ── Hero Banner ── */}
       <div className="rounded-[30px] bg-navy p-8 text-white shadow-shell">
         <p className="text-sm uppercase tracking-[0.24em] text-white/60">Firm Detail</p>
@@ -254,9 +314,16 @@ export function BrokerDealerDetailClient({ brokerDealerId }: { brokerDealerId: s
             </div>
             <div className="rounded-2xl bg-slate-50 px-4 py-4 text-sm text-slate-600">
               <p className="font-medium text-navy">YoY Growth</p>
-              <p className={`mt-2 text-lg font-semibold ${bd.yoy_growth !== null && bd.yoy_growth >= 0 ? "text-emerald-600" : "text-danger"}`}>
-                {formatPercent(bd.yoy_growth)}
-              </p>
+              {bd.yoy_growth !== null ? (
+                <p className={`mt-2 text-lg font-semibold ${bd.yoy_growth >= 0 ? "text-emerald-600" : "text-danger"}`}>
+                  {formatPercent(bd.yoy_growth)}
+                </p>
+              ) : (
+                <div className="mt-2">
+                  <p className="text-lg font-semibold text-slate-400">N/A</p>
+                  <p className="mt-1 text-xs text-slate-400">Requires 2+ years of data</p>
+                </div>
+              )}
             </div>
           </div>
           <FinancialTrendChart points={chartPoints} />
@@ -285,7 +352,12 @@ export function BrokerDealerDetailClient({ brokerDealerId }: { brokerDealerId: s
 
           {/* Operations: Types of Business */}
           <div className="mt-4">
-            <p className="text-sm font-medium text-navy">Types of Business</p>
+            <div className="flex items-center gap-2">
+              <p className="text-sm font-medium text-navy">Types of Business</p>
+              {bd.types_of_business_total ? (
+                <span className="rounded-full bg-blue/10 px-2 py-0.5 text-xs font-medium text-blue">{bd.types_of_business_total} types</span>
+              ) : null}
+            </div>
             {bd.types_of_business && bd.types_of_business.length > 0 ? (
               <div className="mt-2 flex flex-wrap gap-2">
                 {bd.types_of_business.map((type) => (
@@ -297,6 +369,12 @@ export function BrokerDealerDetailClient({ brokerDealerId }: { brokerDealerId: s
             ) : (
               <p className="mt-2 text-sm text-slate-500">Not available</p>
             )}
+            {bd.types_of_business_other ? (
+              <div className="mt-2 rounded-2xl bg-slate-50 px-4 py-3 text-sm text-slate-600">
+                <p className="text-xs font-medium text-slate-500">Other Business Activities</p>
+                <p className="mt-1">{bd.types_of_business_other}</p>
+              </div>
+            ) : null}
           </div>
 
           {bd.website ? (
@@ -325,15 +403,22 @@ export function BrokerDealerDetailClient({ brokerDealerId }: { brokerDealerId: s
             <div className="flex items-center justify-between gap-3">
               <div>
                 <p className="text-sm font-medium text-navy">FOCUS Report Data</p>
-                <p className="mt-1 text-xs text-slate-500">Extract CEO contact and net capital from the latest X-17A-5 filing via AI</p>
+                <p className="mt-1 text-xs text-slate-500">
+                  Extracts contact person, phone, email, and net capital from the latest X-17A-5 PDF filing on SEC EDGAR.
+                </p>
               </div>
               <button
                 type="button"
                 onClick={() => void extractFocusCeo()}
                 disabled={isExtractingFocus}
-                className="shrink-0 rounded-2xl bg-navy px-4 py-2 text-sm font-medium text-white disabled:opacity-60"
+                className="shrink-0 rounded-2xl bg-navy px-4 py-2 text-sm font-medium text-white transition hover:bg-[#112b54] disabled:opacity-60 disabled:hover:bg-navy"
               >
-                {isExtractingFocus ? "Extracting..." : "Extract FOCUS Data"}
+                {isExtractingFocus ? (
+                  <span className="flex items-center gap-2">
+                    <span className="inline-block h-4 w-4 animate-spin rounded-full border-2 border-white/30 border-t-white" />
+                    Extracting...
+                  </span>
+                ) : focusResult ? "Re-extract" : "Extract FOCUS Data"}
               </button>
             </div>
 
@@ -342,47 +427,62 @@ export function BrokerDealerDetailClient({ brokerDealerId }: { brokerDealerId: s
             ) : null}
 
             {focusResult ? (
-              <div className="mt-3 space-y-2">
-                <div className="grid gap-2 md:grid-cols-2">
-                  {focusResult.ceo_name ? (
-                    <div className="rounded-2xl bg-emerald-50 px-4 py-3 text-sm">
-                      <p className="font-medium text-navy">CEO / Principal Officer</p>
-                      <p className="mt-1 text-slate-700">{focusResult.ceo_name}</p>
-                      {focusResult.ceo_title ? <p className="text-xs text-slate-500">{focusResult.ceo_title}</p> : null}
-                    </div>
-                  ) : null}
-                  {focusResult.ceo_phone ? (
-                    <div className="rounded-2xl bg-emerald-50 px-4 py-3 text-sm">
-                      <p className="font-medium text-navy">Phone</p>
-                      <p className="mt-1 text-slate-700">{focusResult.ceo_phone}</p>
-                    </div>
-                  ) : null}
-                  {focusResult.ceo_email ? (
-                    <div className="rounded-2xl bg-emerald-50 px-4 py-3 text-sm">
-                      <p className="font-medium text-navy">Email</p>
-                      <a href={`mailto:${focusResult.ceo_email}`} className="mt-1 block text-blue">{focusResult.ceo_email}</a>
-                    </div>
-                  ) : null}
-                  {focusResult.net_capital !== null ? (
-                    <div className="rounded-2xl bg-emerald-50 px-4 py-3 text-sm">
-                      <p className="font-medium text-navy">Net Capital (from PDF)</p>
-                      <p className="mt-1 text-lg font-semibold text-slate-700">{formatCurrency(focusResult.net_capital)}</p>
-                    </div>
-                  ) : null}
-                </div>
-                <div className="flex flex-wrap items-center gap-3 text-xs text-slate-500">
+              <div className="mt-3 space-y-3">
+                {/* Show results or a "no data found" message */}
+                {focusResult.ceo_name || focusResult.net_capital !== null ? (
+                  <div className="grid gap-2 md:grid-cols-2">
+                    {focusResult.ceo_name ? (
+                      <div className="rounded-2xl bg-emerald-50 px-4 py-3 text-sm">
+                        <p className="font-medium text-navy">Contact Person</p>
+                        <p className="mt-1 text-slate-700">{focusResult.ceo_name}</p>
+                        {focusResult.ceo_title ? <p className="text-xs text-slate-500">{focusResult.ceo_title}</p> : null}
+                      </div>
+                    ) : null}
+                    {focusResult.ceo_phone ? (
+                      <div className="rounded-2xl bg-emerald-50 px-4 py-3 text-sm">
+                        <p className="font-medium text-navy">Phone</p>
+                        <p className="mt-1 text-slate-700">{focusResult.ceo_phone}</p>
+                      </div>
+                    ) : null}
+                    {focusResult.ceo_email ? (
+                      <div className="rounded-2xl bg-emerald-50 px-4 py-3 text-sm">
+                        <p className="font-medium text-navy">Email</p>
+                        <a href={`mailto:${focusResult.ceo_email}`} className="mt-1 block text-blue">{focusResult.ceo_email}</a>
+                      </div>
+                    ) : null}
+                    {focusResult.net_capital !== null ? (
+                      <div className="rounded-2xl bg-emerald-50 px-4 py-3 text-sm">
+                        <p className="font-medium text-navy">Net Capital (from PDF)</p>
+                        <p className="mt-1 text-lg font-semibold text-slate-700">{formatCurrency(focusResult.net_capital)}</p>
+                      </div>
+                    ) : null}
+                  </div>
+                ) : (
+                  <div className="rounded-2xl bg-amber-50 border border-amber-200 px-4 py-3 text-sm text-amber-700">
+                    No contact or net capital data could be extracted from this filing.
+                    {focusResult.extraction_status === "no_pdf" ? " This firm has no X-17A-5 PDF on EDGAR." : " The PDF may be scanned or use a non-standard format."}
+                  </div>
+                )}
+
+                {/* Metadata bar */}
+                <div className="flex flex-wrap items-center gap-3 rounded-2xl bg-slate-50 px-4 py-2 text-xs text-slate-500">
+                  <span className={`inline-flex items-center gap-1 rounded-full px-2 py-0.5 font-medium ${
+                    focusResult.extraction_status === "success" ? "bg-emerald-100 text-emerald-700" :
+                    focusResult.extraction_status === "error" || focusResult.extraction_status === "no_pdf" ? "bg-red-100 text-red-600" :
+                    "bg-amber-100 text-amber-700"
+                  }`}>
+                    {focusResult.extraction_status === "success" ? "Success" :
+                     focusResult.extraction_status === "no_pdf" ? "No PDF" :
+                     focusResult.extraction_status === "error" ? "Error" : "Low confidence"}
+                  </span>
                   <span>Confidence: {(focusResult.confidence_score * 100).toFixed(0)}%</span>
-                  <span>Status: {focusResult.extraction_status}</span>
-                  {focusResult.report_date ? <span>Report date: {formatDate(focusResult.report_date)}</span> : null}
+                  {focusResult.report_date ? <span>Report: {formatDate(focusResult.report_date)}</span> : null}
                   {focusResult.source_pdf_url ? (
-                    <a href={focusResult.source_pdf_url} target="_blank" rel="noreferrer" className="text-blue">
+                    <a href={focusResult.source_pdf_url} target="_blank" rel="noreferrer" className="text-blue hover:underline">
                       View source PDF
                     </a>
                   ) : null}
                 </div>
-                {focusResult.extraction_notes ? (
-                  <p className="text-xs leading-5 text-slate-500">{focusResult.extraction_notes}</p>
-                ) : null}
               </div>
             ) : null}
           </div>
@@ -441,7 +541,7 @@ export function BrokerDealerDetailClient({ brokerDealerId }: { brokerDealerId: s
               <div className="rounded-2xl bg-slate-50 px-4 py-6 text-sm text-slate-500">No enriched contacts loaded yet.</div>
             ) : (
               profile.executive_contacts.map((contact) => (
-                <div key={contact.name} className="rounded-2xl bg-slate-50 px-4 py-3 text-sm text-slate-600">
+                <div key={`contact-${contact.id}`} className="rounded-2xl bg-slate-50 px-4 py-3 text-sm text-slate-600">
                   <p className="font-medium text-navy">{contact.name}</p>
                   <p className="mt-1">{contact.title}</p>
                   <div className="mt-2 flex flex-wrap gap-3">
@@ -458,9 +558,9 @@ export function BrokerDealerDetailClient({ brokerDealerId }: { brokerDealerId: s
 
         {/* ── BOTTOM-RIGHT: Relationship (Clearing / Introducing) ── */}
         <QuadrantCard eyebrow="Relationship" title="Clearing and introducing mapping">
-          {/* Current Classification */}
+          {/* Clearing Classification */}
           <div className="mb-4 rounded-2xl bg-slate-50 px-4 py-4 text-sm text-slate-600">
-            <p className="font-medium text-navy">Clearing Classification</p>
+            <p className="font-medium text-navy">Clearing Arrangements</p>
             <div className="mt-2 flex flex-wrap items-center gap-2">
               <ClassificationBadge classification={bd.clearing_classification} />
               {!bd.clearing_classification || bd.clearing_classification === "unknown" ? (
@@ -472,7 +572,42 @@ export function BrokerDealerDetailClient({ brokerDealerId }: { brokerDealerId: s
                 Clearing through: <span className="font-medium text-navy">{bd.current_clearing_partner}</span>
               </p>
             ) : null}
+            {/* Logic Override: show raw text if classification failed */}
+            {(!bd.clearing_classification || bd.clearing_classification === "unknown") && bd.clearing_raw_text ? (
+              <div className="mt-3 rounded-2xl border border-amber-200 bg-amber-50 px-4 py-3 text-xs text-amber-700">
+                <p className="font-medium">Raw clearing text (classification pending):</p>
+                <p className="mt-1 leading-5">{bd.clearing_raw_text}</p>
+              </div>
+            ) : null}
+            {bd.firm_operations_text && bd.clearing_classification && bd.clearing_classification !== "unknown" ? (
+              <p className="mt-2 text-xs text-slate-500 leading-5">{bd.firm_operations_text}</p>
+            ) : null}
           </div>
+
+          {/* Introducing Arrangements */}
+          {profile.introducing_arrangements.length > 0 ? (
+            <div className="mb-4">
+              <p className="text-sm font-medium text-navy">Introducing Arrangements</p>
+              <div className="mt-2 space-y-2">
+                {profile.introducing_arrangements.map((arr) => (
+                  <div key={arr.id} className="rounded-2xl border border-slate-100 px-4 py-3">
+                    {arr.business_name ? (
+                      <p className="font-medium text-navy">{arr.business_name}</p>
+                    ) : null}
+                    {arr.effective_date ? (
+                      <p className="mt-1 text-xs text-slate-500">Effective: {formatDate(arr.effective_date)}</p>
+                    ) : null}
+                    {arr.statement ? (
+                      <p className="mt-2 text-sm text-slate-600 leading-6">{arr.statement}</p>
+                    ) : null}
+                    {arr.description ? (
+                      <p className="mt-1 text-sm text-slate-600 leading-6">{arr.description}</p>
+                    ) : null}
+                  </div>
+                ))}
+              </div>
+            </div>
+          ) : null}
 
           {/* Deficiency Status */}
           <div className={`mb-4 rounded-2xl px-4 py-4 text-sm ${profile.deficiency_status.is_deficient ? "bg-red-50 text-danger" : "bg-emerald-50 text-emerald-700"}`}>

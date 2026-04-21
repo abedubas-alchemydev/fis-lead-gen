@@ -6,6 +6,7 @@ from app.models.competitor_provider import CompetitorProvider
 from app.models.executive_contact import ExecutiveContact
 from app.models.financial_metric import FinancialMetric
 from app.models.filing_alert import FilingAlert
+from app.models.introducing_arrangement import IntroducingArrangement
 from app.models.pipeline_run import PipelineRun
 from app.models.scoring_setting import ScoringSetting
 
@@ -20,6 +21,7 @@ __all__ = [
     "ExecutiveContact",
     "FinancialMetric",
     "FilingAlert",
+    "IntroducingArrangement",
     "PipelineRun",
     "ScoringSetting",
     "Verification",
