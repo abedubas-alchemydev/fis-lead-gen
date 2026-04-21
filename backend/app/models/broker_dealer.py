@@ -44,11 +44,16 @@ class BrokerDealer(Base):
     # ── Tri-Stream fields (Revision 1) ──
     website: Mapped[str | None] = mapped_column(String(512), nullable=True)
     types_of_business: Mapped[list | None] = mapped_column(JSONB, nullable=True)
+    types_of_business_total: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    types_of_business_other: Mapped[str | None] = mapped_column(Text, nullable=True)
     direct_owners: Mapped[list | None] = mapped_column(JSONB, nullable=True)
     executive_officers: Mapped[list | None] = mapped_column(JSONB, nullable=True)
     firm_operations_text: Mapped[str | None] = mapped_column(Text, nullable=True)
     clearing_classification: Mapped[str | None] = mapped_column(String(32), nullable=True, index=True)
+    clearing_raw_text: Mapped[str | None] = mapped_column(Text, nullable=True)
     is_niche_restricted: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
+    formation_date: Mapped[date | None] = mapped_column(Date, nullable=True)
+    total_assets_yoy: Mapped[float | None] = mapped_column(Numeric(8, 2), nullable=True)
 
     status: Mapped[str] = mapped_column(String(64), default="pending", nullable=False)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now(), nullable=False)

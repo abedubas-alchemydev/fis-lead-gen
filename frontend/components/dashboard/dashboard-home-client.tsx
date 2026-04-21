@@ -19,36 +19,43 @@ export function DashboardHomeClient() {
   const [error, setError] = useState<string | null>(null);
   const [alertsError, setAlertsError] = useState<string | null>(null);
   const [alertsLoading, setAlertsLoading] = useState(true);
+  const [pageLoading, setPageLoading] = useState(true);
 
   useEffect(() => {
     let active = true;
 
     async function loadStats() {
-      try {
-        const [response, clearingDistribution, alertResponse] = await Promise.all([
-          apiRequest<DashboardStats>("/api/v1/stats"),
-          apiRequest<ClearingDistributionResponse>("/api/v1/stats/clearing-distribution"),
-          apiRequest<AlertListResponse>("/api/v1/alerts?page=1&limit=6")
-        ]);
-        if (active) {
-          setTotalBds(response.total_active_bds.toLocaleString());
-          setNewBds(response.new_bds_30_days.toLocaleString());
-          setDeficiencyAlerts(response.deficiency_alerts.toLocaleString());
-          setHighValueLeads(response.high_value_leads.toLocaleString());
-          setDistribution(clearingDistribution.items);
-          setAlerts(alertResponse.items);
-        }
-      } catch (loadError) {
-        if (active) {
-          const message = loadError instanceof Error ? loadError.message : "Unable to load broker-dealer counts.";
-          setError(message);
-          setAlertsError(message);
-        }
-      } finally {
-        if (active) {
-          setAlertsLoading(false);
-        }
+      const [statsResult, distributionResult, alertsResult] = await Promise.allSettled([
+        apiRequest<DashboardStats>("/api/v1/stats"),
+        apiRequest<ClearingDistributionResponse>("/api/v1/stats/clearing-distribution"),
+        apiRequest<AlertListResponse>("/api/v1/alerts?page=1&limit=6")
+      ]);
+
+      if (!active) return;
+
+      if (statsResult.status === "fulfilled") {
+        setTotalBds(statsResult.value.total_active_bds.toLocaleString());
+        setNewBds(statsResult.value.new_bds_30_days.toLocaleString());
+        setDeficiencyAlerts(statsResult.value.deficiency_alerts.toLocaleString());
+        setHighValueLeads(statsResult.value.high_value_leads.toLocaleString());
+      } else {
+        const message = statsResult.reason instanceof Error ? statsResult.reason.message : "Unable to load dashboard stats.";
+        setError(message);
       }
+
+      if (distributionResult.status === "fulfilled") {
+        setDistribution(distributionResult.value.items);
+      }
+
+      if (alertsResult.status === "fulfilled") {
+        setAlerts(alertsResult.value.items);
+      } else {
+        const message = alertsResult.reason instanceof Error ? alertsResult.reason.message : "Unable to load alerts.";
+        setAlertsError(message);
+      }
+
+      setAlertsLoading(false);
+      setPageLoading(false);
     }
 
     void loadStats();
@@ -58,6 +65,18 @@ export function DashboardHomeClient() {
     };
   }, []);
 
+  if (pageLoading) {
+    return (
+      <div className="flex min-h-[50vh] flex-col items-center justify-center gap-5">
+        <div className="relative h-12 w-12">
+          <div className="absolute inset-0 rounded-full border-4 border-slate-200" />
+          <div className="absolute inset-0 animate-spin rounded-full border-4 border-transparent border-t-navy" />
+        </div>
+        <p className="text-sm font-medium tracking-wide text-slate-500">Loading dashboard</p>
+      </div>
+    );
+  }
+
   return (
     <div className="space-y-8">
       <div className="grid gap-4 xl:grid-cols-4">
@@ -66,9 +85,10 @@ export function DashboardHomeClient() {
           value={totalBds}
           tone="navy"
           icon={Building2}
-          helper={error ? "Backend data unavailable" : "Live broker-dealer count from the platform database"}
+          helper={error ? "Backend data unavailable" : "View all broker-dealers in the Master List"}
+          href="/master-list?list=all"
         />
-        <KpiCard title="New BDs (30 days)" value={newBds} tone="blue" icon={Activity} helper="Recent broker-dealer registrations from filing activity" />
+        <KpiCard title="New BDs (30 days)" value={newBds} tone="blue" icon={Activity} helper="Recent broker-dealer registrations from filing activity" href="/master-list?list=all" />
         <KpiCard
           title="Deficiency Alerts"
           value={deficiencyAlerts}

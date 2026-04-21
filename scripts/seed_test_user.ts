@@ -6,7 +6,7 @@ import dotenv from "../frontend/node_modules/dotenv/lib/main";
 const envPath = fileURLToPath(new URL("../frontend/.env.local", import.meta.url));
 dotenv.config({ path: envPath });
 
-const email = process.env.SEED_USER_EMAIL ?? "admin@alchemy.dev";
+const email = process.env.SEED_USER_EMAIL ?? "admin@alchemydev.io";
 const password = process.env.SEED_USER_PASSWORD ?? "ChangeMe12345!";
 const name = process.env.SEED_USER_NAME ?? "Alchemy Admin";
 const role = process.env.SEED_USER_ROLE ?? "admin";

@@ -36,7 +36,12 @@ export type BrokerDealerListItem = {
   executive_officers: Array<{ name: string; title: string }> | null;
   firm_operations_text: string | null;
   clearing_classification: string | null;
+  clearing_raw_text: string | null;
   is_niche_restricted: boolean;
+  formation_date: string | null;
+  total_assets_yoy: number | null;
+  types_of_business_total: number | null;
+  types_of_business_other: string | null;
   created_at: string;
 };
 
@@ -182,10 +187,20 @@ export type DeficiencyStatusSummary = {
   message: string;
 };
 
+export type IntroducingArrangementItem = {
+  id: number;
+  bd_id: number;
+  statement: string | null;
+  business_name: string | null;
+  effective_date: string | null;
+  description: string | null;
+};
+
 export type BrokerDealerProfileResponse = {
   broker_dealer: BrokerDealerListItem;
   financials: FinancialMetricItem[];
   clearing_arrangements: ClearingArrangementItem[];
+  introducing_arrangements: IntroducingArrangementItem[];
   recent_alerts: AlertListItem[];
   filing_history: FilingHistoryItem[];
   executive_contacts: ExecutiveContactItem[];
