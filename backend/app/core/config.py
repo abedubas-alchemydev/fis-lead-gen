@@ -82,6 +82,24 @@ class Settings(BaseSettings):
     openai_max_pdf_size_mb: int = 45
     anthropic_api_key: str | None = None
 
+    # Email extractor — discovery providers (Hunter, Snov, theHarvester, site crawler).
+    # Apollo provider is intentionally absent: upstream module ships without it.
+    # All keys are optional; missing credentials short-circuit to a provider-level
+    # "credentials not configured" error without blocking the rest of the fan-out.
+    hunter_api_key: str | None = None
+    hunter_limit: int = Field(default=10, ge=1, le=100)
+    theharvester_sources: str = "crtsh,rapiddns,otx,duckduckgo"
+    theharvester_timeout_seconds: int = Field(default=90, ge=10, le=300)
+    snov_client_id: str | None = None
+    snov_client_secret: str | None = None
+    snov_limit: int = Field(default=100, ge=1, le=1000)
+    # SMTP verification (POST /verify) — RCPT TO probe knobs.
+    smtp_verify_timeout_seconds: int = Field(default=15, ge=5, le=60)
+    smtp_verify_max_batch: int = Field(default=25, ge=1, le=100)
+    smtp_verify_concurrency: int = Field(default=1, ge=1, le=10)
+    smtp_verify_from_address: str = "verify@email-extractor.local"
+    smtp_verify_helo_host: str = "email-extractor.local"
+
     @computed_field
     @property
     def cors_origins(self) -> list[str]:
