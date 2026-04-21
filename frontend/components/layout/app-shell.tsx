@@ -19,6 +19,7 @@ const navigation = [
   { href: "/dashboard", label: "Dashboard" },
   { href: "/master-list", label: "Master List" },
   { href: "/alerts", label: "Alerts" },
+  { href: "/email-extractor", label: "Email Extractor" },
   { href: "/export", label: "Export" },
   { href: "/settings", label: "Settings" }
 ] as const satisfies ReadonlyArray<{ href: Route; label: string }>;
