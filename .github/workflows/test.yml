@@ -23,6 +23,11 @@ jobs:
       BETTER_AUTH_SECRET: "ci-dummy-secret-padding-xxxxxxxxxxxxxxxx"
       GEMINI_API_KEY: ""
       CONTACT_ENRICHMENT_PROVIDER: "disabled"
+      # Email extractor — dummy values; integration-marked tests are deselected by
+      # default via pytest.ini, so these never exercise the real providers in CI.
+      HUNTER_API_KEY: ""
+      SNOV_CLIENT_ID: ""
+      SNOV_CLIENT_SECRET: ""
     steps:
       - uses: actions/checkout@v4
 

@@ -11,3 +11,13 @@ pdfplumber>=0.11.0
 pypdf>=4.0.0
 pypdfium2>=4.0.0
 uvicorn[standard]>=0.32.1
+selectolax>=0.3.21
+# py3-validate-email — SMTP RCPT TO probe for email_extractor. Package name on
+# PyPI is `py3-validate-email` but imports as `validate_email`. Pinned because
+# SMTP handshake semantics have drifted across minor versions.
+py3-validate-email==1.0.5.post1
+# theHarvester OSINT CLI is intentionally NOT listed here — the PyPI name is a
+# squatter and upstream tags require Python 3.12 (project is pinned to 3.11).
+# The TheHarvester provider reports "binary not installed" cleanly when the CLI
+# is absent from PATH, so the rest of the discovery pipeline keeps working.
+# Install out-of-band (apt/pipx/Docker) if theHarvester output is needed.

@@ -1,6 +1,6 @@
 from fastapi import APIRouter
 
-from app.api.v1.endpoints import alerts, auth, broker_dealers, export, health, pipeline, settings, stats
+from app.api.v1.endpoints import alerts, auth, broker_dealers, email_extractor, export, health, pipeline, settings, stats
 
 api_router = APIRouter()
 api_router.include_router(health.router, tags=["health"])
@@ -11,3 +11,4 @@ api_router.include_router(export.router, tags=["export"])
 api_router.include_router(pipeline.router, tags=["pipeline"])
 api_router.include_router(settings.router, tags=["settings"])
 api_router.include_router(stats.router, tags=["stats"])
+api_router.include_router(email_extractor.router, tags=["email-extractor"])
