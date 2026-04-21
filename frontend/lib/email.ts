@@ -137,12 +137,12 @@ export async function sendVerificationEmail({
   url: string;
 }) {
   const html = buildHtml({
-    preheader: "Verify your email to activate your Lead Gen Engine account",
+    preheader: "Verify your email — your account will then be reviewed by our team",
     heading: "Verify your email address",
     body: `
       <p>Hi ${user.name || "there"},</p>
-      <p>Thank you for creating an account. Please verify your email address to activate your account and access the broker-dealer intelligence platform.</p>
-      <p>Click the button below to verify. This link expires in 24 hours.</p>
+      <p>Thanks for creating an account. Please verify your email address so we know this inbox belongs to you.</p>
+      <p><strong>Next step after verification:</strong> our team reviews every new account before access is granted. You'll get a separate email as soon as you're approved. The verification link expires in 24 hours.</p>
     `,
     ctaUrl: url,
     ctaLabel: "Verify Email Address",
@@ -215,4 +215,42 @@ export async function sendAdminApprovalRequestEmail({
   console.log(
     `[EMAIL] Admin approval request sent to ${adminEmails.length} admin(s)`
   );
+}
+
+// ─── Approval Notification (to the approved user) ───────────────────
+export async function sendApprovalNotificationEmail({
+  user,
+  loginUrl,
+}: {
+  user: { email: string; name: string };
+  loginUrl: string;
+}) {
+  const html = buildHtml({
+    preheader: "Your account has been approved — you can now sign in.",
+    heading: "You're approved",
+    body: `
+      <p>Hi ${user.name || "there"},</p>
+      <p>Good news — an admin has approved your account. You can now sign in to the Lead Gen Engine.</p>
+      <p>If you haven't already verified your email, please click the verification link from the earlier email we sent you.</p>
+    `,
+    ctaUrl: loginUrl,
+    ctaLabel: "Sign in",
+    footer:
+      "If you did not sign up, or if you believe this approval was granted in error, please contact support.",
+  });
+
+  try {
+    await getTransporter().sendMail({
+      from: fromAddress,
+      to: user.email,
+      subject: "Your fis-lead-gen account has been approved",
+      html,
+    });
+  } catch (error: unknown) {
+    console.error("[EMAIL] Failed to send approval notification:", error);
+    const message = error instanceof Error ? error.message : String(error);
+    throw new Error(`Email delivery failed: ${message}`);
+  }
+
+  console.log(`[EMAIL] Approval notification sent to ${user.email}`);
 }

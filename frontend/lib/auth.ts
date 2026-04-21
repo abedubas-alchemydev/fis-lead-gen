@@ -44,7 +44,12 @@ export const auth = betterAuth({
   },
   emailVerification: {
     sendOnSignUp: true,
-    autoSignInAfterVerification: true,
+    // Off on purpose: session.create.before blocks non-active users, so an
+    // auto-login attempt right after verify would throw APIError FORBIDDEN
+    // and the user would see an ugly error instead of a clean "email
+    // verified, waiting on admin approval" state. With this off, the verify
+    // endpoint just flips email_verified and stops.
+    autoSignInAfterVerification: false,
     expiresIn: 60 * 60 * 24,
     sendVerificationEmail: async ({ user, url }) => {
       await sendVerifyEmail({ user, url });
