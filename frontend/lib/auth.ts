@@ -1,11 +1,9 @@
 import { betterAuth } from "better-auth";
-import { APIError } from "better-auth/api";
 import { Pool } from "pg";
 
 import {
   sendPasswordResetEmail,
   sendVerificationEmail as sendVerifyEmail,
-  sendAdminApprovalRequestEmail,
 } from "@/lib/email";
 
 const globalForDatabase = globalThis as typeof globalThis & {
@@ -21,8 +19,6 @@ const database =
 if (process.env.NODE_ENV !== "production") {
   globalForDatabase.__deshornPool = database;
 }
-
-export const db = database;
 
 const appUrl = process.env.BETTER_AUTH_URL ?? process.env.NEXT_PUBLIC_APP_URL ?? "http://localhost:3000";
 
@@ -45,7 +41,6 @@ export const auth = betterAuth({
   emailVerification: {
     sendOnSignUp: true,
     autoSignInAfterVerification: true,
-    expiresIn: 60 * 60 * 24,
     sendVerificationEmail: async ({ user, url }) => {
       await sendVerifyEmail({ user, url });
     }
@@ -62,13 +57,6 @@ export const auth = betterAuth({
         required: false,
         defaultValue: "viewer",
         input: false
-      },
-      status: {
-        type: "string",
-        required: false,
-        defaultValue: "pending",
-        input: false,
-        returned: true
       }
     }
   },
@@ -107,56 +95,6 @@ export const auth = betterAuth({
       expiresAt: "expires_at",
       createdAt: "created_at",
       updatedAt: "updated_at"
-    }
-  },
-  databaseHooks: {
-    user: {
-      create: {
-        after: async (user) => {
-          try {
-            const admins = await database.query<{ email: string }>(
-              'SELECT email FROM "user" WHERE role = $1 AND status = $2',
-              ["admin", "active"]
-            );
-            const adminEmails = admins.rows.map((r) => r.email).filter(Boolean);
-            if (adminEmails.length === 0) {
-              console.warn(
-                `[APPROVAL] No active admins to notify for pending signup ${user.email}`
-              );
-              return;
-            }
-            await sendAdminApprovalRequestEmail({
-              newUser: {
-                email: user.email,
-                name: user.name,
-                createdAt: user.createdAt
-              },
-              adminEmails,
-              settingsUrl: `${appUrl}/settings/users`
-            });
-          } catch (err) {
-            // Never block signup on notification failure.
-            console.error("[APPROVAL] Failed to notify admins of pending signup:", err);
-          }
-        }
-      }
-    },
-    session: {
-      create: {
-        before: async (session) => {
-          const result = await database.query<{ status: string }>(
-            'SELECT status FROM "user" WHERE id = $1',
-            [session.userId]
-          );
-          const status = result.rows[0]?.status;
-          if (status !== "active") {
-            // Shared copy for pending + rejected so rejected users aren't enumerable.
-            throw new APIError("FORBIDDEN", {
-              message: "Your account is pending admin approval."
-            });
-          }
-        }
-      }
     }
   },
   advanced: {

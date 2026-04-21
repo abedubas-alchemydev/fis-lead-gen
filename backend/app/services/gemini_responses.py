@@ -2,15 +2,12 @@ from __future__ import annotations
 
 import asyncio
 import json
-import re
 from typing import Literal
 
 import httpx
 from pydantic import BaseModel, ConfigDict, Field
 
 from app.core.config import settings
-
-_GEMINI_KEY_SHAPE = re.compile(r"^AIzaSy[A-Za-z0-9_\-]{33}$")
 
 
 class GeminiConfigurationError(RuntimeError):
@@ -65,18 +62,6 @@ class GeminiResponsesClient:
         self.base_url = settings.gemini_api_base.rstrip("/")
         self.timeout = settings.gemini_request_timeout_seconds
         self.max_retries = max(1, settings.gemini_request_max_retries)
-
-        # Fail fast on corrupted key values. Google API keys are 39 chars
-        # matching ^AIzaSy[A-Za-z0-9_-]{33}$. Past incident: a shell-quoting
-        # error stored the key as `-n "AIzaSy...\r\n"` — httpx rejected the
-        # header as LocalProtocolError, surfacing as an opaque "network error".
-        # An empty key is permitted here — the per-call check at the top of
-        # each extract_* method still raises GeminiConfigurationError.
-        if settings.gemini_api_key and not _GEMINI_KEY_SHAPE.match(settings.gemini_api_key):
-            raise GeminiConfigurationError(
-                f"GEMINI_API_KEY has invalid shape (length={len(settings.gemini_api_key)}). "
-                f"Expected 39 chars matching ^AIzaSy[A-Za-z0-9_-]{{33}}$."
-            )
 
     async def extract_clearing_data(self, *, pdf_bytes_base64: str, prompt: str) -> GeminiClearingExtraction:
         if not settings.gemini_api_key:

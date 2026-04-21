@@ -73,7 +73,7 @@ class ExecutiveContactService:
 
         if contacts:
             db.add_all(contacts)
-            await db.commit()
+        await db.commit()
         return await self.list_contacts(db, broker_dealer.id)
 
     async def _enrich_via_apollo(self, broker_dealer: BrokerDealer) -> list[ExecutiveContact]:

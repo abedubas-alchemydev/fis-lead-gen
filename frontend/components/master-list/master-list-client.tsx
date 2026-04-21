@@ -10,6 +10,30 @@ import { HealthBadge } from "@/components/master-list/health-badge";
 import { LeadPriorityBadge } from "@/components/master-list/lead-priority-badge";
 import type { BrokerDealerListItem, BrokerDealerListResponse } from "@/lib/types";
 
+/** All 50 US states + DC + territories — ensures no state is ever missing from the filter. */
+const ALL_US_STATES = [
+  "AL", "AK", "AZ", "AR", "CA", "CO", "CT", "DE", "DC", "FL",
+  "GA", "HI", "ID", "IL", "IN", "IA", "KS", "KY", "LA", "ME",
+  "MD", "MA", "MI", "MN", "MS", "MO", "MT", "NE", "NV", "NH",
+  "NJ", "NM", "NY", "NC", "ND", "OH", "OK", "OR", "PA", "PR",
+  "RI", "SC", "SD", "TN", "TX", "UT", "VT", "VA", "VI", "WA",
+  "WV", "WI", "WY",
+];
+
+const STATE_NAMES: Record<string, string> = {
+  AL: "Alabama", AK: "Alaska", AZ: "Arizona", AR: "Arkansas", CA: "California",
+  CO: "Colorado", CT: "Connecticut", DE: "Delaware", DC: "District of Columbia", FL: "Florida",
+  GA: "Georgia", HI: "Hawaii", ID: "Idaho", IL: "Illinois", IN: "Indiana",
+  IA: "Iowa", KS: "Kansas", KY: "Kentucky", LA: "Louisiana", ME: "Maine",
+  MD: "Maryland", MA: "Massachusetts", MI: "Michigan", MN: "Minnesota", MS: "Mississippi",
+  MO: "Missouri", MT: "Montana", NE: "Nebraska", NV: "Nevada", NH: "New Hampshire",
+  NJ: "New Jersey", NM: "New Mexico", NY: "New York", NC: "North Carolina", ND: "North Dakota",
+  OH: "Ohio", OK: "Oklahoma", OR: "Oregon", PA: "Pennsylvania", PR: "Puerto Rico",
+  RI: "Rhode Island", SC: "South Carolina", SD: "South Dakota", TN: "Tennessee", TX: "Texas",
+  UT: "Utah", VT: "Vermont", VA: "Virginia", VI: "Virgin Islands", WA: "Washington",
+  WV: "West Virginia", WI: "Wisconsin", WY: "Wyoming",
+};
+
 const columns = [
   { key: "name", label: "Firm Name" },
   { key: "cik", label: "CIK" },
@@ -39,6 +63,7 @@ export function MasterListClient({
 }: MasterListClientProps) {
   const [items, setItems] = useState<BrokerDealerListItem[]>([]);
   const [states, setStates] = useState<string[]>([]);
+  const [statesWithData, setStatesWithData] = useState<Set<string>>(new Set());
   const [clearingPartners, setClearingPartners] = useState<string[]>([]);
   const [selectedStates, setSelectedStates] = useState<string[]>([]);
   const [searchInput, setSearchInput] = useState("");
@@ -120,12 +145,20 @@ export function MasterListClient({
           apiRequest<string[]>("/api/v1/broker-dealers/clearing-partners")
         ]);
         if (active) {
-          setStates(stateResponse);
+          const dbStates = new Set(stateResponse);
+          setStatesWithData(dbStates);
+          // Show all states, but put states with data first
+          const withData = ALL_US_STATES.filter((s) => dbStates.has(s));
+          const withoutData = ALL_US_STATES.filter((s) => !dbStates.has(s));
+          // Add any DB states not in our static list (international codes)
+          const extra = stateResponse.filter((s) => !ALL_US_STATES.includes(s));
+          setStates([...withData, ...extra, ...withoutData]);
           setClearingPartners(partnerResponse);
         }
       } catch {
         if (active) {
-          setStates([]);
+          setStates(ALL_US_STATES);
+          setStatesWithData(new Set());
           setClearingPartners([]);
         }
       }
@@ -192,11 +225,15 @@ export function MasterListClient({
                 }}
                 className="mt-2 min-h-48 w-full rounded-2xl border border-slate-200 bg-white px-3 py-3 text-sm"
               >
-                {states.map((stateValue) => (
-                  <option key={stateValue} value={stateValue}>
-                    {stateValue}
-                  </option>
-                ))}
+                {states.map((stateValue) => {
+                  const hasData = statesWithData.has(stateValue);
+                  const label = STATE_NAMES[stateValue] ?? stateValue;
+                  return (
+                    <option key={stateValue} value={stateValue} disabled={!hasData} className={hasData ? "" : "text-slate-400"}>
+                      {label} ({stateValue}){hasData ? "" : " -- no firms"}
+                    </option>
+                  );
+                })}
               </select>
               <p className="mt-2 text-xs text-slate-500">Hold Ctrl/Cmd to select multiple states.</p>
             </div>
@@ -500,13 +537,13 @@ export function MasterListClient({
                         </td>
                         <td className="px-5 py-4 text-sm text-slate-700">
                           <div className="flex flex-wrap gap-1">
-                            {item.clearing_classification && item.clearing_classification !== "unknown" ? (
-                              <span className={`inline-flex rounded-full px-2.5 py-1 text-xs font-medium ${
-                                item.clearing_classification === "true_self_clearing"
-                                  ? "bg-emerald-100 text-emerald-700"
-                                  : "bg-blue-100 text-blue-700"
-                              }`}>
-                                {item.clearing_classification === "true_self_clearing" ? "Self-Clearing" : "Introducing"}
+                            {item.clearing_classification === "true_self_clearing" ? (
+                              <span className="inline-flex rounded-full bg-emerald-100 px-2.5 py-1 text-xs font-medium text-emerald-700">
+                                Self-Clearing
+                              </span>
+                            ) : item.clearing_classification === "introducing" ? (
+                              <span className="inline-flex rounded-full bg-blue-100 px-2.5 py-1 text-xs font-medium text-blue-700">
+                                Introducing
                               </span>
                             ) : (
                               <span className="text-xs text-slate-400">--</span>

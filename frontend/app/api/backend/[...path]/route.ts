@@ -1,7 +1,5 @@
 import { NextRequest, NextResponse } from "next/server";
 
-import { getIdentityToken } from "@/lib/gcp-identity-token";
-
 const BACKEND_BASE_URL = process.env.INTERNAL_API_URL ?? process.env.NEXT_PUBLIC_API_URL ?? "http://127.0.0.1:8001";
 
 type RouteContext = {
@@ -17,21 +15,16 @@ async function proxyRequest(request: NextRequest, { params }: RouteContext) {
   });
 
   const bodyText = request.method === "GET" || request.method === "HEAD" ? undefined : await request.text();
-  const identityToken = await getIdentityToken(BACKEND_BASE_URL);
-
-  const upstreamHeaders = new Headers(request.headers);
-  upstreamHeaders.delete("host");
-  upstreamHeaders.delete("content-length");
-  if (identityToken) {
-    upstreamHeaders.set("authorization", `Bearer ${identityToken}`);
-  }
-
   const upstreamResponse = await fetch(upstreamUrl, {
     method: request.method,
-    headers: upstreamHeaders,
+    headers: {
+      accept: request.headers.get("accept") ?? "application/json",
+      "content-type": request.headers.get("content-type") ?? "application/json",
+      cookie: request.headers.get("cookie") ?? "",
+      origin: BACKEND_BASE_URL
+    },
     body: bodyText && bodyText.length > 0 ? bodyText : undefined,
-    cache: "no-store",
-    redirect: "manual"
+    cache: "no-store"
   });
 
   const responseBody = await upstreamResponse.arrayBuffer();

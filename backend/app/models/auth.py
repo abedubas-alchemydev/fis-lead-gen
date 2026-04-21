@@ -17,7 +17,6 @@ class AuthUser(Base):
     email_verified: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
     image: Mapped[str | None] = mapped_column(Text, nullable=True)
     role: Mapped[str] = mapped_column(String(32), default="viewer", nullable=False)
-    status: Mapped[str] = mapped_column(String(16), nullable=False, index=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now(), nullable=False)
     updated_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True),

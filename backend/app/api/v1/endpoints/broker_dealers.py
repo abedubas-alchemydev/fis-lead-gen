@@ -6,6 +6,7 @@ from fastapi import APIRouter, Depends, HTTPException, Query, status
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.db.session import get_db_session
+from app.models.broker_dealer import BrokerDealer
 from app.schemas.auth import AuthenticatedUser
 from app.schemas.broker_dealer import (
     BrokerDealerDetail,
@@ -14,6 +15,7 @@ from app.schemas.broker_dealer import (
     DeficiencyStatusSummary,
     ExecutiveContactItem,
     FocusCeoExtractionResponse,
+    IntroducingArrangementItem,
     FilingHistoryItem,
     FinancialMetricItem,
     FinancialMetricsResponse,
@@ -136,6 +138,32 @@ async def get_broker_dealer_clearing_arrangements(
     return ClearingArrangementsResponse(items=await repository.list_clearing_arrangements(db, broker_dealer_id))
 
 
+@router.get("/{broker_dealer_id}/adjacent")
+async def get_adjacent_broker_dealers(
+    broker_dealer_id: int,
+    _: AuthenticatedUser = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db_session),
+) -> dict[str, int | None]:
+    """Return the previous and next broker-dealer IDs for navigation arrows."""
+    from sqlalchemy import select as sel
+
+    prev_stmt = (
+        sel(BrokerDealer.id)
+        .where(BrokerDealer.id < broker_dealer_id)
+        .order_by(BrokerDealer.id.desc())
+        .limit(1)
+    )
+    next_stmt = (
+        sel(BrokerDealer.id)
+        .where(BrokerDealer.id > broker_dealer_id)
+        .order_by(BrokerDealer.id.asc())
+        .limit(1)
+    )
+    prev_id = (await db.execute(prev_stmt)).scalar_one_or_none()
+    next_id = (await db.execute(next_stmt)).scalar_one_or_none()
+    return {"prev_id": prev_id, "next_id": next_id}
+
+
 @router.post("/{broker_dealer_id}/enrich", response_model=list[ExecutiveContactItem])
 async def enrich_broker_dealer_contacts(
     broker_dealer_id: int,
@@ -197,6 +225,7 @@ async def get_broker_dealer_profile(
 
     financials = await repository.get_financial_metrics(db, broker_dealer_id)
     clearing_arrangements = await repository.list_clearing_arrangements(db, broker_dealer_id)
+    introducing_arrangements = await repository.list_introducing_arrangements(db, broker_dealer_id)
     executive_contacts = await repository.get_executive_contacts(db, broker_dealer_id)
     recent_alerts = (
         await alert_repository.list_alerts(
@@ -256,6 +285,7 @@ async def get_broker_dealer_profile(
         broker_dealer=BrokerDealerDetail.model_validate(broker_dealer),
         financials=[FinancialMetricItem.model_validate(item) for item in financials],
         clearing_arrangements=clearing_arrangements,
+        introducing_arrangements=introducing_arrangements,
         recent_alerts=recent_alerts,
         filing_history=filing_history[:20],
         executive_contacts=[ExecutiveContactItem.model_validate(item) for item in executive_contacts],

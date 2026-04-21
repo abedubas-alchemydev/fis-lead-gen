@@ -1,32 +1,7 @@
-import nodemailer, { type Transporter } from "nodemailer";
+import { Resend } from "resend";
 
-let cachedTransporter: Transporter | null = null;
-
-function getTransporter(): Transporter {
-  if (cachedTransporter) return cachedTransporter;
-
-  const host = process.env.SMTP_HOST;
-  const port = Number(process.env.SMTP_PORT ?? 587);
-  const user = process.env.SMTP_USER;
-  const pass = process.env.SMTP_PASSWORD;
-
-  if (!host || !user || !pass) {
-    throw new Error(
-      "SMTP transport not configured. Missing SMTP_HOST / SMTP_USER / SMTP_PASSWORD."
-    );
-  }
-
-  cachedTransporter = nodemailer.createTransport({
-    host,
-    port,
-    secure: false,
-    requireTLS: true,
-    auth: { user, pass },
-  });
-  return cachedTransporter;
-}
-
-const fromAddress = process.env.EMAIL_FROM ?? "noreply@alchemydev.io";
+const resend = new Resend(process.env.RESEND_API_KEY);
+const fromAddress = process.env.EMAIL_FROM ?? "Client Clearing Lead Gen Engine <onboarding@resend.dev>";
 const appName = "Client Clearing Lead Gen Engine";
 
 // ─── Shared enterprise email wrapper ────────────────────────────────
@@ -112,17 +87,16 @@ export async function sendPasswordResetEmail({
       "If you did not request a password reset, you can safely ignore this email. Your password will not be changed.",
   });
 
-  try {
-    await getTransporter().sendMail({
-      from: fromAddress,
-      to: user.email,
-      subject: "Reset your password",
-      html,
-    });
-  } catch (error: unknown) {
+  const { error } = await resend.emails.send({
+    from: fromAddress,
+    to: user.email,
+    subject: "Reset your password",
+    html,
+  });
+
+  if (error) {
     console.error("[EMAIL] Failed to send password reset:", error);
-    const message = error instanceof Error ? error.message : String(error);
-    throw new Error(`Email delivery failed: ${message}`);
+    throw new Error(`Email delivery failed: ${error.message}`);
   }
 
   console.log(`[EMAIL] Password reset email sent to ${user.email}`);
@@ -150,69 +124,17 @@ export async function sendVerificationEmail({
       "If you did not create an account, you can safely ignore this email.",
   });
 
-  try {
-    await getTransporter().sendMail({
-      from: fromAddress,
-      to: user.email,
-      subject: "Verify your email address",
-      html,
-    });
-  } catch (error: unknown) {
+  const { error } = await resend.emails.send({
+    from: fromAddress,
+    to: user.email,
+    subject: "Verify your email address",
+    html,
+  });
+
+  if (error) {
     console.error("[EMAIL] Failed to send verification email:", error);
-    const message = error instanceof Error ? error.message : String(error);
-    throw new Error(`Email delivery failed: ${message}`);
+    throw new Error(`Email delivery failed: ${error.message}`);
   }
 
   console.log(`[EMAIL] Verification email sent to ${user.email}`);
-}
-
-// ─── Admin Approval Request Email ───────────────────────────────────
-export async function sendAdminApprovalRequestEmail({
-  newUser,
-  adminEmails,
-  settingsUrl,
-}: {
-  newUser: { email: string; name: string; createdAt: Date | string };
-  adminEmails: string[];
-  settingsUrl: string;
-}) {
-  const signupTime =
-    typeof newUser.createdAt === "string"
-      ? newUser.createdAt
-      : newUser.createdAt.toISOString();
-
-  const html = buildHtml({
-    preheader: `New signup pending approval: ${newUser.email}`,
-    heading: "New signup pending approval",
-    body: `
-      <p>A new account is awaiting your review before it can sign in.</p>
-      <p>
-        <strong>Name:</strong> ${newUser.name || "(not provided)"}<br />
-        <strong>Email:</strong> ${newUser.email}<br />
-        <strong>Signed up:</strong> ${signupTime}
-      </p>
-      <p>Open the admin panel to approve or reject this account.</p>
-    `,
-    ctaUrl: settingsUrl,
-    ctaLabel: "Open admin panel",
-    footer:
-      "You are receiving this because you hold the admin role in the Lead Gen Engine.",
-  });
-
-  try {
-    await getTransporter().sendMail({
-      from: fromAddress,
-      to: adminEmails.join(", "),
-      subject: "New fis-lead-gen signup pending approval",
-      html,
-    });
-  } catch (error: unknown) {
-    console.error("[EMAIL] Failed to send admin approval request:", error);
-    const message = error instanceof Error ? error.message : String(error);
-    throw new Error(`Email delivery failed: ${message}`);
-  }
-
-  console.log(
-    `[EMAIL] Admin approval request sent to ${adminEmails.length} admin(s)`
-  );
 }

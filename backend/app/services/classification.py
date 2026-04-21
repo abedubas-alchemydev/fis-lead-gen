@@ -104,11 +104,11 @@ _NICHE_TYPES = {
 }
 
 
-def classify_niche_restricted(types_of_business: list[str] | None) -> bool:
+def classify_niche_restricted(types_of_business: list | None) -> bool:
     """Return True if the firm's business types are exclusively niche/restricted."""
     if not types_of_business:
         return False
-    normalized = {t.strip().lower() for t in types_of_business if t.strip()}
+    normalized = {str(t).strip().lower() for t in types_of_business if str(t).strip()}
     if not normalized:
         return False
     return normalized.issubset(_NICHE_TYPES)
