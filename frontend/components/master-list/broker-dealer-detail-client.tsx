@@ -388,6 +388,24 @@ export function BrokerDealerDetailClient({ brokerDealerId }: { brokerDealerId: s
             </a>
           ) : null}
 
+          {/* Source PDF downloads */}
+          <div className="mt-4 flex flex-wrap gap-2">
+            <a
+              href={`/api/backend/api/v1/broker-dealers/${brokerDealerId}/focus-report.pdf`}
+              className="inline-flex items-center gap-1.5 rounded-full border border-slate-300 bg-white px-3 py-1.5 text-xs font-medium text-slate-700 hover:bg-slate-50"
+            >
+              <span aria-hidden>↓</span> FOCUS report (PDF)
+            </a>
+            {bd.crd_number ? (
+              <a
+                href={`/api/backend/api/v1/broker-dealers/${brokerDealerId}/brokercheck.pdf`}
+                className="inline-flex items-center gap-1.5 rounded-full border border-slate-300 bg-white px-3 py-1.5 text-xs font-medium text-slate-700 hover:bg-slate-50"
+              >
+                <span aria-hidden>↓</span> FINRA BrokerCheck (PDF)
+              </a>
+            ) : null}
+          </div>
+
           {/* FOCUS Report CEO + Net Capital Extraction */}
           <div className="mt-6 border-t border-slate-200 pt-5">
             <div className="flex items-center justify-between gap-3">
