@@ -10,6 +10,10 @@ class ScanCreateRequest(BaseModel):
 
     domain: str = Field(min_length=1, max_length=255, description="Domain to scan, e.g. 'example.com'")
     person_name: str | None = Field(default=None, max_length=255)
+    bd_id: int | None = Field(
+        default=None,
+        description="Broker-dealer id this scan was triggered from (optional; populated when the scan is kicked off from a firm detail page).",
+    )
 
 
 class EmailVerificationResponse(BaseModel):
@@ -30,6 +34,13 @@ class DiscoveredEmailResponse(BaseModel):
     source: str
     confidence: float | None
     attribution: str | None
+    bd_id: int | None = None
+    enriched_name: str | None = None
+    enriched_title: str | None = None
+    enriched_linkedin_url: str | None = None
+    enriched_company: str | None = None
+    enriched_at: datetime | None = None
+    enrichment_status: str = "not_enriched"
     created_at: datetime
     verifications: list[EmailVerificationResponse] = Field(default_factory=list)
 
@@ -107,3 +118,26 @@ class VerificationRunResponse(BaseModel):
     created_at: datetime
     completed_at: datetime | None
     results: list[VerifyResultItem] = Field(default_factory=list)
+
+
+class ScanListItem(BaseModel):
+    """One row in the GET /api/v1/email-extractor/scans list endpoint.
+
+    Strictly a summary shape — callers open a specific scan to see the
+    full `discovered_emails` payload.
+    """
+
+    id: int
+    domain: str
+    person_name: str | None
+    bd_id: int | None
+    status: str
+    total_items: int
+    processed_items: int
+    success_count: int
+    failure_count: int
+    created_at: datetime
+    started_at: datetime | None
+    completed_at: datetime | None
+
+    model_config = ConfigDict(from_attributes=True)

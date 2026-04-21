@@ -37,6 +37,15 @@ class DiscoveredEmail(Base):
     source: Mapped[str] = mapped_column(String(32), nullable=False, index=True)
     confidence: Mapped[float | None] = mapped_column(Float, nullable=True)
     attribution: Mapped[str | None] = mapped_column(Text, nullable=True)
+    bd_id: Mapped[int | None] = mapped_column(
+        Integer, ForeignKey("broker_dealers.id", ondelete="SET NULL"), nullable=True, index=True
+    )
+    enriched_name: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    enriched_title: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    enriched_linkedin_url: Mapped[str | None] = mapped_column(String(512), nullable=True)
+    enriched_company: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    enriched_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    enrichment_status: Mapped[str] = mapped_column(String(32), server_default="not_enriched", nullable=False)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now(), nullable=False)
 
     run: Mapped[ExtractionRun] = relationship(back_populates="discovered_emails")
