@@ -3,8 +3,10 @@ from __future__ import annotations
 from datetime import datetime, time, timezone
 
 from fastapi import APIRouter, Depends, HTTPException, Query, status
+from fastapi.responses import FileResponse
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.core.config import settings
 from app.db.session import get_db_session
 from app.models.broker_dealer import BrokerDealer
 from app.schemas.auth import AuthenticatedUser
@@ -59,6 +61,7 @@ async def list_broker_dealers(
     lead_priority_filter: list[str] | None = Query(default=None, alias="lead_priority"),
     clearing_partner_filter: list[str] | None = Query(default=None, alias="clearing_partner"),
     clearing_type_filter: list[str] | None = Query(default=None, alias="clearing_type"),
+    types_of_business_filter: list[str] | None = Query(default=None, alias="types_of_business"),
     list_mode: str = Query(default="primary", alias="list", pattern="^(primary|alternative|all)$"),
     sort_by: str = Query(default="name"),
     sort_dir: str = Query(default="asc", pattern="^(asc|desc)$"),
@@ -76,6 +79,7 @@ async def list_broker_dealers(
         lead_priorities=_parse_states(lead_priority_filter),
         clearing_partners=_parse_states(clearing_partner_filter),
         clearing_types=_parse_states(clearing_type_filter),
+        types_of_business=_parse_states(types_of_business_filter),
         list_mode=list_mode,
         sort_by=sort_by,
         sort_dir=sort_dir,
@@ -98,6 +102,118 @@ async def list_clearing_partners(
     db: AsyncSession = Depends(get_db_session),
 ) -> list[str]:
     return await repository.list_clearing_partners(db)
+
+
+@router.get("/types-of-business", response_model=list[dict])
+async def list_types_of_business(
+    _: AuthenticatedUser = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db_session),
+) -> list[dict]:
+    """Distinct types-of-business across all firms with per-type counts.
+
+    Fuels the multi-select filter on the master list. Shape: `[{type, count}, ...]`.
+    """
+    return await repository.list_types_of_business(db)
+
+
+@router.get("/{broker_dealer_id}/focus-report.pdf")
+async def download_focus_report_pdf(
+    broker_dealer_id: int,
+    _: AuthenticatedUser = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db_session),
+) -> FileResponse:
+    """Stream the firm's latest X-17A-5 (FOCUS) PDF.
+
+    Reuses the existing PdfDownloaderService cache at PDF_CACHE_DIR/{cik}-{accession}.pdf.
+    First request may take ~5-10s to fetch from SEC; subsequent requests are instant.
+    """
+    from app.services.pdf_downloader import PdfDownloaderService  # deferred to avoid circular
+
+    broker_dealer = await repository.get_broker_dealer(db, broker_dealer_id)
+    if broker_dealer is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Broker-dealer not found.")
+
+    downloader = PdfDownloaderService()
+    try:
+        record = await downloader.download_latest_x17a5_pdf(broker_dealer)
+    except Exception as exc:  # noqa: BLE001
+        raise HTTPException(
+            status_code=status.HTTP_502_BAD_GATEWAY,
+            detail=f"Could not fetch FOCUS report from SEC: {exc}",
+        ) from exc
+
+    if record is None or not record.local_document_path:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="No FOCUS report available for this firm.",
+        )
+
+    filename = f"{broker_dealer.crd_number or broker_dealer.id}-focus-report.pdf"
+    return FileResponse(
+        path=record.local_document_path,
+        media_type="application/pdf",
+        filename=filename,
+    )
+
+
+@router.get("/{broker_dealer_id}/brokercheck.pdf")
+async def download_brokercheck_pdf(
+    broker_dealer_id: int,
+    _: AuthenticatedUser = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db_session),
+) -> FileResponse:
+    """Stream the firm's FINRA BrokerCheck Detailed Report PDF.
+
+    On-demand fetch with disk cache at PDF_CACHE_DIR/finra/{crd}.pdf. First click
+    takes ~2-5s to hit files.brokercheck.finra.org; subsequent clicks serve from
+    cache. FINRA doesn't expose a stable direct-URL, so this endpoint wraps the
+    brokercheck_extractor's FinraClient.
+    """
+    import sys
+    from pathlib import Path as _Path
+
+    # Ensure the sibling brokercheck_extractor package is importable — the
+    # bridge script follows the same sys.path bootstrap.
+    _repo_root = _Path(__file__).resolve().parents[4]
+    if str(_repo_root) not in sys.path:
+        sys.path.insert(0, str(_repo_root))
+
+    from brokercheck_extractor.acquisition.finra_client import FinraClient  # type: ignore[import-not-found]
+
+    broker_dealer = await repository.get_broker_dealer(db, broker_dealer_id)
+    if broker_dealer is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Broker-dealer not found.")
+    if not broker_dealer.crd_number:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="This firm has no CRD number on file; BrokerCheck PDF is not fetchable.",
+        )
+
+    cache_dir = _Path(settings.pdf_cache_dir) / "finra"
+    cache_dir.mkdir(parents=True, exist_ok=True)
+    cache_path = cache_dir / f"{broker_dealer.crd_number}.pdf"
+
+    if not cache_path.exists() or cache_path.stat().st_size == 0:
+        try:
+            async with FinraClient() as client:
+                pdf_bytes = await client.fetch_pdf(int(broker_dealer.crd_number))
+        except Exception as exc:  # noqa: BLE001
+            raise HTTPException(
+                status_code=status.HTTP_502_BAD_GATEWAY,
+                detail=f"Could not fetch BrokerCheck PDF from FINRA: {exc}",
+            ) from exc
+        if not pdf_bytes:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail="FINRA returned no PDF for this CRD.",
+            )
+        cache_path.write_bytes(pdf_bytes)
+
+    return FileResponse(
+        path=str(cache_path),
+        media_type="application/pdf",
+        filename=f"{broker_dealer.crd_number}-brokercheck.pdf",
+    )
 
 
 @router.get("/{broker_dealer_id}", response_model=BrokerDealerDetail)

@@ -3,7 +3,7 @@ from __future__ import annotations
 from math import ceil
 import re
 
-from sqlalchemy import String, cast, delete, func, or_, select, update
+from sqlalchemy import ARRAY, String, cast, delete, func, or_, select, update
 from sqlalchemy.dialects.postgresql import insert
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -204,6 +204,7 @@ class BrokerDealerRepository:
         lead_priorities: list[str],
         clearing_partners: list[str],
         clearing_types: list[str],
+        types_of_business: list[str],
         list_mode: str,
         sort_by: str,
         sort_dir: str,
@@ -239,6 +240,14 @@ class BrokerDealerRepository:
 
         if clearing_types:
             filters.append(BrokerDealer.current_clearing_type.in_(clearing_types))
+
+        if types_of_business:
+            # JSONB array 'any-of': row matches if ANY requested type appears
+            # in the firm's types_of_business list. Cast the query parameter
+            # to the Postgres text[] type so the ?| operator is happy.
+            filters.append(
+                BrokerDealer.types_of_business.op("?|")(cast(types_of_business, ARRAY(String)))
+            )
 
         if list_mode == "primary":
             filters.append(BrokerDealer.is_deficient.is_(False))
@@ -315,6 +324,27 @@ class BrokerDealerRepository:
         )
         rows = (await db.execute(stmt)).scalars().all()
         return [row for row in rows if row]
+
+    async def list_types_of_business(self, db: AsyncSession) -> list[dict[str, object]]:
+        """Distinct types-of-business across all firms with per-type counts.
+
+        Flattens the JSONB array via `jsonb_array_elements_text`, groups by the
+        extracted text value, and returns `{type, count}` sorted by count desc
+        then alphabetically. Fuels the multi-select filter on the master list.
+        """
+        type_element = func.jsonb_array_elements_text(BrokerDealer.types_of_business).label("type")
+        subq = (
+            select(type_element)
+            .where(BrokerDealer.types_of_business.is_not(None))
+            .subquery()
+        )
+        stmt = (
+            select(subq.c.type, func.count().label("count"))
+            .group_by(subq.c.type)
+            .order_by(func.count().desc(), subq.c.type.asc())
+        )
+        rows = (await db.execute(stmt)).all()
+        return [{"type": row.type, "count": int(row.count)} for row in rows if row.type]
 
     async def list_clearing_arrangements(self, db: AsyncSession, broker_dealer_id: int) -> list[ClearingArrangement]:
         stmt = (

@@ -48,6 +48,7 @@ async def get_export_preview(
         lead_priorities=_parse_values(lead_priority_filter),
         clearing_partners=_parse_values(clearing_partner_filter),
         clearing_types=_parse_values(clearing_type_filter),
+        types_of_business=[],
         list_mode=list_mode,
         sort_by="lead_score",
         sort_dir="desc",
