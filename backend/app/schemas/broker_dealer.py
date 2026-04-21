@@ -47,7 +47,12 @@ class BrokerDealerListItem(BaseModel):
     executive_officers: list[dict[str, str]] | None = None
     firm_operations_text: str | None = None
     clearing_classification: str | None = None
+    clearing_raw_text: str | None = None
     is_niche_restricted: bool = False
+    formation_date: date | None = None
+    total_assets_yoy: float | None = None
+    types_of_business_total: int | None = None
+    types_of_business_other: str | None = None
     created_at: datetime
 
 
@@ -123,6 +128,17 @@ class DeficiencyStatusSummary(BaseModel):
     message: str
 
 
+class IntroducingArrangementItem(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
+    id: int
+    bd_id: int
+    statement: str | None = None
+    business_name: str | None = None
+    effective_date: date | None = None
+    description: str | None = None
+
+
 class FocusCeoExtractionResponse(BaseModel):
     """Response from the on-demand FOCUS Report CEO extraction."""
     ceo_name: str | None = None
@@ -141,6 +157,7 @@ class BrokerDealerProfileResponse(BaseModel):
     broker_dealer: BrokerDealerDetail
     financials: list[FinancialMetricItem]
     clearing_arrangements: list[ClearingArrangementItem]
+    introducing_arrangements: list[IntroducingArrangementItem]
     recent_alerts: list[AlertListItem]
     filing_history: list[FilingHistoryItem]
     executive_contacts: list[ExecutiveContactItem]

@@ -9,6 +9,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.models.broker_dealer import BrokerDealer
 from app.models.clearing_arrangement import ClearingArrangement
+from app.models.introducing_arrangement import IntroducingArrangement
 from app.models.competitor_provider import CompetitorProvider
 from app.models.executive_contact import ExecutiveContact
 from app.models.filing_alert import FilingAlert
@@ -319,6 +320,14 @@ class BrokerDealerRepository:
             select(ClearingArrangement)
             .where(ClearingArrangement.bd_id == broker_dealer_id)
             .order_by(ClearingArrangement.filing_year.desc(), ClearingArrangement.id.desc())
+        )
+        return (await db.execute(stmt)).scalars().all()
+
+    async def list_introducing_arrangements(self, db: AsyncSession, broker_dealer_id: int) -> list[IntroducingArrangement]:
+        stmt = (
+            select(IntroducingArrangement)
+            .where(IntroducingArrangement.bd_id == broker_dealer_id)
+            .order_by(IntroducingArrangement.id.asc())
         )
         return (await db.execute(stmt)).scalars().all()
 

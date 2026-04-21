@@ -27,6 +27,7 @@ class ClearingArrangement(Base):
     extraction_confidence: Mapped[float | None] = mapped_column(Numeric(5, 2), nullable=True)
     extraction_status: Mapped[str] = mapped_column(String(32), default="pending", nullable=False, index=True)
     extraction_notes: Mapped[str | None] = mapped_column(Text, nullable=True)
+    clearing_statement_text: Mapped[str | None] = mapped_column(Text, nullable=True)
     is_competitor: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False, index=True)
     is_verified: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
     extracted_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
