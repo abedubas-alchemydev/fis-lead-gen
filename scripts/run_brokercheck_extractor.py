@@ -41,6 +41,7 @@ logger = logging.getLogger("bridge")
 from app.db.session import SessionLocal  # noqa: E402
 from app.models.broker_dealer import BrokerDealer  # noqa: E402
 from app.models.executive_contact import ExecutiveContact  # noqa: E402
+from app.models.industry_arrangement import IndustryArrangement  # noqa: E402
 from app.models.introducing_arrangement import IntroducingArrangement  # noqa: E402
 from app.services.scoring import classify_health_status  # noqa: E402
 
@@ -158,6 +159,36 @@ async def _save_firm_to_webapp(
                             description=arr.description,
                         ))
                     changes.append(f"introducing_arrangements({len(profile.operations.introducing_arrangements)})")
+
+                # Industry arrangements (the three yes/no statements). Always
+                # clear-then-insert keyed by bd_id so re-runs converge to the
+                # parser's latest view; the UNIQUE(bd_id, kind) constraint in
+                # the schema keeps at most one row per kind per firm.
+                if profile.operations.industry_arrangements:
+                    await db.execute(
+                        delete(IndustryArrangement).where(IndustryArrangement.bd_id == bd_id)
+                    )
+                    for ind in profile.operations.industry_arrangements:
+                        ind_eff = None
+                        if ind.effective_date:
+                            try:
+                                # FINRA writes MM/DD/YYYY; convert to a real
+                                # date for the Postgres DATE column.
+                                month, day, year = ind.effective_date.split("/")
+                                ind_eff = date(int(year), int(month), int(day))
+                            except (ValueError, TypeError, AttributeError):
+                                pass
+                        db.add(IndustryArrangement(
+                            bd_id=bd_id,
+                            kind=ind.kind,
+                            has_arrangement=ind.has_arrangement,
+                            partner_name=ind.partner_name,
+                            partner_crd=ind.partner_crd,
+                            partner_address=ind.partner_address,
+                            effective_date=ind_eff,
+                            description=ind.description,
+                        ))
+                    changes.append(f"industry_arrangements({len(profile.operations.industry_arrangements)})")
 
             # Firm history
             if profile.history:

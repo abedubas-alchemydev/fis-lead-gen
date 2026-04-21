@@ -387,16 +387,6 @@ export function BrokerDealerDetailClient({ brokerDealerId }: { brokerDealerId: s
               Visit firm website
             </a>
           ) : null}
-          {profile.registration_compliance.filings_index_url ? (
-            <a
-              href={profile.registration_compliance.filings_index_url}
-              target="_blank"
-              rel="noreferrer"
-              className="mt-2 inline-block text-sm font-medium text-blue ml-4"
-            >
-              Open filings index
-            </a>
-          ) : null}
 
           {/* FOCUS Report CEO + Net Capital Extraction */}
           <div className="mt-6 border-t border-slate-200 pt-5">
@@ -609,6 +599,68 @@ export function BrokerDealerDetailClient({ brokerDealerId }: { brokerDealerId: s
             </div>
           ) : null}
 
+          {/* Industry Arrangements — three yes/no statements: books_records, accounts_funds, customer_accounts */}
+          {profile.industry_arrangements.length > 0 ? (
+            <div className="mb-4">
+              <p className="text-sm font-medium text-navy">Industry Arrangements</p>
+              <p className="mt-1 text-xs text-slate-500">
+                Determines whether the firm is truly self-clearing or relies on a third party.
+              </p>
+              <div className="mt-2 space-y-2">
+                {profile.industry_arrangements.map((arr) => {
+                  const kindLabel =
+                    arr.kind === "books_records"
+                      ? "Books / records"
+                      : arr.kind === "accounts_funds"
+                      ? "Accounts, funds, or securities"
+                      : "Customer accounts, funds, or securities";
+                  return (
+                    <div key={arr.id} className="rounded-2xl border border-slate-100 px-4 py-3">
+                      <div className="flex flex-wrap items-center justify-between gap-2">
+                        <p className="text-sm font-medium text-navy">{kindLabel}</p>
+                        <span
+                          className={`inline-flex items-center rounded-full px-2 py-0.5 text-xs font-medium ${
+                            arr.has_arrangement
+                              ? "bg-amber-50 text-amber-700"
+                              : "bg-emerald-50 text-emerald-700"
+                          }`}
+                        >
+                          {arr.has_arrangement
+                            ? "Maintained by a third party"
+                            : "Not maintained by a third party"}
+                        </span>
+                      </div>
+                      {arr.has_arrangement ? (
+                        <div className="mt-2 space-y-1 text-sm text-slate-600">
+                          {arr.partner_name ? (
+                            <p>
+                              <span className="text-xs uppercase tracking-wide text-slate-400">Partner:</span>{" "}
+                              <span className="font-medium text-navy">{arr.partner_name}</span>
+                              {arr.partner_crd ? (
+                                <span className="ml-2 text-xs text-slate-500">CRD #{arr.partner_crd}</span>
+                              ) : null}
+                            </p>
+                          ) : null}
+                          {arr.partner_address ? (
+                            <p className="whitespace-pre-line text-xs text-slate-500">{arr.partner_address}</p>
+                          ) : null}
+                          {arr.effective_date ? (
+                            <p className="text-xs text-slate-500">
+                              Effective: {formatDate(arr.effective_date)}
+                            </p>
+                          ) : null}
+                          {arr.description ? (
+                            <p className="leading-6">{arr.description}</p>
+                          ) : null}
+                        </div>
+                      ) : null}
+                    </div>
+                  );
+                })}
+              </div>
+            </div>
+          ) : null}
+
           {/* Deficiency Status */}
           <div className={`mb-4 rounded-2xl px-4 py-4 text-sm ${profile.deficiency_status.is_deficient ? "bg-red-50 text-danger" : "bg-emerald-50 text-emerald-700"}`}>
             <p className="font-medium">
@@ -635,11 +687,6 @@ export function BrokerDealerDetailClient({ brokerDealerId }: { brokerDealerId: s
                       <CompetitorBadge isCompetitor={item.is_competitor} />
                     </div>
                   </div>
-                  {item.source_filing_url ? (
-                    <a href={item.source_filing_url} target="_blank" rel="noreferrer" className="mt-2 inline-block text-xs text-blue">
-                      View EDGAR filing
-                    </a>
-                  ) : null}
                 </div>
               ))
             )}

@@ -139,6 +139,27 @@ class IntroducingArrangementItem(BaseModel):
     description: str | None = None
 
 
+class IndustryArrangementItem(BaseModel):
+    """FINRA 'Firm Operations → Industry Arrangements' row.
+
+    One of three kinds (books_records / accounts_funds / customer_accounts),
+    each a yes/no plus optional partner block. Together they say whether the
+    firm is truly self-clearing vs using a third party.
+    """
+
+    model_config = ConfigDict(from_attributes=True)
+
+    id: int
+    bd_id: int
+    kind: str
+    has_arrangement: bool
+    partner_name: str | None = None
+    partner_crd: str | None = None
+    partner_address: str | None = None
+    effective_date: date | None = None
+    description: str | None = None
+
+
 class FocusCeoExtractionResponse(BaseModel):
     """Response from the on-demand FOCUS Report CEO extraction."""
     ceo_name: str | None = None
@@ -158,6 +179,7 @@ class BrokerDealerProfileResponse(BaseModel):
     financials: list[FinancialMetricItem]
     clearing_arrangements: list[ClearingArrangementItem]
     introducing_arrangements: list[IntroducingArrangementItem]
+    industry_arrangements: list[IndustryArrangementItem] = []
     recent_alerts: list[AlertListItem]
     filing_history: list[FilingHistoryItem]
     executive_contacts: list[ExecutiveContactItem]
