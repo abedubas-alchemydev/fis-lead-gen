@@ -89,6 +89,7 @@ class FirmProfileRow(Base):
     clearing_statement: Mapped[Optional[str]] = mapped_column(Text)
     clearing_raw_text: Mapped[Optional[str]] = mapped_column(Text)
     introducing_arrangements: Mapped[Optional[list]] = mapped_column(JSON)
+    industry_arrangements: Mapped[Optional[list]] = mapped_column(JSON)
 
     officers: Mapped[Optional[list]] = mapped_column(JSON)
     parse_warnings: Mapped[Optional[list]] = mapped_column(JSON)
@@ -373,6 +374,9 @@ def _firm_profile_to_row(p: FirmProfile) -> dict:
         "clearing_raw_text": p.operations.clearing_raw_text,
         "introducing_arrangements": [
             i.model_dump(mode="json") for i in p.operations.introducing_arrangements
+        ],
+        "industry_arrangements": [
+            i.model_dump(mode="json") for i in p.operations.industry_arrangements
         ],
         "officers": [o.model_dump(mode="json") for o in p.officers],
         "parse_warnings": p.parse_warnings,

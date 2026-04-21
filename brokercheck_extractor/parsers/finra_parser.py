@@ -20,6 +20,7 @@ from ..schema.models import (
     FirmHistory,
     FirmOperations,
     FirmProfile,
+    IndustryArrangement,
     IntroducingArrangement,
     Officer,
     TypesOfBusiness,
@@ -255,6 +256,7 @@ def _parse_operations(sections: dict, profile: FirmProfile) -> None:
 
     clearing_section = sections.get("Clearing Arrangements", "")
     introducing_section = sections.get("Introducing Arrangements", "")
+    industry_section = sections.get("Industry Arrangements", "")
 
     # Clearing statement — first sentence of the section content
     clearing_text = _strip_section_header(clearing_section, "Clearing Arrangements")
@@ -267,6 +269,11 @@ def _parse_operations(sections: dict, profile: FirmProfile) -> None:
         r"does not refer or introduce", intro_text, re.IGNORECASE
     ):
         ops.introducing_arrangements = _parse_introducing_entries(intro_text)
+
+    # Industry Arrangements: three yes/no statements with optional partner blocks
+    industry_text = _strip_section_header(industry_section, "Industry Arrangements")
+    if industry_text:
+        ops.industry_arrangements = _parse_industry_arrangements(industry_text)
 
     profile.operations = ops
 
@@ -306,6 +313,88 @@ def _parse_introducing_entries(text: str) -> list[IntroducingArrangement]:
                 statement=block.strip()[:800],
             )
         )
+    return entries
+
+
+# ---------------------------------------------------------------------------
+# Industry Arrangements (three yes/no statements + optional partner blocks)
+# ---------------------------------------------------------------------------
+
+# Order: put 'customer_accounts' before 'accounts_funds' because
+# 'accounts, funds, or securities' matches both — the negative lookbehind in
+# the generic pattern filters out 'customer accounts, funds, or securities'
+# so each line maps to exactly one kind.
+_INDUSTRY_KIND_PATTERNS: list[tuple[str, str]] = [
+    ("books_records", r"books or records"),
+    ("customer_accounts", r"customer accounts,?\s*funds,?\s*or securities"),
+    ("accounts_funds", r"(?<!customer\s)accounts,?\s*funds,?\s*or securities"),
+]
+
+
+def _parse_industry_arrangements(text: str) -> list[IndustryArrangement]:
+    """Parse the three yes/no statements in the 'Industry Arrangements' subsection.
+
+    The FINRA BrokerCheck PDF's Industry Arrangements block follows a fixed
+    three-sentence structure, each of the form::
+
+        This firm does [not] have <phrase>.
+
+    where <phrase> is one of 'books or records', 'accounts, funds, or
+    securities', or 'customer accounts, funds, or securities', each scoped
+    'maintained by a third party'. When a sentence says 'does have', a partner
+    block with Name / CRD # / Business Address / Effective Date / Description
+    follows before the next 'This firm' sentence (or end of section).
+
+    Absent statements are simply not returned — the three kinds combined
+    determine whether the firm is truly self-clearing versus using a third
+    party at any layer.
+    """
+    entries: list[IndustryArrangement] = []
+
+    for kind, phrase in _INDUSTRY_KIND_PATTERNS:
+        statement_match = re.search(
+            rf"This firm does (not\s+)?have {phrase}[^.]*\.",
+            text,
+            re.IGNORECASE,
+        )
+        if not statement_match:
+            continue
+
+        has = statement_match.group(1) is None  # 'not' group absent → has_arrangement=True
+        statement = statement_match.group(0).strip()
+
+        entry = IndustryArrangement(
+            kind=kind,  # type: ignore[arg-type]
+            has_arrangement=has,
+            statement=statement[:800],
+        )
+
+        # Partner block only exists when has_arrangement is True. It sits
+        # between this sentence and the next 'This firm does' sentence (or end
+        # of section text).
+        if has:
+            after = text[statement_match.end():]
+            next_statement = re.search(r"This firm does", after, re.IGNORECASE)
+            block = after[: next_statement.start()] if next_statement else after
+            entry.partner_name = find_first_match([r"Name:\s*([^\n]+)"], block)
+            entry.partner_crd = find_first_match([r"CRD\s*#?:?\s*([^\n]+)"], block)
+            entry.partner_address = _extract_multiline_field(
+                block,
+                start_label=r"Business Address:",
+                end_label=r"(?:Effective Date:|Description:|$)",
+            )
+            entry.effective_date = find_first_match(
+                [r"Effective Date:\s*([\d/]+)"], block
+            )
+            desc = _extract_multiline_field(
+                block,
+                start_label=r"Description:",
+                end_label=r"(?:This firm does|$)",
+            )
+            entry.description = (desc or "").strip() or None
+
+        entries.append(entry)
+
     return entries
 
 

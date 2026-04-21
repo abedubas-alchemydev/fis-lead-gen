@@ -226,6 +226,7 @@ async def get_broker_dealer_profile(
     financials = await repository.get_financial_metrics(db, broker_dealer_id)
     clearing_arrangements = await repository.list_clearing_arrangements(db, broker_dealer_id)
     introducing_arrangements = await repository.list_introducing_arrangements(db, broker_dealer_id)
+    industry_arrangements = await repository.list_industry_arrangements(db, broker_dealer_id)
     executive_contacts = await repository.get_executive_contacts(db, broker_dealer_id)
     recent_alerts = (
         await alert_repository.list_alerts(
@@ -286,6 +287,7 @@ async def get_broker_dealer_profile(
         financials=[FinancialMetricItem.model_validate(item) for item in financials],
         clearing_arrangements=clearing_arrangements,
         introducing_arrangements=introducing_arrangements,
+        industry_arrangements=industry_arrangements,
         recent_alerts=recent_alerts,
         filing_history=filing_history[:20],
         executive_contacts=[ExecutiveContactItem.model_validate(item) for item in executive_contacts],

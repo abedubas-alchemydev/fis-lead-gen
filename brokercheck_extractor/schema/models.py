@@ -45,6 +45,27 @@ class IntroducingArrangement(BaseModel):
     statement: Optional[str] = None                # full sentence block
 
 
+IndustryArrangementKind = Literal["books_records", "accounts_funds", "customer_accounts"]
+
+
+class IndustryArrangement(BaseModel):
+    """One of three yes/no Industry Arrangements statements from the FINRA
+    BrokerCheck 'Firm Operations → Industry Arrangements' subsection.
+
+    The three kinds combined determine whether the firm is truly self-clearing
+    versus using a third party for books/records, firm-level asset custody, or
+    customer-level asset custody.
+    """
+    kind: IndustryArrangementKind
+    has_arrangement: bool
+    partner_name: Optional[str] = None
+    partner_crd: Optional[str] = None
+    partner_address: Optional[str] = None
+    effective_date: Optional[str] = None           # FINRA stores as MM/DD/YYYY strings
+    description: Optional[str] = None
+    statement: Optional[str] = None                # full raw sentence block
+
+
 class TypesOfBusiness(BaseModel):
     """Client spec requires: total number + list + 'other' freeform."""
     total: int = 0
@@ -61,6 +82,7 @@ class FirmHistory(BaseModel):
 class FirmOperations(BaseModel):
     clearing_statement: Optional[str] = None
     introducing_arrangements: list[IntroducingArrangement] = Field(default_factory=list)
+    industry_arrangements: list[IndustryArrangement] = Field(default_factory=list)
     clearing_type: ClearingType = ClearingType.UNKNOWN
     clearing_raw_text: Optional[str] = None        # always preserved for client override
 
