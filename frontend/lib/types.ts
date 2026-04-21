@@ -196,11 +196,26 @@ export type IntroducingArrangementItem = {
   description: string | null;
 };
 
+export type IndustryArrangementKind = "books_records" | "accounts_funds" | "customer_accounts";
+
+export type IndustryArrangementItem = {
+  id: number;
+  bd_id: number;
+  kind: IndustryArrangementKind;
+  has_arrangement: boolean;
+  partner_name: string | null;
+  partner_crd: string | null;
+  partner_address: string | null;
+  effective_date: string | null;
+  description: string | null;
+};
+
 export type BrokerDealerProfileResponse = {
   broker_dealer: BrokerDealerListItem;
   financials: FinancialMetricItem[];
   clearing_arrangements: ClearingArrangementItem[];
   introducing_arrangements: IntroducingArrangementItem[];
+  industry_arrangements: IndustryArrangementItem[];
   recent_alerts: AlertListItem[];
   filing_history: FilingHistoryItem[];
   executive_contacts: ExecutiveContactItem[];
