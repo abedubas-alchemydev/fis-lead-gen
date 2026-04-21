@@ -59,6 +59,7 @@ class ExportService:
             lead_priorities=lead_priorities,
             clearing_partners=clearing_partners,
             clearing_types=clearing_types,
+            types_of_business=[],
             list_mode=list_mode,
             sort_by="lead_score",
             sort_dir="desc",

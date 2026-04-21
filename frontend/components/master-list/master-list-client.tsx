@@ -65,6 +65,8 @@ export function MasterListClient({
   const [states, setStates] = useState<string[]>([]);
   const [statesWithData, setStatesWithData] = useState<Set<string>>(new Set());
   const [clearingPartners, setClearingPartners] = useState<string[]>([]);
+  const [typesOfBusinessOptions, setTypesOfBusinessOptions] = useState<{ type: string; count: number }[]>([]);
+  const [selectedTypesOfBusiness, setSelectedTypesOfBusiness] = useState<string[]>([]);
   const [selectedStates, setSelectedStates] = useState<string[]>([]);
   const [searchInput, setSearchInput] = useState("");
   const [search, setSearch] = useState("");
@@ -97,13 +99,14 @@ export function MasterListClient({
         lead_priority: leadPriorityFilter === "All" ? undefined : [leadPriorityFilter],
         clearing_partner: clearingPartnerFilter ? [clearingPartnerFilter] : undefined,
         clearing_type: clearingTypeFilter === "All" ? undefined : [clearingTypeFilter],
+        types_of_business: selectedTypesOfBusiness.length > 0 ? selectedTypesOfBusiness : undefined,
         list: listMode,
         sort_by: sortBy,
         sort_dir: sortDir,
         page,
         limit
       }),
-    [search, selectedStates, statusFilter, healthFilter, leadPriorityFilter, clearingPartnerFilter, clearingTypeFilter, listMode, sortBy, sortDir, page, limit]
+    [search, selectedStates, statusFilter, healthFilter, leadPriorityFilter, clearingPartnerFilter, clearingTypeFilter, selectedTypesOfBusiness, listMode, sortBy, sortDir, page, limit]
   );
 
   useEffect(() => {
@@ -140,9 +143,10 @@ export function MasterListClient({
 
     async function loadFilters() {
       try {
-        const [stateResponse, partnerResponse] = await Promise.all([
+        const [stateResponse, partnerResponse, typesResponse] = await Promise.all([
           apiRequest<string[]>("/api/v1/broker-dealers/states"),
-          apiRequest<string[]>("/api/v1/broker-dealers/clearing-partners")
+          apiRequest<string[]>("/api/v1/broker-dealers/clearing-partners"),
+          apiRequest<{ type: string; count: number }[]>("/api/v1/broker-dealers/types-of-business")
         ]);
         if (active) {
           const dbStates = new Set(stateResponse);
@@ -154,12 +158,14 @@ export function MasterListClient({
           const extra = stateResponse.filter((s) => !ALL_US_STATES.includes(s));
           setStates([...withData, ...extra, ...withoutData]);
           setClearingPartners(partnerResponse);
+          setTypesOfBusinessOptions(typesResponse);
         }
       } catch {
         if (active) {
           setStates(ALL_US_STATES);
           setStatesWithData(new Set());
           setClearingPartners([]);
+          setTypesOfBusinessOptions([]);
         }
       }
     }
@@ -357,6 +363,37 @@ export function MasterListClient({
               </div>
             </div>
 
+            {typesOfBusinessOptions.length > 0 ? (
+              <div>
+                <p className="text-sm font-medium text-slate-700">Types of business</p>
+                <p className="mt-1 text-xs text-slate-500">Match firms that conduct any of the selected business types.</p>
+                <div className="mt-3 max-h-64 space-y-1 overflow-y-auto rounded-2xl border border-slate-200 px-3 py-2">
+                  {typesOfBusinessOptions.map((option) => {
+                    const checked = selectedTypesOfBusiness.includes(option.type);
+                    return (
+                      <label key={option.type} className="flex items-center justify-between gap-2 py-1 text-sm">
+                        <div className="flex items-center gap-2">
+                          <input
+                            type="checkbox"
+                            checked={checked}
+                            onChange={(event) => {
+                              const next = event.target.checked
+                                ? [...selectedTypesOfBusiness, option.type]
+                                : selectedTypesOfBusiness.filter((t) => t !== option.type);
+                              setSelectedTypesOfBusiness(next);
+                              setPage(1);
+                            }}
+                          />
+                          <span className="text-slate-700">{option.type}</span>
+                        </div>
+                        <span className="text-xs text-slate-400 tabular-nums">{option.count}</span>
+                      </label>
+                    );
+                  })}
+                </div>
+              </div>
+            ) : null}
+
             <button
               type="button"
               onClick={() => {
@@ -368,6 +405,7 @@ export function MasterListClient({
                 setLeadPriorityFilter("All");
                 setClearingPartnerFilter("");
                 setClearingTypeFilter("All");
+                setSelectedTypesOfBusiness([]);
                 setSortBy("name");
                 setSortDir("asc");
                 setPage(1);
