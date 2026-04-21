@@ -2,6 +2,7 @@ import { NextResponse } from "next/server";
 import { headers } from "next/headers";
 
 import { auth, db } from "@/lib/auth";
+import { sendApprovalNotificationEmail } from "@/lib/email";
 
 export async function POST(
   _request: Request,
@@ -23,12 +24,18 @@ export async function POST(
   }
 
   const targetId = params.id;
+  let approvedUser: { email: string; name: string } | null = null;
+
   const client = await db.connect();
   try {
     await client.query("BEGIN");
 
-    const existing = await client.query<{ status: string }>(
-      'SELECT status FROM "user" WHERE id = $1 FOR UPDATE',
+    const existing = await client.query<{
+      status: string;
+      email: string;
+      name: string;
+    }>(
+      'SELECT status, email, name FROM "user" WHERE id = $1 FOR UPDATE',
       [targetId]
     );
     if (existing.rowCount === 0) {
@@ -36,6 +43,10 @@ export async function POST(
       return NextResponse.json({ error: "User not found" }, { status: 404 });
     }
     const previousStatus = existing.rows[0].status;
+    approvedUser = {
+      email: existing.rows[0].email,
+      name: existing.rows[0].name,
+    };
 
     await client.query(
       'UPDATE "user" SET status = $1, updated_at = NOW() WHERE id = $2',
@@ -64,6 +75,24 @@ export async function POST(
     );
   } finally {
     client.release();
+  }
+
+  // Fire-and-forget approval notification to the user. A send failure must
+  // not roll back the approval itself — the status change is already committed.
+  if (approvedUser) {
+    const appUrl =
+      process.env.BETTER_AUTH_URL ??
+      process.env.NEXT_PUBLIC_APP_URL ??
+      "http://localhost:3000";
+    sendApprovalNotificationEmail({
+      user: approvedUser,
+      loginUrl: `${appUrl}/login`,
+    }).catch((err) => {
+      console.error(
+        "[ADMIN_APPROVE] Failed to send approval notification email:",
+        err
+      );
+    });
   }
 
   return NextResponse.json({ ok: true });
