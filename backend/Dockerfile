@@ -6,6 +6,15 @@ ENV PYTHONDONTWRITEBYTECODE=1
 ENV PYTHONUNBUFFERED=1
 ENV PYTHONPATH=/app
 
+# Install theHarvester CLI (Debian bookworm main; provides the `theHarvester`
+# binary on PATH for the email_extractor theHarvester provider). Upstream's
+# 4.8+ tags require Python 3.12 and 4.7.x conflicts with FastAPI/SQLAlchemy
+# pins, so installing via apt is the least-painful path — runs as a subprocess
+# in its own system Python env, isolated from the backend's pip dependencies.
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends theharvester \
+    && rm -rf /var/lib/apt/lists/*
+
 # Install dependencies
 COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
