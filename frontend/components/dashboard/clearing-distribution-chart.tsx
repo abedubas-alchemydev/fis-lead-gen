@@ -29,21 +29,29 @@ export function ClearingDistributionChart({ items }: { items: ClearingProviderSh
 
   if (items.length === 0) {
     return (
-      <div className="rounded-[28px] border border-white/80 bg-white/92 p-6 shadow-shell">
-        <p className="text-sm font-medium uppercase tracking-[0.22em] text-blue">Clearing Market</p>
-        <p className="mt-3 text-sm text-slate-600">Clearing distribution will appear as extracted provider data becomes available.</p>
+      <div className="rounded-2xl border border-slate-200/80 bg-white p-6">
+        <p className="text-[11px] font-semibold uppercase tracking-[0.16em] text-slate-500">
+          Clearing Market
+        </p>
+        <p className="mt-3 text-sm text-slate-600">
+          Clearing distribution will appear as extracted provider data becomes available.
+        </p>
       </div>
     );
   }
 
   return (
-    <div className="rounded-[28px] border border-white/80 bg-white/92 p-6 shadow-shell">
+    <div className="rounded-2xl border border-slate-200/80 bg-white p-6">
       <div className="flex items-start justify-between gap-4">
         <div>
-          <p className="text-sm font-medium uppercase tracking-[0.22em] text-blue">Clearing Market</p>
+          <p className="text-[11px] font-semibold uppercase tracking-[0.16em] text-slate-500">
+            Clearing Market
+          </p>
           <h3 className="mt-2 text-xl font-semibold text-navy">Provider distribution</h3>
         </div>
-        <p className="max-w-44 text-right text-xs leading-5 text-slate-500">Click a segment or provider row to filter the Master List.</p>
+        <p className="max-w-44 text-right text-xs leading-5 text-slate-500">
+          Click a segment or provider row to filter the Master List.
+        </p>
       </div>
 
       <div className="mt-6 grid gap-6 lg:grid-cols-[220px_1fr]">
