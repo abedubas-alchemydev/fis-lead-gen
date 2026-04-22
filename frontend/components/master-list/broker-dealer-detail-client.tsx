@@ -12,6 +12,7 @@ import { CompetitorBadge } from "@/components/master-list/competitor-badge";
 import { HealthBadge } from "@/components/master-list/health-badge";
 import { LeadPriorityBadge } from "@/components/master-list/lead-priority-badge";
 import { apiRequest } from "@/lib/api";
+import { parseArrangementBlob } from "@/lib/arrangements";
 import { formatCurrency, formatDate, formatPercent } from "@/lib/format";
 import type { BrokerDealerProfileResponse, FocusCeoExtractionResponse } from "@/lib/types";
 
@@ -87,6 +88,48 @@ function QuadrantCard({ eyebrow, title, children }: { eyebrow: string; title: st
       <h2 className="mt-3 text-2xl font-semibold text-navy">{title}</h2>
       <div className="mt-5">{children}</div>
     </article>
+  );
+}
+
+function ArrangementFields({
+  crd,
+  address,
+  effective,
+  details,
+}: {
+  crd: string | null;
+  address: string | null;
+  effective: string | null;
+  details: string | null;
+}) {
+  if (!crd && !address && !effective && !details) return null;
+  return (
+    <dl className="mt-2 grid grid-cols-[auto_1fr] gap-x-3 gap-y-1.5 text-sm text-slate-600">
+      {crd ? (
+        <>
+          <dt className="text-xs uppercase tracking-wide text-slate-400 pt-0.5">CRD #</dt>
+          <dd className="text-navy">{crd}</dd>
+        </>
+      ) : null}
+      {address ? (
+        <>
+          <dt className="text-xs uppercase tracking-wide text-slate-400 pt-0.5">Address</dt>
+          <dd className="whitespace-pre-line text-slate-600">{address}</dd>
+        </>
+      ) : null}
+      {effective ? (
+        <>
+          <dt className="text-xs uppercase tracking-wide text-slate-400 pt-0.5">Effective</dt>
+          <dd>{effective}</dd>
+        </>
+      ) : null}
+      {details ? (
+        <>
+          <dt className="text-xs uppercase tracking-wide text-slate-400 pt-0.5">Details</dt>
+          <dd className="leading-6">{details}</dd>
+        </>
+      ) : null}
+    </dl>
   );
 }
 
@@ -658,22 +701,31 @@ export function BrokerDealerDetailClient({ brokerDealerId }: { brokerDealerId: s
             <div className="mb-4">
               <p className="text-sm font-medium text-navy">Introducing Arrangements</p>
               <div className="mt-2 space-y-2">
-                {profile.introducing_arrangements.map((arr) => (
-                  <div key={arr.id} className="rounded-2xl border border-slate-100 px-4 py-3">
-                    {arr.business_name ? (
-                      <p className="font-medium text-navy">{arr.business_name}</p>
-                    ) : null}
-                    {arr.effective_date ? (
-                      <p className="mt-1 text-xs text-slate-500">Effective: {formatDate(arr.effective_date)}</p>
-                    ) : null}
-                    {arr.statement ? (
-                      <p className="mt-2 text-sm text-slate-600 leading-6">{arr.statement}</p>
-                    ) : null}
-                    {arr.description ? (
-                      <p className="mt-1 text-sm text-slate-600 leading-6">{arr.description}</p>
-                    ) : null}
-                  </div>
-                ))}
+                {profile.introducing_arrangements.map((arr) => {
+                  const parsed = parseArrangementBlob(
+                    [arr.statement, arr.description].filter(Boolean).join(" "),
+                  );
+                  const name = arr.business_name || parsed.partnerName;
+                  const crd = parsed.partnerCrd;
+                  const address = parsed.partnerAddress;
+                  const effective = arr.effective_date
+                    ? formatDate(arr.effective_date)
+                    : parsed.effectiveDate;
+                  const details = parsed.description || parsed.intro;
+                  return (
+                    <div key={arr.id} className="rounded-2xl border border-slate-100 px-4 py-3">
+                      {name ? (
+                        <p className="font-medium text-navy">{name}</p>
+                      ) : null}
+                      <ArrangementFields
+                        crd={crd}
+                        address={address}
+                        effective={effective}
+                        details={details}
+                      />
+                    </div>
+                  );
+                })}
               </div>
             </div>
           ) : null}
@@ -709,30 +761,35 @@ export function BrokerDealerDetailClient({ brokerDealerId }: { brokerDealerId: s
                             : "Not maintained by a third party"}
                         </span>
                       </div>
-                      {arr.has_arrangement ? (
-                        <div className="mt-2 space-y-1 text-sm text-slate-600">
-                          {arr.partner_name ? (
-                            <p>
-                              <span className="text-xs uppercase tracking-wide text-slate-400">Partner:</span>{" "}
-                              <span className="font-medium text-navy">{arr.partner_name}</span>
-                              {arr.partner_crd ? (
-                                <span className="ml-2 text-xs text-slate-500">CRD #{arr.partner_crd}</span>
-                              ) : null}
-                            </p>
-                          ) : null}
-                          {arr.partner_address ? (
-                            <p className="whitespace-pre-line text-xs text-slate-500">{arr.partner_address}</p>
-                          ) : null}
-                          {arr.effective_date ? (
-                            <p className="text-xs text-slate-500">
-                              Effective: {formatDate(arr.effective_date)}
-                            </p>
-                          ) : null}
-                          {arr.description ? (
-                            <p className="leading-6">{arr.description}</p>
-                          ) : null}
-                        </div>
-                      ) : null}
+                      {arr.has_arrangement ? (() => {
+                        const parsed = parseArrangementBlob(arr.description);
+                        const partnerName = arr.partner_name || parsed.partnerName;
+                        const partnerCrd = arr.partner_crd || parsed.partnerCrd;
+                        const partnerAddress = arr.partner_address || parsed.partnerAddress;
+                        const effective = arr.effective_date
+                          ? formatDate(arr.effective_date)
+                          : parsed.effectiveDate;
+                        const details = parsed.description || parsed.intro;
+                        return (
+                          <div className="mt-3 space-y-2 text-sm text-slate-600">
+                            {partnerName ? (
+                              <p>
+                                <span className="text-xs uppercase tracking-wide text-slate-400">Partner</span>{" "}
+                                <span className="font-medium text-navy">{partnerName}</span>
+                                {partnerCrd ? (
+                                  <span className="ml-2 text-xs text-slate-500">CRD #{partnerCrd}</span>
+                                ) : null}
+                              </p>
+                            ) : null}
+                            <ArrangementFields
+                              crd={partnerName ? null : partnerCrd}
+                              address={partnerAddress}
+                              effective={effective}
+                              details={details}
+                            />
+                          </div>
+                        );
+                      })() : null}
                     </div>
                   );
                 })}
