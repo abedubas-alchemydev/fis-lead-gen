@@ -45,8 +45,8 @@ export function AppShell({
   }
 
   return (
-    <div className="min-h-screen">
-      <div className="flex min-h-screen w-full overflow-hidden bg-white/55 backdrop-blur">
+    <div className="h-screen overflow-hidden">
+      <div className="flex h-full w-full bg-white/55 backdrop-blur">
         <aside className="hidden w-[256px] shrink-0 bg-navy px-6 py-7 text-white lg:flex lg:flex-col xl:w-[272px]">
           <div>
             <p className="text-xs uppercase tracking-[0.3em] text-white/55">Lead Engine</p>
@@ -82,7 +82,7 @@ export function AppShell({
           </div>
         </aside>
 
-        <div className="flex min-h-full min-w-0 flex-1 flex-col">
+        <div className="flex h-full min-w-0 flex-1 flex-col">
           <header className="flex flex-wrap items-start justify-between gap-4 border-b border-slate-200/80 bg-white/70 px-5 py-4 backdrop-blur xl:px-7">
             <div className="min-w-0 flex-1">
               <p className="text-xs uppercase tracking-[0.28em] text-blue">Enterprise Dashboard</p>
