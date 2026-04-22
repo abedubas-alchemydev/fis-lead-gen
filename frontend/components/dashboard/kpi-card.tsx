@@ -4,20 +4,28 @@ import type { LucideIcon } from "lucide-react";
 
 type Tone = "navy" | "blue" | "danger" | "gold";
 
-// Diagonal tonal gradients give each card a subtle light source without
-// pulling it away from its brand color.
-const toneMap: Record<Tone, string> = {
-  navy: "bg-gradient-to-br from-[#13305a] via-navy to-[#08162c] text-white",
-  blue: "bg-gradient-to-br from-[#2477c6] via-blue to-[#144978] text-white",
-  danger: "bg-gradient-to-br from-[#ef6d5e] via-danger to-[#c83a2a] text-white",
-  gold: "bg-gradient-to-br from-[#f2c26b] via-gold to-[#c98b20] text-navy"
+// Neutral white base with color-as-accent — the modern enterprise SaaS
+// pattern (Stripe, Linear, Vercel). Each tone surfaces only via a thin
+// top strip, the icon chip color, and an understated focus ring on hover.
+const accentStripMap: Record<Tone, string> = {
+  navy: "bg-navy",
+  blue: "bg-blue",
+  danger: "bg-danger",
+  gold: "bg-gold"
 };
 
 const iconChipMap: Record<Tone, string> = {
-  navy: "bg-white/10 ring-1 ring-white/15",
-  blue: "bg-white/12 ring-1 ring-white/20",
-  danger: "bg-white/12 ring-1 ring-white/20",
-  gold: "bg-navy/10 ring-1 ring-navy/15"
+  navy: "bg-navy/10 text-navy",
+  blue: "bg-blue/10 text-blue",
+  danger: "bg-danger/10 text-danger",
+  gold: "bg-gold/15 text-[#a06d0f]"
+};
+
+const hoverRingMap: Record<Tone, string> = {
+  navy: "group-hover/kpi:ring-navy/25",
+  blue: "group-hover/kpi:ring-blue/25",
+  danger: "group-hover/kpi:ring-danger/25",
+  gold: "group-hover/kpi:ring-gold/35"
 };
 
 export function KpiCard({
@@ -37,39 +45,29 @@ export function KpiCard({
 }) {
   const content = (
     <article
-      className={`group/card relative isolate overflow-hidden rounded-[28px] p-6 shadow-shell ${toneMap[tone]}`}
+      className={`group/kpi relative isolate overflow-hidden rounded-2xl border border-slate-200/80 bg-white p-6 ring-1 ring-transparent transition-all duration-200 hover:border-slate-300 hover:shadow-[0_14px_38px_rgba(10,31,63,0.08)] ${hoverRingMap[tone]}`}
     >
-      {/* Faint radial highlight in the top-right for subtle depth. */}
+      {/* Thin tone-colored strip at the top — the only saturated element on the card. */}
       <div
         aria-hidden
-        className="pointer-events-none absolute -right-12 -top-12 h-40 w-40 rounded-full bg-white/10 blur-2xl"
+        className={`absolute inset-x-0 top-0 h-0.5 ${accentStripMap[tone]}`}
       />
-      {/* Diagonal gradient shine that sweeps across on hover. */}
-      <div
-        aria-hidden
-        className="pointer-events-none absolute inset-0 -translate-x-full bg-gradient-to-r from-transparent via-white/20 to-transparent opacity-0 transition-transform duration-700 ease-out group-hover/card:translate-x-full group-hover/card:opacity-100"
-      />
-      <div className="relative flex items-start justify-between gap-4">
+      <div className="flex items-start justify-between gap-4">
         <div className="min-w-0">
-          <p className="text-xs font-medium uppercase tracking-[0.24em] text-current/70">
+          <p className="text-[11px] font-semibold uppercase tracking-[0.16em] text-slate-500">
             {title}
           </p>
-          <p className="mt-5 text-5xl font-semibold tabular-nums leading-none">
+          <p className="mt-4 text-5xl font-semibold tabular-nums leading-none text-navy">
             {value}
           </p>
-          <p className="mt-4 text-sm leading-5 text-current/80">{helper}</p>
         </div>
         <div
-          className={`rounded-2xl p-3 backdrop-blur transition-transform duration-300 group-hover/card:scale-110 group-hover/card:-rotate-3 ${iconChipMap[tone]}`}
+          className={`flex h-10 w-10 shrink-0 items-center justify-center rounded-xl transition-transform duration-200 group-hover/kpi:scale-105 ${iconChipMap[tone]}`}
         >
-          <Icon className="h-5 w-5" />
+          <Icon className="h-5 w-5" strokeWidth={2} />
         </div>
       </div>
-      {/* Bottom accent bar — reveals on hover for a subtle interaction cue. */}
-      <div
-        aria-hidden
-        className="absolute inset-x-0 bottom-0 h-[3px] origin-left scale-x-0 bg-current/30 transition-transform duration-300 group-hover/card:scale-x-100"
-      />
+      <p className="mt-5 text-sm leading-5 text-slate-500">{helper}</p>
     </article>
   );
 
@@ -80,7 +78,7 @@ export function KpiCard({
   return (
     <Link
       href={href}
-      className="block rounded-[28px] transition duration-200 ease-out hover:-translate-y-1 hover:shadow-[0_24px_52px_rgba(10,31,63,0.18)] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-blue focus-visible:ring-offset-2 focus-visible:ring-offset-white/70"
+      className="block rounded-2xl transition duration-200 ease-out hover:-translate-y-0.5 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-blue focus-visible:ring-offset-2 focus-visible:ring-offset-white"
     >
       {content}
     </Link>

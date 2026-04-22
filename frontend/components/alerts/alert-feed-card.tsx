@@ -26,11 +26,13 @@ export function AlertFeedCard({
   onMarkRead?: (alertId: number) => void;
 }) {
   return (
-    <article className="rounded-[30px] border border-white/80 bg-white/88 p-7 shadow-shell backdrop-blur">
+    <article className="rounded-2xl border border-slate-200/80 bg-white p-6">
       <div className="flex items-center justify-between gap-4">
         <div>
-          <p className="text-sm font-medium uppercase tracking-[0.24em] text-blue">Activity Feed</p>
-          <h2 className="mt-3 text-2xl font-semibold text-navy">Recent filing alerts</h2>
+          <p className="text-[11px] font-semibold uppercase tracking-[0.16em] text-slate-500">
+            Activity Feed
+          </p>
+          <h2 className="mt-2 text-xl font-semibold text-navy">Recent filing alerts</h2>
         </div>
         <Link
           href="/alerts"
