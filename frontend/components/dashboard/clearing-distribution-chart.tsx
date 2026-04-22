@@ -47,13 +47,17 @@ export function ClearingDistributionChart({ items }: { items: ClearingProviderSh
       </div>
 
       <div className="mt-6 grid gap-6 lg:grid-cols-[220px_1fr]">
-        <div className="flex items-center justify-center">
+        <div className="relative flex items-center justify-center">
+          {/* Soft radial glow behind the donut. */}
+          <div
+            aria-hidden
+            className="pointer-events-none absolute inset-0 -z-10 m-auto h-[180px] w-[180px] rounded-full bg-blue/5 blur-2xl"
+          />
           <svg
             viewBox="0 0 220 220"
             className="h-[220px] w-[220px] drop-shadow-[0_6px_16px_rgba(10,31,63,0.08)]"
           >
             <circle cx="110" cy="110" r="70" fill="#eff4fb" />
-            <circle cx="110" cy="110" r="36" fill="white" />
             {items.map((item, index) => {
               const angle = (item.percentage / 100) * 360;
               const path = describeArc(110, 110, 70, currentAngle, currentAngle + angle);
@@ -64,13 +68,15 @@ export function ClearingDistributionChart({ items }: { items: ClearingProviderSh
                   key={`${item.provider}-${segmentStart}`}
                   d={path}
                   fill={palette[index % palette.length]}
-                  className="origin-center cursor-pointer transition-all duration-200 hover:opacity-90 hover:brightness-110"
+                  className="origin-center cursor-pointer animate-scale-in transition-all duration-200 hover:opacity-90 hover:brightness-110"
+                  style={{ animationDelay: `${index * 80}ms` }}
                   onClick={() => router.push(`/master-list?clearing_partner=${encodeURIComponent(item.provider)}`)}
                 >
                   <title>{`${item.provider} — ${item.count.toLocaleString()} firms (${item.percentage.toFixed(1)}%)`}</title>
                 </path>
               );
             })}
+            <circle cx="110" cy="110" r="36" fill="white" />
             <text x="110" y="104" textAnchor="middle" className="fill-[#15305b] text-[20px] font-semibold tabular-nums">
               {totalFirms.toLocaleString()}
             </text>
