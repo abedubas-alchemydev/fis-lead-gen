@@ -45,8 +45,8 @@ export function AppShell({
   }
 
   return (
-    <div className="min-h-screen px-4 py-4 lg:px-6">
-      <div className="mx-auto flex min-h-[calc(100vh-2rem)] w-full overflow-hidden rounded-[34px] border border-white/70 bg-white/55 shadow-shell backdrop-blur">
+    <div className="min-h-screen">
+      <div className="flex min-h-screen w-full overflow-hidden bg-white/55 backdrop-blur">
         <aside className="hidden w-[256px] shrink-0 bg-navy px-6 py-7 text-white lg:flex lg:flex-col xl:w-[272px]">
           <div>
             <p className="text-xs uppercase tracking-[0.3em] text-white/55">Lead Engine</p>
