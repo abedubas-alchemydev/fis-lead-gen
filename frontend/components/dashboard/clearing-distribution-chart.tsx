@@ -25,6 +25,7 @@ function describeArc(x: number, y: number, radius: number, startAngle: number, e
 export function ClearingDistributionChart({ items }: { items: ClearingProviderShare[] }) {
   const router = useRouter();
   let currentAngle = 0;
+  const totalFirms = items.reduce((acc, item) => acc + item.count, 0);
 
   if (items.length === 0) {
     return (
@@ -47,9 +48,12 @@ export function ClearingDistributionChart({ items }: { items: ClearingProviderSh
 
       <div className="mt-6 grid gap-6 lg:grid-cols-[220px_1fr]">
         <div className="flex items-center justify-center">
-          <svg viewBox="0 0 220 220" className="h-[220px] w-[220px]">
+          <svg
+            viewBox="0 0 220 220"
+            className="h-[220px] w-[220px] drop-shadow-[0_6px_16px_rgba(10,31,63,0.08)]"
+          >
             <circle cx="110" cy="110" r="70" fill="#eff4fb" />
-            <circle cx="110" cy="110" r="34" fill="white" />
+            <circle cx="110" cy="110" r="36" fill="white" />
             {items.map((item, index) => {
               const angle = (item.percentage / 100) * 360;
               const path = describeArc(110, 110, 70, currentAngle, currentAngle + angle);
@@ -60,39 +64,49 @@ export function ClearingDistributionChart({ items }: { items: ClearingProviderSh
                   key={`${item.provider}-${segmentStart}`}
                   d={path}
                   fill={palette[index % palette.length]}
-                  className="cursor-pointer transition hover:opacity-85"
+                  className="origin-center cursor-pointer transition-all duration-200 hover:opacity-90 hover:brightness-110"
                   onClick={() => router.push(`/master-list?clearing_partner=${encodeURIComponent(item.provider)}`)}
-                />
+                >
+                  <title>{`${item.provider} — ${item.count.toLocaleString()} firms (${item.percentage.toFixed(1)}%)`}</title>
+                </path>
               );
             })}
-            <text x="110" y="102" textAnchor="middle" className="fill-[#15305b] text-[14px] font-semibold">
-              Clearing
+            <text x="110" y="104" textAnchor="middle" className="fill-[#15305b] text-[20px] font-semibold tabular-nums">
+              {totalFirms.toLocaleString()}
             </text>
-            <text x="110" y="124" textAnchor="middle" className="fill-[#6d8097] text-[11px]">
-              Share
+            <text
+              x="110"
+              y="122"
+              textAnchor="middle"
+              className="fill-[#6d8097] text-[9px] font-medium uppercase tracking-[0.18em]"
+            >
+              Total firms
             </text>
           </svg>
         </div>
 
-        <div className="space-y-3">
+        <div className="space-y-2.5">
           {items.map((item, index) => (
             <button
               key={item.provider}
               type="button"
               onClick={() => router.push(`/master-list?clearing_partner=${encodeURIComponent(item.provider)}`)}
-              className="flex w-full items-center justify-between rounded-2xl border border-slate-200 px-4 py-3 text-left transition hover:border-blue/35 hover:bg-slate-50"
+              className="group flex w-full items-center justify-between rounded-2xl border border-slate-200 px-4 py-3 text-left transition hover:-translate-y-px hover:border-blue/40 hover:bg-slate-50 hover:shadow-sm"
             >
-              <div className="flex items-center gap-3">
-                <span className="h-3 w-3 rounded-full" style={{ backgroundColor: palette[index % palette.length] }} />
-                <div>
-                  <p className="text-sm font-medium text-navy">{item.provider}</p>
+              <div className="flex min-w-0 items-center gap-3">
+                <span
+                  className="h-3 w-3 shrink-0 rounded-full ring-2 ring-white shadow-sm transition group-hover:scale-110"
+                  style={{ backgroundColor: palette[index % palette.length] }}
+                />
+                <div className="min-w-0">
+                  <p className="truncate text-sm font-medium text-navy">{item.provider}</p>
                   <div className="mt-1 flex items-center gap-2">
-                    <p className="text-xs text-slate-500">{item.count.toLocaleString()} firms</p>
+                    <p className="text-xs tabular-nums text-slate-500">{item.count.toLocaleString()} firms</p>
                     <CompetitorBadge isCompetitor={item.is_competitor} />
                   </div>
                 </div>
               </div>
-              <p className="text-sm font-semibold text-navy">{item.percentage.toFixed(1)}%</p>
+              <p className="shrink-0 text-sm font-semibold tabular-nums text-navy">{item.percentage.toFixed(1)}%</p>
             </button>
           ))}
         </div>
