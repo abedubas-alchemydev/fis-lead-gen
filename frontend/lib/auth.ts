@@ -78,8 +78,11 @@ export const auth = betterAuth({
     }
   },
   session: {
-    expiresIn: 60 * 30,
-    updateAge: 60 * 5,
+    // 7-day absolute TTL, refreshed on any request older than 24h. Matches
+    // BetterAuth defaults. Keeps active users logged in indefinitely on a
+    // rolling window and drops inactive ones after a week.
+    expiresIn: 60 * 60 * 24 * 7,
+    updateAge: 60 * 60 * 24,
     fields: {
       userId: "user_id",
       expiresAt: "expires_at",
