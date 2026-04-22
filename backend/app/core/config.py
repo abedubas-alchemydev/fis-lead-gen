@@ -87,7 +87,7 @@ class Settings(BaseSettings):
     # All keys are optional; missing credentials short-circuit to a provider-level
     # "credentials not configured" error without blocking the rest of the fan-out.
     hunter_api_key: str | None = None
-    hunter_limit: int = Field(default=10, ge=1, le=100)
+    hunter_limit: int = Field(default=100, ge=1, le=100)
     theharvester_sources: str = "crtsh,rapiddns,otx,duckduckgo"
     theharvester_timeout_seconds: int = Field(default=90, ge=10, le=300)
     snov_client_id: str | None = None
