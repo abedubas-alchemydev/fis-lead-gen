@@ -49,14 +49,15 @@ async def run(run_id: int, providers: list[EmailSource] | None = None) -> None:
     if providers is None:
         providers = default_providers()
 
-    domain = await _begin_run(run_id)
-    if domain is None:
+    begin = await _begin_run(run_id)
+    if begin is None:
         return
+    domain, bd_id = begin
 
     try:
         deduped, errors, failed_providers = await _fan_out(providers, domain)
 
-        success, failure, persist_errors = await _persist_drafts(run_id, domain, deduped)
+        success, failure, persist_errors = await _persist_drafts(run_id, domain, bd_id, deduped)
         errors.extend(persist_errors)
 
         final_status = _final_status(providers, failed_providers)
@@ -87,7 +88,7 @@ async def run(run_id: int, providers: list[EmailSource] | None = None) -> None:
         raise
 
 
-async def _begin_run(run_id: int) -> str | None:
+async def _begin_run(run_id: int) -> tuple[str, int | None] | None:
     async with SessionLocal() as session:
         scan = await session.get(ExtractionRun, run_id)
         if scan is None:
@@ -96,8 +97,9 @@ async def _begin_run(run_id: int) -> str | None:
         scan.status = RunStatus.running.value
         scan.started_at = datetime.now(UTC)
         domain = scan.domain
+        bd_id = scan.bd_id
         await session.commit()
-        return domain
+        return domain, bd_id
 
 
 def _sortable_confidence(c: float | None) -> float:
@@ -152,7 +154,7 @@ async def _fan_out(providers: list[EmailSource], domain: str) -> tuple[dict[str,
 
 
 async def _persist_drafts(
-    run_id: int, domain: str, deduped: dict[str, DiscoveredEmailDraft]
+    run_id: int, domain: str, bd_id: int | None, deduped: dict[str, DiscoveredEmailDraft]
 ) -> tuple[int, int, list[str]]:
     success = 0
     failure = 0
@@ -168,6 +170,7 @@ async def _persist_drafts(
                     source=draft.source,
                     confidence=draft.confidence,
                     attribution=draft.attribution,
+                    bd_id=bd_id,
                 )
                 session.add(de)
                 await session.flush()

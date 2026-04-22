@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, status
+from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, Query, status
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
@@ -13,7 +13,9 @@ from app.models.extraction_run import ExtractionRun, RunStatus
 from app.models.verification_run import VerificationRun
 from app.schemas.auth import AuthenticatedUser
 from app.schemas.email_extractor import (
+    DiscoveredEmailResponse,
     ScanCreateRequest,
+    ScanListItem,
     ScanResponse,
     VerificationRunCreateResponse,
     VerificationRunResponse,
@@ -22,6 +24,10 @@ from app.schemas.email_extractor import (
 )
 from app.services.auth import get_current_user
 from app.services.email_extractor import aggregator
+from app.services.email_extractor.apollo_enrichment import (
+    EnrichmentError,
+    enrich_discovered_email,
+)
 from app.services.email_extractor.verification_runner import run_smtp_verification
 
 router = APIRouter(prefix="/email-extractor", tags=["email-extractor"])
@@ -37,6 +43,7 @@ async def create_scan(
     scan = ExtractionRun(
         domain=payload.domain,
         person_name=payload.person_name,
+        bd_id=payload.bd_id,
         status=RunStatus.queued.value,
     )
     db.add(scan)
@@ -44,6 +51,55 @@ async def create_scan(
     await db.refresh(scan)
     background_tasks.add_task(aggregator.run, scan.id)
     return scan
+
+
+@router.get("/scans", response_model=list[ScanListItem])
+async def list_scans(
+    bd_id: int | None = Query(default=None, description="Filter scans tied to a specific broker-dealer."),
+    limit: int = Query(default=20, ge=1, le=100),
+    offset: int = Query(default=0, ge=0),
+    db: AsyncSession = Depends(get_db_session),
+    current_user: AuthenticatedUser = Depends(get_current_user),
+) -> list[ExtractionRun]:
+    """Recent scans across all users, sorted by created_at desc.
+
+    Powers the 'Recent scans' list on /email-extractor and the per-firm
+    history section on broker-dealer detail pages.
+    """
+    stmt = select(ExtractionRun).order_by(ExtractionRun.created_at.desc())
+    if bd_id is not None:
+        stmt = stmt.where(ExtractionRun.bd_id == bd_id)
+    stmt = stmt.offset(offset).limit(limit)
+    return (await db.execute(stmt)).scalars().all()
+
+
+@router.post(
+    "/discovered-emails/{discovered_email_id}/enrich",
+    response_model=DiscoveredEmailResponse,
+)
+async def enrich_email(
+    discovered_email_id: int,
+    db: AsyncSession = Depends(get_db_session),
+    current_user: AuthenticatedUser = Depends(get_current_user),
+) -> DiscoveredEmail:
+    """Run Apollo /people/match against a discovered email to pull name,
+    title, LinkedIn URL, and company. Writes results onto the row itself.
+    """
+    try:
+        return await enrich_discovered_email(db, discovered_email_id)
+    except EnrichmentError as exc:
+        message = str(exc)
+        if message == "discovered_email not found":
+            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=message) from exc
+        if message == "APOLLO_API_KEY not configured":
+            raise HTTPException(
+                status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+                detail="Apollo enrichment is not configured on this deployment.",
+            ) from exc
+        raise HTTPException(
+            status_code=status.HTTP_502_BAD_GATEWAY,
+            detail=f"apollo: {message}",
+        ) from exc
 
 
 @router.get("/scans/{run_id}", response_model=ScanResponse)

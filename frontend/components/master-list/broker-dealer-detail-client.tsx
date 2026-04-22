@@ -1,6 +1,7 @@
 "use client";
 
 import Link from "next/link";
+import type { Route } from "next";
 import type { ReactNode } from "react";
 import { useEffect, useMemo, useState } from "react";
 import { useRouter } from "next/navigation";
@@ -121,6 +122,8 @@ export function BrokerDealerDetailClient({ brokerDealerId }: { brokerDealerId: s
   const [focusError, setFocusError] = useState<string | null>(null);
   const [prevId, setPrevId] = useState<number | null>(null);
   const [nextId, setNextId] = useState<number | null>(null);
+  const [isStartingScan, setIsStartingScan] = useState(false);
+  const [scanError, setScanError] = useState<string | null>(null);
 
   // Fetch adjacent IDs for Next/Previous Lead navigation
   useEffect(() => {
@@ -388,7 +391,7 @@ export function BrokerDealerDetailClient({ brokerDealerId }: { brokerDealerId: s
             </a>
           ) : null}
 
-          {/* Source PDF downloads */}
+          {/* Source PDF downloads + Find emails */}
           <div className="mt-4 flex flex-wrap gap-2">
             <a
               href={`/api/backend/api/v1/broker-dealers/${brokerDealerId}/focus-report.pdf`}
@@ -404,6 +407,60 @@ export function BrokerDealerDetailClient({ brokerDealerId }: { brokerDealerId: s
                 <span aria-hidden>↓</span> FINRA BrokerCheck (PDF)
               </a>
             ) : null}
+            {(() => {
+              // Resolve domain: prefer firm website, fall back to the FOCUS
+              // contact's email domain, else disable the button.
+              const websiteDomain = bd.website
+                ? bd.website.replace(/^https?:\/\//i, "").replace(/\/+$/, "").split("/")[0]?.toLowerCase() ?? null
+                : null;
+              const contactEmail = profile?.executive_contacts?.find((c) => c.email)?.email ?? null;
+              const emailDomain = contactEmail ? contactEmail.split("@")[1]?.toLowerCase() ?? null : null;
+              const resolvedDomain = websiteDomain || emailDomain;
+              const disabled = !resolvedDomain || isStartingScan;
+
+              const handleClick = async () => {
+                if (!resolvedDomain) return;
+                setIsStartingScan(true);
+                setScanError(null);
+                try {
+                  const created = await apiRequest<{ id: number }>(
+                    "/api/v1/email-extractor/scans",
+                    {
+                      method: "POST",
+                      body: JSON.stringify({
+                        domain: resolvedDomain,
+                        bd_id: Number(brokerDealerId),
+                      }),
+                    },
+                  );
+                  router.push(`/email-extractor/${created.id}` as Route);
+                } catch (err) {
+                  setScanError(err instanceof Error ? err.message : "Could not start scan");
+                  setIsStartingScan(false);
+                }
+              };
+
+              return (
+                <div className="flex flex-col items-start gap-1">
+                  <button
+                    type="button"
+                    onClick={() => void handleClick()}
+                    disabled={disabled}
+                    title={
+                      resolvedDomain
+                        ? `Scan ${resolvedDomain} for contact emails`
+                        : "No domain on file for this firm"
+                    }
+                    className="inline-flex items-center gap-1.5 rounded-full bg-navy px-3 py-1.5 text-xs font-medium text-white hover:bg-navy/90 disabled:cursor-not-allowed disabled:opacity-50"
+                  >
+                    {isStartingScan ? "Starting…" : "Find emails"}
+                  </button>
+                  {scanError ? (
+                    <span className="text-xs text-rose-600">{scanError}</span>
+                  ) : null}
+                </div>
+              );
+            })()}
           </div>
 
           {/* FOCUS Report CEO + Net Capital Extraction */}

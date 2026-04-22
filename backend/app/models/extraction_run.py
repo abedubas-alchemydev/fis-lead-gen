@@ -4,7 +4,7 @@ from datetime import datetime
 from enum import StrEnum
 from typing import TYPE_CHECKING
 
-from sqlalchemy import DateTime, Integer, String, Text, func
+from sqlalchemy import DateTime, ForeignKey, Integer, String, Text, func
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from app.db.base import Base
@@ -35,6 +35,9 @@ class ExtractionRun(Base):
     pipeline_name: Mapped[str] = mapped_column(String(120), default="email_extractor", nullable=False, index=True)
     domain: Mapped[str] = mapped_column(String(255), nullable=False, index=True)
     person_name: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    bd_id: Mapped[int | None] = mapped_column(
+        Integer, ForeignKey("broker_dealers.id", ondelete="SET NULL"), nullable=True, index=True
+    )
     status: Mapped[str] = mapped_column(String(32), default=RunStatus.queued.value, nullable=False, index=True)
     total_items: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
     processed_items: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
