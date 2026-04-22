@@ -3,127 +3,91 @@
 import { useRouter } from "next/navigation";
 
 import type { ClearingProviderShare } from "@/lib/types";
-import { CompetitorBadge } from "@/components/master-list/competitor-badge";
 
-const palette = ["#15305b", "#2d6aad", "#6d8097", "#d8a94a", "#ef4c3b", "#76a7e1"];
-
-function polarToCartesian(centerX: number, centerY: number, radius: number, angleInDegrees: number) {
-  const angleInRadians = ((angleInDegrees - 90) * Math.PI) / 180;
-  return {
-    x: centerX + radius * Math.cos(angleInRadians),
-    y: centerY + radius * Math.sin(angleInRadians)
-  };
-}
-
-function describeArc(x: number, y: number, radius: number, startAngle: number, endAngle: number) {
-  const start = polarToCartesian(x, y, radius, endAngle);
-  const end = polarToCartesian(x, y, radius, startAngle);
-  const largeArcFlag = endAngle - startAngle <= 180 ? "0" : "1";
-  return `M ${x} ${y} L ${start.x} ${start.y} A ${radius} ${radius} 0 ${largeArcFlag} 0 ${end.x} ${end.y} Z`;
-}
+// Mockup palette — each row gets a stable color pair by position.
+const rowPalettes = [
+  { swatch: "#1e3a8a", fillA: "#1e3a8a", fillB: "#3b82f6" },
+  { swatch: "#ef4444", fillA: "#b91c1c", fillB: "#ef4444" },
+  { swatch: "#9ca3af", fillA: "#6b7280", fillB: "#9ca3af" },
+  { swatch: "#fbbf24", fillA: "#d97706", fillB: "#fbbf24" },
+  { swatch: "#ec4899", fillA: "#be185d", fillB: "#ec4899" },
+  { swatch: "#10b981", fillA: "#047857", fillB: "#10b981" },
+  { swatch: "#06b6d4", fillA: "#0e7490", fillB: "#06b6d4" },
+  { swatch: "#8b5cf6", fillA: "#6d28d9", fillB: "#8b5cf6" }
+];
 
 export function ClearingDistributionChart({ items }: { items: ClearingProviderShare[] }) {
   const router = useRouter();
-  let currentAngle = 0;
-  const totalFirms = items.reduce((acc, item) => acc + item.count, 0);
 
   if (items.length === 0) {
     return (
-      <div className="rounded-2xl border border-slate-200/80 bg-white p-6">
-        <p className="text-[11px] font-semibold uppercase tracking-[0.16em] text-slate-500">
+      <div className="rounded-2xl border border-slate-200/70 bg-white p-5 shadow-[0_1px_2px_rgba(15,23,42,0.04),0_4px_14px_rgba(15,23,42,0.05)]">
+        <p className="text-[11px] font-semibold uppercase tracking-[0.1em] text-slate-500">
           Clearing Market
         </p>
-        <p className="mt-3 text-sm text-slate-600">
+        <p className="mt-3 text-sm text-slate-500">
           Clearing distribution will appear as extracted provider data becomes available.
         </p>
       </div>
     );
   }
 
+  // Normalize bar widths so the top bar is ~92% and others scale
+  // proportionally — matches the mockup's visual rhythm.
+  const maxPercent = Math.max(...items.map((i) => i.percentage));
+  const scale = (p: number) => (maxPercent > 0 ? (p / maxPercent) * 92 : 0);
+
   return (
-    <div className="rounded-2xl border border-slate-200/80 bg-white p-6">
-      <div className="flex items-start justify-between gap-4">
+    <div className="rounded-2xl border border-slate-200/70 bg-white p-5 shadow-[0_1px_2px_rgba(15,23,42,0.04),0_4px_14px_rgba(15,23,42,0.05)]">
+      <div className="mb-4 flex items-start justify-between gap-4">
         <div>
-          <p className="text-[11px] font-semibold uppercase tracking-[0.16em] text-slate-500">
-            Clearing Market
-          </p>
-          <h3 className="mt-2 text-xl font-semibold text-navy">Provider distribution</h3>
+          <h3 className="text-[15px] font-semibold tracking-[-0.01em] text-slate-900">
+            Clearing market — provider distribution
+          </h3>
+          <p className="mt-0.5 text-xs text-slate-500">Click a row to filter the Master List</p>
         </div>
-        <p className="max-w-44 text-right text-xs leading-5 text-slate-500">
-          Click a segment or provider row to filter the Master List.
-        </p>
       </div>
 
-      <div className="mt-6 grid gap-6 lg:grid-cols-[220px_1fr]">
-        <div className="relative flex items-center justify-center">
-          {/* Soft radial glow behind the donut. */}
-          <div
-            aria-hidden
-            className="pointer-events-none absolute inset-0 -z-10 m-auto h-[180px] w-[180px] rounded-full bg-blue/5 blur-2xl"
-          />
-          <svg
-            viewBox="0 0 220 220"
-            className="h-[220px] w-[220px] drop-shadow-[0_6px_16px_rgba(10,31,63,0.08)]"
-          >
-            <circle cx="110" cy="110" r="70" fill="#eff4fb" />
-            {items.map((item, index) => {
-              const angle = (item.percentage / 100) * 360;
-              const path = describeArc(110, 110, 70, currentAngle, currentAngle + angle);
-              const segmentStart = currentAngle;
-              currentAngle += angle;
-              return (
-                <path
-                  key={`${item.provider}-${segmentStart}`}
-                  d={path}
-                  fill={palette[index % palette.length]}
-                  className="origin-center cursor-pointer animate-scale-in transition-all duration-200 hover:opacity-90 hover:brightness-110"
-                  style={{ animationDelay: `${index * 80}ms` }}
-                  onClick={() => router.push(`/master-list?clearing_partner=${encodeURIComponent(item.provider)}`)}
-                >
-                  <title>{`${item.provider} — ${item.count.toLocaleString()} firms (${item.percentage.toFixed(1)}%)`}</title>
-                </path>
-              );
-            })}
-            <circle cx="110" cy="110" r="36" fill="white" />
-            <text x="110" y="104" textAnchor="middle" className="fill-[#15305b] text-[20px] font-semibold tabular-nums">
-              {totalFirms.toLocaleString()}
-            </text>
-            <text
-              x="110"
-              y="122"
-              textAnchor="middle"
-              className="fill-[#6d8097] text-[9px] font-medium uppercase tracking-[0.18em]"
-            >
-              Total firms
-            </text>
-          </svg>
-        </div>
-
-        <div className="space-y-2.5">
-          {items.map((item, index) => (
+      <div>
+        {items.map((item, index) => {
+          const p = rowPalettes[index % rowPalettes.length];
+          return (
             <button
               key={item.provider}
               type="button"
-              onClick={() => router.push(`/master-list?clearing_partner=${encodeURIComponent(item.provider)}`)}
-              className="group flex w-full items-center justify-between rounded-2xl border border-slate-200 px-4 py-3 text-left transition hover:-translate-y-px hover:border-blue/40 hover:bg-slate-50 hover:shadow-sm"
+              onClick={() =>
+                router.push(`/master-list?clearing_partner=${encodeURIComponent(item.provider)}`)
+              }
+              className="flex w-full items-center gap-3.5 border-t border-slate-200/70 py-2.5 text-left transition first:border-t-0 hover:bg-slate-50/60"
             >
-              <div className="flex min-w-0 items-center gap-3">
-                <span
-                  className="h-3 w-3 shrink-0 rounded-full ring-2 ring-white shadow-sm transition group-hover:scale-110"
-                  style={{ backgroundColor: palette[index % palette.length] }}
-                />
-                <div className="min-w-0">
-                  <p className="truncate text-sm font-medium text-navy">{item.provider}</p>
-                  <div className="mt-1 flex items-center gap-2">
-                    <p className="text-xs tabular-nums text-slate-500">{item.count.toLocaleString()} firms</p>
-                    <CompetitorBadge isCompetitor={item.is_competitor} />
-                  </div>
-                </div>
+              <span
+                className="h-2.5 w-2.5 shrink-0 rounded-[3px]"
+                style={{ backgroundColor: p.swatch }}
+              />
+              <div className="flex min-w-[220px] items-center gap-2 text-[13px]">
+                <span className="font-medium text-slate-800">{item.provider}</span>
+                <span className="text-[11px] text-slate-500">· {item.count.toLocaleString()} firms</span>
+                {item.is_competitor ? (
+                  <span className="rounded bg-red-500/12 px-1.5 py-0.5 text-[10px] font-semibold tracking-wide text-red-600">
+                    COMPETITOR
+                  </span>
+                ) : null}
               </div>
-              <p className="shrink-0 text-sm font-semibold tabular-nums text-navy">{item.percentage.toFixed(1)}%</p>
+              <div className="relative h-1.5 flex-1 overflow-hidden rounded-full bg-slate-100">
+                <div
+                  className="h-full rounded-full"
+                  style={{
+                    width: `${scale(item.percentage)}%`,
+                    background: `linear-gradient(90deg, ${p.fillA}, ${p.fillB})`
+                  }}
+                />
+              </div>
+              <span className="min-w-[48px] text-right text-[13px] font-semibold tabular-nums text-slate-800">
+                {item.percentage.toFixed(1)}%
+              </span>
             </button>
-          ))}
-        </div>
+          );
+        })}
       </div>
     </div>
   );
