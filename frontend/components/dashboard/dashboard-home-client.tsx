@@ -80,31 +80,46 @@ export function DashboardHomeClient() {
   return (
     <div className="space-y-8">
       <div className="grid gap-4 xl:grid-cols-4">
-        <KpiCard
-          title="Total Active BDs"
-          value={totalBds}
-          tone="navy"
-          icon={Building2}
-          helper={error ? "Backend data unavailable" : "View all broker-dealers in the Master List"}
-          href="/master-list?list=all"
-        />
-        <KpiCard title="New BDs (30 days)" value={newBds} tone="blue" icon={Activity} helper="Recent broker-dealer registrations from filing activity" href="/master-list?list=all" />
-        <KpiCard
-          title="Deficiency Alerts"
-          value={deficiencyAlerts}
-          tone="danger"
-          icon={AlertTriangle}
-          helper="Active Form 17a-11 notices"
-          href="/alerts?form_type=Form%2017a-11"
-        />
-        <KpiCard
-          title="High-Value Leads"
-          value={highValueLeads}
-          tone="gold"
-          icon={Target}
-          helper="Hot leads based on weighted scoring"
-          href="/master-list?lead_priority=hot"
-        />
+        <div className="animate-fade-in">
+          <KpiCard
+            title="Total Active BDs"
+            value={totalBds}
+            tone="navy"
+            icon={Building2}
+            helper={error ? "Backend data unavailable" : "View all broker-dealers in the Master List"}
+            href="/master-list?list=all"
+          />
+        </div>
+        <div className="animate-fade-in delay-75">
+          <KpiCard
+            title="New BDs (30 days)"
+            value={newBds}
+            tone="blue"
+            icon={Activity}
+            helper="Recent broker-dealer registrations from filing activity"
+            href="/master-list?list=all"
+          />
+        </div>
+        <div className="animate-fade-in delay-150">
+          <KpiCard
+            title="Deficiency Alerts"
+            value={deficiencyAlerts}
+            tone="danger"
+            icon={AlertTriangle}
+            helper="Active Form 17a-11 notices"
+            href="/alerts?form_type=Form%2017a-11"
+          />
+        </div>
+        <div className="animate-fade-in delay-200">
+          <KpiCard
+            title="High-Value Leads"
+            value={highValueLeads}
+            tone="gold"
+            icon={Target}
+            helper="Hot leads based on weighted scoring"
+            href="/master-list?lead_priority=hot"
+          />
+        </div>
       </div>
 
       {error ? (
@@ -112,18 +127,22 @@ export function DashboardHomeClient() {
       ) : null}
 
       <div className="grid gap-6 xl:grid-cols-[1.2fr_0.8fr]">
-        <AlertFeedCard
-          alerts={alerts}
-          loading={alertsLoading}
-          error={alertsError}
-          onMarkRead={(alertId) => {
-            setAlerts((current) => current.map((item) => (item.id === alertId ? { ...item, is_read: true } : item)));
-            void apiRequest(`/api/v1/alerts/${alertId}/read`, { method: "PATCH" }).catch((markError) => {
-              setAlertsError(markError instanceof Error ? markError.message : "Unable to update alert state.");
-            });
-          }}
-        />
-        <ClearingDistributionChart items={distribution} />
+        <div className="animate-fade-in-left delay-300">
+          <AlertFeedCard
+            alerts={alerts}
+            loading={alertsLoading}
+            error={alertsError}
+            onMarkRead={(alertId) => {
+              setAlerts((current) => current.map((item) => (item.id === alertId ? { ...item, is_read: true } : item)));
+              void apiRequest(`/api/v1/alerts/${alertId}/read`, { method: "PATCH" }).catch((markError) => {
+                setAlertsError(markError instanceof Error ? markError.message : "Unable to update alert state.");
+              });
+            }}
+          />
+        </div>
+        <div className="animate-fade-in-right delay-300">
+          <ClearingDistributionChart items={distribution} />
+        </div>
       </div>
     </div>
   );
