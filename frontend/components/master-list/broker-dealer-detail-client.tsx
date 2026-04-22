@@ -395,6 +395,8 @@ export function BrokerDealerDetailClient({ brokerDealerId }: { brokerDealerId: s
           <div className="mt-4 flex flex-wrap gap-2">
             <a
               href={`/api/backend/api/v1/broker-dealers/${brokerDealerId}/focus-report.pdf`}
+              target="_blank"
+              rel="noopener noreferrer"
               className="inline-flex items-center gap-1.5 rounded-full border border-slate-300 bg-white px-3 py-1.5 text-xs font-medium text-slate-700 hover:bg-slate-50"
             >
               <span aria-hidden>↓</span> FOCUS report (PDF)
@@ -402,6 +404,8 @@ export function BrokerDealerDetailClient({ brokerDealerId }: { brokerDealerId: s
             {bd.crd_number ? (
               <a
                 href={`/api/backend/api/v1/broker-dealers/${brokerDealerId}/brokercheck.pdf`}
+                target="_blank"
+                rel="noopener noreferrer"
                 className="inline-flex items-center gap-1.5 rounded-full border border-slate-300 bg-white px-3 py-1.5 text-xs font-medium text-slate-700 hover:bg-slate-50"
               >
                 <span aria-hidden>↓</span> FINRA BrokerCheck (PDF)
