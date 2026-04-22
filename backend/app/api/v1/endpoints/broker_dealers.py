@@ -31,6 +31,11 @@ from app.services.broker_dealers import BrokerDealerRepository
 from app.services.classification import apply_classification_to_all
 from app.services.contacts import ContactEnrichmentUnavailableError, ExecutiveContactService
 from app.services.finra import FinraService
+from app.services.finra_pdf_service import (
+    FinraPdfFetchError,
+    FinraPdfNotFound,
+    fetch_and_cache_brokercheck_pdf,
+)
 from app.services.focus_ceo_extraction import FocusCeoExtractionService
 from app.services.service_models import FinraBrokerDealerRecord
 
@@ -164,22 +169,10 @@ async def download_brokercheck_pdf(
 ) -> FileResponse:
     """Stream the firm's FINRA BrokerCheck Detailed Report PDF.
 
-    On-demand fetch with disk cache at PDF_CACHE_DIR/finra/{crd}.pdf. First click
-    takes ~2-5s to hit files.brokercheck.finra.org; subsequent clicks serve from
-    cache. FINRA doesn't expose a stable direct-URL, so this endpoint wraps the
-    brokercheck_extractor's FinraClient.
+    On-demand fetch with disk cache at PDF_CACHE_DIR/finra/{crd}.pdf. First
+    click takes ~2-5s to hit files.brokercheck.finra.org; subsequent clicks
+    serve from cache.
     """
-    import sys
-    from pathlib import Path as _Path
-
-    # Ensure the sibling brokercheck_extractor package is importable — the
-    # bridge script follows the same sys.path bootstrap.
-    _repo_root = _Path(__file__).resolve().parents[4]
-    if str(_repo_root) not in sys.path:
-        sys.path.insert(0, str(_repo_root))
-
-    from brokercheck_extractor.acquisition.finra_client import FinraClient  # type: ignore[import-not-found]
-
     broker_dealer = await repository.get_broker_dealer(db, broker_dealer_id)
     if broker_dealer is None:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Broker-dealer not found.")
@@ -189,25 +182,18 @@ async def download_brokercheck_pdf(
             detail="This firm has no CRD number on file; BrokerCheck PDF is not fetchable.",
         )
 
-    cache_dir = _Path(settings.pdf_cache_dir) / "finra"
-    cache_dir.mkdir(parents=True, exist_ok=True)
-    cache_path = cache_dir / f"{broker_dealer.crd_number}.pdf"
-
-    if not cache_path.exists() or cache_path.stat().st_size == 0:
-        try:
-            async with FinraClient() as client:
-                pdf_bytes = await client.fetch_pdf(int(broker_dealer.crd_number))
-        except Exception as exc:  # noqa: BLE001
-            raise HTTPException(
-                status_code=status.HTTP_502_BAD_GATEWAY,
-                detail=f"Could not fetch BrokerCheck PDF from FINRA: {exc}",
-            ) from exc
-        if not pdf_bytes:
-            raise HTTPException(
-                status_code=status.HTTP_404_NOT_FOUND,
-                detail="FINRA returned no PDF for this CRD.",
-            )
-        cache_path.write_bytes(pdf_bytes)
+    try:
+        cache_path = await fetch_and_cache_brokercheck_pdf(broker_dealer.crd_number)
+    except FinraPdfNotFound as exc:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="FINRA has no Detailed Report PDF for this CRD.",
+        ) from exc
+    except FinraPdfFetchError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_502_BAD_GATEWAY,
+            detail=f"Could not fetch BrokerCheck PDF from FINRA: {exc}",
+        ) from exc
 
     return FileResponse(
         path=str(cache_path),
