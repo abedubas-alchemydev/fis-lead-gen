@@ -6,13 +6,12 @@ import { AlertPriorityBadge } from "@/components/alerts/alert-priority-badge";
 import { formatRelativeTime } from "@/lib/format";
 import type { AlertListItem } from "@/lib/types";
 
-// Mirrors AlertPriorityBadge tone map. Applied to the card's left edge so
-// priority is readable at a glance even before the pill is scanned.
-const PRIORITY_EDGE: Record<string, string> = {
-  critical: "border-l-[3px] border-l-danger",
-  high: "border-l-[3px] border-l-amber-500",
-  medium: "border-l-[3px] border-l-blue",
-  low: "border-l-[3px] border-l-slate-300"
+// Priority → timeline dot color. Mirrors the AlertPriorityBadge tone map.
+const PRIORITY_DOT: Record<string, string> = {
+  critical: "bg-danger ring-danger/25",
+  high: "bg-amber-500 ring-amber-400/25",
+  medium: "bg-blue ring-blue/25",
+  low: "bg-slate-400 ring-slate-300/40"
 };
 
 export function AlertFeedCard({
@@ -44,32 +43,41 @@ export function AlertFeedCard({
 
       {error ? <div className="mt-5 rounded-2xl bg-red-50 px-4 py-3 text-sm text-danger">{error}</div> : null}
 
-      <div className="mt-6 space-y-3">
-        {loading
-          ? Array.from({ length: 5 }).map((_, index) => (
+      <div className="mt-6">
+        {loading ? (
+          <div className="space-y-3">
+            {Array.from({ length: 5 }).map((_, index) => (
               <div key={`alert-loading-${index}`} className="rounded-2xl border border-slate-100 px-4 py-4">
                 <div className="h-4 w-48 animate-pulse rounded bg-slate-100" />
                 <div className="mt-3 h-3 w-full animate-pulse rounded bg-slate-100" />
               </div>
-            ))
-          : alerts.length === 0
-            ? (
-              <div className="rounded-2xl border border-dashed border-slate-200 px-4 py-8 text-sm text-slate-500">
-                No filing alerts have been generated yet.
-              </div>
-              )
-            : alerts.map((alert) => {
-              const edge = PRIORITY_EDGE[alert.priority] ?? PRIORITY_EDGE.low;
+            ))}
+          </div>
+        ) : alerts.length === 0 ? (
+          <div className="rounded-2xl border border-dashed border-slate-200 px-4 py-8 text-sm text-slate-500">
+            No filing alerts have been generated yet.
+          </div>
+        ) : (
+          <ol className="relative space-y-4 pl-7">
+            {/* Vertical connector line. */}
+            <span
+              aria-hidden
+              className="absolute left-[11px] top-3 bottom-3 w-px bg-gradient-to-b from-slate-200 via-slate-200 to-transparent"
+            />
+            {alerts.map((alert) => {
+              const dot = PRIORITY_DOT[alert.priority] ?? PRIORITY_DOT.low;
               return (
-                <div
+                <li
                   key={alert.id}
-                  className={`rounded-2xl border border-slate-100 px-4 py-4 transition hover:border-slate-200 hover:bg-slate-50/70 hover:shadow-sm ${edge} ${alert.is_read ? "opacity-65" : ""}`}
+                  className={`relative rounded-2xl border border-slate-100 px-4 py-4 transition hover:border-slate-200 hover:bg-slate-50/70 hover:shadow-sm ${alert.is_read ? "opacity-60" : ""}`}
                 >
+                  {/* Timeline dot — absolutely positioned so it straddles the connector line. */}
+                  <span
+                    aria-hidden
+                    className={`absolute -left-[23px] top-5 h-3 w-3 rounded-full ring-4 ${dot}`}
+                  />
                   <div className="flex flex-wrap items-center justify-between gap-3">
                     <div className="flex items-center gap-3">
-                      {!alert.is_read ? (
-                        <span aria-label="Unread" className="h-2 w-2 rounded-full bg-blue ring-2 ring-blue/20" />
-                      ) : null}
                       <AlertPriorityBadge priority={alert.priority} />
                       <p className="text-xs uppercase tracking-[0.18em] text-slate-500">{alert.form_type}</p>
                     </div>
@@ -95,9 +103,11 @@ export function AlertFeedCard({
                       </button>
                     ) : null}
                   </div>
-                </div>
+                </li>
               );
             })}
+          </ol>
+        )}
       </div>
     </article>
   );

@@ -37,12 +37,17 @@ export function KpiCard({
 }) {
   const content = (
     <article
-      className={`relative overflow-hidden rounded-[28px] p-6 shadow-shell ${toneMap[tone]}`}
+      className={`group/card relative isolate overflow-hidden rounded-[28px] p-6 shadow-shell ${toneMap[tone]}`}
     >
       {/* Faint radial highlight in the top-right for subtle depth. */}
       <div
         aria-hidden
         className="pointer-events-none absolute -right-12 -top-12 h-40 w-40 rounded-full bg-white/10 blur-2xl"
+      />
+      {/* Diagonal gradient shine that sweeps across on hover. */}
+      <div
+        aria-hidden
+        className="pointer-events-none absolute inset-0 -translate-x-full bg-gradient-to-r from-transparent via-white/20 to-transparent opacity-0 transition-transform duration-700 ease-out group-hover/card:translate-x-full group-hover/card:opacity-100"
       />
       <div className="relative flex items-start justify-between gap-4">
         <div className="min-w-0">
@@ -54,10 +59,17 @@ export function KpiCard({
           </p>
           <p className="mt-4 text-sm leading-5 text-current/80">{helper}</p>
         </div>
-        <div className={`rounded-2xl p-3 backdrop-blur ${iconChipMap[tone]}`}>
+        <div
+          className={`rounded-2xl p-3 backdrop-blur transition-transform duration-300 group-hover/card:scale-110 group-hover/card:-rotate-3 ${iconChipMap[tone]}`}
+        >
           <Icon className="h-5 w-5" />
         </div>
       </div>
+      {/* Bottom accent bar — reveals on hover for a subtle interaction cue. */}
+      <div
+        aria-hidden
+        className="absolute inset-x-0 bottom-0 h-[3px] origin-left scale-x-0 bg-current/30 transition-transform duration-300 group-hover/card:scale-x-100"
+      />
     </article>
   );
 
