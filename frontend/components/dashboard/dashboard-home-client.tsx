@@ -1,15 +1,56 @@
 "use client";
 
 import { useEffect, useState } from "react";
-import { Activity, AlertTriangle, Building2, Target } from "lucide-react";
 
 import { AlertFeedCard } from "@/components/alerts/alert-feed-card";
 import { ClearingDistributionChart } from "@/components/dashboard/clearing-distribution-chart";
 import { KpiCard } from "@/components/dashboard/kpi-card";
+import type { KpiIconProps } from "@/components/dashboard/kpi-card";
 import { LeadVolumeTrendCard } from "@/components/dashboard/lead-volume-trend-card";
 import { TopLeadsCard } from "@/components/dashboard/top-leads-card";
+import { TopActions } from "@/components/layout/top-actions";
 import { apiRequest } from "@/lib/api";
 import type { AlertListItem, AlertListResponse, ClearingDistributionResponse, DashboardStats } from "@/lib/types";
+
+// ─── KPI icons — verbatim SVG paths from dashboard-redesign.html ──────────
+
+function KpiIconBuilding({ className, strokeWidth = 2 }: KpiIconProps) {
+  return (
+    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={strokeWidth} className={className} aria-hidden>
+      <path d="M3 21h18" />
+      <path d="M5 21V7l7-4 7 4v14" />
+      <path d="M9 9h6v12H9z" />
+    </svg>
+  );
+}
+
+function KpiIconPulse({ className, strokeWidth = 2 }: KpiIconProps) {
+  return (
+    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={strokeWidth} className={className} aria-hidden>
+      <path d="M22 12h-4l-3 9L9 3l-3 9H2" />
+    </svg>
+  );
+}
+
+function KpiIconAlert({ className, strokeWidth = 2 }: KpiIconProps) {
+  return (
+    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={strokeWidth} className={className} aria-hidden>
+      <path d="M10.29 3.86L1.82 18a2 2 0 001.71 3h16.94a2 2 0 001.71-3L13.71 3.86a2 2 0 00-3.42 0z" />
+      <line x1="12" y1="9" x2="12" y2="13" />
+      <line x1="12" y1="17" x2="12.01" y2="17" />
+    </svg>
+  );
+}
+
+function KpiIconTarget({ className, strokeWidth = 2 }: KpiIconProps) {
+  return (
+    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={strokeWidth} className={className} aria-hidden>
+      <circle cx="12" cy="12" r="10" />
+      <circle cx="12" cy="12" r="6" />
+      <circle cx="12" cy="12" r="2" />
+    </svg>
+  );
+}
 
 export function DashboardHomeClient() {
   const [totalBds, setTotalBds] = useState<string>("-");
@@ -79,40 +120,46 @@ export function DashboardHomeClient() {
     );
   }
 
-  const todayLabel = new Date().toLocaleDateString("en-US", {
-    weekday: "long",
-    month: "long",
-    day: "numeric",
-    year: "numeric",
-  });
-
   return (
-    // Full-bleed light-blue canvas — cancels app-shell main padding so the
-    // dashboard owns its own surface (matches the mockup's body bg).
-    <div className="-m-5 min-h-full bg-[#eaf3ff] px-7 py-7 lg:-m-6 lg:px-9 lg:py-7 xl:-m-7 xl:px-9">
-      {/* Top crumbs + title */}
-      <div className="mb-6 flex flex-wrap items-end justify-between gap-4">
-        <div>
-          <p className="text-[11px] font-semibold uppercase tracking-[0.14em] text-slate-500">
-            Enterprise Dashboard <span className="text-slate-400">/</span> Lead Intelligence
+    // App shell <main> owns the canvas bg. Typography is now applied at
+    // the body level via `.dashboard-theme body {}` in globals.css — so
+    // the sidebar (which lives outside this wrapper) also inherits Inter
+    // + 14px + 1.5 line-height + antialiased.
+    // Mockup uses 28px top / 36px horizontal / 48px bottom padding.
+    <div className="px-7 pb-12 pt-7 lg:px-9">
+      {/* Topbar — crumbs + title LEFT, TopActions RIGHT on the same row.
+          Mockup .topbar: display:flex; align-items:center; gap:16px; margin-bottom:28px. */}
+      <div className="mb-7 flex flex-wrap items-center gap-4">
+        <div className="min-w-0">
+          {/* .crumbs: 12px, text-muted (slate-400), uppercase, 0.06em tracking.
+              Only the "/" separator is in a span with text-dim (slate-600). */}
+          <p className="text-[12px] uppercase tracking-[0.06em] text-slate-400">
+            Enterprise Dashboard <span className="text-slate-600">/</span> Lead Intelligence
           </p>
-          <h1 className="mt-1 text-2xl font-bold tracking-[-0.02em] text-slate-900">
+          {/* .page-title: font-size 24px, weight 700, tracking -0.02em,
+              margin-top 4px. No line-height → inherits body 1.5 (36px line-box).
+              Using text-[24px] instead of text-2xl because text-2xl also
+              applies line-height: 32px which shrinks the visible gap. */}
+          <h1 className="mt-1 text-[24px] font-bold tracking-[-0.02em] text-slate-900">
             Lead Intelligence Workspace
           </h1>
         </div>
-        <p className="text-xs tabular-nums text-slate-500">{todayLabel}</p>
+        <div className="ml-auto">
+          <TopActions />
+        </div>
       </div>
 
-      {/* KPI grid — exact mockup palette + sparklines */}
+      {/* KPI grid */}
       <div className="mb-6 grid grid-cols-1 gap-4 md:grid-cols-2 xl:grid-cols-4">
         <div className="animate-fade-in">
           <KpiCard
             title="Total Active BDs"
             value={totalBds}
             tone="blue"
-            icon={Building2}
+            icon={KpiIconBuilding}
             helper={error ? "Backend data unavailable" : "All broker-dealers in Master List"}
             href="/master-list?list=all"
+            trend={{ direction: "up", label: "2.4%" }}
           />
         </div>
         <div className="animate-fade-in delay-75">
@@ -120,9 +167,10 @@ export function DashboardHomeClient() {
             title="New BDs · 30 days"
             value={newBds}
             tone="purple"
-            icon={Activity}
+            icon={KpiIconPulse}
             helper="Recent registrations from filing activity"
             href="/master-list?list=all"
+            trend={{ direction: "down", label: "66%" }}
           />
         </div>
         <div className="animate-fade-in delay-150">
@@ -130,9 +178,10 @@ export function DashboardHomeClient() {
             title="Deficiency Alerts"
             value={deficiencyAlerts}
             tone="red"
-            icon={AlertTriangle}
+            icon={KpiIconAlert}
             helper="Active Form 17a-11 notices"
             href="/alerts?form_type=Form%2017a-11"
+            trend={{ direction: "up", label: "12" }}
           />
         </div>
         <div className="animate-fade-in delay-200">
@@ -140,9 +189,10 @@ export function DashboardHomeClient() {
             title="High-Value Leads"
             value={highValueLeads}
             tone="amber"
-            icon={Target}
-            helper="Weighted scoring"
+            icon={KpiIconTarget}
+            helper="Weighted scoring, last updated 8m ago"
             href="/master-list?lead_priority=hot"
+            trend={{ direction: "up", label: "5" }}
           />
         </div>
       </div>
@@ -153,17 +203,21 @@ export function DashboardHomeClient() {
         </div>
       ) : null}
 
-      {/* Trend + top leads */}
+      {/* Trend (LEFT, narrower) + top leads (RIGHT, wider) — matches mockup 1fr 1.4fr.
+          `h-full` on both animate wrappers forwards the grid row's stretched
+          height to the cards inside, so the trend chart's flex-fill resolves
+          to the actual row height instead of collapsing to the SVG's intrinsic
+          220px baseline. */}
       <div className="mb-4 grid grid-cols-1 gap-4 xl:grid-cols-[1fr_1.4fr]">
-        <div className="animate-fade-in-left delay-300 xl:order-2">
+        <div className="h-full animate-fade-in-left delay-300">
           <LeadVolumeTrendCard />
         </div>
-        <div className="animate-fade-in-right delay-300 xl:order-1">
+        <div className="h-full animate-fade-in-right delay-300">
           <TopLeadsCard />
         </div>
       </div>
 
-      {/* Provider distribution + activity feed */}
+      {/* Provider distribution (LEFT, wider) + activity feed (RIGHT, narrower) — 1.4fr 1fr */}
       <div className="grid grid-cols-1 gap-4 xl:grid-cols-[1.4fr_1fr]">
         <div className="animate-fade-in-left delay-[400ms]">
           <ClearingDistributionChart items={distribution} />

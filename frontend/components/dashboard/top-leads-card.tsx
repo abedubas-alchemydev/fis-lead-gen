@@ -61,17 +61,26 @@ export function TopLeadsCard() {
   }, []);
 
   return (
-    <div className="rounded-2xl border border-slate-200/70 bg-white p-5 shadow-[0_1px_2px_rgba(15,23,42,0.04),0_4px_14px_rgba(15,23,42,0.05)]">
-      <div className="mb-4 flex items-start justify-between gap-4">
+    // `h-full` so this card sits at the row's stretched height, matching the
+    // trend card on the left. Themed border/bg/shadow keep it visually
+    // aligned with the KPI + trend cards and the mockup `.card` rule.
+    <div
+      className="flex h-full flex-col rounded-2xl border border-[var(--border,rgba(30,64,175,0.1))] bg-[var(--surface,#ffffff)] p-5"
+      style={{ boxShadow: "var(--shadow-card, 0 1px 2px rgba(15,23,42,0.04), 0 4px 14px rgba(15,23,42,0.05))" }}
+    >
+      <div className="mb-4 flex items-center justify-between gap-4">
         <div>
-          <h3 className="text-[15px] font-semibold tracking-[-0.01em] text-slate-900">
+          <h3 className="text-[15px] font-semibold tracking-[-0.01em] text-[var(--text,#0f172a)]">
             Top high-value leads
           </h3>
-          <p className="mt-0.5 text-xs text-slate-500">Ranked by weighted lead score</p>
+          <p className="mt-0.5 text-[12px] text-[var(--text-muted,#94a3b8)]">
+            Ranked by weighted lead score
+          </p>
         </div>
+        {/* .link-btn: 12px, weight 600, color var(--accent)=#6366f1. */}
         <Link
           href="/master-list?lead_priority=hot"
-          className="inline-flex items-center gap-1 text-xs font-semibold text-violet-600 transition hover:text-violet-700"
+          className="inline-flex items-center gap-1 text-[12px] font-semibold text-[#6366f1] transition hover:text-[#a5b4fc]"
         >
           View all
           <svg width="12" height="12" fill="none" stroke="currentColor" strokeWidth="2.5" viewBox="0 0 24 24">
@@ -109,7 +118,7 @@ export function TopLeadsCard() {
               <Link
                 key={item.id}
                 href={`/master-list/${item.id}`}
-                className="grid grid-cols-[36px_1fr_auto] items-center gap-3 border-t border-slate-200/70 py-3 transition first:border-t-0 hover:bg-slate-50/60"
+                className="grid grid-cols-[36px_1fr_auto] items-center gap-3 border-t border-[var(--border,rgba(30,64,175,0.1))] py-3 transition first:border-t-0 hover:bg-[var(--surface-2,#f1f6fd)]"
               >
                 <div
                   className="grid h-9 w-9 place-items-center rounded-[10px] text-[13px] font-bold text-white"
@@ -118,15 +127,17 @@ export function TopLeadsCard() {
                   {initialsFromName(item.name)}
                 </div>
                 <div className="min-w-0">
-                  <div className="truncate text-[13.5px] font-semibold text-slate-900">{item.name}</div>
-                  <div className="mt-0.5 truncate text-[11px] text-slate-500">
+                  <div className="truncate text-[13.5px] font-semibold text-[var(--text,#0f172a)]">
+                    {item.name}
+                  </div>
+                  <div className="mt-0.5 truncate text-[11px] text-[var(--text-muted,#94a3b8)]">
                     {item.crd_number ? `CRD #${item.crd_number}` : "No CRD"}
                     {item.state ? ` · ${item.state}` : ""}
                     {item.is_deficient ? " · Deficient" : ""}
                   </div>
                 </div>
                 <div className="flex items-center gap-2">
-                  <span className="text-sm font-bold tabular-nums" style={{ color }}>
+                  <span className="text-[14px] font-bold" style={{ color }}>
                     {item.lead_score ?? "—"}
                   </span>
                   <svg width="30" height="30" viewBox="0 0 36 36" className="shrink-0">

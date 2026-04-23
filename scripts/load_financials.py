@@ -5,6 +5,9 @@ import selectors
 import sys
 from pathlib import Path
 
+sys.stdout.reconfigure(line_buffering=True)  # type: ignore[attr-defined]
+sys.stderr.reconfigure(line_buffering=True)  # type: ignore[attr-defined]
+
 ROOT = Path(__file__).resolve().parents[1]
 BACKEND_ROOT = ROOT / "backend"
 if str(BACKEND_ROOT) not in sys.path:
@@ -18,6 +21,13 @@ from app.services.focus_reports import FocusReportService  # noqa: E402
 
 
 async def main() -> None:
+    import logging
+
+    logging.basicConfig(
+        level=logging.INFO,
+        format="%(asctime)s %(levelname)s %(name)s: %(message)s",
+        stream=sys.stderr,
+    )
     service = FocusReportService()
     async with SessionLocal() as db:
         count = await service.load_financial_metrics(db)

@@ -273,6 +273,15 @@ class BrokerDealerRepository:
         data_stmt = data_stmt.order_by(ordering, BrokerDealer.id.asc()).offset(offset).limit(limit)
 
         items = (await db.execute(data_stmt)).scalars().all()
+        # Surface the latest pipeline-run timestamp on every list response so
+        # the master-list topbar can render "Pipeline refreshed Xm ago" for
+        # all authenticated users (the dedicated /pipeline/clearing endpoint
+        # is admin-only). Prefer `completed_at`; fall back to `started_at`
+        # while a run is still in flight; None if no runs exist yet.
+        latest_run = await self.get_latest_pipeline_run(db)
+        pipeline_refreshed_at = (
+            (latest_run.completed_at or latest_run.started_at) if latest_run else None
+        )
         return BrokerDealerListResponse(
             items=items,
             meta=BrokerDealerListMeta(
@@ -280,6 +289,7 @@ class BrokerDealerRepository:
                 limit=limit,
                 total=total,
                 total_pages=max(1, ceil(total / limit)) if limit else 1,
+                pipeline_refreshed_at=pipeline_refreshed_at,
             ),
         )
 
