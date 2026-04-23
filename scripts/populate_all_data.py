@@ -14,13 +14,13 @@ import time
 from pathlib import Path
 
 sys.stdout.reconfigure(line_buffering=True)  # type: ignore[attr-defined]
+sys.stderr.reconfigure(line_buffering=True)  # type: ignore[attr-defined]
 
 ROOT = Path(__file__).resolve().parents[1]
 BACKEND_ROOT = ROOT / "backend"
 if str(BACKEND_ROOT) not in sys.path:
     sys.path.insert(0, str(BACKEND_ROOT))
 
-logging.basicConfig(level=logging.INFO, format="  [%(levelname)s] %(message)s", stream=sys.stdout, force=True)
 logging.getLogger("httpx").setLevel(logging.WARNING)
 logging.getLogger("httpcore").setLevel(logging.WARNING)
 logging.getLogger("sqlalchemy").setLevel(logging.WARNING)
@@ -55,6 +55,13 @@ async def main() -> None:
     from app.services.contacts import ExecutiveContactService, ContactEnrichmentUnavailableError
     from app.models.broker_dealer import BrokerDealer
     from sqlalchemy import select, func, text
+
+    logging.basicConfig(
+        level=logging.INFO,
+        format="%(asctime)s %(levelname)s %(name)s: %(message)s",
+        stream=sys.stderr,
+        force=True,
+    )
 
     repo = BrokerDealerRepository()
     comp_svc = CompetitorProviderService()

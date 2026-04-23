@@ -52,6 +52,11 @@ export type BrokerDealerListResponse = {
     limit: number;
     total: number;
     total_pages: number;
+    // ISO-8601 timestamp of the most recent pipeline_run (completed_at or
+    // started_at fallback). Null when no runs have landed yet. Surfaced here
+    // so the master-list topbar can render a refresh stamp for all users,
+    // not just admins.
+    pipeline_refreshed_at: string | null;
   };
 };
 
@@ -149,6 +154,19 @@ export type ClearingProviderShare = {
 
 export type ClearingDistributionResponse = {
   items: ClearingProviderShare[];
+};
+
+export type TimeSeriesRange = "7D" | "30D" | "90D" | "1Y";
+
+export type TimeSeriesBucket = {
+  date: string; // ISO YYYY-MM-DD
+  registrations: number;
+  alerts: number;
+};
+
+export type TimeSeriesResponse = {
+  range: TimeSeriesRange;
+  buckets: TimeSeriesBucket[];
 };
 
 export type FilingHistoryItem = {

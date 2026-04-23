@@ -2,17 +2,24 @@ from __future__ import annotations
 
 from datetime import date, timedelta
 
-from fastapi import APIRouter, Depends
+from fastapi import APIRouter, Depends, HTTPException, Query, status
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.db.session import get_db_session
 from app.models.broker_dealer import BrokerDealer
 from app.schemas.auth import AuthenticatedUser
-from app.schemas.stats import ClearingDistributionResponse, DashboardStatsResponse, TotalBrokerDealersResponse
+from app.schemas.stats import (
+    ClearingDistributionResponse,
+    DashboardStatsResponse,
+    TimeSeriesBucketResponse,
+    TimeSeriesResponse,
+    TotalBrokerDealersResponse,
+)
 from app.services.alerts import AlertRepository
 from app.services.auth import get_current_user
 from app.services.broker_dealers import BrokerDealerRepository
+from app.services.stats_service import RANGE_DAYS, fetch_time_series
 
 router = APIRouter(prefix="/stats")
 repository = BrokerDealerRepository()
@@ -54,3 +61,31 @@ async def get_clearing_distribution(
     db: AsyncSession = Depends(get_db_session),
 ) -> ClearingDistributionResponse:
     return ClearingDistributionResponse(items=await repository.get_clearing_distribution(db))
+
+
+@router.get("/time-series", response_model=TimeSeriesResponse)
+async def get_time_series(
+    range_key: str = Query("30D", alias="range", description="One of 7D, 30D, 90D, 1Y."),
+    _: AuthenticatedUser = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db_session),
+) -> TimeSeriesResponse:
+    """Daily registrations + deficiency alerts for the Lead Volume Trend card."""
+
+    if range_key not in RANGE_DAYS:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=f"Invalid range. Expected one of: {sorted(RANGE_DAYS.keys())}.",
+        )
+
+    buckets = await fetch_time_series(db, range_key=range_key)
+    return TimeSeriesResponse(
+        range=range_key,
+        buckets=[
+            TimeSeriesBucketResponse(
+                date=bucket.date,
+                registrations=bucket.registrations,
+                alerts=bucket.alerts,
+            )
+            for bucket in buckets
+        ],
+    )

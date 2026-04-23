@@ -1,3 +1,5 @@
+from datetime import date
+
 from pydantic import BaseModel
 
 from app.schemas.pipeline import ClearingProviderShare
@@ -16,3 +18,14 @@ class DashboardStatsResponse(BaseModel):
 
 class ClearingDistributionResponse(BaseModel):
     items: list[ClearingProviderShare]
+
+
+class TimeSeriesBucketResponse(BaseModel):
+    date: date
+    registrations: int
+    alerts: int
+
+
+class TimeSeriesResponse(BaseModel):
+    range: str
+    buckets: list[TimeSeriesBucketResponse]
