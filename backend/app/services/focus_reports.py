@@ -7,7 +7,7 @@ from dataclasses import dataclass, field
 from datetime import date, datetime, timezone
 from pathlib import Path
 
-from sqlalchemy import delete, select
+from sqlalchemy import delete, select, tuple_
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.config import settings
@@ -106,7 +106,18 @@ class FocusReportService:
 
             async with SessionLocal() as write_db:
                 if incremental_target_ids is not None:
-                    await write_db.execute(delete(FinancialMetric).where(FinancialMetric.bd_id.in_(incremental_target_ids)))
+                    # Narrow the DELETE to the (bd_id, report_date) pairs the
+                    # current run is about to re-insert. Prevents wiping prior
+                    # fiscal-year history for the same bd once the multi-year
+                    # extractor ships (Phase 2C-code). Matches the grain of the
+                    # uq_financial_metrics_bd_report_date constraint.
+                    target_pairs = sorted({(record.bd_id, record.report_date) for record in records})
+                    if target_pairs:
+                        await write_db.execute(
+                            delete(FinancialMetric).where(
+                                tuple_(FinancialMetric.bd_id, FinancialMetric.report_date).in_(target_pairs)
+                            )
+                        )
                 else:
                     await write_db.execute(delete(FinancialMetric))
                 write_db.add_all(
