@@ -342,63 +342,87 @@ class FocusReportService:
                 skipped_no_pdf += 1
                 continue
 
-            added_for_bd = 0
             seen_dates: set[str] = set()
             for pdf_record in pdf_records:
                 try:
-                    extraction = await self.gemini_client.extract_financial_data(
+                    extractions = await self.gemini_client.extract_multi_year_financial_data(
                         pdf_bytes_base64=pdf_record.bytes_base64,
                         prompt=self._build_financial_prompt(),
                     )
                 except (GeminiConfigurationError, GeminiExtractionError) as exc:
-                    logger.warning("Gemini extraction failed for BD %d year %d: %s", broker_dealer.id, pdf_record.filing_year, exc)
+                    logger.warning(
+                        "Gemini multi-year extraction failed for BD %d filing_year %d: %s",
+                        broker_dealer.id, pdf_record.filing_year, exc,
+                    )
+                    skipped_extraction_error += 1
                     continue
                 except Exception as exc:
-                    logger.warning("Unexpected error for BD %d year %d: %s", broker_dealer.id, pdf_record.filing_year, exc)
-                    continue
-
-                if (
-                    extraction.net_capital is None
-                    or extraction.confidence_score < settings.financial_extraction_min_confidence
-                ):
                     logger.warning(
-                        "Financial extraction skipped BD %s: net_capital=%s confidence=%s below min_confidence=%s",
-                        broker_dealer.id,
-                        extraction.net_capital,
-                        extraction.confidence_score,
-                        settings.financial_extraction_min_confidence,
+                        "Unexpected error in multi-year extraction for BD %d filing_year %d: %s",
+                        broker_dealer.id, pdf_record.filing_year, exc,
                     )
+                    skipped_extraction_error += 1
                     continue
 
-                report_date = self._parse_report_date(extraction.report_date) or pdf_record.report_date
-                if report_date is None:
+                if not extractions:
                     logger.warning(
-                        "Financial extraction skipped BD %s: unparseable report_date",
-                        broker_dealer.id,
+                        "Gemini multi-year extraction returned zero rows for BD %d filing_year %d",
+                        broker_dealer.id, pdf_record.filing_year,
                     )
+                    skipped_extraction_error += 1
                     continue
 
-                # Avoid duplicates for the same date
-                date_key = report_date.isoformat()
-                if date_key in seen_dates:
-                    continue
-                seen_dates.add(date_key)
+                # Per-year evaluation: the multi-year response is an array of
+                # per-fiscal-year records, each independently eligible. A firm
+                # may have year N as success and year N-1 as low-confidence.
+                # skipped_low_confidence and skipped_extraction_error count
+                # year-grain; skipped_no_url / skipped_no_pdf remain firm-grain
+                # because "no PDF to try" has no per-year analogue.
+                for extraction in extractions:
+                    if (
+                        extraction.net_capital is None
+                        or extraction.confidence_score < settings.financial_extraction_min_confidence
+                    ):
+                        logger.warning(
+                            "Financial extraction skipped BD %s: net_capital=%s confidence=%s below min_confidence=%s",
+                            broker_dealer.id,
+                            extraction.net_capital,
+                            extraction.confidence_score,
+                            settings.financial_extraction_min_confidence,
+                        )
+                        skipped_low_confidence += 1
+                        continue
 
-                records.append(
-                    FinancialMetricRecord(
-                        bd_id=broker_dealer.id,
-                        report_date=report_date,
-                        net_capital=extraction.net_capital,
-                        excess_net_capital=extraction.excess_net_capital,
-                        total_assets=extraction.total_assets,
-                        required_min_capital=extraction.required_min_capital,
-                        source_filing_url=pdf_record.source_pdf_url or pdf_record.source_filing_url,
+                    report_date = self._parse_report_date(extraction.report_date) or pdf_record.report_date
+                    if report_date is None:
+                        logger.warning(
+                            "Financial extraction skipped BD %s: unparseable report_date",
+                            broker_dealer.id,
+                        )
+                        skipped_extraction_error += 1
+                        continue
+
+                    # Dedup across PDFs within a firm: if two PDFs each return
+                    # year N (e.g. an amendment + its original), keep the first
+                    # parse of that date. uq_financial_metrics_bd_report_date
+                    # would reject the second insert anyway, but the set skip
+                    # saves a wasted ORM flush.
+                    date_key = report_date.isoformat()
+                    if date_key in seen_dates:
+                        continue
+                    seen_dates.add(date_key)
+
+                    records.append(
+                        FinancialMetricRecord(
+                            bd_id=broker_dealer.id,
+                            report_date=report_date,
+                            net_capital=extraction.net_capital,
+                            excess_net_capital=extraction.excess_net_capital,
+                            total_assets=extraction.total_assets,
+                            required_min_capital=extraction.required_min_capital,
+                            source_filing_url=pdf_record.source_pdf_url or pdf_record.source_filing_url,
+                        )
                     )
-                )
-                added_for_bd += 1
-
-            if added_for_bd == 0:
-                skipped_low_confidence += 1
 
         logger.info(
             "Financial extraction complete: %d/%d extracted. Skipped: %d no URL, %d no PDF, %d errors, %d low confidence.",
