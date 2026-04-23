@@ -403,6 +403,17 @@ class FocusReportService:
             "Financial extraction complete: %d/%d extracted. Skipped: %d no URL, %d no PDF, %d errors, %d low confidence.",
             len(records), total, skipped_no_url, skipped_no_pdf, skipped_extraction_error, skipped_low_confidence,
         )
+        logger.warning(
+            "Financial extraction summary: total=%d skipped_no_url=%d "
+            "skipped_no_pdf=%d skipped_extraction_error=%d "
+            "skipped_low_confidence=%d records=%d",
+            total,
+            skipped_no_url,
+            skipped_no_pdf,
+            skipped_extraction_error,
+            skipped_low_confidence,
+            len(records),
+        )
         return FinancialExtractionResult(
             records=records,
             target_count=total,
