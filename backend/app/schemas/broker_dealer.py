@@ -65,6 +65,10 @@ class BrokerDealerListMeta(BaseModel):
     limit: int
     total: int
     total_pages: int
+    # Populated from the most recent `pipeline_run` row so every authenticated
+    # user (not just admins) can render a "Pipeline refreshed Xm ago" stamp
+    # next to the master-list tabs. Null when no runs have landed yet.
+    pipeline_refreshed_at: datetime | None = None
 
 
 class BrokerDealerListResponse(BaseModel):

@@ -97,3 +97,112 @@ a {
 .delay-700 { animation-delay: 700ms; }
 .delay-800 { animation-delay: 800ms; }
 .delay-1000 { animation-delay: 1000ms; }
+
+/* ─────────────────────────────────────────────────────────────
+   Global theme tokens — promoted from the old `.dashboard-theme`
+   scope so every route inherits the same palette, typography, and
+   canvas. Dark mode is keyed off `data-theme="dark"` on <html>,
+   the canonical App Router pattern (no client-side class toggle,
+   no FOUC). Values copied verbatim from dashboard-redesign.html.
+   ───────────────────────────────────────────────────────────── */
+
+body {
+  font-family: var(--font-sans), Inter, system-ui, -apple-system, sans-serif;
+  font-size: 14px;
+  line-height: 1.5;
+  -webkit-font-smoothing: antialiased;
+}
+
+:root {
+  --bg: #eaf3ff;
+  --bg-2: #ffffff;
+  --surface: #ffffff;
+  --surface-2: #f1f6fd;
+  --surface-3: #dbeafe;
+  --border: rgba(30, 64, 175, 0.1);
+  --border-2: rgba(30, 64, 175, 0.16);
+  --text: #0f172a;
+  --text-dim: #475569;
+  --text-muted: #94a3b8;
+  --grid: rgba(15, 23, 42, 0.06);
+  --sidebar-a: #ffffff;
+  --sidebar-b: #ffffff;
+  --body-glow-a: transparent;
+  --body-glow-b: transparent;
+  --kpi-tint-opacity: 0;
+  --nav-active-bg: rgba(37, 99, 235, 0.12);
+  --nav-hover: rgba(15, 23, 42, 0.04);
+  --nav-active-text: #312e81;
+  --accent: #6366f1;
+  --accent-2: #8b5cf6;
+  --green: #10b981;
+  --amber: #f59e0b;
+  --red: #ef4444;
+  --blue: #3b82f6;
+  --cyan: #06b6d4;
+  --pink: #ec4899;
+  --trend-a: #4f46e5;
+  --trend-b: #dc2626;
+  --pill-red-text: #b91c1c;
+  --pill-amber-text: #b45309;
+  --pill-blue-text: #1d4ed8;
+  --pill-green-text: #047857;
+  --pill-purple-text: #6d28d9;
+  --score-red: #dc2626;
+  --score-amber: #d97706;
+  --score-indigo: #4f46e5;
+  --score-green: #059669;
+  --shadow-card: 0 1px 2px rgba(15, 23, 42, 0.04), 0 4px 14px rgba(15, 23, 42, 0.05);
+  --row-hover: rgba(99, 102, 241, 0.04);
+}
+
+[data-theme="dark"] {
+  --bg: #0b0f1a;
+  --bg-2: #0e1424;
+  --surface: #121a2e;
+  --surface-2: #182243;
+  --surface-3: #1e2a4f;
+  --border: rgba(255, 255, 255, 0.06);
+  --border-2: rgba(255, 255, 255, 0.1);
+  --text: #e8ecf6;
+  --text-dim: #9aa3bf;
+  --text-muted: #6b7494;
+  --grid: rgba(255, 255, 255, 0.04);
+  --sidebar-a: rgba(18, 26, 46, 0.95);
+  --sidebar-b: rgba(11, 15, 26, 0.95);
+  --body-glow-a: rgba(99, 102, 241, 0.12);
+  --body-glow-b: rgba(139, 92, 246, 0.08);
+  --kpi-tint-opacity: 0.08;
+  --nav-active-bg: linear-gradient(90deg, rgba(99, 102, 241, 0.22), rgba(99, 102, 241, 0.04));
+  --nav-hover: rgba(255, 255, 255, 0.04);
+  --nav-active-text: #ffffff;
+  --trend-a: #a5b4fc;
+  --trend-b: #fca5a5;
+  --pill-red-text: #fca5a5;
+  --pill-amber-text: #fbbf24;
+  --pill-blue-text: #60a5fa;
+  --pill-green-text: #6ee7b7;
+  --pill-purple-text: #c4b5fd;
+  --score-red: #fca5a5;
+  --score-amber: #fbbf24;
+  --score-indigo: #a5b4fc;
+  --score-green: #6ee7b7;
+  --shadow-card: none;
+  --row-hover: rgba(99, 102, 241, 0.08);
+}
+
+/* Canvas sits behind the authenticated shell. The radial glow is
+   invisible in light mode (body-glow-* are transparent) and blooms
+   in dark mode. Available everywhere .canvas-surface is used. */
+.canvas-surface {
+  background:
+    radial-gradient(1200px 800px at 10% -10%, var(--body-glow-a), transparent 60%),
+    radial-gradient(1000px 700px at 100% 0%, var(--body-glow-b), transparent 60%),
+    var(--bg);
+}
+
+/* Theme-icon visibility — matches mockup .theme-icon / -sun / -moon. */
+.theme-icon { display: none; }
+.theme-icon-moon { display: block; }
+[data-theme="dark"] .theme-icon-moon { display: none; }
+[data-theme="dark"] .theme-icon-sun { display: block; }
