@@ -46,8 +46,9 @@ class FocusReportService:
         self.gemini_client = GeminiResponsesClient()
 
     async def load_financial_metrics(self, db: AsyncSession, *, trigger_source: str = "manual") -> int:
-        # Prioritize BDs that already have financial data (proven to have filings)
-        # then fill remaining slots with BDs that have filing URLs but no data yet.
+        # Prioritize BDs that still need financials so small batches land on
+        # unprocessed firms first; BDs with existing data come after as a
+        # refresh-tail fallback.
         bds_with_data = (await db.execute(
             select(BrokerDealer)
             .where(BrokerDealer.latest_net_capital.is_not(None))
@@ -63,8 +64,8 @@ class FocusReportService:
             .order_by(BrokerDealer.id.asc())
         )).scalars().all()
 
-        # Prioritized list: firms with proven filings first
-        broker_dealers = bds_with_data + bds_with_urls_no_data
+        # Prioritized list: firms that still need financials first, then refresh tail.
+        broker_dealers = bds_with_urls_no_data + bds_with_data
         target_broker_dealers = self._apply_batch_window(
             broker_dealers,
             offset=settings.financial_pipeline_offset,
