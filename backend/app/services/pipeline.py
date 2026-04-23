@@ -10,6 +10,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.core.config import settings
 from app.db.session import SessionLocal
 from app.models.broker_dealer import BrokerDealer
+from app.models.clearing_arrangement import ClearingArrangement
 from app.models.pipeline_run import PipelineRun
 from app.services.broker_dealers import BrokerDealerRepository
 from app.services.classification import apply_classification_to_all
@@ -33,28 +34,7 @@ class ClearingPipelineService:
             failed_ids = await self.repository.list_failed_clearing_broker_dealer_ids(db)
             broker_dealers = [item for item in broker_dealers if item.id in failed_ids]
         else:
-            # Prioritize BDs that have proven filings (financial data exists),
-            # then BDs with filing URLs.  This avoids wasting Gemini calls on
-            # firms that have no X-17A-5 filings.
-            bds_with_data = (await db.execute(
-                select(BrokerDealer)
-                .where(BrokerDealer.latest_net_capital.is_not(None))
-                .order_by(BrokerDealer.latest_net_capital.desc())
-            )).scalars().all()
-            bds_without_data = (await db.execute(
-                select(BrokerDealer)
-                .where(
-                    BrokerDealer.filings_index_url.is_not(None),
-                    BrokerDealer.latest_net_capital.is_(None),
-                )
-                .order_by(BrokerDealer.id.asc())
-            )).scalars().all()
-            broker_dealers = bds_with_data + bds_without_data
-
-            if settings.clearing_pipeline_offset > 0:
-                broker_dealers = broker_dealers[settings.clearing_pipeline_offset :]
-            if settings.clearing_pipeline_limit:
-                broker_dealers = broker_dealers[: settings.clearing_pipeline_limit]
+            broker_dealers = await self._select_default_targets(db)
 
         pipeline_run = PipelineRun(
             pipeline_name="clearing_pdf_pipeline",
@@ -193,3 +173,41 @@ class ClearingPipelineService:
             await write_db.commit()
             await write_db.refresh(persisted_run)
             return persisted_run
+
+    async def _select_default_targets(self, db: AsyncSession) -> list[BrokerDealer]:
+        # Prioritize firms that have a filings_index_url but no clearing row
+        # yet, so small batches land on firms we have never attempted. Firms
+        # that already have at least one clearing_arrangement row come after
+        # as a refresh tail. Mirrors the financial pipeline's Fix E ordering
+        # (focus_reports.py) so a starvation loop against the same top-100
+        # firms cannot keep the other ~2,900 URL-bearing firms permanently
+        # unattempted.
+        bds_without_clearing = (await db.execute(
+            select(BrokerDealer)
+            .where(
+                BrokerDealer.filings_index_url.is_not(None),
+                ~select(ClearingArrangement.id)
+                .where(ClearingArrangement.bd_id == BrokerDealer.id)
+                .exists(),
+            )
+            .order_by(BrokerDealer.id.asc())
+        )).scalars().all()
+
+        bds_with_clearing = (await db.execute(
+            select(BrokerDealer)
+            .where(
+                select(ClearingArrangement.id)
+                .where(ClearingArrangement.bd_id == BrokerDealer.id)
+                .exists()
+            )
+            .order_by(BrokerDealer.id.asc())
+        )).scalars().all()
+
+        broker_dealers = bds_without_clearing + bds_with_clearing
+
+        if settings.clearing_pipeline_offset > 0:
+            broker_dealers = broker_dealers[settings.clearing_pipeline_offset :]
+        if settings.clearing_pipeline_limit:
+            broker_dealers = broker_dealers[: settings.clearing_pipeline_limit]
+
+        return broker_dealers
