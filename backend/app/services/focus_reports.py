@@ -333,7 +333,7 @@ class FocusReportService:
             try:
                 pdf_records = await self.downloader.download_recent_x17a5_pdfs(broker_dealer, count=2)
             except Exception as exc:
-                logger.debug("PDF download failed for BD %d (%s): %s", broker_dealer.id, broker_dealer.name, exc)
+                logger.warning("PDF download failed for BD %d (%s): %s", broker_dealer.id, broker_dealer.name, exc)
                 skipped_extraction_error += 1
                 continue
 
@@ -350,20 +350,31 @@ class FocusReportService:
                         prompt=self._build_financial_prompt(),
                     )
                 except (GeminiConfigurationError, GeminiExtractionError) as exc:
-                    logger.debug("Gemini extraction failed for BD %d year %d: %s", broker_dealer.id, pdf_record.filing_year, exc)
+                    logger.warning("Gemini extraction failed for BD %d year %d: %s", broker_dealer.id, pdf_record.filing_year, exc)
                     continue
                 except Exception as exc:
-                    logger.debug("Unexpected error for BD %d year %d: %s", broker_dealer.id, pdf_record.filing_year, exc)
+                    logger.warning("Unexpected error for BD %d year %d: %s", broker_dealer.id, pdf_record.filing_year, exc)
                     continue
 
                 if (
                     extraction.net_capital is None
                     or extraction.confidence_score < settings.financial_extraction_min_confidence
                 ):
+                    logger.warning(
+                        "Financial extraction skipped BD %s: net_capital=%s confidence=%s below min_confidence=%s",
+                        broker_dealer.id,
+                        extraction.net_capital,
+                        extraction.confidence_score,
+                        settings.financial_extraction_min_confidence,
+                    )
                     continue
 
                 report_date = self._parse_report_date(extraction.report_date) or pdf_record.report_date
                 if report_date is None:
+                    logger.warning(
+                        "Financial extraction skipped BD %s: unparseable report_date",
+                        broker_dealer.id,
+                    )
                     continue
 
                 # Avoid duplicates for the same date
