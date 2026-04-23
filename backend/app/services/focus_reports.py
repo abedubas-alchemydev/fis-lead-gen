@@ -1,8 +1,10 @@
 from __future__ import annotations
 
 import csv
+import json
 import logging
-from datetime import date
+from dataclasses import dataclass, field
+from datetime import date, datetime, timezone
 from pathlib import Path
 
 from sqlalchemy import delete, select
@@ -14,6 +16,7 @@ from app.models.broker_dealer import BrokerDealer
 
 logger = logging.getLogger(__name__)
 from app.models.financial_metric import FinancialMetric
+from app.models.pipeline_run import PipelineRun
 from app.services.gemini_responses import (
     GeminiConfigurationError,
     GeminiExtractionError,
@@ -24,12 +27,25 @@ from app.services.scoring import calculate_yoy_growth, classify_health_status
 from app.services.service_models import FinancialMetricRecord
 
 
+FINANCIAL_PIPELINE_NAME = "financial_pdf_pipeline"
+
+
+@dataclass(slots=True)
+class FinancialExtractionResult:
+    records: list[FinancialMetricRecord] = field(default_factory=list)
+    target_count: int = 0
+    skipped_no_url: int = 0
+    skipped_no_pdf: int = 0
+    skipped_extraction_error: int = 0
+    skipped_low_confidence: int = 0
+
+
 class FocusReportService:
     def __init__(self) -> None:
         self.downloader = PdfDownloaderService()
         self.gemini_client = GeminiResponsesClient()
 
-    async def load_financial_metrics(self, db: AsyncSession) -> int:
+    async def load_financial_metrics(self, db: AsyncSession, *, trigger_source: str = "manual") -> int:
         # Prioritize BDs that already have financial data (proven to have filings)
         # then fill remaining slots with BDs that have filing URLs but no data yet.
         bds_with_data = (await db.execute(
@@ -49,52 +65,169 @@ class FocusReportService:
 
         # Prioritized list: firms with proven filings first
         broker_dealers = bds_with_data + bds_with_urls_no_data
-        if not broker_dealers:
-            return 0
-        await db.commit()
         target_broker_dealers = self._apply_batch_window(
             broker_dealers,
             offset=settings.financial_pipeline_offset,
             limit=settings.financial_pipeline_limit,
         )
 
-        incremental_target_ids: list[int] | None = None
-        records = await self._load_live_records(target_broker_dealers)
-        if settings.financial_pipeline_limit and not settings.focus_reports_csv_path:
-            incremental_target_ids = [broker_dealer.id for broker_dealer in target_broker_dealers]
+        # Commit the pipeline_run row in its own transaction before any
+        # extraction work begins, so a crash mid-loop still leaves a
+        # discoverable audit row in status='running'.
+        pipeline_run = PipelineRun(
+            pipeline_name=FINANCIAL_PIPELINE_NAME,
+            trigger_source=trigger_source,
+            status="running",
+            total_items=len(target_broker_dealers),
+            processed_items=0,
+            success_count=0,
+            failure_count=0,
+            notes=json.dumps(
+                {
+                    "stage": "started",
+                    "offset": settings.financial_pipeline_offset,
+                    "limit": settings.financial_pipeline_limit,
+                    "target_count": len(target_broker_dealers),
+                    "provider": self._provider_descriptor(),
+                }
+            ),
+        )
+        db.add(pipeline_run)
+        await db.flush()
+        run_id = pipeline_run.id
+        await db.commit()
 
-        async with SessionLocal() as write_db:
-            if incremental_target_ids is not None:
-                await write_db.execute(delete(FinancialMetric).where(FinancialMetric.bd_id.in_(incremental_target_ids)))
-            else:
-                await write_db.execute(delete(FinancialMetric))
-            write_db.add_all(
-                [
-                    FinancialMetric(
-                        bd_id=record.bd_id,
-                        report_date=record.report_date,
-                        net_capital=record.net_capital,
-                        excess_net_capital=record.excess_net_capital,
-                        total_assets=record.total_assets,
-                        required_min_capital=record.required_min_capital,
-                        source_filing_url=record.source_filing_url,
-                    )
-                    for record in records
-                ]
+        try:
+            incremental_target_ids: list[int] | None = None
+            extraction = await self._load_live_records(target_broker_dealers)
+            records = extraction.records
+            if settings.financial_pipeline_limit and not settings.focus_reports_csv_path:
+                incremental_target_ids = [broker_dealer.id for broker_dealer in target_broker_dealers]
+
+            async with SessionLocal() as write_db:
+                if incremental_target_ids is not None:
+                    await write_db.execute(delete(FinancialMetric).where(FinancialMetric.bd_id.in_(incremental_target_ids)))
+                else:
+                    await write_db.execute(delete(FinancialMetric))
+                write_db.add_all(
+                    [
+                        FinancialMetric(
+                            bd_id=record.bd_id,
+                            report_date=record.report_date,
+                            net_capital=record.net_capital,
+                            excess_net_capital=record.excess_net_capital,
+                            total_assets=record.total_assets,
+                            required_min_capital=record.required_min_capital,
+                            source_filing_url=record.source_filing_url,
+                        )
+                        for record in records
+                    ]
+                )
+                await write_db.flush()
+                refreshed_broker_dealers = (
+                    await write_db.execute(select(BrokerDealer).order_by(BrokerDealer.id.asc()))
+                ).scalars().all()
+                await self._refresh_broker_dealer_rollups(write_db, refreshed_broker_dealers)
+                await write_db.commit()
+
+                await self._finalize_pipeline_run(write_db, run_id, extraction)
+            return len(records)
+        except Exception as exc:
+            logger.exception("Financial extraction pipeline failed for run %s", run_id)
+            await self._mark_pipeline_run_failed(run_id, exc, len(target_broker_dealers))
+            raise
+
+    async def _finalize_pipeline_run(
+        self,
+        write_db: AsyncSession,
+        run_id: int,
+        extraction: FinancialExtractionResult,
+    ) -> None:
+        persisted_run = await write_db.get(PipelineRun, run_id)
+        if persisted_run is None:
+            raise RuntimeError(
+                f"Pipeline run {run_id} could not be reloaded for financial finalization."
             )
-            await write_db.flush()
-            refreshed_broker_dealers = (
-                await write_db.execute(select(BrokerDealer).order_by(BrokerDealer.id.asc()))
-            ).scalars().all()
-            await self._refresh_broker_dealer_rollups(write_db, refreshed_broker_dealers)
-            await write_db.commit()
-        return len(records)
 
-    async def _load_live_records(self, broker_dealers: list[BrokerDealer]) -> list[FinancialMetricRecord]:
+        failure_count = (
+            extraction.skipped_no_url
+            + extraction.skipped_no_pdf
+            + extraction.skipped_extraction_error
+            + extraction.skipped_low_confidence
+        )
+        provider_descriptor = self._provider_descriptor()
+        summary = (
+            f"Processed {extraction.target_count} filings via {provider_descriptor}. "
+            f"Records extracted: {len(extraction.records)}. "
+            f"Skipped: {extraction.skipped_no_url} no URL, "
+            f"{extraction.skipped_no_pdf} no PDF, "
+            f"{extraction.skipped_extraction_error} errors, "
+            f"{extraction.skipped_low_confidence} low confidence."
+        )
+        persisted_run.total_items = extraction.target_count
+        persisted_run.processed_items = extraction.target_count
+        persisted_run.success_count = len(extraction.records)
+        persisted_run.failure_count = failure_count
+        persisted_run.status = "completed_with_errors" if failure_count else "completed"
+        persisted_run.completed_at = datetime.now(timezone.utc)
+        persisted_run.notes = json.dumps(
+            {
+                "summary": summary,
+                "records": len(extraction.records),
+                "skipped_no_url": extraction.skipped_no_url,
+                "skipped_no_pdf": extraction.skipped_no_pdf,
+                "skipped_extraction_error": extraction.skipped_extraction_error,
+                "skipped_low_confidence": extraction.skipped_low_confidence,
+                "target_count": extraction.target_count,
+                "offset": settings.financial_pipeline_offset,
+                "limit": settings.financial_pipeline_limit,
+                "provider": provider_descriptor,
+            }
+        )
+        await write_db.commit()
+
+    async def _mark_pipeline_run_failed(
+        self,
+        run_id: int,
+        exc: BaseException,
+        target_count: int,
+    ) -> None:
+        # Use a fresh session so the failure write is not bound to the
+        # extraction path's rolled-back transaction state.
+        try:
+            async with SessionLocal() as fail_db:
+                persisted_run = await fail_db.get(PipelineRun, run_id)
+                if persisted_run is None:
+                    return
+                persisted_run.status = "failed"
+                persisted_run.completed_at = datetime.now(timezone.utc)
+                persisted_run.notes = json.dumps(
+                    {
+                        "error": f"{type(exc).__name__}: {str(exc)[:500]}",
+                        "offset": settings.financial_pipeline_offset,
+                        "limit": settings.financial_pipeline_limit,
+                        "target_count": target_count,
+                        "provider": self._provider_descriptor(),
+                    }
+                )
+                await fail_db.commit()
+        except Exception:
+            logger.exception("Failed to mark pipeline run %s as failed", run_id)
+
+    def _provider_descriptor(self) -> str:
+        provider = settings.llm_provider
+        if provider == "openai":
+            return f"openai:{settings.openai_pdf_model}"
+        return provider
+
+    async def _load_live_records(self, broker_dealers: list[BrokerDealer]) -> FinancialExtractionResult:
         csv_records = self._load_live_records_from_csv(broker_dealers)
         if csv_records:
             logger.info("Loaded %d financial records from CSV.", len(csv_records))
-            return csv_records
+            return FinancialExtractionResult(
+                records=csv_records,
+                target_count=len(broker_dealers),
+            )
 
         if settings.focus_reports_csv_path:
             logger.warning(
@@ -102,14 +235,14 @@ class FocusReportService:
                 settings.focus_reports_csv_path,
             )
 
-        records = await self._extract_live_records_from_pdfs(broker_dealers)
-        if not records:
+        result = await self._extract_live_records_from_pdfs(broker_dealers)
+        if not result.records:
             logger.warning(
                 "Financial extraction produced zero records for %d broker-dealers. "
                 "Check that GEMINI_API_KEY is set and broker-dealers have filings_index_url populated.",
                 len(broker_dealers),
             )
-        return records
+        return result
 
 
     def _load_live_records_from_csv(self, broker_dealers: list[BrokerDealer]) -> list[FinancialMetricRecord]:
@@ -166,7 +299,7 @@ class FocusReportService:
 
         return records
 
-    async def _extract_live_records_from_pdfs(self, broker_dealers: list[BrokerDealer]) -> list[FinancialMetricRecord]:
+    async def _extract_live_records_from_pdfs(self, broker_dealers: list[BrokerDealer]) -> FinancialExtractionResult:
         records: list[FinancialMetricRecord] = []
         total = len(broker_dealers)
         skipped_no_url = 0
@@ -248,7 +381,14 @@ class FocusReportService:
             "Financial extraction complete: %d/%d extracted. Skipped: %d no URL, %d no PDF, %d errors, %d low confidence.",
             len(records), total, skipped_no_url, skipped_no_pdf, skipped_extraction_error, skipped_low_confidence,
         )
-        return records
+        return FinancialExtractionResult(
+            records=records,
+            target_count=total,
+            skipped_no_url=skipped_no_url,
+            skipped_no_pdf=skipped_no_pdf,
+            skipped_extraction_error=skipped_extraction_error,
+            skipped_low_confidence=skipped_low_confidence,
+        )
 
     def _apply_batch_window(self, broker_dealers: list[BrokerDealer], *, offset: int, limit: int | None) -> list[BrokerDealer]:
         if offset < 0:
