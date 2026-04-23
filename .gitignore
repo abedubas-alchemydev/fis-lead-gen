@@ -14,9 +14,21 @@ backend/.mypy_cache/
 dist/
 coverage/
 
-# Claude Code
+# Claude Code / AI session artifacts — local working docs, never commit.
+# CLAUDE.md at repo root is tracked (repo SOP); this rule only prevents
+# additional CLAUDE.md files in subdirs or re-added copies.
 .claude/
 CLAUDE.md
+CLAUDE_CODE_SESSION_PROMPT.md
+EVERYTHING_CLAUDE_CODE_RESEARCH.md
+PROJECT_ANALYSIS.md
+plans/
+prompts/
+reports/
+# Catch future AI / Claude / prompt / research-note variants at the root.
+*_CLAUDE_*.md
+*_AI_*.md
+*_PROMPT_*.md
 
 # Local handoff / secret-bearing docs — never commit
 credentials.md
