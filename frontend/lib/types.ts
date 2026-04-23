@@ -76,6 +76,7 @@ export type FinancialMetricItem = {
   total_assets: number | null;
   required_min_capital: number | null;
   source_filing_url: string | null;
+  extraction_status: string;
   created_at: string;
 };
 

@@ -197,9 +197,13 @@ class TestYearLevelFailureIsolation:
     increment at year-grain."""
 
     @pytest.mark.asyncio
-    async def test_low_confidence_year_skipped_siblings_preserved(
+    async def test_low_confidence_year_persists_tagged_siblings_preserved(
         self, service: FocusReportService
     ) -> None:
+        """Under Fix G, a below-threshold year is PERSISTED tagged as
+        'needs_review' rather than dropped. Siblings at parsed confidence
+        are unaffected. Counter moves from skipped_low_confidence (year
+        couldn't persist) to needs_review_count (year persisted tagged)."""
         bd = _make_broker_dealer(bd_id=7)
         pdf = _make_pdf_record(bd_id=7, filing_year=2026)
 
@@ -214,11 +218,17 @@ class TestYearLevelFailureIsolation:
 
         result = await service._extract_live_records_from_pdfs([bd])
 
-        assert len(result.records) == 2
+        assert len(result.records) == 3
         surviving = sorted(r.report_date for r in result.records)
-        assert surviving == [date(2023, 12, 31), date(2025, 12, 31)]
-        # Year-grain: the failed year bumps the counter exactly once.
-        assert result.skipped_low_confidence == 1
+        assert surviving == [date(2023, 12, 31), date(2024, 12, 31), date(2025, 12, 31)]
+        # The low-confidence sibling is the only needs_review row.
+        needs_review_dates = sorted(
+            r.report_date for r in result.records if r.extraction_status == "needs_review"
+        )
+        assert needs_review_dates == [date(2024, 12, 31)]
+        assert result.needs_review_count == 1
+        # Unpersistable-year counter stays zero — the row persisted, tagged.
+        assert result.skipped_low_confidence == 0
         assert result.skipped_extraction_error == 0
 
     @pytest.mark.asyncio
@@ -287,10 +297,14 @@ class TestYearLevelFailureIsolation:
 
 
 class TestCounterSumInvariant:
-    """The five counters span the unit-of-work attempted across a run.
-    records is row-grain; skipped_no_url / skipped_no_pdf are firm-grain;
-    skipped_low_confidence and skipped_extraction_error are year-grain.
-    Their sum equals the total unit-of-work attempted."""
+    """The six counters span the unit-of-work attempted across a run.
+    records list (parsed + needs_review) is row-grain;
+    skipped_no_url / skipped_no_pdf are firm-grain;
+    skipped_low_confidence and skipped_extraction_error are year-grain;
+    needs_review_count is the year-grain subset of records.
+    Invariant: len(records) + skipped_no_url + skipped_no_pdf +
+    skipped_extraction_error + skipped_low_confidence == total units of work.
+    Equivalently: (parsed rows) + needs_review_count + skipped_* == total."""
 
     @pytest.mark.asyncio
     async def test_mixed_outcomes_sum_to_total_unit_of_work(
@@ -298,13 +312,16 @@ class TestCounterSumInvariant:
     ) -> None:
         """Synthetic multi-firm run with one of each outcome class:
 
-        - Firm A: 2 good years -> records +2.
-        - Firm B: 1 good year + 1 low-confidence -> records +1, low +1.
+        - Firm A: 2 good years -> records +2 (both parsed).
+        - Firm B: 1 good year + 1 low-confidence -> records +2
+          (1 parsed + 1 needs_review; low-conf now persists tagged).
         - Firm C: extractor raises on the PDF -> extraction_error +1.
         - Firm D: no filings_index_url -> no_url +1.
 
-        Total unit-of-work attempted: 3 (records) + 1 (no_url) + 1
-        (extraction_error) + 1 (low_confidence) == 6.
+        Total unit-of-work attempted: 4 (records) + 1 (no_url) + 1
+        (extraction_error) + 0 (low_confidence) == 6.
+        Equivalent breakdown: 3 parsed + 1 needs_review + 1 no_url +
+        1 extraction_error + 0 low_confidence == 6.
         """
         firm_a = _make_broker_dealer(bd_id=100, cik="0000000100", name="FIRM A")
         firm_b = _make_broker_dealer(bd_id=200, cik="0000000200", name="FIRM B")
@@ -357,12 +374,21 @@ class TestCounterSumInvariant:
         )
         total_unit_of_work = records_count + skip_sum
 
-        assert records_count == 3
+        # Firm B's low-conf year now persists tagged as needs_review
+        # instead of bumping skipped_low_confidence. records count goes
+        # from 3 to 4; low_confidence from 1 to 0; needs_review from 0
+        # to 1. Total unit-of-work attempted stays 6.
+        assert records_count == 4
+        parsed_count = sum(
+            1 for r in result.records if r.extraction_status == "parsed"
+        )
+        assert parsed_count == 3
+        assert result.needs_review_count == 1
         assert result.skipped_no_url == 1
         assert result.skipped_no_pdf == 0
         assert result.skipped_extraction_error == 1
-        assert result.skipped_low_confidence == 1
-        # Invariant: all five counters span the run; nothing disappears.
+        assert result.skipped_low_confidence == 0
+        # Invariant: six counters span the run; nothing disappears.
         assert total_unit_of_work == 6
 
 
@@ -551,15 +577,15 @@ class TestNarrowedDeleteIdempotency:
 
 
 class TestNeedsReviewPreservation:
-    """Low-confidence per-year rows are not persisted today. Phase 2D /
-    Fix G will add an extraction_status column; until then, the contract
-    is "skip the row, bump skipped_low_confidence, log at WARNING" so
-    the signal is observable in pipeline_run.notes and server logs.
+    """Fix G contract: low-confidence per-year rows are persisted tagged
+    'needs_review' (not dropped), so the review queue has something to
+    surface. The signal stays observable via needs_review_count in
+    pipeline_run.notes and the extraction_status column on the row itself.
 
-    This test locks in that contract at the per-year grain."""
+    These tests lock in that contract at the per-year grain."""
 
     @pytest.mark.asyncio
-    async def test_low_confidence_year_is_not_persisted(
+    async def test_low_confidence_year_is_persisted_as_needs_review(
         self, service: FocusReportService
     ) -> None:
         bd = _make_broker_dealer(bd_id=77)
@@ -575,12 +601,14 @@ class TestNeedsReviewPreservation:
 
         result = await service._extract_live_records_from_pdfs([bd])
 
-        persisted_dates = {r.report_date for r in result.records}
-        assert date(2025, 12, 31) in persisted_dates
-        # Contract: low-confidence year is NOT among persisted rows.
-        assert date(2024, 12, 31) not in persisted_dates
-        # Contract: skipped_low_confidence bumped at year-grain.
-        assert result.skipped_low_confidence == 1
+        by_date = {r.report_date: r for r in result.records}
+        # Contract: both years persist; the low-conf row carries the tag.
+        assert set(by_date.keys()) == {date(2025, 12, 31), date(2024, 12, 31)}
+        assert by_date[date(2025, 12, 31)].extraction_status == "parsed"
+        assert by_date[date(2024, 12, 31)].extraction_status == "needs_review"
+        assert result.needs_review_count == 1
+        # Counter for unpersistable rows stays zero — we persisted, tagged.
+        assert result.skipped_low_confidence == 0
 
     @pytest.mark.asyncio
     async def test_low_confidence_does_not_touch_extraction_error_bucket(
@@ -589,7 +617,8 @@ class TestNeedsReviewPreservation:
         """Orthogonality: a confidence failure is distinct from an
         extraction failure. Routing low-confidence rows through
         skipped_extraction_error would obscure how much is "bad data"
-        vs "bad extraction" in downstream audit queries."""
+        vs "bad extraction" in downstream audit queries. Under Fix G, the
+        signal lives in needs_review_count, not a skip counter."""
         bd = _make_broker_dealer(bd_id=78)
         pdf = _make_pdf_record(bd_id=78, filing_year=2026)
 
@@ -602,5 +631,6 @@ class TestNeedsReviewPreservation:
 
         result = await service._extract_live_records_from_pdfs([bd])
 
-        assert result.skipped_low_confidence == 1
+        assert result.needs_review_count == 1
+        assert result.skipped_low_confidence == 0
         assert result.skipped_extraction_error == 0
