@@ -91,6 +91,32 @@ function SettingsIcon(props: IconProps) {
   );
 }
 
+function FavoritesIcon(props: IconProps) {
+  return (
+    <IconBase {...props}>
+      <path d="M12 2l2.9 6.3 6.9.7-5.2 4.7 1.5 6.8L12 17l-6.1 3.5 1.5-6.8L2.2 9l6.9-.7L12 2z" />
+    </IconBase>
+  );
+}
+
+function VisitedFirmsIcon(props: IconProps) {
+  return (
+    <IconBase {...props}>
+      <circle cx="12" cy="12" r="9" />
+      <path d="M12 7v5l3 2" />
+    </IconBase>
+  );
+}
+
+function VaultIcon(props: IconProps) {
+  return (
+    <IconBase {...props}>
+      <rect x="3" y="10" width="18" height="11" rx="2" />
+      <path d="M7 10V7a5 5 0 0110 0v3" />
+    </IconBase>
+  );
+}
+
 type SessionUser = {
   name?: string | null;
   email?: string | null;
@@ -118,11 +144,14 @@ const workspaceNav: ReadonlyArray<NavEntry> = [
   { href: "/master-list", label: "Master List", icon: MasterListIcon, badgeKey: "total" },
   { href: "/alerts", label: "Alerts", icon: AlertsIcon, badgeKey: "alerts" },
   { href: "/email-extractor", label: "Email Extractor", icon: EmailExtractorIcon, badgeKey: null },
-  { href: "/export", label: "Export", icon: ExportIcon, badgeKey: null }
+  { href: "/export", label: "Export", icon: ExportIcon, badgeKey: null },
+  { href: "/my-favorites", label: "My Favorites", icon: FavoritesIcon, badgeKey: null },
+  { href: "/visited-firms", label: "Visited Firms", icon: VisitedFirmsIcon, badgeKey: null }
 ];
 
 const accountNav: ReadonlyArray<NavEntry> = [
-  { href: "/settings", label: "Settings", icon: SettingsIcon, badgeKey: null }
+  { href: "/settings", label: "Settings", icon: SettingsIcon, badgeKey: null },
+  { href: "/vault", label: "Vault", icon: VaultIcon, badgeKey: null }
 ];
 
 function initialsFromName(name: string | null | undefined): string {
