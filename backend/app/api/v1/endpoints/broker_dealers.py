@@ -24,11 +24,18 @@ from app.schemas.broker_dealer import (
     FinancialMetricsResponse,
     RegistrationComplianceSummary,
 )
+from app.schemas.favorites import FavoriteResponse
 from app.services.contacts import ExecutiveContactService
 from app.schemas.pipeline import ClearingArrangementsResponse
 from app.services.alerts import AlertRepository
 from app.services.auth import get_current_user
 from app.services.broker_dealers import BrokerDealerRepository
+from app.services.user_lists import (
+    add_favorite,
+    is_favorited,
+    record_visit,
+    remove_favorite,
+)
 from app.services.classification import apply_classification_to_all
 from app.services.contact_discovery.orchestrator import discover_contact
 from app.services.contacts import ContactEnrichmentUnavailableError, ExecutiveContactService
@@ -438,10 +445,62 @@ async def extract_focus_ceo(
     )
 
 
+@router.post("/{broker_dealer_id}/favorite", response_model=FavoriteResponse)
+async def favorite_broker_dealer(
+    broker_dealer_id: int,
+    current_user: AuthenticatedUser = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db_session),
+) -> FavoriteResponse:
+    """Favorite a broker-dealer for the calling user.
+
+    Idempotent: a second call returns 200 with the original ``favorited_at``.
+    """
+    broker_dealer = await repository.get_broker_dealer(db, broker_dealer_id)
+    if broker_dealer is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Broker-dealer not found.")
+
+    row = await add_favorite(db, current_user.id, broker_dealer_id)
+    return FavoriteResponse(favorited=True, favorited_at=row.created_at)
+
+
+@router.delete("/{broker_dealer_id}/favorite", status_code=status.HTTP_204_NO_CONTENT)
+async def unfavorite_broker_dealer(
+    broker_dealer_id: int,
+    current_user: AuthenticatedUser = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db_session),
+) -> None:
+    """Remove a favorite. Idempotent: 204 even when the row wasn't there."""
+    broker_dealer = await repository.get_broker_dealer(db, broker_dealer_id)
+    if broker_dealer is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Broker-dealer not found.")
+
+    await remove_favorite(db, current_user.id, broker_dealer_id)
+
+
+@router.post("/{broker_dealer_id}/visit", status_code=status.HTTP_204_NO_CONTENT)
+async def visit_broker_dealer(
+    broker_dealer_id: int,
+    current_user: AuthenticatedUser = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db_session),
+) -> None:
+    """Record a detail-page visit.
+
+    Fired fire-and-forget by the frontend on mount. Upserts the ``user_visit``
+    row: first call sets ``visit_count=1`` and both timestamps to ``now()``;
+    subsequent calls bump ``visit_count`` and ``last_visited_at`` while the
+    original ``first_visited_at`` is preserved.
+    """
+    broker_dealer = await repository.get_broker_dealer(db, broker_dealer_id)
+    if broker_dealer is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Broker-dealer not found.")
+
+    await record_visit(db, current_user.id, broker_dealer_id)
+
+
 @router.get("/{broker_dealer_id}/profile", response_model=BrokerDealerProfileResponse)
 async def get_broker_dealer_profile(
     broker_dealer_id: int,
-    _: AuthenticatedUser = Depends(get_current_user),
+    current_user: AuthenticatedUser = Depends(get_current_user),
     db: AsyncSession = Depends(get_db_session),
 ) -> BrokerDealerProfileResponse:
     broker_dealer = await repository.get_broker_dealer(db, broker_dealer_id)
@@ -507,6 +566,8 @@ async def get_broker_dealer_profile(
 
     filing_history.sort(key=lambda item: item.filed_at, reverse=True)
 
+    favorited, favorited_at = await is_favorited(db, current_user.id, broker_dealer_id)
+
     return BrokerDealerProfileResponse(
         broker_dealer=BrokerDealerDetail.model_validate(broker_dealer),
         financials=[FinancialMetricItem.model_validate(item) for item in financials],
@@ -516,6 +577,8 @@ async def get_broker_dealer_profile(
         recent_alerts=recent_alerts,
         filing_history=filing_history[:20],
         executive_contacts=[ExecutiveContactItem.model_validate(item) for item in executive_contacts],
+        is_favorited=favorited,
+        favorited_at=favorited_at,
         registration_compliance=RegistrationComplianceSummary(
             registration_status=broker_dealer.status,
             registration_date=broker_dealer.registration_date,

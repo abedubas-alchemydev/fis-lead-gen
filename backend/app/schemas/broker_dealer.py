@@ -184,6 +184,30 @@ class FocusCeoExtractionResponse(BaseModel):
     extraction_notes: str | None = None
 
 
+class BrokerDealerSummary(BaseModel):
+    """Slim master-list projection reused by /favorites and /visits.
+
+    Mirrors the 12 fields plan §2 calls out as "BrokerDealerSummary" so the
+    sidebar list pages can render the same row shape as the master list
+    without pulling the full detail envelope.
+    """
+
+    model_config = ConfigDict(from_attributes=True)
+
+    id: int
+    name: str
+    city: str | None
+    state: str | None
+    lead_score: float | None
+    lead_priority: str | None
+    current_clearing_partner: str | None
+    health_status: str | None
+    is_deficient: bool
+    last_filing_date: date | None
+    latest_net_capital: float | None
+    yoy_growth: float | None
+
+
 class BrokerDealerProfileResponse(BaseModel):
     broker_dealer: BrokerDealerDetail
     financials: list[FinancialMetricItem]
@@ -195,3 +219,8 @@ class BrokerDealerProfileResponse(BaseModel):
     executive_contacts: list[ExecutiveContactItem]
     registration_compliance: RegistrationComplianceSummary
     deficiency_status: DeficiencyStatusSummary
+    # Per-user favorite state for the firm detail page. Populated from
+    # `user_favorite` against the calling session's user_id so the heart
+    # toggle renders in its correct state on the first paint.
+    is_favorited: bool = False
+    favorited_at: datetime | None = None

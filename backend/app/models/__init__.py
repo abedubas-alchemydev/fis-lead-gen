@@ -13,6 +13,8 @@ from app.models.industry_arrangement import IndustryArrangement
 from app.models.introducing_arrangement import IntroducingArrangement
 from app.models.pipeline_run import PipelineRun
 from app.models.scoring_setting import ScoringSetting
+from app.models.user_favorite import UserFavorite
+from app.models.user_visit import UserVisit
 from app.models.verification_run import VerificationRun
 
 __all__ = [
@@ -33,6 +35,8 @@ __all__ = [
     "IntroducingArrangement",
     "PipelineRun",
     "ScoringSetting",
+    "UserFavorite",
+    "UserVisit",
     "Verification",
     "VerificationRun",
 ]
