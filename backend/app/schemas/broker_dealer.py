@@ -117,6 +117,8 @@ class ExecutiveContactItem(BaseModel):
     phone: str | None
     linkedin_url: str | None
     source: str
+    discovery_source: str | None = None
+    discovery_confidence: float | None = None
     enriched_at: datetime
 
 
