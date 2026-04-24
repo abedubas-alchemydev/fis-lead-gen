@@ -11,6 +11,7 @@ import { ClearingTypeBadge } from "@/components/master-list/clearing-type-badge"
 import { CompetitorBadge } from "@/components/master-list/competitor-badge";
 import { HealthBadge } from "@/components/master-list/health-badge";
 import { LeadPriorityBadge } from "@/components/master-list/lead-priority-badge";
+import { OutreachButton } from "@/components/master-list/outreach-button";
 import { apiRequest } from "@/lib/api";
 import { parseArrangementBlob } from "@/lib/arrangements";
 import { formatCurrency, formatDate, formatPercent } from "@/lib/format";
@@ -67,29 +68,67 @@ function nameMatches(finraDisplay: string, contact: ExecutiveContactItem): boole
   return finra.last === apollo.last && finra.first === apollo.first;
 }
 
-function ContactBadges({
+type OfficerEntity =
+  | { type: "person"; first_name: string; last_name: string; title: string }
+  | { type: "organization"; org_name: string; title: string };
+
+function toOfficerEntity(record: { name: string; title: string }): OfficerEntity {
+  const parsed = parseFinraName(record.name);
+  if (parsed) {
+    return {
+      type: "person",
+      first_name: parsed.first,
+      last_name: parsed.last,
+      title: record.title,
+    };
+  }
+  return { type: "organization", org_name: record.name, title: record.title };
+}
+
+function dedupOfficers(entities: OfficerEntity[]): OfficerEntity[] {
+  const seen = new Set<string>();
+  const out: OfficerEntity[] = [];
+  for (const entity of entities) {
+    const key =
+      entity.type === "person"
+        ? `p|${entity.first_name}|${entity.last_name}`
+        : `o|${entity.org_name.toLowerCase()}`;
+    if (seen.has(key)) continue;
+    seen.add(key);
+    out.push(entity);
+  }
+  return out;
+}
+
+function ContactRow({
   contact,
 }: {
   contact: Pick<ExecutiveContactItem, "email" | "phone" | "linkedin_url">;
 }) {
-  if (!contact.email && !contact.phone && !contact.linkedin_url) return null;
+  if (!contact.email && !contact.phone) return null;
   return (
-    <div className="mt-2 flex flex-wrap gap-3 text-sm">
+    <div className="mt-2 flex flex-wrap items-center gap-2 text-xs">
       {contact.email ? (
-        <a href={`mailto:${contact.email}`} className="text-blue">
+        <a href={`mailto:${contact.email}`} className="text-blue hover:underline">
           {contact.email}
         </a>
       ) : null}
       {contact.phone ? (
-        <a href={`tel:${contact.phone}`} className="text-slate-600">
+        <a href={`tel:${contact.phone}`} className="text-slate-600 hover:underline">
           {contact.phone}
         </a>
       ) : null}
       {contact.linkedin_url ? (
-        <a href={contact.linkedin_url} target="_blank" rel="noreferrer" className="text-blue">
+        <a
+          href={contact.linkedin_url}
+          target="_blank"
+          rel="noreferrer"
+          className="text-blue hover:underline"
+        >
           LinkedIn
         </a>
       ) : null}
+      <OutreachButton contact={contact} disabled />
     </div>
   );
 }
@@ -329,9 +368,15 @@ export function BrokerDealerDetailClient({ brokerDealerId }: { brokerDealerId: s
     setIsEnriching(true);
     setEnrichError(null);
     try {
+      const directOwners = profile?.broker_dealer.direct_owners ?? [];
+      const executiveOfficers = profile?.broker_dealer.executive_officers ?? [];
+      const officers = dedupOfficers([
+        ...directOwners.map(toOfficerEntity),
+        ...executiveOfficers.map(toOfficerEntity),
+      ]);
       const contacts = await apiRequest<BrokerDealerProfileResponse["executive_contacts"]>(
         `/api/v1/broker-dealers/${brokerDealerId}/enrich`,
-        { method: "POST" }
+        { method: "POST", body: JSON.stringify({ officers }) }
       );
       setProfile((c) => (c ? { ...c, executive_contacts: contacts } : c));
     } catch (err) {
@@ -720,7 +765,7 @@ export function BrokerDealerDetailClient({ brokerDealerId }: { brokerDealerId: s
                   disabled={isEnriching}
                   className="inline-flex items-center gap-1.5 rounded-full bg-navy px-3 py-1.5 text-xs font-medium text-white hover:bg-navy/90 disabled:cursor-not-allowed disabled:opacity-50"
                 >
-                  {isEnriching ? "Generating…" : "Generate More Details"}
+                  {isEnriching ? "Generating… (Apollo, Hunter, Snov)" : "Generate More Details"}
                 </button>
               }
             >
@@ -744,7 +789,7 @@ export function BrokerDealerDetailClient({ brokerDealerId }: { brokerDealerId: s
                           {owner.ownership_pct ? (
                             <p className="mt-1 text-xs text-slate-500">Ownership: {owner.ownership_pct}</p>
                           ) : null}
-                          {matched ? <ContactBadges contact={matched} /> : null}
+                          {matched ? <ContactRow contact={matched} /> : null}
                         </div>
                       );
                     })}
@@ -763,7 +808,7 @@ export function BrokerDealerDetailClient({ brokerDealerId }: { brokerDealerId: s
                         <div key={`officer-${i}`} className="rounded-2xl bg-slate-50 px-4 py-3 text-sm text-slate-600">
                           <p className="font-medium text-navy">{officer.name}</p>
                           {officer.title ? <p className="mt-1">{officer.title}</p> : null}
-                          {matched ? <ContactBadges contact={matched} /> : null}
+                          {matched ? <ContactRow contact={matched} /> : null}
                         </div>
                       );
                     })}
@@ -780,7 +825,7 @@ export function BrokerDealerDetailClient({ brokerDealerId }: { brokerDealerId: s
                       <div key={`contact-${contact.id}`} className="rounded-2xl bg-slate-50 px-4 py-3 text-sm text-slate-600">
                         <p className="font-medium text-navy">{contact.name}</p>
                         <p className="mt-1">{contact.title}</p>
-                        <ContactBadges contact={contact} />
+                        <ContactRow contact={contact} />
                         <p className="mt-1 text-xs uppercase tracking-[0.18em] text-slate-400">
                           {contact.source} • {formatDate(contact.enriched_at)}
                         </p>
