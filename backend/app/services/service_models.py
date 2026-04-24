@@ -157,6 +157,12 @@ class FinancialMetricRecord:
     total_assets: float | None
     required_min_capital: float | None
     source_filing_url: str | None
+    # Defaults to "parsed" so legacy call sites that construct this dataclass
+    # (e.g. CSV loader, tests) without thinking about the review queue still
+    # land in the successful-extraction bucket. The financial pipeline's
+    # write path in focus_reports.py overrides this explicitly via
+    # classify_financial_extraction_status.
+    extraction_status: str = "parsed"
 
 
 @dataclass(slots=True)

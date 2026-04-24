@@ -87,6 +87,10 @@ class FinancialMetricItem(BaseModel):
     total_assets: float | None
     required_min_capital: float | None
     source_filing_url: str | None
+    # Read-only tag. Always set server-side by the financial pipeline
+    # (app.services.extraction_status). Clients must not POST or PATCH
+    # this field; the backend has no write path for it.
+    extraction_status: str = "parsed"
     created_at: datetime
 
 
