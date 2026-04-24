@@ -14,7 +14,85 @@ import { LeadPriorityBadge } from "@/components/master-list/lead-priority-badge"
 import { apiRequest } from "@/lib/api";
 import { parseArrangementBlob } from "@/lib/arrangements";
 import { formatCurrency, formatDate, formatPercent } from "@/lib/format";
-import type { BrokerDealerProfileResponse, FocusCeoExtractionResponse } from "@/lib/types";
+import type { BrokerDealerProfileResponse, ExecutiveContactItem, FocusCeoExtractionResponse } from "@/lib/types";
+
+/* ── Name matching + contact helpers ───────────────────────── */
+
+const NAME_SUFFIXES = new Set(["jr", "sr", "ii", "iii", "iv", "v"]);
+
+function stripSuffix(token: string): string {
+  return token.replace(/[^a-z]/gi, "").toLowerCase();
+}
+
+function parseFinraName(display: string | null | undefined): { first: string; last: string } | null {
+  if (!display) return null;
+  const trimmed = display.trim();
+  const commaIdx = trimmed.indexOf(",");
+  if (commaIdx < 0) return null;
+  const last = trimmed.slice(0, commaIdx).trim().toLowerCase();
+  const firstTokens = trimmed
+    .slice(commaIdx + 1)
+    .trim()
+    .split(/\s+/)
+    .filter(Boolean);
+  const first = (firstTokens[0] ?? "").toLowerCase();
+  if (!last || !first) return null;
+  return { last, first };
+}
+
+function parseApolloName(name: string | null | undefined): { first: string; last: string } | null {
+  if (!name) return null;
+  const tokens = name.trim().split(/\s+/).filter(Boolean);
+  if (tokens.length < 2) return null;
+  let lastIdx = tokens.length - 1;
+  while (lastIdx > 0 && NAME_SUFFIXES.has(stripSuffix(tokens[lastIdx]))) {
+    lastIdx -= 1;
+  }
+  const first = tokens[0].toLowerCase();
+  const last = tokens[lastIdx].toLowerCase();
+  if (!first || !last || first === last) return null;
+  return { first, last };
+}
+
+function isOrgLevelContact(contact: ExecutiveContactItem): boolean {
+  return contact.title === "Company (Organization Profile)";
+}
+
+function nameMatches(finraDisplay: string, contact: ExecutiveContactItem): boolean {
+  if (isOrgLevelContact(contact)) return false;
+  const finra = parseFinraName(finraDisplay);
+  if (!finra) return false;
+  const apollo = parseApolloName(contact.name);
+  if (!apollo) return false;
+  return finra.last === apollo.last && finra.first === apollo.first;
+}
+
+function ContactBadges({
+  contact,
+}: {
+  contact: Pick<ExecutiveContactItem, "email" | "phone" | "linkedin_url">;
+}) {
+  if (!contact.email && !contact.phone && !contact.linkedin_url) return null;
+  return (
+    <div className="mt-2 flex flex-wrap gap-3 text-sm">
+      {contact.email ? (
+        <a href={`mailto:${contact.email}`} className="text-blue">
+          {contact.email}
+        </a>
+      ) : null}
+      {contact.phone ? (
+        <a href={`tel:${contact.phone}`} className="text-slate-600">
+          {contact.phone}
+        </a>
+      ) : null}
+      {contact.linkedin_url ? (
+        <a href={contact.linkedin_url} target="_blank" rel="noreferrer" className="text-blue">
+          LinkedIn
+        </a>
+      ) : null}
+    </div>
+  );
+}
 
 /* ── Shared sub-components ─────────────────────────────────── */
 
@@ -81,11 +159,24 @@ function FinancialTrendChart({ points }: { points: Array<{ label: string; value:
   );
 }
 
-function QuadrantCard({ eyebrow, title, children }: { eyebrow: string; title: string; children: ReactNode }) {
+function QuadrantCard({
+  eyebrow,
+  title,
+  headerAction,
+  children,
+}: {
+  eyebrow: string;
+  title: string;
+  headerAction?: ReactNode;
+  children: ReactNode;
+}) {
   return (
     <article className="rounded-[28px] border border-white/80 bg-white/92 p-6 shadow-shell">
       <p className="text-sm font-medium uppercase tracking-[0.24em] text-blue">{eyebrow}</p>
-      <h2 className="mt-3 text-2xl font-semibold text-navy">{title}</h2>
+      <div className="mt-3 flex flex-wrap items-center justify-between gap-3">
+        <h2 className="text-2xl font-semibold text-navy">{title}</h2>
+        {headerAction}
+      </div>
       <div className="mt-5">{children}</div>
     </article>
   );
@@ -601,72 +692,106 @@ export function BrokerDealerDetailClient({ brokerDealerId }: { brokerDealerId: s
         </QuadrantCard>
 
         {/* ── BOTTOM-LEFT: People (FOCUS Report & CRD Owners) ── */}
-        <QuadrantCard eyebrow="People" title="Owners, officers, and contacts">
-          {/* Direct Owners from FINRA CRD */}
-          {bd.direct_owners && bd.direct_owners.length > 0 ? (
-            <div className="mb-4">
-              <p className="text-sm font-medium text-navy">Direct Owners</p>
-              <div className="mt-2 space-y-2">
-                {bd.direct_owners.map((owner, i) => (
-                  <div key={`owner-${i}`} className="rounded-2xl bg-slate-50 px-4 py-3 text-sm text-slate-600">
-                    <p className="font-medium text-navy">{owner.name}</p>
-                    {owner.title ? <p className="mt-1">{owner.title}</p> : null}
-                    {owner.ownership_pct ? <p className="mt-1 text-xs text-slate-500">Ownership: {owner.ownership_pct}</p> : null}
-                  </div>
-                ))}
-              </div>
-            </div>
-          ) : null}
+        {(() => {
+          const finraNames = [
+            ...(bd.direct_owners ?? []).map((o) => o.name),
+            ...(bd.executive_officers ?? []).map((o) => o.name),
+          ];
+          const matchedContactIds = new Set<number>();
+          for (const contact of profile.executive_contacts) {
+            if (finraNames.some((n) => nameMatches(n, contact))) {
+              matchedContactIds.add(contact.id);
+            }
+          }
+          const matchForFinra = (finraDisplay: string): ExecutiveContactItem | undefined =>
+            profile.executive_contacts.find((c) => nameMatches(finraDisplay, c));
+          const additionalContacts = profile.executive_contacts.filter(
+            (c) => !matchedContactIds.has(c.id),
+          );
 
-          {/* Executive Officers from FINRA CRD */}
-          {bd.executive_officers && bd.executive_officers.length > 0 ? (
-            <div className="mb-4">
-              <p className="text-sm font-medium text-navy">Executive Officers</p>
-              <div className="mt-2 space-y-2">
-                {bd.executive_officers.map((officer, i) => (
-                  <div key={`officer-${i}`} className="rounded-2xl bg-slate-50 px-4 py-3 text-sm text-slate-600">
-                    <p className="font-medium text-navy">{officer.name}</p>
-                    {officer.title ? <p className="mt-1">{officer.title}</p> : null}
-                  </div>
-                ))}
-              </div>
-            </div>
-          ) : null}
-
-          {/* Enriched Executive Contacts (Apollo / ZoomInfo) */}
-          <div className="mb-2 flex items-center justify-between gap-3">
-            <p className="text-sm font-medium text-navy">Enriched Contacts</p>
-            <button
-              type="button"
-              onClick={() => void enrichContacts()}
-              disabled={isEnriching}
-              className="rounded-2xl bg-navy px-4 py-2 text-sm font-medium text-white disabled:opacity-60"
+          return (
+            <QuadrantCard
+              eyebrow="People"
+              title="Owners, officers, and contacts"
+              headerAction={
+                <button
+                  type="button"
+                  onClick={() => void enrichContacts()}
+                  disabled={isEnriching}
+                  className="inline-flex items-center gap-1.5 rounded-full bg-navy px-3 py-1.5 text-xs font-medium text-white hover:bg-navy/90 disabled:cursor-not-allowed disabled:opacity-50"
+                >
+                  {isEnriching ? "Generating…" : "Generate More Details"}
+                </button>
+              }
             >
-              {isEnriching ? "Refreshing..." : "Refresh contacts"}
-            </button>
-          </div>
-          {enrichError ? (
-            <div className="mb-3 rounded-2xl border border-amber-200 bg-amber-50 px-4 py-3 text-sm text-amber-700">{enrichError}</div>
-          ) : null}
-          <div className="space-y-2">
-            {profile.executive_contacts.length === 0 && !enrichError ? (
-              <div className="rounded-2xl bg-slate-50 px-4 py-6 text-sm text-slate-500">No enriched contacts loaded yet.</div>
-            ) : (
-              profile.executive_contacts.map((contact) => (
-                <div key={`contact-${contact.id}`} className="rounded-2xl bg-slate-50 px-4 py-3 text-sm text-slate-600">
-                  <p className="font-medium text-navy">{contact.name}</p>
-                  <p className="mt-1">{contact.title}</p>
-                  <div className="mt-2 flex flex-wrap gap-3">
-                    {contact.email ? <a href={`mailto:${contact.email}`} className="text-blue">{contact.email}</a> : null}
-                    {contact.phone ? <span>{contact.phone}</span> : null}
-                    {contact.linkedin_url ? <a href={contact.linkedin_url} target="_blank" rel="noreferrer" className="text-blue">LinkedIn</a> : null}
-                  </div>
-                  <p className="mt-1 text-xs uppercase tracking-[0.18em] text-slate-400">{contact.source} • {formatDate(contact.enriched_at)}</p>
+              {enrichError ? (
+                <div className="mb-3 rounded-2xl border border-amber-200 bg-amber-50 px-4 py-3 text-sm text-amber-700">
+                  {enrichError}
                 </div>
-              ))
-            )}
-          </div>
-        </QuadrantCard>
+              ) : null}
+
+              {/* Direct Owners from FINRA CRD */}
+              {bd.direct_owners && bd.direct_owners.length > 0 ? (
+                <div className="mb-4">
+                  <p className="text-sm font-medium text-navy">Direct Owners</p>
+                  <div className="mt-2 space-y-2">
+                    {bd.direct_owners.map((owner, i) => {
+                      const matched = matchForFinra(owner.name);
+                      return (
+                        <div key={`owner-${i}`} className="rounded-2xl bg-slate-50 px-4 py-3 text-sm text-slate-600">
+                          <p className="font-medium text-navy">{owner.name}</p>
+                          {owner.title ? <p className="mt-1">{owner.title}</p> : null}
+                          {owner.ownership_pct ? (
+                            <p className="mt-1 text-xs text-slate-500">Ownership: {owner.ownership_pct}</p>
+                          ) : null}
+                          {matched ? <ContactBadges contact={matched} /> : null}
+                        </div>
+                      );
+                    })}
+                  </div>
+                </div>
+              ) : null}
+
+              {/* Executive Officers from FINRA CRD */}
+              {bd.executive_officers && bd.executive_officers.length > 0 ? (
+                <div className="mb-4">
+                  <p className="text-sm font-medium text-navy">Executive Officers</p>
+                  <div className="mt-2 space-y-2">
+                    {bd.executive_officers.map((officer, i) => {
+                      const matched = matchForFinra(officer.name);
+                      return (
+                        <div key={`officer-${i}`} className="rounded-2xl bg-slate-50 px-4 py-3 text-sm text-slate-600">
+                          <p className="font-medium text-navy">{officer.name}</p>
+                          {officer.title ? <p className="mt-1">{officer.title}</p> : null}
+                          {matched ? <ContactBadges contact={matched} /> : null}
+                        </div>
+                      );
+                    })}
+                  </div>
+                </div>
+              ) : null}
+
+              {/* Additional contacts (org row + Apollo people not in FINRA lists) */}
+              {additionalContacts.length > 0 ? (
+                <div>
+                  <p className="text-sm font-medium text-navy">Additional contacts</p>
+                  <div className="mt-2 space-y-2">
+                    {additionalContacts.map((contact) => (
+                      <div key={`contact-${contact.id}`} className="rounded-2xl bg-slate-50 px-4 py-3 text-sm text-slate-600">
+                        <p className="font-medium text-navy">{contact.name}</p>
+                        <p className="mt-1">{contact.title}</p>
+                        <ContactBadges contact={contact} />
+                        <p className="mt-1 text-xs uppercase tracking-[0.18em] text-slate-400">
+                          {contact.source} • {formatDate(contact.enriched_at)}
+                        </p>
+                      </div>
+                    ))}
+                  </div>
+                </div>
+              ) : null}
+            </QuadrantCard>
+          );
+        })()}
 
         {/* ── BOTTOM-RIGHT: Relationship (Clearing / Introducing) ── */}
         <QuadrantCard eyebrow="Relationship" title="Clearing and introducing mapping">
