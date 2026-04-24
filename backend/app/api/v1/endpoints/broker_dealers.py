@@ -2,8 +2,9 @@ from __future__ import annotations
 
 from datetime import datetime, time, timezone
 
-from fastapi import APIRouter, Depends, HTTPException, Query, status
+from fastapi import APIRouter, Body, Depends, HTTPException, Query, status
 from fastapi.responses import FileResponse
+from pydantic import BaseModel, Field
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.config import settings
@@ -29,6 +30,7 @@ from app.services.alerts import AlertRepository
 from app.services.auth import get_current_user
 from app.services.broker_dealers import BrokerDealerRepository
 from app.services.classification import apply_classification_to_all
+from app.services.contact_discovery.orchestrator import discover_contact
 from app.services.contacts import ContactEnrichmentUnavailableError, ExecutiveContactService
 from app.services.finra import FinraService
 from app.services.finra_pdf_service import (
@@ -266,20 +268,141 @@ async def get_adjacent_broker_dealers(
     return {"prev_id": prev_id, "next_id": next_id}
 
 
+class EnrichOfficerRequest(BaseModel):
+    """One officer the frontend wants discovered via the multi-provider chain.
+
+    ``type="person"`` requires ``first_name`` and ``last_name``; ``title`` is
+    optional but preserved on the resulting row so the UI can render the
+    FINRA-derived role alongside the provider-found email / phone.
+
+    ``type="organization"`` requires ``org_name`` (defaults to the firm's
+    own name if omitted). Used for sole-member / parent-holding officer rows
+    that aren't human beings.
+    """
+
+    type: str = Field(pattern="^(person|organization)$")
+    first_name: str | None = None
+    last_name: str | None = None
+    org_name: str | None = None
+    title: str | None = None
+
+
+class EnrichRequestBody(BaseModel):
+    officers: list[EnrichOfficerRequest] = Field(default_factory=list)
+
+
 @router.post("/{broker_dealer_id}/enrich", response_model=list[ExecutiveContactItem])
 async def enrich_broker_dealer_contacts(
     broker_dealer_id: int,
+    body: EnrichRequestBody | None = Body(default=None),
     _: AuthenticatedUser = Depends(get_current_user),
     db: AsyncSession = Depends(get_db_session),
 ) -> list[ExecutiveContactItem]:
+    """Enrich executive contacts for a firm.
+
+    Phase 1: run the existing Apollo-based company search (cheap and often
+    catches officers Apollo already has). Phase 2: for each officer the
+    frontend sent that didn't get matched in phase 1, run the multi-provider
+    discovery chain (Apollo match -> Hunter -> Snov) anchored on the firm's
+    website domain.
+
+    Backward compat: when no ``officers`` list is provided the endpoint
+    behaves exactly as before -- pure company-level search, no per-officer
+    fan-out. That lets the frontend roll out the richer body incrementally.
+    """
     broker_dealer = await repository.get_broker_dealer(db, broker_dealer_id)
     if broker_dealer is None:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Broker-dealer not found.")
+
     try:
         contacts = await contact_service.enrich_contacts(db, broker_dealer)
     except ContactEnrichmentUnavailableError as exc:
         raise HTTPException(status_code=status.HTTP_503_SERVICE_UNAVAILABLE, detail=str(exc)) from exc
+
+    officers = list(body.officers) if body else []
+    if officers:
+        domain = _resolve_domain(broker_dealer)
+        existing_names = {_normalise_name(contact.name) for contact in contacts}
+        discovered = 0
+        for officer in officers:
+            entity = _officer_to_entity(officer, broker_dealer, domain)
+            if entity is None:
+                continue
+            if _normalise_name(entity["cache_name"]) in existing_names:
+                continue
+            row = await discover_contact(entity, bd_id=broker_dealer.id, session=db)
+            if row is not None:
+                discovered += 1
+                existing_names.add(_normalise_name(row.name))
+        if discovered:
+            await db.commit()
+            contacts = await contact_service.list_contacts(db, broker_dealer.id)
+
     return [ExecutiveContactItem.model_validate(item) for item in contacts]
+
+
+def _resolve_domain(broker_dealer: BrokerDealer) -> str | None:
+    """Extract a bare ``example.com`` domain from the firm's website.
+
+    Handles ``https://www.example.com/path?x=1`` -> ``example.com`` and
+    leaves an already-bare ``example.com`` alone. Returns ``None`` when the
+    firm has no website on file so downstream providers can skip cleanly.
+    """
+    website = (broker_dealer.website or "").strip()
+    if not website:
+        return None
+    candidate = website
+    if "://" in candidate:
+        candidate = candidate.split("://", 1)[1]
+    candidate = candidate.split("/", 1)[0].strip().lower()
+    if candidate.startswith("www."):
+        candidate = candidate[4:]
+    return candidate or None
+
+
+def _officer_to_entity(
+    officer: EnrichOfficerRequest,
+    broker_dealer: BrokerDealer,
+    domain: str | None,
+) -> dict[str, object] | None:
+    """Translate an EnrichOfficerRequest into the orchestrator's entity shape.
+
+    Returns ``None`` when the officer is missing the fields its type requires
+    (a person without first+last, an org entry that resolves to an empty
+    name) so the endpoint can skip it without a provider round-trip.
+    """
+    if officer.type == "person":
+        first = (officer.first_name or "").strip()
+        last = (officer.last_name or "").strip()
+        if not first or not last:
+            return None
+        return {
+            "type": "person",
+            "first_name": first,
+            "last_name": last,
+            "org_name": broker_dealer.name,
+            "title": officer.title,
+            "domain": domain,
+            "cache_name": f"{first} {last}",
+        }
+
+    # organisation
+    org_name = (officer.org_name or broker_dealer.name or "").strip()
+    if not org_name:
+        return None
+    return {
+        "type": "organization",
+        "first_name": None,
+        "last_name": None,
+        "org_name": org_name,
+        "title": officer.title,
+        "domain": domain,
+        "cache_name": org_name,
+    }
+
+
+def _normalise_name(name: str | None) -> str:
+    return (name or "").strip().lower()
 
 
 @router.post("/{broker_dealer_id}/extract-focus-ceo", response_model=FocusCeoExtractionResponse)

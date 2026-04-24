@@ -68,6 +68,15 @@ class Settings(BaseSettings):
     contact_enrichment_provider: str = "disabled"
     apollo_api_key: str | None = None
     zoominfo_api_key: str | None = None
+    # Multi-provider contact discovery chain used by the "Generate More Details"
+    # button on the firm detail page. The orchestrator walks providers in the
+    # comma-separated order below; the first result with ``confidence >=
+    # contact_discovery_min_confidence`` wins. Keys (``hunter_api_key``,
+    # ``snov_client_id``, ``snov_client_secret``) are declared further down
+    # because the existing email-extractor module already depends on them.
+    contact_discovery_chain: str = "apollo_match,hunter,snov"
+    contact_discovery_min_confidence: float = 60.0
+    contact_discovery_timeout: float = 10.0
     gemini_api_key: str | None = None
     gemini_api_base: str = "https://generativelanguage.googleapis.com/v1beta"
     gemini_pdf_model: str = "gemini-2.5-pro"
