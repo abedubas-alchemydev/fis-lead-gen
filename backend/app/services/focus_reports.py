@@ -17,6 +17,11 @@ from app.models.broker_dealer import BrokerDealer
 logger = logging.getLogger(__name__)
 from app.models.financial_metric import FinancialMetric
 from app.models.pipeline_run import PipelineRun
+from app.services.extraction_status import (
+    STATUS_NEEDS_REVIEW,
+    STATUS_PARSED,
+    classify_financial_extraction_status,
+)
 from app.services.gemini_responses import (
     GeminiConfigurationError,
     GeminiExtractionError,
@@ -37,7 +42,12 @@ class FinancialExtractionResult:
     skipped_no_url: int = 0
     skipped_no_pdf: int = 0
     skipped_extraction_error: int = 0
+    # Counts rows that couldn't be persisted at all -- Gemini produced no
+    # net_capital / no report_date, so the NOT NULL columns rule them out.
+    # Rows that DID have net_capital but below the confidence threshold now
+    # land in ``records`` tagged ``needs_review`` instead of being dropped.
     skipped_low_confidence: int = 0
+    needs_review_count: int = 0
 
 
 class FocusReportService:
@@ -131,6 +141,7 @@ class FocusReportService:
                             total_assets=record.total_assets,
                             required_min_capital=record.required_min_capital,
                             source_filing_url=record.source_filing_url,
+                            extraction_status=record.extraction_status,
                         )
                         for record in records
                     ]
@@ -170,7 +181,8 @@ class FocusReportService:
         provider_descriptor = self._provider_descriptor()
         summary = (
             f"Processed {extraction.target_count} filings via {provider_descriptor}. "
-            f"Records extracted: {len(extraction.records)}. "
+            f"Records extracted: {len(extraction.records)} "
+            f"({extraction.needs_review_count} needs_review). "
             f"Skipped: {extraction.skipped_no_url} no URL, "
             f"{extraction.skipped_no_pdf} no PDF, "
             f"{extraction.skipped_extraction_error} errors, "
@@ -186,6 +198,7 @@ class FocusReportService:
             {
                 "summary": summary,
                 "records": len(extraction.records),
+                "needs_review": extraction.needs_review_count,
                 "skipped_no_url": extraction.skipped_no_url,
                 "skipped_no_pdf": extraction.skipped_no_pdf,
                 "skipped_extraction_error": extraction.skipped_extraction_error,
@@ -372,23 +385,35 @@ class FocusReportService:
                     skipped_extraction_error += 1
                     continue
 
-                # Per-year evaluation: the multi-year response is an array of
-                # per-fiscal-year records, each independently eligible. A firm
-                # may have year N as success and year N-1 as low-confidence.
-                # skipped_low_confidence and skipped_extraction_error count
-                # year-grain; skipped_no_url / skipped_no_pdf remain firm-grain
-                # because "no PDF to try" has no per-year analogue.
+                # Per-year evaluation (#54 multi-year + #56/Fix G tagging):
+                # the multi-year response is an array of per-fiscal-year
+                # records, each independently eligible. A firm may have year N
+                # pass confidence while year N-1 lands as needs_review.
+                # Counter catalog:
+                #   - records list (parsed + needs_review): YEAR-grain rows
+                #     persisted; parsed vs needs_review determined by the
+                #     confidence classifier. needs_review_count is derived
+                #     from the list after the loop.
+                #   - skipped_low_confidence: YEAR-grain for rows that can't
+                #     persist at all because net_capital is NULL (NOT NULL
+                #     column rules them out regardless of tag).
+                #   - skipped_extraction_error: PDF- or year-grain for
+                #     provider errors, empty arrays, unparseable report_date.
+                #   - skipped_no_url / skipped_no_pdf: FIRM-grain.
+                # Invariant: (parsed rows) + needs_review_count + skipped_no_url
+                # + skipped_no_pdf + skipped_extraction_error +
+                # skipped_low_confidence == total units of work attempted.
                 for extraction in extractions:
-                    if (
-                        extraction.net_capital is None
-                        or extraction.confidence_score < settings.financial_extraction_min_confidence
-                    ):
+                    # Rows with NULL net_capital can't be persisted at ANY
+                    # extraction_status because net_capital is NOT NULL.
+                    # Route to skipped_low_confidence -- "unpersistable" is
+                    # its own signal, distinct from provider errors.
+                    if extraction.net_capital is None:
                         logger.warning(
-                            "Financial extraction skipped BD %s: net_capital=%s confidence=%s below min_confidence=%s",
+                            "Financial extraction skipped BD %s: net_capital=None "
+                            "(confidence=%s) cannot persist under NOT NULL constraint",
                             broker_dealer.id,
-                            extraction.net_capital,
                             extraction.confidence_score,
-                            settings.financial_extraction_min_confidence,
                         )
                         skipped_low_confidence += 1
                         continue
@@ -406,11 +431,28 @@ class FocusReportService:
                     # year N (e.g. an amendment + its original), keep the first
                     # parse of that date. uq_financial_metrics_bd_report_date
                     # would reject the second insert anyway, but the set skip
-                    # saves a wasted ORM flush.
+                    # saves a wasted ORM flush. Not counted as a skip bucket --
+                    # already attributed to the first occurrence.
                     date_key = report_date.isoformat()
                     if date_key in seen_dates:
                         continue
                     seen_dates.add(date_key)
+
+                    # Tag based on LLM confidence (#56 / Fix G). Below-threshold
+                    # rows with a valid net_capital still persist, tagged
+                    # 'needs_review', so the review queue can surface them
+                    # instead of a silent drop. See app.services.extraction_status.
+                    extraction_status = classify_financial_extraction_status(
+                        confidence_score=extraction.confidence_score,
+                        min_confidence=settings.financial_extraction_min_confidence,
+                    )
+                    if extraction_status == STATUS_NEEDS_REVIEW:
+                        logger.warning(
+                            "Financial extraction BD %s tagged needs_review: confidence=%s below min_confidence=%s",
+                            broker_dealer.id,
+                            extraction.confidence_score,
+                            settings.financial_extraction_min_confidence,
+                        )
 
                     records.append(
                         FinancialMetricRecord(
@@ -421,22 +463,29 @@ class FocusReportService:
                             total_assets=extraction.total_assets,
                             required_min_capital=extraction.required_min_capital,
                             source_filing_url=pdf_record.source_pdf_url or pdf_record.source_filing_url,
+                            extraction_status=extraction_status,
                         )
                     )
 
+        needs_review_count = sum(
+            1 for record in records if record.extraction_status == STATUS_NEEDS_REVIEW
+        )
         logger.info(
-            "Financial extraction complete: %d/%d extracted. Skipped: %d no URL, %d no PDF, %d errors, %d low confidence.",
-            len(records), total, skipped_no_url, skipped_no_pdf, skipped_extraction_error, skipped_low_confidence,
+            "Financial extraction complete: %d/%d extracted (%d needs_review). "
+            "Skipped: %d no URL, %d no PDF, %d errors, %d low confidence (unpersistable).",
+            len(records), total, needs_review_count,
+            skipped_no_url, skipped_no_pdf, skipped_extraction_error, skipped_low_confidence,
         )
         logger.warning(
             "Financial extraction summary: total=%d skipped_no_url=%d "
             "skipped_no_pdf=%d skipped_extraction_error=%d "
-            "skipped_low_confidence=%d records=%d",
+            "skipped_low_confidence=%d needs_review=%d records=%d",
             total,
             skipped_no_url,
             skipped_no_pdf,
             skipped_extraction_error,
             skipped_low_confidence,
+            needs_review_count,
             len(records),
         )
         return FinancialExtractionResult(
@@ -446,6 +495,7 @@ class FocusReportService:
             skipped_no_pdf=skipped_no_pdf,
             skipped_extraction_error=skipped_extraction_error,
             skipped_low_confidence=skipped_low_confidence,
+            needs_review_count=needs_review_count,
         )
 
     def _apply_batch_window(self, broker_dealers: list[BrokerDealer], *, offset: int, limit: int | None) -> list[BrokerDealer]:
@@ -511,8 +561,19 @@ class FocusReportService:
         )
 
     async def _refresh_broker_dealer_rollups(self, db: AsyncSession, broker_dealers: list[BrokerDealer]) -> None:
+        # Filter to parsed rows only. needs_review rows carry below-threshold
+        # confidence; feeding them into yoy/health rollups would corrupt the
+        # master-list numbers with low-quality data. The review-queue surface
+        # (Phase 2B-bis) reads needs_review rows directly, not through this
+        # rollup.
         metrics_by_bd: dict[int, list[FinancialMetric]] = {}
-        all_metrics = (await db.execute(select(FinancialMetric).order_by(FinancialMetric.report_date.desc()))).scalars().all()
+        all_metrics = (
+            await db.execute(
+                select(FinancialMetric)
+                .where(FinancialMetric.extraction_status == STATUS_PARSED)
+                .order_by(FinancialMetric.report_date.desc())
+            )
+        ).scalars().all()
         for metric in all_metrics:
             metrics_by_bd.setdefault(metric.bd_id, []).append(metric)
 
