@@ -9,11 +9,13 @@ import { useRouter } from "next/navigation";
 import { AlertPriorityBadge } from "@/components/alerts/alert-priority-badge";
 import { ClearingTypeBadge } from "@/components/master-list/clearing-type-badge";
 import { CompetitorBadge } from "@/components/master-list/competitor-badge";
+import { FavoriteButton } from "@/components/master-list/favorite-button";
 import { HealthBadge } from "@/components/master-list/health-badge";
 import { LeadPriorityBadge } from "@/components/master-list/lead-priority-badge";
 import { OutreachButton } from "@/components/master-list/outreach-button";
 import { apiRequest } from "@/lib/api";
 import { parseArrangementBlob } from "@/lib/arrangements";
+import { recordVisit } from "@/lib/favorites";
 import { formatCurrency, formatDate, formatPercent } from "@/lib/format";
 import type { BrokerDealerProfileResponse, ExecutiveContactItem, FocusCeoExtractionResponse } from "@/lib/types";
 
@@ -308,6 +310,16 @@ export function BrokerDealerDetailClient({ brokerDealerId }: { brokerDealerId: s
     }).catch(() => {});
   }, [brokerDealerId]);
 
+  // Fire-and-forget visit tracking. The backend upserts on (user_id, bd_id)
+  // so a failure here never blocks render or mutates the detail payload.
+  useEffect(() => {
+    const numericId = Number(brokerDealerId);
+    if (!Number.isFinite(numericId)) return;
+    recordVisit(numericId).catch(() => {
+      /* swallow — visit history is non-critical */
+    });
+  }, [brokerDealerId]);
+
   useEffect(() => {
     let active = true;
     async function loadProfile() {
@@ -446,7 +458,10 @@ export function BrokerDealerDetailClient({ brokerDealerId }: { brokerDealerId: s
         <p className="text-sm uppercase tracking-[0.24em] text-white/60">Firm Detail</p>
         <div className="mt-3 flex flex-col gap-5 xl:flex-row xl:items-start xl:justify-between">
           <div>
-            <h1 className="text-3xl font-semibold">{bd.name}</h1>
+            <div className="flex flex-wrap items-center gap-3">
+              <h1 className="text-3xl font-semibold">{bd.name}</h1>
+              <FavoriteButton bdId={bd.id} initialFavorited={profile.is_favorited} />
+            </div>
             <p className="mt-3 text-sm text-white/70">
               CIK {bd.cik ?? "N/A"} | CRD {bd.crd_number ?? "Pending"} | {bd.city ?? "Unknown"}, {bd.state ?? "Unknown"}
             </p>
