@@ -40,12 +40,6 @@ const columns = [
 // ── Segmented option catalogs ─────────────────────────────────────────────
 // Kept as module-level constants so the arrays are referentially stable
 // between renders (cheap child renders inside Segmented).
-const STATUS_ITEMS: ReadonlyArray<SegmentedItem> = [
-  { value: "All", label: "All" },
-  { value: "Active", label: "Active" },
-  { value: "Inactive", label: "Inactive" },
-];
-
 const HEALTH_ITEMS: ReadonlyArray<SegmentedItem> = [
   { value: "All", label: "All" },
   { value: "healthy", label: "Healthy", dot: "healthy" },
@@ -167,7 +161,6 @@ export function MasterListWorkspaceClient({
   const [selectedStates, setSelectedStates] = useState<string[]>([]);
   const [searchInput, setSearchInput] = useState("");
   const [search, setSearch] = useState("");
-  const [statusFilter, setStatusFilter] = useState("All");
   const [healthFilter, setHealthFilter] = useState("All");
   const [leadPriorityFilter, setLeadPriorityFilter] = useState(initialLeadPriority);
   const [clearingTypeFilter, setClearingTypeFilter] = useState(initialClearingType);
@@ -199,7 +192,6 @@ export function MasterListWorkspaceClient({
       buildApiPath("/api/v1/broker-dealers", {
         search,
         state: selectedStates,
-        status: statusFilter === "All" ? undefined : [statusFilter],
         health: healthFilter === "All" ? undefined : [healthFilter],
         lead_priority: leadPriorityFilter === "All" ? undefined : [leadPriorityFilter],
         clearing_partner: clearingPartnerFilter ? [clearingPartnerFilter] : undefined,
@@ -213,7 +205,6 @@ export function MasterListWorkspaceClient({
     [
       search,
       selectedStates,
-      statusFilter,
       healthFilter,
       leadPriorityFilter,
       clearingPartnerFilter,
@@ -339,7 +330,6 @@ export function MasterListWorkspaceClient({
     setSelectedStates([]);
     setSearch("");
     setSearchInput("");
-    setStatusFilter("All");
     setHealthFilter("All");
     setLeadPriorityFilter("All");
     setClearingPartnerFilter("");
@@ -353,7 +343,6 @@ export function MasterListWorkspaceClient({
   const activeFilterCount = useMemo(() => {
     let count = 0;
     if (selectedStates.length > 0) count += 1;
-    if (statusFilter !== "All") count += 1;
     if (healthFilter !== "All") count += 1;
     if (leadPriorityFilter !== "All") count += 1;
     if (clearingPartnerFilter !== "") count += 1;
@@ -361,7 +350,6 @@ export function MasterListWorkspaceClient({
     return count;
   }, [
     selectedStates,
-    statusFilter,
     healthFilter,
     leadPriorityFilter,
     clearingPartnerFilter,
@@ -575,21 +563,7 @@ export function MasterListWorkspaceClient({
           </div>
         </div>
 
-        <div className="grid gap-4 lg:grid-cols-3">
-          <div>
-            <p className="mb-1.5 text-[11px] font-semibold uppercase tracking-[0.08em] text-[var(--text-muted,#94a3b8)]">
-              Registration
-            </p>
-            <Segmented
-              value={statusFilter}
-              onChange={(next) => {
-                setStatusFilter(next);
-                setPage(1);
-              }}
-              items={STATUS_ITEMS}
-              ariaLabel="Registration status"
-            />
-          </div>
+        <div className="grid gap-4 lg:grid-cols-2">
           <div>
             <p className="mb-1.5 text-[11px] font-semibold uppercase tracking-[0.08em] text-[var(--text-muted,#94a3b8)]">
               Financial Health
@@ -673,16 +647,6 @@ export function MasterListWorkspaceClient({
                 }}
               >
                 Type: {clearingTypeLabel(clearingTypeFilter)}
-              </Tag>
-            ) : null}
-            {statusFilter !== "All" ? (
-              <Tag
-                onDismiss={() => {
-                  setStatusFilter("All");
-                  setPage(1);
-                }}
-              >
-                Status: {statusFilter}
               </Tag>
             ) : null}
           </div>
