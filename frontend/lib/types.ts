@@ -240,6 +240,11 @@ export type BrokerDealerProfileResponse = {
   executive_contacts: ExecutiveContactItem[];
   registration_compliance: RegistrationComplianceSummary;
   deficiency_status: DeficiencyStatusSummary;
+  // Per-user favorite state, scoped to the calling session. Populated by
+  // the backend so the detail page renders the heart in its correct state
+  // on the first paint without a second round-trip.
+  is_favorited: boolean;
+  favorited_at: string | null;
 };
 
 export type PipelineRunItem = {
