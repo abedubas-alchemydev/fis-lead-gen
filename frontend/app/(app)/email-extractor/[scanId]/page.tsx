@@ -15,6 +15,7 @@ import type { Route } from "next";
 import { useCallback, useEffect, useRef, useState } from "react";
 
 import { EnrichAllButton } from "@/components/email-extractor/enrich-all-button";
+import { useToast } from "@/components/ui/use-toast";
 import { apiRequest } from "@/lib/api";
 
 // --- Types (mirror backend/app/schemas/email_extractor.py) -----------------
@@ -220,12 +221,10 @@ function VerificationCell({
 function EnrichmentCell({
   row,
   inFlight,
-  enrichError,
   onEnrich,
 }: {
   row: DiscoveredEmailResponse;
   inFlight: boolean;
-  enrichError: string | undefined;
   onEnrich: (emailId: number) => void;
 }): React.ReactElement {
   if (row.enrichment_status === "enriched") {
@@ -268,7 +267,7 @@ function EnrichmentCell({
       <div className="flex flex-col items-start gap-1">
         <span
           className="inline-flex items-center gap-1 rounded-md bg-rose-50 px-2 py-0.5 text-xs font-medium text-rose-700"
-          title={enrichError ?? "Enrichment failed — click to retry"}
+          title="Enrichment failed — click to retry"
         >
           <AlertCircle className="h-3.5 w-3.5" /> Error
         </span>
@@ -286,18 +285,15 @@ function EnrichmentCell({
   }
 
   return (
-    <div className="flex flex-col items-start gap-1">
-      <button
-        type="button"
-        onClick={() => onEnrich(row.id)}
-        disabled={inFlight}
-        className="inline-flex items-center gap-1 rounded-md border border-slate-300 bg-white px-2 py-0.5 text-xs font-medium text-slate-700 hover:bg-slate-50 disabled:cursor-not-allowed disabled:opacity-50"
-      >
-        {inFlight ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : null}
-        {inFlight ? "Enriching…" : "Enrich"}
-      </button>
-      {enrichError ? <span className="text-xs text-rose-600">{enrichError}</span> : null}
-    </div>
+    <button
+      type="button"
+      onClick={() => onEnrich(row.id)}
+      disabled={inFlight}
+      className="inline-flex items-center gap-1 rounded-md border border-slate-300 bg-white px-2 py-0.5 text-xs font-medium text-slate-700 hover:bg-slate-50 disabled:cursor-not-allowed disabled:opacity-50"
+    >
+      {inFlight ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : null}
+      {inFlight ? "Enriching…" : "Enrich"}
+    </button>
   );
 }
 
@@ -308,7 +304,6 @@ function ResultsTable({
   verifyErrors,
   onVerify,
   enrichInFlight,
-  enrichErrors,
   onEnrich,
 }: {
   rows: DiscoveredEmailResponse[];
@@ -317,7 +312,6 @@ function ResultsTable({
   verifyErrors: Record<number, string>;
   onVerify: (emailId: number) => void;
   enrichInFlight: Set<number>;
-  enrichErrors: Record<number, string>;
   onEnrich: (emailId: number) => void;
 }): React.ReactElement {
   if (rows.length === 0) {
@@ -353,7 +347,6 @@ function ResultsTable({
                 <EnrichmentCell
                   row={row}
                   inFlight={enrichInFlight.has(row.id)}
-                  enrichError={enrichErrors[row.id]}
                   onEnrich={onEnrich}
                 />
               </td>
@@ -387,7 +380,7 @@ export default function ScanDetailPage(): React.ReactElement {
   const [verifyInFlight, setVerifyInFlight] = useState<Set<number>>(new Set());
   const [verifyErrors, setVerifyErrors] = useState<Record<number, string>>({});
   const [enrichInFlight, setEnrichInFlight] = useState<Set<number>>(new Set());
-  const [enrichErrors, setEnrichErrors] = useState<Record<number, string>>({});
+  const toast = useToast();
 
   const pollRef = useRef<ReturnType<typeof setInterval> | null>(null);
   const startedAtRef = useRef<number>(0);
@@ -565,12 +558,6 @@ export default function ScanDetailPage(): React.ReactElement {
         next.add(emailId);
         return next;
       });
-      setEnrichErrors((prev) => {
-        if (!(emailId in prev)) return prev;
-        const next = { ...prev };
-        delete next[emailId];
-        return next;
-      });
 
       try {
         const updated = await apiRequest<DiscoveredEmailResponse>(
@@ -587,11 +574,8 @@ export default function ScanDetailPage(): React.ReactElement {
                 ),
               },
         );
-      } catch (err) {
-        setEnrichErrors((prev) => ({
-          ...prev,
-          [emailId]: errorMessage(err, "enrichment failed"),
-        }));
+      } catch {
+        toast.error("Couldn't enrich — please try again.");
       } finally {
         setEnrichInFlight((prev) => {
           const next = new Set(prev);
@@ -600,7 +584,7 @@ export default function ScanDetailPage(): React.ReactElement {
         });
       }
     },
-    [],
+    [toast],
   );
 
   return (
@@ -673,7 +657,6 @@ export default function ScanDetailPage(): React.ReactElement {
             verifyErrors={verifyErrors}
             onVerify={handleVerify}
             enrichInFlight={enrichInFlight}
-            enrichErrors={enrichErrors}
             onEnrich={handleEnrich}
           />
         </section>

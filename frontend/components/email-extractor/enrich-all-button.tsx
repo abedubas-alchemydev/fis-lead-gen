@@ -3,6 +3,7 @@
 import { Loader2, Sparkles } from "lucide-react";
 import { useCallback, useEffect, useRef, useState } from "react";
 
+import { useToast } from "@/components/ui/use-toast";
 import { apiRequest } from "@/lib/api";
 import { enrichAll, type EnrichAllResponse } from "@/lib/email-extractor";
 
@@ -40,10 +41,6 @@ function countStatuses(scan: PollScanShape): { enriched: number; failed: number;
   return { enriched, failed, total };
 }
 
-function errorMessage(err: unknown, fallback: string): string {
-  return err instanceof Error && err.message ? err.message : fallback;
-}
-
 export function EnrichAllButton({
   scanId,
   unenrichedCount,
@@ -53,7 +50,7 @@ export function EnrichAllButton({
   const [isRunning, setIsRunning] = useState(false);
   const [optimisticQueued, setOptimisticQueued] = useState(0);
   const [statusText, setStatusText] = useState<string | null>(null);
-  const [errorText, setErrorText] = useState<string | null>(null);
+  const toast = useToast();
 
   const pollRef = useRef<ReturnType<typeof setInterval> | null>(null);
   const pollCountRef = useRef(0);
@@ -77,7 +74,6 @@ export function EnrichAllButton({
   const handleClick = useCallback(async () => {
     if (isRunning || unenrichedCount <= 0) return;
     setIsRunning(true);
-    setErrorText(null);
     setStatusText(`Enriching ${unenrichedCount}…`);
     setOptimisticQueued(unenrichedCount);
     pollCountRef.current = 0;
@@ -85,12 +81,12 @@ export function EnrichAllButton({
     let queued: EnrichAllResponse;
     try {
       queued = await enrichAll(scanId);
-    } catch (err) {
+    } catch {
       if (!mountedRef.current) return;
       setIsRunning(false);
       setOptimisticQueued(0);
       setStatusText(null);
-      setErrorText(errorMessage(err, "Could not start bulk enrichment."));
+      toast.error("Couldn't start enrichment — please try again.");
       return;
     }
 
@@ -144,19 +140,20 @@ export function EnrichAllButton({
           if (!mountedRef.current) return;
           setIsRunning(false);
           setOptimisticQueued(0);
-          setStatusText("Still running — refresh to see latest.");
+          setStatusText(null);
+          toast.info("Still enriching — refresh to see latest.");
           onDone?.({ enrichedCount: enriched, failedCount: failed, total, timedOut: true });
         }
-      } catch (err) {
+      } catch {
         stopPolling();
         if (!mountedRef.current) return;
         setIsRunning(false);
         setOptimisticQueued(0);
         setStatusText(null);
-        setErrorText(errorMessage(err, "Lost connection while polling."));
+        toast.error("Lost connection while polling — please try again.");
       }
     }, POLL_INTERVAL_MS);
-  }, [isRunning, onDone, onProgress, scanId, stopPolling, unenrichedCount]);
+  }, [isRunning, onDone, onProgress, scanId, stopPolling, toast, unenrichedCount]);
 
   const disabled = isRunning || unenrichedCount <= 0;
   const disabledTitle =
@@ -181,9 +178,11 @@ export function EnrichAllButton({
         )}
         {label}
       </button>
-      <span className="text-xs text-slate-600" aria-live="polite">
-        {errorText ? <span className="text-rose-600">{errorText}</span> : statusText}
-      </span>
+      {statusText !== null ? (
+        <span className="text-xs text-slate-600" aria-live="polite">
+          {statusText}
+        </span>
+      ) : null}
     </div>
   );
 }
