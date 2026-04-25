@@ -14,6 +14,7 @@ from app.models.verification_run import VerificationRun
 from app.schemas.auth import AuthenticatedUser
 from app.schemas.email_extractor import (
     DiscoveredEmailResponse,
+    EnrichAllResponse,
     ScanCreateRequest,
     ScanListItem,
     ScanResponse,
@@ -28,6 +29,7 @@ from app.services.email_extractor.apollo_enrichment import (
     EnrichmentError,
     enrich_discovered_email,
 )
+from app.services.email_extractor.bulk_enrichment import run_bulk_enrichment
 from app.services.email_extractor.verification_runner import run_smtp_verification
 
 router = APIRouter(prefix="/email-extractor", tags=["email-extractor"])
@@ -100,6 +102,54 @@ async def enrich_email(
             status_code=status.HTTP_502_BAD_GATEWAY,
             detail=f"apollo: {message}",
         ) from exc
+
+
+@router.post(
+    "/scans/{run_id}/enrich-all",
+    status_code=status.HTTP_202_ACCEPTED,
+    response_model=EnrichAllResponse,
+)
+async def enrich_all_for_scan(
+    run_id: int,
+    background_tasks: BackgroundTasks,
+    db: AsyncSession = Depends(get_db_session),
+    current_user: AuthenticatedUser = Depends(get_current_user),
+) -> EnrichAllResponse:
+    """Enqueue per-row Apollo enrichment for every unenriched email in a scan.
+
+    Returns 202 immediately with a snapshot of what's queued so the
+    frontend can display "Enriching N..." before polling
+    GET /scans/{run_id} for per-row progress. Per-email failures are
+    isolated by the background task so one bad row never aborts the batch.
+    """
+    scan = await db.get(ExtractionRun, run_id)
+    if scan is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="scan not found")
+
+    if not settings.apollo_api_key:
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="Apollo enrichment is not configured on this deployment.",
+        )
+
+    total_stmt = select(func.count(DiscoveredEmail.id)).where(DiscoveredEmail.run_id == run_id)
+    already_stmt = select(func.count(DiscoveredEmail.id)).where(
+        DiscoveredEmail.run_id == run_id,
+        DiscoveredEmail.enrichment_status == "enriched",
+    )
+    total = int((await db.execute(total_stmt)).scalar_one())
+    already = int((await db.execute(already_stmt)).scalar_one())
+    queued = total - already
+
+    background_tasks.add_task(run_bulk_enrichment, run_id)
+
+    return EnrichAllResponse(
+        scan_id=run_id,
+        candidates_total=total,
+        candidates_skipped_already_enriched=already,
+        candidates_queued=queued,
+        status="queued",
+    )
 
 
 @router.get("/scans/{run_id}", response_model=ScanResponse)
