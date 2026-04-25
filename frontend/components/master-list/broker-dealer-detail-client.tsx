@@ -34,7 +34,7 @@ import {
   nameMatches,
   toOfficerEntity,
 } from "@/components/master-list/detail/name-matching";
-import { SectionPanel } from "@/components/master-list/detail/section-panel";
+import { SectionPanel } from "@/components/ui/section-panel";
 import { FavoriteButton } from "@/components/master-list/favorite-button";
 import { Pill } from "@/components/ui/pill";
 import { apiRequest } from "@/lib/api";
