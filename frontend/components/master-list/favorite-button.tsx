@@ -10,6 +10,12 @@ import { addFavorite, removeFavorite } from "@/lib/favorites";
 // and surfaces an inline caption since the app doesn't yet have a shared
 // toast primitive. Follow-up: swap the caption for a real toast once the
 // broader UX system lands a pattern.
+//
+// Behaviour contract (must not regress): optimistic flip on click, rollback
+// + inline error caption on failure, aria-pressed reflects current state,
+// disabled while a request is in flight. Visual treatment moved off the old
+// dark-navy hero onto the project's neutral surface tokens so the button
+// reads on the light topbar pattern shared with /dashboard and /master-list.
 
 export interface FavoriteButtonProps {
   bdId: number;
@@ -62,7 +68,7 @@ export function FavoriteButton({ bdId, initialFavorited, onChange }: FavoriteBut
         className={`inline-flex h-9 w-9 items-center justify-center rounded-full border transition disabled:cursor-not-allowed disabled:opacity-60 ${
           favorited
             ? "border-red-200 bg-red-500/15 text-red-500 hover:bg-red-500/20"
-            : "border-white/30 bg-white/10 text-white/80 hover:bg-white/20 hover:text-white"
+            : "border-[var(--border-2,rgba(30,64,175,0.16))] bg-[var(--surface,#ffffff)] text-[var(--text-dim,#475569)] hover:bg-[var(--surface-2,#f1f6fd)] hover:text-[var(--text,#0f172a)]"
         }`}
       >
         <Heart
@@ -72,7 +78,7 @@ export function FavoriteButton({ bdId, initialFavorited, onChange }: FavoriteBut
           aria-hidden
         />
       </button>
-      {error ? <span className="text-xs text-red-200">{error}</span> : null}
+      {error ? <span className="text-xs text-[var(--red,#ef4444)]">{error}</span> : null}
     </div>
   );
 }
