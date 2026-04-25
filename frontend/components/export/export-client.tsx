@@ -2,15 +2,44 @@
 
 import { useEffect, useMemo, useState } from "react";
 
+import { Download } from "lucide-react";
+
+import { TopActions } from "@/components/layout/top-actions";
+import { SectionPanel } from "@/components/ui/section-panel";
+import { Segmented, type SegmentedItem } from "@/components/ui/segmented";
 import { apiRequest, buildApiPath } from "@/lib/api";
 import type { ExportCsvResponse, ExportPreviewResponse } from "@/lib/types";
 
+type ListMode = "primary" | "alternative" | "all";
+
+// Filter option catalogs — module-level so the arrays are referentially
+// stable between renders (mirrors master-list-workspace-client / alerts-client).
+const LIST_ITEMS: ReadonlyArray<SegmentedItem> = [
+  { value: "primary", label: "Primary" },
+  { value: "alternative", label: "Alternative" },
+  { value: "all", label: "All firms" },
+];
+
+const PRIORITY_ITEMS: ReadonlyArray<SegmentedItem> = [
+  { value: "All", label: "All" },
+  { value: "hot", label: "Hot", dot: "hot" },
+  { value: "warm", label: "Warm", dot: "warm" },
+  { value: "cold", label: "Cold", dot: "cold" },
+];
+
+const HEALTH_ITEMS: ReadonlyArray<SegmentedItem> = [
+  { value: "All", label: "All" },
+  { value: "healthy", label: "Healthy", dot: "healthy" },
+  { value: "ok", label: "OK", dot: "ok" },
+  { value: "at_risk", label: "At Risk", dot: "risk" },
+];
+
 export function ExportClient({
-  initialListMode = "primary"
+  initialListMode = "primary",
 }: {
-  initialListMode?: "primary" | "alternative" | "all";
+  initialListMode?: ListMode;
 }) {
-  const [listMode, setListMode] = useState<"primary" | "alternative" | "all">(initialListMode);
+  const [listMode, setListMode] = useState<ListMode>(initialListMode);
   const [leadPriority, setLeadPriority] = useState("All");
   const [health, setHealth] = useState("All");
   const [preview, setPreview] = useState<ExportPreviewResponse | null>(null);
@@ -22,9 +51,9 @@ export function ExportClient({
       buildApiPath("/api/v1/export/preview", {
         list: listMode,
         lead_priority: leadPriority === "All" ? undefined : [leadPriority],
-        health: health === "All" ? undefined : [health]
+        health: health === "All" ? undefined : [health],
       }),
-    [listMode, leadPriority, health]
+    [listMode, leadPriority, health],
   );
 
   async function loadPreview() {
@@ -48,9 +77,9 @@ export function ExportClient({
         buildApiPath("/api/v1/export", {
           list: listMode,
           lead_priority: leadPriority === "All" ? undefined : [leadPriority],
-          health: health === "All" ? undefined : [health]
+          health: health === "All" ? undefined : [health],
         }),
-        { method: "POST" }
+        { method: "POST" },
       );
       const blob = new Blob([response.content], { type: "text/csv;charset=utf-8" });
       const url = URL.createObjectURL(blob);
@@ -69,97 +98,201 @@ export function ExportClient({
     }
   }
 
-  return (
-    <section className="space-y-6">
-      <div className="rounded-[30px] border border-white/80 bg-white/92 p-8 shadow-shell">
-        <p className="text-sm font-medium uppercase tracking-[0.24em] text-blue">Controlled Export</p>
-        <h1 className="mt-3 text-3xl font-semibold text-navy">Restricted CSV export</h1>
-        <p className="mt-3 max-w-3xl text-sm leading-6 text-slate-600">
-          Exports are intentionally limited: maximum 100 rows, three exports per user per day, and no email,
-          phone, or LinkedIn fields leave the platform.
-        </p>
+  function clearFilters() {
+    setListMode("primary");
+    setLeadPriority("All");
+    setHealth("All");
+  }
 
-        <div className="mt-6 grid gap-4 md:grid-cols-3">
-          <label className="text-sm font-medium text-slate-700">
-            List
-            <select
-              value={listMode}
-              onChange={(event) => setListMode(event.target.value as "primary" | "alternative" | "all")}
-              className="mt-2 w-full rounded-2xl border border-slate-200 px-3 py-3 text-sm"
-            >
-              <option value="primary">Primary List</option>
-              <option value="alternative">Alternative List</option>
-              <option value="all">All Firms</option>
-            </select>
-          </label>
-          <label className="text-sm font-medium text-slate-700">
-            Lead Priority
-            <select
-              value={leadPriority}
-              onChange={(event) => setLeadPriority(event.target.value)}
-              className="mt-2 w-full rounded-2xl border border-slate-200 px-3 py-3 text-sm"
-            >
-              <option value="All">All</option>
-              <option value="hot">Hot</option>
-              <option value="warm">Warm</option>
-              <option value="cold">Cold</option>
-            </select>
-          </label>
-          <label className="text-sm font-medium text-slate-700">
-            Health
-            <select
-              value={health}
-              onChange={(event) => setHealth(event.target.value)}
-              className="mt-2 w-full rounded-2xl border border-slate-200 px-3 py-3 text-sm"
-            >
-              <option value="All">All</option>
-              <option value="healthy">Healthy</option>
-              <option value="ok">OK</option>
-              <option value="at_risk">At Risk</option>
-            </select>
-          </label>
+  const activeFilterCount = useMemo(() => {
+    let count = 0;
+    if (listMode !== "primary") count += 1;
+    if (leadPriority !== "All") count += 1;
+    if (health !== "All") count += 1;
+    return count;
+  }, [listMode, leadPriority, health]);
+
+  const remainingExports = preview?.remaining_exports_today ?? null;
+  const matchingRecords = preview?.matching_records ?? null;
+  const requestedRecords = preview?.requested_records ?? null;
+  const quotaExhausted = remainingExports !== null && remainingExports <= 0;
+
+  return (
+    <div className="px-7 pb-12 pt-7 lg:px-9">
+      {/* ── Topbar ───────────────────────────────────────────────────────── */}
+      <div className="mb-7 flex flex-wrap items-center gap-4">
+        <div className="min-w-0">
+          <p className="text-[12px] uppercase tracking-[0.06em] text-[var(--text-muted,#94a3b8)]">
+            Enterprise Dashboard{" "}
+            <span className="text-[var(--text-dim,#475569)]">/</span> Export
+          </p>
+          <h1 className="mt-1 text-[24px] font-bold tracking-[-0.02em] text-[var(--text,#0f172a)]">
+            Restricted CSV export
+          </h1>
+        </div>
+        <div className="ml-auto flex items-center gap-3">
+          <span
+            className={`inline-flex items-center gap-1.5 rounded-full border px-2.5 py-[3px] text-[11px] font-semibold ${
+              quotaExhausted
+                ? "border-[rgba(239,68,68,0.25)] bg-[rgba(239,68,68,0.08)] text-[var(--pill-red-text,#b91c1c)]"
+                : "border-[var(--border,rgba(30,64,175,0.1))] bg-[var(--surface-2,#f1f6fd)] text-[var(--text-dim,#475569)]"
+            }`}
+          >
+            {remainingExports === null
+              ? "— of 3 exports remaining today"
+              : `${remainingExports} of 3 export${remainingExports === 1 ? "" : "s"} remaining today`}
+          </span>
+          <TopActions />
         </div>
       </div>
 
-      {error ? <div className="rounded-2xl border border-red-100 bg-red-50 px-4 py-3 text-sm text-danger">{error}</div> : null}
+      {/* ── Live-match strip ─────────────────────────────────────────────── */}
+      <div className="mb-4 flex flex-wrap items-center gap-3 text-[12px] text-[var(--text-muted,#94a3b8)]">
+        <span className="inline-flex items-center gap-1.5 rounded-full border border-[var(--border,rgba(30,64,175,0.1))] bg-[var(--surface-2,#f1f6fd)] px-2.5 py-[3px] text-[11px] font-semibold text-[var(--text-dim,#475569)]">
+          <span aria-hidden className="relative flex h-2 w-2">
+            <span className="absolute inset-0 animate-ping rounded-full bg-[var(--green,#10b981)] opacity-60" />
+            <span className="relative h-2 w-2 rounded-full bg-[var(--green,#10b981)]" />
+          </span>
+          {matchingRecords === null
+            ? "Loading…"
+            : `${matchingRecords.toLocaleString()} match${matchingRecords === 1 ? "" : "es"}`}
+        </span>
+        <span>Each export ships up to 100 rows of permitted fields.</span>
+      </div>
 
-      <div className="grid gap-6 lg:grid-cols-[0.8fr_1.2fr]">
-        <div className="rounded-[30px] border border-white/80 bg-white/92 p-6 shadow-shell">
-          <p className="text-sm font-medium uppercase tracking-[0.22em] text-blue">Preview</p>
-          <div className="mt-4 grid gap-3">
-            <div className="rounded-2xl bg-slate-50 px-4 py-4">
-              <p className="text-xs uppercase tracking-[0.18em] text-slate-500">Matching records</p>
-              <p className="mt-2 text-2xl font-semibold text-navy">{preview?.matching_records ?? "-"}</p>
-            </div>
-            <div className="rounded-2xl bg-slate-50 px-4 py-4">
-              <p className="text-xs uppercase tracking-[0.18em] text-slate-500">Exported this run</p>
-              <p className="mt-2 text-2xl font-semibold text-navy">{preview?.requested_records ?? "-"}</p>
-            </div>
-            <div className="rounded-2xl bg-slate-50 px-4 py-4">
-              <p className="text-xs uppercase tracking-[0.18em] text-slate-500">Remaining today</p>
-              <p className="mt-2 text-2xl font-semibold text-navy">{preview?.remaining_exports_today ?? "-"}</p>
-            </div>
-          </div>
-        </div>
-
-        <div className="rounded-[30px] border border-white/80 bg-white/92 p-6 shadow-shell">
-          <p className="text-sm font-medium uppercase tracking-[0.22em] text-blue">Export Rules</p>
-          <div className="mt-4 grid gap-3 md:grid-cols-2">
-            <div className="rounded-2xl bg-slate-50 px-4 py-4 text-sm text-slate-600">Only permitted CSV fields are exported.</div>
-            <div className="rounded-2xl bg-slate-50 px-4 py-4 text-sm text-slate-600">Names may export, but email, phone, and LinkedIn never do.</div>
-            <div className="rounded-2xl bg-slate-50 px-4 py-4 text-sm text-slate-600">Each file includes a source watermark footer.</div>
-            <div className="rounded-2xl bg-slate-50 px-4 py-4 text-sm text-slate-600">Export volume is capped to keep teams in-platform.</div>
+      {/* ── Filters card ─────────────────────────────────────────────────── */}
+      <div
+        className="mb-4 rounded-2xl border border-[var(--border,rgba(30,64,175,0.1))] bg-[var(--surface,#ffffff)] p-5"
+        style={{ boxShadow: "var(--shadow-card, 0 1px 2px rgba(15,23,42,0.04), 0 4px 14px rgba(15,23,42,0.05))" }}
+      >
+        <div className="mb-4 flex items-center justify-between gap-4">
+          <div>
+            <p className="flex items-center gap-2 text-[11px] font-semibold uppercase tracking-[0.1em] text-[var(--text-muted,#94a3b8)]">
+              Filters
+              {activeFilterCount > 0 ? (
+                <span className="rounded-full bg-[rgba(99,102,241,0.12)] px-2 py-0.5 text-[10px] font-bold tracking-[0.04em] text-[#4338ca]">
+                  {activeFilterCount} ACTIVE
+                </span>
+              ) : null}
+            </p>
+            <h3 className="mt-1 text-[15px] font-semibold tracking-[-0.01em] text-[var(--text,#0f172a)]">
+              Refine the export
+            </h3>
           </div>
           <button
             type="button"
-            onClick={() => void exportCsv()}
-            disabled={isExporting || (preview?.remaining_exports_today ?? 0) <= 0}
-            className="mt-6 rounded-2xl bg-navy px-5 py-3 text-sm font-medium text-white disabled:opacity-60"
+            onClick={clearFilters}
+            className="rounded-[6px] border border-[var(--border-2,rgba(30,64,175,0.16))] bg-transparent px-2.5 py-1 text-[11px] font-semibold text-[var(--text-dim,#475569)] transition hover:bg-[var(--surface-2,#f1f6fd)] hover:text-[var(--text,#0f172a)]"
           >
-            {isExporting ? "Preparing CSV..." : "Export CSV"}
+            Clear filters
           </button>
         </div>
+
+        <div className="grid gap-4 lg:grid-cols-3">
+          <div>
+            <p className="mb-1.5 text-[11px] font-semibold uppercase tracking-[0.08em] text-[var(--text-muted,#94a3b8)]">
+              List
+            </p>
+            <Segmented
+              value={listMode}
+              onChange={(next) => setListMode(next as ListMode)}
+              items={LIST_ITEMS}
+              ariaLabel="List mode"
+            />
+          </div>
+          <div>
+            <p className="mb-1.5 text-[11px] font-semibold uppercase tracking-[0.08em] text-[var(--text-muted,#94a3b8)]">
+              Lead Priority
+            </p>
+            <Segmented
+              value={leadPriority}
+              onChange={setLeadPriority}
+              items={PRIORITY_ITEMS}
+              ariaLabel="Lead priority"
+            />
+          </div>
+          <div>
+            <p className="mb-1.5 text-[11px] font-semibold uppercase tracking-[0.08em] text-[var(--text-muted,#94a3b8)]">
+              Financial Health
+            </p>
+            <Segmented
+              value={health}
+              onChange={setHealth}
+              items={HEALTH_ITEMS}
+              ariaLabel="Financial health"
+            />
+          </div>
+        </div>
       </div>
-    </section>
+
+      {error ? (
+        <div className="mb-4 rounded-2xl border border-red-100 bg-red-50 px-4 py-3 text-sm text-red-700">
+          {error}
+        </div>
+      ) : null}
+
+      {/* ── Preview + Rules grid ─────────────────────────────────────────── */}
+      <div className="grid gap-4 lg:grid-cols-2">
+        <SectionPanel eyebrow="Preview" title="Selection summary">
+          <div className="grid gap-3">
+            <div className="rounded-2xl bg-[var(--surface-2,#f1f6fd)] px-4 py-4">
+              <p className="text-[11px] font-semibold uppercase tracking-[0.1em] text-[var(--text-muted,#94a3b8)]">
+                Matching records
+              </p>
+              <p className="mt-1 text-[24px] font-bold tracking-[-0.02em] text-[var(--text,#0f172a)]">
+                {matchingRecords === null ? "—" : matchingRecords.toLocaleString()}
+              </p>
+            </div>
+            <div className="rounded-2xl bg-[var(--surface-2,#f1f6fd)] px-4 py-4">
+              <p className="text-[11px] font-semibold uppercase tracking-[0.1em] text-[var(--text-muted,#94a3b8)]">
+                Exported this run
+              </p>
+              <p className="mt-1 text-[24px] font-bold tracking-[-0.02em] text-[var(--text,#0f172a)]">
+                {requestedRecords === null ? "—" : requestedRecords.toLocaleString()}
+              </p>
+            </div>
+            <div className="rounded-2xl bg-[var(--surface-2,#f1f6fd)] px-4 py-4">
+              <p className="text-[11px] font-semibold uppercase tracking-[0.1em] text-[var(--text-muted,#94a3b8)]">
+                Remaining today
+              </p>
+              <p className="mt-1 text-[24px] font-bold tracking-[-0.02em] text-[var(--text,#0f172a)]">
+                {remainingExports === null ? "—" : remainingExports.toLocaleString()}
+              </p>
+            </div>
+          </div>
+        </SectionPanel>
+
+        <SectionPanel eyebrow="Restricted CSV" title="Export rules">
+          <ul className="grid gap-2.5">
+            <li className="rounded-2xl bg-[var(--surface-2,#f1f6fd)] px-4 py-3 text-[13px] text-[var(--text-dim,#475569)]">
+              Only permitted CSV fields are exported.
+            </li>
+            <li className="rounded-2xl bg-[var(--surface-2,#f1f6fd)] px-4 py-3 text-[13px] text-[var(--text-dim,#475569)]">
+              Names may export, but email, phone, and LinkedIn never do.
+            </li>
+            <li className="rounded-2xl bg-[var(--surface-2,#f1f6fd)] px-4 py-3 text-[13px] text-[var(--text-dim,#475569)]">
+              Each file includes a source watermark footer.
+            </li>
+            <li className="rounded-2xl bg-[var(--surface-2,#f1f6fd)] px-4 py-3 text-[13px] text-[var(--text-dim,#475569)]">
+              Export volume is capped to keep teams in-platform.
+            </li>
+          </ul>
+          <div className="mt-5 flex flex-col gap-2 border-t border-dashed border-[var(--border,rgba(30,64,175,0.1))] pt-4">
+            <button
+              type="button"
+              onClick={() => void exportCsv()}
+              disabled={isExporting || quotaExhausted}
+              className="inline-flex w-fit items-center gap-2 rounded-[10px] bg-gradient-to-br from-[#6366f1] to-[#8b5cf6] px-4 py-2 text-[13px] font-semibold text-white shadow-[0_6px_16px_rgba(99,102,241,0.35)] transition hover:brightness-110 disabled:cursor-not-allowed disabled:opacity-60 disabled:hover:brightness-100"
+            >
+              <Download className="h-4 w-4" strokeWidth={2} />
+              {isExporting ? "Preparing CSV…" : "Export CSV"}
+            </button>
+            <p className="text-[11px] text-[var(--text-muted,#94a3b8)]">
+              Up to 100 rows · 9 permitted columns · resets at midnight UTC.
+            </p>
+          </div>
+        </SectionPanel>
+      </div>
+    </div>
   );
 }
