@@ -83,6 +83,10 @@ class Settings(BaseSettings):
     gemini_request_timeout_seconds: float = 120.0
     gemini_request_max_retries: int = 2
     gemini_inline_pdf_max_size_mb: int = 45
+    # Files API kicks in for PDFs above this size to keep working-set memory
+    # flat. Smaller PDFs stay on the inline base64 path (fewer round-trips,
+    # lower latency). Set above gemini_inline_pdf_max_size_mb to disable.
+    gemini_files_api_threshold_mb: int = 20
     openai_api_key: str | None = None
     openai_api_base: str = "https://api.openai.com/v1"
     openai_pdf_model: str = "gpt-4o"
