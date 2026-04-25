@@ -1,19 +1,67 @@
 "use client";
 
 import Link from "next/link";
-import { Heart, Star } from "lucide-react";
+import { ArrowRight, Heart, Star } from "lucide-react";
 import { useEffect, useState } from "react";
 
-import { HealthBadge } from "@/components/master-list/health-badge";
-import { LeadPriorityBadge } from "@/components/master-list/lead-priority-badge";
+import { Pill, type PillVariant } from "@/components/ui/pill";
+import { SectionPanel } from "@/components/ui/section-panel";
+import { useToast } from "@/components/ui/use-toast";
 import {
   listFavorites,
   removeFavorite,
-  type FavoriteListItem
+  type FavoriteListItem,
 } from "@/lib/favorites";
 import { formatCurrency, formatPercent, formatRelativeTime } from "@/lib/format";
 
 const PAGE_SIZE = 25;
+
+// ── Backend-enum → Pill variant / label mappings ──────────────────────────
+// Mirror the helpers in master-list-workspace-client.tsx so the favorites
+// row reads identically to the master-list table cells.
+
+type PriorityKey = "hot" | "warm" | "cold" | "unknown";
+
+function resolvePriority(raw: string | null): PriorityKey {
+  if (raw === "hot" || raw === "warm" || raw === "cold") return raw;
+  return "unknown";
+}
+
+const PRIORITY_PILL_VARIANT: Record<PriorityKey, PillVariant> = {
+  hot: "hot",
+  warm: "warm",
+  cold: "cold",
+  unknown: "unknown",
+};
+
+const PRIORITY_PILL_LABEL: Record<PriorityKey, string> = {
+  hot: "Hot",
+  warm: "Warm",
+  cold: "Cold",
+  unknown: "Not scored",
+};
+
+const PRIORITY_DOT_CLASS: Record<PriorityKey, string> = {
+  hot: "bg-[var(--red,#ef4444)] shadow-[0_0_0_4px_rgba(239,68,68,0.15)]",
+  warm: "bg-[var(--amber,#f59e0b)] shadow-[0_0_0_4px_rgba(245,158,11,0.15)]",
+  cold: "bg-[var(--blue,#3b82f6)] shadow-[0_0_0_4px_rgba(59,130,246,0.15)]",
+  unknown:
+    "bg-[var(--text-muted,#94a3b8)] shadow-[0_0_0_4px_rgba(148,163,184,0.15)]",
+};
+
+function healthVariant(status: string | null): PillVariant {
+  if (status === "healthy") return "healthy";
+  if (status === "ok") return "ok";
+  if (status === "at_risk") return "risk";
+  return "unknown";
+}
+
+function healthLabel(status: string | null): string {
+  if (status === "healthy") return "Healthy";
+  if (status === "ok") return "OK";
+  if (status === "at_risk") return "At Risk";
+  return "Unknown";
+}
 
 function formatLocation(city: string | null, state: string | null): string {
   const parts = [city, state].filter((part): part is string => Boolean(part));
@@ -26,13 +74,12 @@ export function FavoritesClient() {
   const [offset, setOffset] = useState(0);
   const [loading, setLoading] = useState(true);
   const [loadingMore, setLoadingMore] = useState(false);
-  const [error, setError] = useState<string | null>(null);
   const [removing, setRemoving] = useState<number | null>(null);
+  const toast = useToast();
 
   useEffect(() => {
     let active = true;
     setLoading(true);
-    setError(null);
 
     listFavorites({ limit: PAGE_SIZE, offset: 0 })
       .then((response) => {
@@ -43,7 +90,11 @@ export function FavoritesClient() {
       })
       .catch((err) => {
         if (!active) return;
-        setError(err instanceof Error ? err.message : "Unable to load favorites.");
+        toast.error(
+          err instanceof Error
+            ? err.message
+            : "Couldn't load favorites — please refresh.",
+        );
       })
       .finally(() => {
         if (active) setLoading(false);
@@ -52,7 +103,7 @@ export function FavoritesClient() {
     return () => {
       active = false;
     };
-  }, []);
+  }, [toast]);
 
   async function loadMore() {
     if (loadingMore) return;
@@ -63,7 +114,9 @@ export function FavoritesClient() {
       setTotal(response.total);
       setOffset((current) => current + response.items.length);
     } catch (err) {
-      setError(err instanceof Error ? err.message : "Unable to load more favorites.");
+      toast.error(
+        err instanceof Error ? err.message : "Couldn't load more favorites.",
+      );
     } finally {
       setLoadingMore(false);
     }
@@ -80,7 +133,11 @@ export function FavoritesClient() {
     } catch (err) {
       setItems(snapshot);
       setTotal(snapshot.length);
-      setError(err instanceof Error ? err.message : "Could not remove favorite.");
+      toast.error(
+        err instanceof Error
+          ? err.message
+          : "Couldn't unfavorite — please try again.",
+      );
     } finally {
       setRemoving(null);
     }
@@ -89,139 +146,198 @@ export function FavoritesClient() {
   const hasMore = items.length < total;
 
   return (
-    <section className="space-y-4">
-      <div className="rounded-[30px] border border-white/80 bg-white/92 px-6 py-4 text-sm text-slate-600 shadow-shell">
-        {loading
-          ? "Loading favorites…"
-          : total === 0
-          ? "No favorites yet."
-          : `${total.toLocaleString()} favorite${total === 1 ? "" : "s"}`}
+    <>
+      {/* ── Live-match pill row (mirrors alerts / email-extractor) ──────── */}
+      <div className="mb-4 flex flex-wrap items-center gap-3 text-[12px] text-[var(--text-muted,#94a3b8)]">
+        <span className="inline-flex items-center gap-1.5 rounded-full border border-[var(--border,rgba(30,64,175,0.1))] bg-[var(--surface-2,#f1f6fd)] px-2.5 py-[3px] text-[11px] font-semibold text-[var(--text-dim,#475569)]">
+          <span aria-hidden className="relative flex h-2 w-2">
+            <span className="absolute inset-0 animate-ping rounded-full bg-[var(--green,#10b981)] opacity-60" />
+            <span className="relative h-2 w-2 rounded-full bg-[var(--green,#10b981)]" />
+          </span>
+          {total.toLocaleString()} favorite{total === 1 ? "" : "s"} saved
+        </span>
+        {items.length > 0 ? (
+          <span className="inline-flex items-center gap-1.5 rounded-full border border-[rgba(99,102,241,0.25)] bg-[rgba(99,102,241,0.08)] px-2.5 py-[3px] text-[11px] font-semibold text-[#4338ca]">
+            {items.length.toLocaleString()} loaded on this page
+          </span>
+        ) : null}
       </div>
 
-      {error ? (
-        <div className="rounded-[30px] border border-red-200 bg-red-50 px-6 py-4 text-sm text-danger shadow-shell">
-          {error}
-        </div>
-      ) : null}
-
-      {loading ? (
-        <div className="space-y-3">
-          {Array.from({ length: 4 }).map((_, index) => (
-            <div
-              key={index}
-              className="h-24 animate-pulse rounded-[28px] border border-white/80 bg-white/88 shadow-shell"
-            />
-          ))}
-        </div>
-      ) : items.length === 0 ? (
-        <EmptyState />
-      ) : (
-        <ul className="space-y-3">
-          {items.map((item) => (
-            <li key={item.id}>
+      {/* ── Saved-firms SectionPanel ────────────────────────────────────── */}
+      <SectionPanel eyebrow="Workspace" title="Saved firms">
+        {loading ? (
+          <div>
+            {Array.from({ length: 6 }).map((_, index) => (
+              <div
+                key={`favorite-loading-${index}`}
+                className="border-t border-[var(--border,rgba(30,64,175,0.1))] py-4 first:border-t-0"
+              >
+                <div className="h-3 w-32 animate-pulse rounded bg-[var(--surface-2,#f1f6fd)]" />
+                <div className="mt-2 h-4 w-48 animate-pulse rounded bg-[var(--surface-2,#f1f6fd)]" />
+                <div className="mt-2 h-3 w-64 animate-pulse rounded bg-[var(--surface-2,#f1f6fd)]" />
+              </div>
+            ))}
+          </div>
+        ) : items.length === 0 ? (
+          <EmptyState />
+        ) : (
+          <div>
+            {items.map((item) => (
               <FavoriteRow
+                key={item.id}
                 item={item}
                 onRemove={() => void unfavorite(item.id)}
                 removing={removing === item.id}
               />
-            </li>
-          ))}
-        </ul>
-      )}
+            ))}
+          </div>
+        )}
+      </SectionPanel>
 
+      {/* ── Load-more (matches master-list / alerts paginator buttons) ──── */}
       {hasMore && !loading ? (
-        <div className="flex justify-center">
+        <div className="mt-4 flex justify-center">
           <button
             type="button"
             onClick={() => void loadMore()}
             disabled={loadingMore}
-            className="rounded-2xl border border-slate-200 bg-white px-5 py-2.5 text-sm font-medium text-slate-700 transition hover:bg-slate-50 disabled:cursor-not-allowed disabled:opacity-60"
+            className="rounded-[8px] border border-[var(--border-2,rgba(30,64,175,0.16))] bg-[var(--surface,#ffffff)] px-3 py-1.5 text-[12px] font-medium text-[var(--text-dim,#475569)] transition hover:bg-[var(--surface-2,#f1f6fd)] disabled:cursor-not-allowed disabled:opacity-45"
           >
             {loadingMore ? "Loading…" : "Load more"}
           </button>
         </div>
       ) : null}
-    </section>
+    </>
   );
 }
 
 function FavoriteRow({
   item,
   onRemove,
-  removing
+  removing,
 }: {
   item: FavoriteListItem;
   onRemove: () => void;
   removing: boolean;
 }) {
+  const priorityKey = resolvePriority(item.lead_priority);
+  const priorityLabel =
+    priorityKey === "unknown"
+      ? PRIORITY_PILL_LABEL.unknown
+      : `${PRIORITY_PILL_LABEL[priorityKey]}${
+          item.lead_score !== null ? ` · ${item.lead_score.toFixed(0)}` : ""
+        }`;
+
   return (
-    <article className="flex flex-wrap items-start justify-between gap-4 rounded-[28px] border border-white/80 bg-white/92 px-6 py-5 shadow-shell transition hover:bg-white">
-      <div className="min-w-0 flex-1 space-y-2">
-        <div className="flex flex-wrap items-center gap-3">
-          <Link
-            href={`/master-list/${item.id}`}
-            className="text-lg font-semibold text-navy hover:text-blue"
-          >
-            {item.name}
-          </Link>
-          <HealthBadge status={item.health_status} />
-          <LeadPriorityBadge priority={item.lead_priority} score={item.lead_score} />
+    <div className="flex gap-3 border-t border-[var(--border,rgba(30,64,175,0.1))] py-4 first:border-t-0">
+      <span
+        aria-hidden
+        className={`mt-2 h-2 w-2 shrink-0 rounded-full ${PRIORITY_DOT_CLASS[priorityKey]}`}
+      />
+      <div className="min-w-0 flex-1">
+        <div className="mb-1.5 flex flex-wrap items-center gap-2">
+          <Pill variant={PRIORITY_PILL_VARIANT[priorityKey]}>{priorityLabel}</Pill>
+          <Pill variant={healthVariant(item.health_status)}>
+            {healthLabel(item.health_status)}
+          </Pill>
+          <span className="ml-auto inline-flex items-center gap-1.5 text-[11px] text-[var(--text-muted,#94a3b8)]">
+            added {formatRelativeTime(item.favorited_at)}
+          </span>
         </div>
-        <p className="text-sm text-slate-600">{formatLocation(item.city, item.state)}</p>
-        <div className="flex flex-wrap gap-x-5 gap-y-1 text-xs text-slate-500">
+        <Link
+          href={`/master-list/${item.id}`}
+          className="mb-1 block text-[14px] font-semibold text-[var(--text,#0f172a)] transition hover:text-[#6366f1]"
+        >
+          {item.name}
+        </Link>
+        <p className="text-[13px] leading-5 text-[var(--text-dim,#475569)]">
+          <span>{formatLocation(item.city, item.state)}</span>
           {item.current_clearing_partner ? (
-            <span>
-              Clearing: <span className="text-slate-700">{item.current_clearing_partner}</span>
-            </span>
+            <>
+              {" "}
+              <span aria-hidden className="text-[var(--text-muted,#94a3b8)]">·</span>{" "}
+              <span>
+                Clearing:{" "}
+                <span className="text-[var(--text,#0f172a)]">
+                  {item.current_clearing_partner}
+                </span>
+              </span>
+            </>
           ) : null}
           {item.latest_net_capital !== null ? (
-            <span>
-              Net capital:{" "}
-              <span className="text-slate-700">{formatCurrency(item.latest_net_capital)}</span>
-            </span>
+            <>
+              {" "}
+              <span aria-hidden className="text-[var(--text-muted,#94a3b8)]">·</span>{" "}
+              <span>
+                Net capital:{" "}
+                <span className="tabular-nums text-[var(--text,#0f172a)]">
+                  {formatCurrency(item.latest_net_capital)}
+                </span>
+              </span>
+            </>
           ) : null}
           {item.yoy_growth !== null ? (
-            <span>
-              YoY: <span className="text-slate-700">{formatPercent(item.yoy_growth)}</span>
-            </span>
+            <>
+              {" "}
+              <span aria-hidden className="text-[var(--text-muted,#94a3b8)]">·</span>{" "}
+              <span>
+                YoY:{" "}
+                <span className="tabular-nums text-[var(--text,#0f172a)]">
+                  {formatPercent(item.yoy_growth)}
+                </span>
+              </span>
+            </>
           ) : null}
+        </p>
+        <div className="mt-3 flex flex-wrap gap-2">
+          <Link
+            href={`/master-list/${item.id}`}
+            className="inline-flex items-center gap-1 rounded-md border border-[rgba(99,102,241,0.3)] px-2.5 py-1 text-[11px] font-semibold text-[#6366f1] transition hover:bg-[rgba(99,102,241,0.05)]"
+          >
+            Review
+            <ArrowRight className="h-3.5 w-3.5" strokeWidth={2} />
+          </Link>
+          <button
+            type="button"
+            onClick={onRemove}
+            disabled={removing}
+            aria-label={`Remove ${item.name} from favorites`}
+            className="inline-flex items-center gap-1 rounded-md border border-[var(--border-2,rgba(30,64,175,0.16))] bg-transparent px-2.5 py-1 text-[11px] font-semibold text-[var(--text-dim,#475569)] transition hover:bg-[var(--surface-2,#f1f6fd)] hover:text-[var(--text,#0f172a)] disabled:cursor-not-allowed disabled:opacity-45"
+          >
+            <Heart
+              className="h-3.5 w-3.5"
+              strokeWidth={2}
+              fill="currentColor"
+              aria-hidden
+            />
+            {removing ? "Removing…" : "Unfavorite"}
+          </button>
         </div>
       </div>
-      <div className="flex flex-col items-end gap-2">
-        <p className="text-xs text-slate-500">added {formatRelativeTime(item.favorited_at)}</p>
-        <button
-          type="button"
-          onClick={onRemove}
-          disabled={removing}
-          aria-label={`Remove ${item.name} from favorites`}
-          className="inline-flex items-center gap-1.5 rounded-full border border-red-200 bg-red-50 px-3 py-1.5 text-xs font-medium text-red-600 transition hover:bg-red-100 disabled:cursor-not-allowed disabled:opacity-60"
-        >
-          <Heart className="h-3.5 w-3.5" strokeWidth={2} fill="currentColor" aria-hidden />
-          {removing ? "Removing…" : "Unfavorite"}
-        </button>
-      </div>
-    </article>
+    </div>
   );
 }
 
 function EmptyState() {
   return (
-    <div className="flex min-h-[340px] items-center justify-center rounded-[30px] border border-white/80 bg-white/88 p-10 shadow-shell backdrop-blur">
-      <div className="flex flex-col items-center text-center">
-        <div className="grid h-14 w-14 place-items-center rounded-full bg-slate-100 text-slate-500">
-          <Star className="h-6 w-6" strokeWidth={1.75} aria-hidden />
-        </div>
-        <h2 className="mt-5 text-lg font-semibold text-navy">No favorites yet</h2>
-        <p className="mt-2 max-w-sm text-sm text-slate-600">
-          Open a firm on the master list and tap the heart to start building your shortlist.
-        </p>
-        <Link
-          href="/master-list"
-          className="mt-5 inline-flex items-center gap-2 rounded-2xl bg-navy px-4 py-2.5 text-sm font-medium text-white transition hover:bg-[#112b54]"
-        >
-          Browse the Master List
-        </Link>
+    <div className="my-2 flex flex-col items-center gap-3 rounded-lg border border-dashed border-[var(--border,rgba(30,64,175,0.1))] px-4 py-10 text-center">
+      <div className="grid h-12 w-12 place-items-center rounded-full bg-[var(--surface-2,#f1f6fd)] text-[var(--text-muted,#94a3b8)]">
+        <Star className="h-5 w-5" strokeWidth={1.75} aria-hidden />
       </div>
+      <h2 className="text-[14px] font-semibold text-[var(--text,#0f172a)]">
+        No favorites yet
+      </h2>
+      <p className="max-w-sm text-[13px] leading-5 text-[var(--text-dim,#475569)]">
+        Open a firm on the master list and tap the heart to start building your
+        shortlist.
+      </p>
+      <Link
+        href="/master-list"
+        className="mt-1 inline-flex h-[34px] items-center justify-center gap-1.5 rounded-[10px] bg-gradient-to-br from-[#6366f1] to-[#8b5cf6] px-4 text-[12px] font-semibold text-white shadow-[0_6px_16px_rgba(99,102,241,0.35)] transition hover:shadow-[0_8px_22px_rgba(99,102,241,0.45)]"
+      >
+        Browse the Master List
+        <ArrowRight className="h-3.5 w-3.5" strokeWidth={2} />
+      </Link>
     </div>
   );
 }
