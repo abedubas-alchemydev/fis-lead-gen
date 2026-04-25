@@ -230,3 +230,57 @@ BETTER_AUTH_SECRET=must-match-backend
 DATABASE_URL=postgresql://...
 RESEND_API_KEY=your-key
 ```
+
+---
+
+## Running tests
+
+The pytest suite is split into two tiers via the `integration` marker.
+
+### Default (unit) suite
+
+Pure unit tests using `respx` for HTTP and `monkeypatch` / `MagicMock` for state. They never touch a real Postgres or external API and are safe to run on any machine that has the dev requirements installed. CI runs this tier on every push.
+
+```bash
+cd backend
+pip install -r requirements-dev.txt
+pytest app/tests/
+```
+
+`backend/pytest.ini` sets `addopts = -m "not integration"` so the default invocation deselects the integration tier automatically.
+
+### Integration suite
+
+Integration-marked tests hit the real Neon database and external providers (Apollo, Hunter, Snov, etc.). They are **deselected by default** because the staging and production Cloud Run services share one Neon database (see `CLAUDE.md` → "Staging caveat"), so an unguarded run from a developer laptop can write to the same rows the demo environment is reading from.
+
+To run them explicitly — only when you have an isolated Postgres / API set wired into your local env — opt in with the marker:
+
+```bash
+cd backend
+pytest app/tests/ -m integration -v
+```
+
+To run both tiers in one pass:
+
+```bash
+pytest app/tests/ -m "integration or not integration" -v
+```
+
+Do **not** add `-m integration` to the GitHub Actions workflow against the shared Neon DB until staging and production have separate Neon instances. That database split is the prerequisite for re-enabling integration tests in CI.
+
+### Adding a new test
+
+- A new test is **integration** if any of these is true:
+  - it opens a real `AsyncSession` against the configured `DATABASE_URL`
+  - it calls a real upstream HTTP API (Apollo, Hunter, Snov, Gemini, SEC EDGAR, FINRA, etc.)
+  - it relies on Alembic migrations having been applied to a live Postgres
+- A new test is a **unit** test if it stays mocked end-to-end (`respx` for HTTP, `monkeypatch` / `MagicMock` for state).
+- Mark integration tests with a module-level guard at the top of the file:
+
+```python
+import pytest
+
+pytestmark = pytest.mark.integration
+```
+
+Use `@pytest.mark.integration` per-function only when the file mixes both tiers. Prefer module-level — fewer lines changed and harder to forget when adding the next test.
