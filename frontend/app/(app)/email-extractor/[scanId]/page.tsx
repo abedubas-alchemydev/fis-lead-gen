@@ -14,6 +14,7 @@ import { useParams } from "next/navigation";
 import type { Route } from "next";
 import { useCallback, useEffect, useRef, useState } from "react";
 
+import { EnrichAllButton } from "@/components/email-extractor/enrich-all-button";
 import { apiRequest } from "@/lib/api";
 
 // --- Types (mirror backend/app/schemas/email_extractor.py) -----------------
@@ -465,7 +466,20 @@ export default function ScanDetailPage(): React.ReactElement {
     };
   }, [scanId, stopPolling]);
 
+  const refetchScan = useCallback(async () => {
+    if (!scanId || Number.isNaN(scanId)) return;
+    try {
+      const response = await apiRequest<ScanResponse>(`/api/v1/email-extractor/scans/${scanId}`);
+      setScan(response);
+    } catch {
+      // The EnrichAllButton surfaces its own polling errors; swallow here to
+      // avoid stomping on the inline load error banner with transient blips.
+    }
+  }, [scanId]);
+
   const isInFlight = scan !== null && !TERMINAL_STATUSES.has(scan.status) && !timedOut;
+  const unenrichedCount =
+    scan?.discovered_emails.filter((row) => row.enrichment_status !== "enriched").length ?? 0;
 
   const finishVerify = useCallback(
     (emailId: number, result: VerifyResultItem | undefined, failureMessage: string | null) => {
@@ -645,6 +659,13 @@ export default function ScanDetailPage(): React.ReactElement {
 
       {scan !== null ? (
         <section>
+          <div className="mb-3 flex items-start justify-end">
+            <EnrichAllButton
+              scanId={scan.id}
+              unenrichedCount={unenrichedCount}
+              onProgress={() => void refetchScan()}
+            />
+          </div>
           <ResultsTable
             rows={scan.discovered_emails}
             localVerifications={localVerifications}
