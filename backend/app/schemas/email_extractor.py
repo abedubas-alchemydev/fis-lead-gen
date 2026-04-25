@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from datetime import datetime
+from typing import Literal
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
@@ -118,6 +119,20 @@ class VerificationRunResponse(BaseModel):
     created_at: datetime
     completed_at: datetime | None
     results: list[VerifyResultItem] = Field(default_factory=list)
+
+
+class EnrichAllResponse(BaseModel):
+    """Returned by POST /api/v1/email-extractor/scans/{run_id}/enrich-all (202 Accepted).
+
+    Frontend polls GET /api/v1/email-extractor/scans/{run_id} for per-row
+    progress; this body is the "what's about to run" handshake.
+    """
+
+    scan_id: int
+    candidates_total: int
+    candidates_skipped_already_enriched: int
+    candidates_queued: int
+    status: Literal["queued"]
 
 
 class ScanListItem(BaseModel):

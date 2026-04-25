@@ -4,6 +4,8 @@ import { getIdentityToken } from "@/lib/gcp-identity-token";
 
 const BACKEND_BASE_URL = process.env.INTERNAL_API_URL ?? process.env.NEXT_PUBLIC_API_URL ?? "http://127.0.0.1:8001";
 
+const STATUSES_WITHOUT_BODY = new Set<number>([204, 205, 304]);
+
 type RouteContext = {
   params: {
     path: string[];
@@ -34,12 +36,24 @@ async function proxyRequest(request: NextRequest, { params }: RouteContext) {
     redirect: "manual"
   });
 
+  const contentType = upstreamResponse.headers.get("content-type");
+
+  if (STATUSES_WITHOUT_BODY.has(upstreamResponse.status)) {
+    const headers = new Headers();
+    if (contentType) {
+      headers.set("content-type", contentType);
+    }
+    return new NextResponse(null, {
+      status: upstreamResponse.status,
+      headers
+    });
+  }
+
   const responseBody = await upstreamResponse.arrayBuffer();
   const response = new NextResponse(responseBody, {
     status: upstreamResponse.status
   });
 
-  const contentType = upstreamResponse.headers.get("content-type");
   if (contentType) {
     response.headers.set("content-type", contentType);
   }
