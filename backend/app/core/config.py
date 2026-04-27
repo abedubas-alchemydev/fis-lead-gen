@@ -67,6 +67,13 @@ class Settings(BaseSettings):
     clearing_pipeline_limit: int | None = None
     contact_enrichment_provider: str = "disabled"
     apollo_api_key: str | None = None
+    # Cooldown window between successive Apollo /enrich attempts for the same
+    # broker-dealer. Stops the detail-page useEffect from re-firing /enrich
+    # on every visit for empty-result firms (where the FE's existing guard
+    # is insufficient because no ExecutiveContact rows exist to read off).
+    # Stamped on Apollo-owned outcomes only (success + no-result). Transient
+    # 5xx / network errors do not engage the cooldown. Set to 0 to disable.
+    apollo_enrich_cooldown_hours: int = 24
     zoominfo_api_key: str | None = None
     # Multi-provider contact discovery chain used by the "Generate More Details"
     # button on the firm detail page. The orchestrator walks providers in the

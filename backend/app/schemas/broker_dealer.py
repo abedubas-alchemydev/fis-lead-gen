@@ -53,6 +53,10 @@ class BrokerDealerListItem(BaseModel):
     total_assets_yoy: float | None = None
     types_of_business_total: int | None = None
     types_of_business_other: str | None = None
+    # Stamped server-side on every Apollo /enrich attempt the API "owns"
+    # (success or no-result). NULL = never attempted. Surfaced here so a
+    # follow-up FE PR can use it to gate the detail-page enrich call.
+    last_enrich_attempt_at: datetime | None = None
     created_at: datetime
 
 

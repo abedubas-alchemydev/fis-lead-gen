@@ -43,23 +43,31 @@ class ExecutiveContactService:
         force: bool = False,
     ) -> list[ExecutiveContact]:
         existing = await self.list_contacts(db, broker_dealer.id)
+
+        # Server-side cooldown. Stops the detail-page useEffect from re-firing
+        # /enrich on every visit for empty-result firms (where the legacy
+        # 90-day guard below never triggers because no ExecutiveContact rows
+        # exist to read enriched_at off). NULL last_enrich_attempt_at means
+        # "never attempted" -> first-time calls fall through. cooldown_hours=0
+        # disables the guard entirely.
+        cooldown_hours = settings.apollo_enrich_cooldown_hours
+        if (
+            not force
+            and cooldown_hours > 0
+            and broker_dealer.last_enrich_attempt_at is not None
+        ):
+            cutoff = datetime.now(timezone.utc) - timedelta(hours=cooldown_hours)
+            if broker_dealer.last_enrich_attempt_at >= cutoff:
+                return existing
+
         if not force and existing:
             newest = max(item.enriched_at for item in existing)
             if newest >= datetime.now(timezone.utc) - timedelta(days=90):
                 return existing
 
-        # Only delete non-FOCUS contacts — FOCUS-extracted CEO data should survive
-        # Apollo enrichment cycles so the two sources coexist.
-        await db.execute(
-            delete(ExecutiveContact).where(
-                ExecutiveContact.bd_id == broker_dealer.id,
-                ExecutiveContact.source != "focus_report",
-            )
-        )
-
         provider = settings.contact_enrichment_provider.lower()
         if provider == "apollo" and settings.apollo_api_key:
-            contacts = await self._enrich_via_apollo(broker_dealer)
+            contacts, apollo_errored = await self._enrich_via_apollo(broker_dealer)
         elif provider != "disabled":
             raise ContactEnrichmentUnavailableError(
                 f"Contact enrichment provider '{provider}' is not configured or missing API key. "
@@ -71,13 +79,40 @@ class ExecutiveContactService:
                 "and APOLLO_API_KEY in the backend .env file."
             )
 
+        # Transient Apollo error (5xx, 429, network) -> leave existing rows
+        # and the cooldown timestamp untouched so the next visit retries
+        # instead of being locked out for 24h by a 502 from Apollo.
+        if apollo_errored:
+            return existing
+
+        # Apollo-owned outcome (success or no-result). Wipe stale non-FOCUS
+        # rows, add any new contacts, stamp the cooldown timestamp, and
+        # commit atomically. FOCUS-extracted CEO data is preserved so the
+        # two sources continue to coexist.
+        await db.execute(
+            delete(ExecutiveContact).where(
+                ExecutiveContact.bd_id == broker_dealer.id,
+                ExecutiveContact.source != "focus_report",
+            )
+        )
         if contacts:
             db.add_all(contacts)
-            await db.commit()
+        broker_dealer.last_enrich_attempt_at = datetime.now(timezone.utc)
+        await db.commit()
         return await self.list_contacts(db, broker_dealer.id)
 
-    async def _enrich_via_apollo(self, broker_dealer: BrokerDealer) -> list[ExecutiveContact]:
+    async def _enrich_via_apollo(
+        self, broker_dealer: BrokerDealer
+    ) -> tuple[list[ExecutiveContact], bool]:
         """Enrich contacts via Apollo.io.
+
+        Returns ``(contacts, apollo_errored)``. ``apollo_errored`` is True
+        when at least one Apollo HTTP attempt failed transiently (network
+        timeout, 5xx, 429) AND no strategy produced any people. The caller
+        uses this flag to decide whether to engage the cooldown timestamp:
+        we only want to lock out future calls when Apollo "owned" the
+        outcome (success or genuine no-result), never when a 502 made us
+        give up early.
 
         Strategy cascade:
         1. People search (/mixed_people/search) — requires paid plan.
@@ -87,7 +122,7 @@ class ExecutiveContactService:
         """
         company_name = broker_dealer.name.strip()
         if not company_name:
-            return []
+            return [], False
 
         headers = {
             "Content-Type": "application/json",
@@ -96,6 +131,7 @@ class ExecutiveContactService:
         }
 
         people: list[dict] = []
+        apollo_errored = False
 
         # ── Strategy 1: People search (paid plans) ──────────
         try:
@@ -117,18 +153,24 @@ class ExecutiveContactService:
                 )
                 if response.status_code == 200:
                     people = response.json().get("people") or []
+                elif response.status_code == 429 or 500 <= response.status_code < 600:
+                    apollo_errored = True
+                    logger.warning("Apollo search returned %d for '%s'", response.status_code, company_name)
                 elif response.status_code != 403:
                     logger.warning("Apollo search returned %d for '%s'", response.status_code, company_name)
         except httpx.HTTPError as exc:
+            apollo_errored = True
             logger.warning("Apollo search network error for '%s': %s", company_name, exc)
 
         # ── Strategy 2: Org enrich -> domain-based contacts (free tier) ──
         if not people:
-            people = await self._enrich_via_org_lookup(headers, company_name, broker_dealer)
+            people, org_errored = await self._enrich_via_org_lookup(headers, company_name, broker_dealer)
+            apollo_errored = apollo_errored or org_errored
 
         if not people or not isinstance(people, list):
-            logger.info("Apollo returned 0 contacts for '%s'.", company_name)
-            return []
+            if not apollo_errored:
+                logger.info("Apollo returned 0 contacts for '%s'.", company_name)
+            return [], apollo_errored
 
         now = datetime.now(timezone.utc)
         contacts: list[ExecutiveContact] = []
@@ -170,18 +212,25 @@ class ExecutiveContactService:
         if not contacts:
             logger.info("Apollo returned 0 contacts for '%s'.", company_name)
 
-        return contacts
+        return contacts, False
 
     async def _enrich_via_org_lookup(
         self,
         headers: dict[str, str],
         company_name: str,
         broker_dealer: BrokerDealer,
-    ) -> list[dict]:
+    ) -> tuple[list[dict], bool]:
         """Use the Apollo org-enrich endpoint (free tier) to get company data,
         then build a synthetic org-level contact record with whatever data
-        Apollo provides (phone, LinkedIn, domain)."""
+        Apollo provides (phone, LinkedIn, domain).
+
+        Returns ``(people, errored)``. ``errored`` is True when at least one
+        domain attempt failed transiently (network / 5xx / 429) so the
+        caller can avoid engaging the cooldown timestamp on what looks like
+        a no-result but is actually a flaky Apollo response.
+        """
         domain_guesses = self._guess_domains(company_name)
+        apollo_errored = False
 
         for domain in domain_guesses:
             try:
@@ -192,6 +241,8 @@ class ExecutiveContactService:
                         json={"domain": domain},
                     )
                     if resp.status_code != 200:
+                        if resp.status_code == 429 or 500 <= resp.status_code < 600:
+                            apollo_errored = True
                         continue
 
                     org = resp.json().get("organization")
@@ -206,20 +257,24 @@ class ExecutiveContactService:
                         phone = primary_phone.get("sanitized_number") or primary_phone.get("number")
 
                     # Build a company-level contact record.
-                    return [
-                        {
-                            "name": org_name,
-                            "title": "Company (Organization Profile)",
-                            "email": None,
-                            "phone_numbers": [{"sanitized_number": phone}] if phone else [],
-                            "linkedin_url": linkedin,
-                        }
-                    ]
+                    return (
+                        [
+                            {
+                                "name": org_name,
+                                "title": "Company (Organization Profile)",
+                                "email": None,
+                                "phone_numbers": [{"sanitized_number": phone}] if phone else [],
+                                "linkedin_url": linkedin,
+                            }
+                        ],
+                        apollo_errored,
+                    )
             except httpx.HTTPError as exc:
+                apollo_errored = True
                 logger.debug("Org enrich failed for domain '%s': %s", domain, exc)
                 continue
 
-        return []
+        return [], apollo_errored
 
     @staticmethod
     def _guess_domains(company_name: str) -> list[str]:
