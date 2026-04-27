@@ -56,4 +56,11 @@ class BrokerDealer(Base):
     total_assets_yoy: Mapped[float | None] = mapped_column(Numeric(8, 2), nullable=True)
 
     status: Mapped[str] = mapped_column(String(64), default="pending", nullable=False)
+    # Stamped on every Apollo /enrich attempt that the API "owns" (success or
+    # no-result). Used by ExecutiveContactService.enrich_contacts as a
+    # server-side cooldown so empty-result firms don't re-fire Apollo on
+    # every detail-page visit. NULL means "never attempted".
+    last_enrich_attempt_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True, index=True
+    )
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now(), nullable=False)
