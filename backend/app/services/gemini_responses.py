@@ -1,14 +1,20 @@
 from __future__ import annotations
 
 import asyncio
+import base64
 import json
+import logging
 import re
+import secrets
 from typing import Literal
+from urllib.parse import urlparse
 
 import httpx
 from pydantic import BaseModel, ConfigDict, Field
 
 from app.core.config import settings
+
+logger = logging.getLogger(__name__)
 
 _GEMINI_KEY_SHAPE = re.compile(r"^AIzaSy[A-Za-z0-9_\-]{33}$")
 
@@ -82,7 +88,7 @@ class GeminiResponsesClient:
         if not settings.gemini_api_key:
             raise GeminiConfigurationError("GEMINI_API_KEY is not configured.")
 
-        payload = self._build_payload(
+        response_payload = await self._dispatch_pdf_extract(
             pdf_bytes_base64=pdf_bytes_base64,
             prompt=prompt,
             schema={
@@ -109,7 +115,6 @@ class GeminiResponsesClient:
                 ],
             },
         )
-        response_payload = await self._post_with_retries(payload)
         response_text = self._extract_response_text(response_payload)
 
         try:
@@ -123,7 +128,7 @@ class GeminiResponsesClient:
         if not settings.gemini_api_key:
             raise GeminiConfigurationError("GEMINI_API_KEY is not configured.")
 
-        payload = self._build_payload(
+        response_payload = await self._dispatch_pdf_extract(
             pdf_bytes_base64=pdf_bytes_base64,
             prompt=prompt,
             schema={
@@ -151,7 +156,6 @@ class GeminiResponsesClient:
                 ],
             },
         )
-        response_payload = await self._post_with_retries(payload)
         response_text = self._extract_response_text(response_payload)
 
         try:
@@ -211,15 +215,18 @@ class GeminiResponsesClient:
                 prompt=prompt,
                 schema=schema,
             )
+            response_payload = await self._post_with_retries(payload)
         else:
-            # Fallback: send raw PDF inline
-            payload = self._build_payload(
+            # Fallback: raw PDF — dispatch routes between inline base64 and
+            # the Files API based on size, keeping container memory flat for
+            # the 20-45 MB FOCUS filings that previously OOM-killed the pod.
+            assert pdf_bytes_base64 is not None  # invariant from the guard above
+            response_payload = await self._dispatch_pdf_extract(
                 pdf_bytes_base64=pdf_bytes_base64,
                 prompt=prompt,
                 schema=schema,
             )
 
-        response_payload = await self._post_with_retries(payload)
         response_text = self._extract_response_text(response_payload)
 
         try:
@@ -258,8 +265,11 @@ class GeminiResponsesClient:
             },
         }
 
-        payload = self._build_payload(pdf_bytes_base64=pdf_bytes_base64, prompt=prompt, schema=schema)
-        response_payload = await self._post_with_retries(payload)
+        response_payload = await self._dispatch_pdf_extract(
+            pdf_bytes_base64=pdf_bytes_base64,
+            prompt=prompt,
+            schema=schema,
+        )
         response_text = self._extract_response_text(response_payload)
 
         try:
@@ -331,6 +341,223 @@ class GeminiResponsesClient:
                 "topP": 0.95,
             },
         }
+
+    def _build_files_api_payload(
+        self,
+        *,
+        file_uri: str,
+        prompt: str,
+        schema: dict[str, object],
+    ) -> dict[str, object]:
+        """Build a Gemini API payload that references a previously-uploaded file.
+
+        Used for PDFs above ``gemini_files_api_threshold_mb``. The PDF bytes
+        are NOT in this payload — the model fetches them from ``file_uri``.
+        """
+        return {
+            "contents": [
+                {
+                    "role": "user",
+                    "parts": [
+                        {"text": prompt},
+                        {
+                            "file_data": {
+                                "mime_type": "application/pdf",
+                                "file_uri": file_uri,
+                            }
+                        },
+                    ],
+                }
+            ],
+            "generationConfig": {
+                "responseMimeType": "application/json",
+                "responseJsonSchema": schema,
+                "temperature": 0.1,
+                "topP": 0.95,
+            },
+        }
+
+    @staticmethod
+    def _pdf_byte_size_from_b64(pdf_bytes_base64: str) -> int:
+        """Return the raw byte size of a base64 string without decoding it.
+
+        Avoids materializing the decoded bytes just to measure them — saves
+        ~45 MB of transient memory on the hot path. Standard base64 strings
+        are always a multiple of 4 chars; padding ``=`` accounts for the
+        final 1-2 byte trim.
+        """
+        if not pdf_bytes_base64:
+            return 0
+        return (len(pdf_bytes_base64) * 3) // 4 - pdf_bytes_base64.count("=")
+
+    async def _dispatch_pdf_extract(
+        self,
+        *,
+        pdf_bytes_base64: str,
+        prompt: str,
+        schema: dict[str, object],
+    ) -> dict[str, object]:
+        """Route a PDF Gemini call through inline base64 or the Files API.
+
+        - size <= ``gemini_files_api_threshold_mb`` → inline base64 (existing
+          fast path, fewer round-trips).
+        - threshold < size <= ``gemini_inline_pdf_max_size_mb`` → upload to
+          Files API, reference by file_uri, delete after the model call.
+          Keeps container memory flat regardless of PDF size.
+        - size > ``gemini_inline_pdf_max_size_mb`` → reject (defense-in-depth;
+          the downloader normally caps before bytes ever reach this client).
+        """
+        threshold_bytes = settings.gemini_files_api_threshold_mb * 1024 * 1024
+        max_bytes = settings.gemini_inline_pdf_max_size_mb * 1024 * 1024
+        pdf_size_bytes = self._pdf_byte_size_from_b64(pdf_bytes_base64)
+
+        if pdf_size_bytes > max_bytes:
+            raise GeminiExtractionError(
+                f"PDF size {pdf_size_bytes} bytes exceeds "
+                f"gemini_inline_pdf_max_size_mb={settings.gemini_inline_pdf_max_size_mb} MB."
+            )
+
+        if pdf_size_bytes <= threshold_bytes:
+            payload = self._build_payload(
+                pdf_bytes_base64=pdf_bytes_base64, prompt=prompt, schema=schema
+            )
+            return await self._post_with_retries(payload)
+
+        # Files API path: decode -> upload -> reference -> generate -> delete.
+        pdf_bytes = base64.b64decode(pdf_bytes_base64)
+        file_name, file_uri = await self._upload_pdf_to_files_api(pdf_bytes)
+        try:
+            payload = self._build_files_api_payload(
+                file_uri=file_uri, prompt=prompt, schema=schema
+            )
+            return await self._post_with_retries(payload)
+        finally:
+            await self._delete_files_api_file(file_name)
+
+    def _files_api_upload_url(self) -> str:
+        """Compose the Gemini Files API multipart upload endpoint.
+
+        The upload host inserts ``/upload`` before the API version segment of
+        ``gemini_api_base`` (e.g. ``…/v1beta`` → ``…/upload/v1beta``).
+        """
+        parsed = urlparse(self.base_url)
+        return f"{parsed.scheme}://{parsed.netloc}/upload{parsed.path}/files?uploadType=multipart"
+
+    def _files_api_resource_url(self, file_name: str) -> str:
+        """Compose the Gemini Files API resource URL for ``file_name``.
+
+        ``file_name`` is the ``files/<id>`` reference returned by the upload
+        response (NOT the full URI).
+        """
+        return f"{self.base_url}/{file_name}"
+
+    async def _upload_pdf_to_files_api(self, pdf_bytes: bytes) -> tuple[str, str]:
+        """Upload PDF bytes via multipart/related and return ``(name, uri)``.
+
+        Returns the ``files/<id>`` resource name and the absolute file_uri
+        that the generateContent payload references. Polls until the file
+        becomes ``ACTIVE`` if the upload response reports ``PROCESSING``.
+        """
+        boundary = f"----GeminiUpload{secrets.token_hex(16)}"
+        metadata = json.dumps(
+            {"file": {"display_name": "focus_filing.pdf"}}
+        ).encode("utf-8")
+        body = b"".join(
+            [
+                f"--{boundary}\r\n".encode("ascii"),
+                b"Content-Type: application/json; charset=UTF-8\r\n\r\n",
+                metadata,
+                f"\r\n--{boundary}\r\n".encode("ascii"),
+                b"Content-Type: application/pdf\r\n\r\n",
+                pdf_bytes,
+                f"\r\n--{boundary}--\r\n".encode("ascii"),
+            ]
+        )
+        headers = {
+            "x-goog-api-key": settings.gemini_api_key,
+            "Content-Type": f"multipart/related; boundary={boundary}",
+        }
+        try:
+            async with httpx.AsyncClient(timeout=self.timeout) as client:
+                response = await client.post(
+                    self._files_api_upload_url(), headers=headers, content=body
+                )
+            response.raise_for_status()
+        except httpx.HTTPStatusError as exc:
+            detail = exc.response.text.strip()
+            raise GeminiExtractionError(
+                f"Files API upload failed with status {exc.response.status_code}: "
+                f"{detail or 'No response body.'}"
+            ) from exc
+        except httpx.HTTPError as exc:
+            raise GeminiExtractionError(
+                "Files API upload failed due to a network error."
+            ) from exc
+
+        payload = response.json()
+        file_obj = payload.get("file") if isinstance(payload, dict) else None
+        if not isinstance(file_obj, dict):
+            raise GeminiExtractionError("Files API upload response missing 'file' object.")
+        file_name = file_obj.get("name")
+        file_uri = file_obj.get("uri")
+        if not isinstance(file_name, str) or not isinstance(file_uri, str):
+            raise GeminiExtractionError(
+                "Files API upload response missing 'name' or 'uri'."
+            )
+        if file_obj.get("state") != "ACTIVE":
+            await self._poll_files_api_until_active(file_name)
+        return file_name, file_uri
+
+    async def _poll_files_api_until_active(
+        self, file_name: str, *, attempts: int = 6, delay_seconds: float = 2.0
+    ) -> None:
+        """Poll a Files API resource until state == ACTIVE or attempts run out."""
+        url = self._files_api_resource_url(file_name)
+        headers = {"x-goog-api-key": settings.gemini_api_key}
+        for _ in range(attempts):
+            await asyncio.sleep(delay_seconds)
+            try:
+                async with httpx.AsyncClient(timeout=self.timeout) as client:
+                    response = await client.get(url, headers=headers)
+                response.raise_for_status()
+            except httpx.HTTPError as exc:
+                raise GeminiExtractionError(
+                    f"Files API status poll failed for {file_name}."
+                ) from exc
+            payload = response.json()
+            state = payload.get("state") if isinstance(payload, dict) else None
+            if state == "ACTIVE":
+                return
+            if state == "FAILED":
+                raise GeminiExtractionError(
+                    f"Files API processing failed for {file_name}."
+                )
+        raise GeminiExtractionError(
+            f"Files API resource {file_name} did not reach ACTIVE state after polling."
+        )
+
+    async def _delete_files_api_file(self, file_name: str) -> None:
+        """Best-effort delete to keep the Files API quota tidy.
+
+        Failures are logged, not raised — orphaned files TTL out on Google's
+        side and the response we already got is the one the user needs.
+        """
+        url = self._files_api_resource_url(file_name)
+        headers = {"x-goog-api-key": settings.gemini_api_key}
+        try:
+            async with httpx.AsyncClient(timeout=self.timeout) as client:
+                response = await client.delete(url, headers=headers)
+            if response.status_code >= 400:
+                logger.warning(
+                    "Files API delete failed for %s: status=%s body=%s",
+                    file_name,
+                    response.status_code,
+                    response.text[:200],
+                )
+        except httpx.HTTPError as exc:
+            logger.warning(
+                "Files API delete network error for %s: %s", file_name, exc
+            )
 
     async def _post_with_retries(self, payload: dict[str, object]) -> dict[str, object]:
         url = f"{self.base_url}/models/{settings.gemini_pdf_model}:generateContent"
