@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from datetime import date
 from math import ceil
 import re
 
@@ -218,6 +219,10 @@ class BrokerDealerRepository:
         sort_dir: str,
         page: int,
         limit: int,
+        min_net_capital: float | None = None,
+        max_net_capital: float | None = None,
+        registered_after: date | None = None,
+        registered_before: date | None = None,
     ) -> BrokerDealerListResponse:
         filters = []
         if search:
@@ -256,6 +261,19 @@ class BrokerDealerRepository:
             filters.append(
                 BrokerDealer.types_of_business.op("?|")(cast(types_of_business, ARRAY(String)))
             )
+
+        # Net-capital + registration-date range filters. NULL columns never
+        # satisfy a range comparison (NULL >= 5 evaluates to unknown, which
+        # WHERE treats as false), so firms missing the underlying value are
+        # excluded automatically — no explicit is_not(None) guard needed.
+        if min_net_capital is not None:
+            filters.append(BrokerDealer.latest_net_capital >= min_net_capital)
+        if max_net_capital is not None:
+            filters.append(BrokerDealer.latest_net_capital <= max_net_capital)
+        if registered_after is not None:
+            filters.append(BrokerDealer.registration_date >= registered_after)
+        if registered_before is not None:
+            filters.append(BrokerDealer.registration_date <= registered_before)
 
         if list_mode == "primary":
             filters.append(BrokerDealer.is_deficient.is_(False))
