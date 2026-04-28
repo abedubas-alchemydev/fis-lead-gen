@@ -10,6 +10,10 @@ import { apiRequest, buildApiPath } from "@/lib/api";
 import { formatCurrency, formatRelativeTime } from "@/lib/format";
 import { STATE_NAMES, stateCodeFromName } from "@/lib/states";
 import { Combo } from "@/components/ui/combo";
+import {
+  MultiSelectFilter,
+  type MultiSelectFilterOption,
+} from "@/components/ui/multi-select-filter";
 import { Dotmark, Segmented, type SegmentedItem } from "@/components/ui/segmented";
 import { Pill, type PillVariant } from "@/components/ui/pill";
 import { Tag } from "@/components/ui/tag";
@@ -19,6 +23,7 @@ import type {
   BrokerDealerListResponse,
   CompetitorProvidersResponse,
   DashboardStats,
+  TypeOfBusinessOption,
 } from "@/lib/types";
 
 // ── Column catalog ────────────────────────────────────────────────────────
@@ -139,6 +144,7 @@ type MasterListWorkspaceClientProps = {
   initialClearingType?: string;
   initialLeadPriority?: string;
   initialListMode?: ListMode;
+  initialTypesOfBusiness?: string[];
 };
 
 export function MasterListWorkspaceClient({
@@ -146,11 +152,20 @@ export function MasterListWorkspaceClient({
   initialClearingType = "All",
   initialLeadPriority = "All",
   initialListMode = "primary",
+  initialTypesOfBusiness = [],
 }: MasterListWorkspaceClientProps) {
   // ── Table data + filter state — preserved from pre-redesign client ─────
   const [items, setItems] = useState<BrokerDealerListItem[]>([]);
   const [clearingPartners, setClearingPartners] = useState<string[]>([]);
   const [competitorSeeds, setCompetitorSeeds] = useState<string[]>([]);
+  // Distinct types-of-business values + per-type firm counts. Loaded once
+  // from /broker-dealers/types-of-business; sorted by count desc inside the
+  // filter so the most common types surface first. Empty array until the
+  // one-shot fetch returns; the filter renders its loading row meanwhile.
+  const [typesOfBusinessOptions, setTypesOfBusinessOptions] = useState<
+    TypeOfBusinessOption[]
+  >([]);
+  const [typesOfBusinessLoading, setTypesOfBusinessLoading] = useState(true);
   const [listCounts, setListCounts] = useState<Record<ListMode, number | null>>({
     primary: null,
     alternative: null,
@@ -164,6 +179,8 @@ export function MasterListWorkspaceClient({
   const [leadPriorityFilter, setLeadPriorityFilter] = useState(initialLeadPriority);
   const [clearingTypeFilter, setClearingTypeFilter] = useState(initialClearingType);
   const [clearingPartnerFilter, setClearingPartnerFilter] = useState(initialClearingPartner);
+  const [typesOfBusinessFilter, setTypesOfBusinessFilter] =
+    useState<string[]>(initialTypesOfBusiness);
   const [listMode, setListMode] = useState<ListMode>(initialListMode);
   const [sortBy, setSortBy] = useState("name");
   const [sortDir, setSortDir] = useState<"asc" | "desc">("asc");
@@ -195,6 +212,8 @@ export function MasterListWorkspaceClient({
         lead_priority: leadPriorityFilter === "All" ? undefined : [leadPriorityFilter],
         clearing_partner: clearingPartnerFilter ? [clearingPartnerFilter] : undefined,
         clearing_type: clearingTypeFilter === "All" ? undefined : [clearingTypeFilter],
+        types_of_business:
+          typesOfBusinessFilter.length > 0 ? typesOfBusinessFilter : undefined,
         list: listMode,
         sort_by: sortBy,
         sort_dir: sortDir,
@@ -208,6 +227,7 @@ export function MasterListWorkspaceClient({
       leadPriorityFilter,
       clearingPartnerFilter,
       clearingTypeFilter,
+      typesOfBusinessFilter,
       listMode,
       sortBy,
       sortDir,
@@ -252,20 +272,29 @@ export function MasterListWorkspaceClient({
 
     async function loadFilters() {
       try {
-        const [partnerResp, competitorResp, primaryResp, alternativeResp, allResp] =
-          await Promise.all([
-            apiRequest<string[]>("/api/v1/broker-dealers/clearing-partners"),
-            apiRequest<CompetitorProvidersResponse>("/api/v1/settings/competitors"),
-            apiRequest<BrokerDealerListResponse>(
-              buildApiPath("/api/v1/broker-dealers", { list: "primary", limit: 1 }),
-            ),
-            apiRequest<BrokerDealerListResponse>(
-              buildApiPath("/api/v1/broker-dealers", { list: "alternative", limit: 1 }),
-            ),
-            apiRequest<BrokerDealerListResponse>(
-              buildApiPath("/api/v1/broker-dealers", { list: "all", limit: 1 }),
-            ),
-          ]);
+        const [
+          partnerResp,
+          competitorResp,
+          typesResp,
+          primaryResp,
+          alternativeResp,
+          allResp,
+        ] = await Promise.all([
+          apiRequest<string[]>("/api/v1/broker-dealers/clearing-partners"),
+          apiRequest<CompetitorProvidersResponse>("/api/v1/settings/competitors"),
+          apiRequest<TypeOfBusinessOption[]>(
+            "/api/v1/broker-dealers/types-of-business",
+          ),
+          apiRequest<BrokerDealerListResponse>(
+            buildApiPath("/api/v1/broker-dealers", { list: "primary", limit: 1 }),
+          ),
+          apiRequest<BrokerDealerListResponse>(
+            buildApiPath("/api/v1/broker-dealers", { list: "alternative", limit: 1 }),
+          ),
+          apiRequest<BrokerDealerListResponse>(
+            buildApiPath("/api/v1/broker-dealers", { list: "all", limit: 1 }),
+          ),
+        ]);
         if (!active) return;
         setClearingPartners(partnerResp);
         setCompetitorSeeds(
@@ -274,6 +303,7 @@ export function MasterListWorkspaceClient({
             .sort((a, b) => a.priority - b.priority)
             .map((item) => item.name),
         );
+        setTypesOfBusinessOptions(typesResp);
         setListCounts({
           primary: primaryResp.meta.total,
           alternative: alternativeResp.meta.total,
@@ -284,6 +314,9 @@ export function MasterListWorkspaceClient({
         // Silent on error — filter options degrade to empty; table still loads.
         setClearingPartners([]);
         setCompetitorSeeds([]);
+        setTypesOfBusinessOptions([]);
+      } finally {
+        if (active) setTypesOfBusinessLoading(false);
       }
     }
 
@@ -330,6 +363,7 @@ export function MasterListWorkspaceClient({
     setLeadPriorityFilter("All");
     setClearingPartnerFilter("");
     setClearingTypeFilter("All");
+    setTypesOfBusinessFilter([]);
     setSortBy("name");
     setSortDir("asc");
     setPage(1);
@@ -343,6 +377,7 @@ export function MasterListWorkspaceClient({
     if (leadPriorityFilter !== "All") count += 1;
     if (clearingPartnerFilter !== "") count += 1;
     if (clearingTypeFilter !== "All") count += 1;
+    if (typesOfBusinessFilter.length > 0) count += 1;
     return count;
   }, [
     stateFilter,
@@ -350,7 +385,23 @@ export function MasterListWorkspaceClient({
     leadPriorityFilter,
     clearingPartnerFilter,
     clearingTypeFilter,
+    typesOfBusinessFilter,
   ]);
+
+  // Memoized options shape for the multi-select. Sorted by count desc with
+  // alphabetical tiebreak so the most-common types render at the top of the
+  // popover. The empty-string short-circuit keeps the sort stable while the
+  // initial fetch is in flight.
+  const typesOfBusinessFilterOptions = useMemo<MultiSelectFilterOption[]>(
+    () =>
+      [...typesOfBusinessOptions]
+        .sort((a, b) => {
+          if (b.count !== a.count) return b.count - a.count;
+          return a.type.localeCompare(b.type);
+        })
+        .map((item) => ({ value: item.type, label: item.type, count: item.count })),
+    [typesOfBusinessOptions],
+  );
 
   const pages = paginationPages(meta.page, meta.total_pages);
 
@@ -497,7 +548,7 @@ export function MasterListWorkspaceClient({
           </button>
         </div>
 
-        <div className="mb-4 grid gap-4 lg:grid-cols-3">
+        <div className="mb-4 grid gap-4 md:grid-cols-2 lg:grid-cols-4">
           <div>
             <label className="mb-1.5 block text-[11px] font-semibold uppercase tracking-[0.08em] text-[var(--text-muted,#94a3b8)]">
               State
@@ -551,6 +602,27 @@ export function MasterListWorkspaceClient({
                 </option>
               ))}
             </select>
+          </div>
+
+          <div>
+            <label className="mb-1.5 block text-[11px] font-semibold uppercase tracking-[0.08em] text-[var(--text-muted,#94a3b8)]">
+              Types of Business
+            </label>
+            <MultiSelectFilter
+              value={typesOfBusinessFilter}
+              onChange={(next) => {
+                setTypesOfBusinessFilter(next);
+                setPage(1);
+              }}
+              options={typesOfBusinessFilterOptions}
+              triggerLabel="Types of Business"
+              placeholder="Search types…"
+              emptyLabel={
+                typesOfBusinessLoading ? "Loading…" : "No types match your search"
+              }
+              loading={typesOfBusinessLoading}
+              ariaLabel="Types of Business"
+            />
           </div>
         </div>
 
@@ -640,6 +712,19 @@ export function MasterListWorkspaceClient({
                 Type: {clearingTypeLabel(clearingTypeFilter)}
               </Tag>
             ) : null}
+            {typesOfBusinessFilter.map((type) => (
+              <Tag
+                key={`tob-${type}`}
+                onDismiss={() => {
+                  setTypesOfBusinessFilter((current) =>
+                    current.filter((value) => value !== type),
+                  );
+                  setPage(1);
+                }}
+              >
+                Business: {type}
+              </Tag>
+            ))}
           </div>
         ) : null}
       </div>

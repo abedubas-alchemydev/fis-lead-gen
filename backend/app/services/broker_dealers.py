@@ -545,25 +545,26 @@ class BrokerDealerRepository:
 
         Gemini sometimes returns multi-partner strings like
         ``"Goldman, Sachs & Co., Pershing LLC, and Mirae Asset Securities"``.
-        A simple exact-equality check would miss the embedded "Pershing LLC".
-        Instead we check if the normalized competitor name is a *substring*
-        of the normalized partner string (and vice-versa for short aliases).
+        We need to catch the embedded ``Pershing LLC`` without firing on
+        sister entities that share a brand prefix (``RBC Capital Markets``
+        vs ``RBC Correspondent Services``).
+
+        Match each competitor name and alias as a whole word
+        (``\\b<alias>\\b``, case-insensitive) against the original
+        un-normalized partner string. Whitespace inside multi-word aliases
+        is treated as ``\\s+`` so commas-and-spaces variants ("BNY Pershing"
+        vs "BNY  Pershing") still match. Bare-prefix aliases that collide
+        with sibling brands have been removed from ``DEFAULT_COMPETITORS``
+        in tandem with this change.
         """
-        normalized_partner = self.normalize_partner_name(partner_name)
-        if not normalized_partner:
+        if not partner_name:
             return False
 
         for competitor in competitors:
-            candidates = [competitor.name, *competitor.aliases]
-            for candidate in candidates:
-                normalized_candidate = self.normalize_partner_name(candidate)
-                if not normalized_candidate:
+            for candidate in [competitor.name, *competitor.aliases]:
+                if not candidate:
                     continue
-                # Exact match OR substring containment in either direction.
-                if (
-                    normalized_candidate == normalized_partner
-                    or normalized_candidate in normalized_partner
-                    or normalized_partner in normalized_candidate
-                ):
+                pattern = r"\b" + r"\s+".join(re.escape(token) for token in candidate.split()) + r"\b"
+                if re.search(pattern, partner_name, re.IGNORECASE):
                     return True
         return False

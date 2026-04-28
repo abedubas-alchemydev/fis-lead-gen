@@ -276,6 +276,11 @@ export type PipelineTriggerResponse = {
   failure_count: number;
 };
 
+export type TypeOfBusinessOption = {
+  type: string;
+  count: number;
+};
+
 export type CompetitorProviderItem = {
   id: number;
   name: string;
