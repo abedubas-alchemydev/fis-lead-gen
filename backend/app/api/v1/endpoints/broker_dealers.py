@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import base64
-from datetime import datetime, time, timezone
+from datetime import date, datetime, time, timezone
 
 from fastapi import APIRouter, Body, Depends, HTTPException, Query, status
 from fastapi.responses import Response
@@ -77,6 +77,10 @@ async def list_broker_dealers(
     clearing_partner_filter: list[str] | None = Query(default=None, alias="clearing_partner"),
     clearing_type_filter: list[str] | None = Query(default=None, alias="clearing_type"),
     types_of_business_filter: list[str] | None = Query(default=None, alias="types_of_business"),
+    min_net_capital: float | None = Query(default=None, ge=0),
+    max_net_capital: float | None = Query(default=None, ge=0),
+    registered_after: date | None = Query(default=None),
+    registered_before: date | None = Query(default=None),
     list_mode: str = Query(default="primary", alias="list", pattern="^(primary|alternative|all)$"),
     sort_by: str = Query(default="name"),
     sort_dir: str = Query(default="asc", pattern="^(asc|desc)$"),
@@ -95,6 +99,10 @@ async def list_broker_dealers(
         clearing_partners=_parse_states(clearing_partner_filter),
         clearing_types=_parse_states(clearing_type_filter),
         types_of_business=_parse_states(types_of_business_filter),
+        min_net_capital=min_net_capital,
+        max_net_capital=max_net_capital,
+        registered_after=registered_after,
+        registered_before=registered_before,
         list_mode=list_mode,
         sort_by=sort_by,
         sort_dir=sort_dir,
