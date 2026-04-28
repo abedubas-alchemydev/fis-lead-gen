@@ -8,7 +8,11 @@ Supports both:
 - **Batch** (all ~3000 firms via ``python -m scripts.run_focus_ceo_extraction``)
 
 The extracted CEO contact is persisted as an ExecutiveContact with
-source="focus_report" so it coexists with Apollo-sourced contacts.
+source="focus_report" so it coexists with Apollo-sourced contacts. The extracted
+net capital is persisted as a FinancialMetric row keyed on (bd_id, report_date)
+and, when the result clears the confidence threshold, the BD rollup cache
+(``broker_dealers.latest_net_capital`` and friends) is refreshed so the
+firm-detail page survives a reload.
 """
 
 from __future__ import annotations
@@ -27,6 +31,11 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.core.config import settings
 from app.models.broker_dealer import BrokerDealer
 from app.models.executive_contact import ExecutiveContact
+from app.models.financial_metric import FinancialMetric
+from app.services.extraction_status import (
+    STATUS_PARSED,
+    classify_financial_extraction_status,
+)
 from app.services.gemini_responses import (
     GeminiConfigurationError,
     GeminiExtractionError,
@@ -34,6 +43,7 @@ from app.services.gemini_responses import (
 )
 from app.services.pdf_downloader import PdfDownloaderService
 from app.services.pdf_text_extractor import extract_from_pdf
+from app.services.scoring import calculate_yoy_growth, classify_health_status
 
 logger = logging.getLogger(__name__)
 
@@ -222,6 +232,20 @@ class FocusCeoExtractionService:
                         ceo_email=text_result.contact_email,
                         ceo_phone=text_result.contact_phone,
                     )
+                # Persist the net capital reading (if any). pdfplumber rarely
+                # surfaces a parseable report_date, so the persistence helper
+                # falls back to the BD's last_audit_report_date when needed.
+                await self._persist_net_capital(
+                    db,
+                    broker_dealer=broker_dealer,
+                    net_capital=text_result.net_capital,
+                    excess_net_capital=text_result.excess_net_capital,
+                    total_assets=None,
+                    required_min_capital=None,
+                    extracted_report_date=None,
+                    confidence_score=confidence,
+                    source_filing_url=pdf_record.source_pdf_url,
+                )
                 return FocusCeoExtractionResult(
                     bd_id=broker_dealer.id,
                     ceo_name=text_result.contact_name,
@@ -294,6 +318,24 @@ class FocusCeoExtractionService:
                 ceo_email=extraction.ceo_email,
                 ceo_phone=extraction.ceo_phone,
             )
+
+        # Persist the net capital reading (if any) so the firm-detail page
+        # survives a reload. The helper preserves review-queue semantics:
+        # below-threshold rows land tagged ``needs_review`` and do NOT promote
+        # to the BD rollup cache. The focus-CEO Gemini schema only carries
+        # net_capital today; the sibling financial fields stay None and the
+        # bulk financial pipeline keeps owning the multi-year rollup.
+        await self._persist_net_capital(
+            db,
+            broker_dealer=broker_dealer,
+            net_capital=extraction.net_capital,
+            excess_net_capital=None,
+            total_assets=None,
+            required_min_capital=None,
+            extracted_report_date=report_date,
+            confidence_score=extraction.confidence_score,
+            source_filing_url=pdf_record.source_pdf_url,
+        )
 
         return FocusCeoExtractionResult(
             bd_id=broker_dealer.id,
@@ -563,5 +605,149 @@ class FocusCeoExtractionService:
                 source="focus_report",
                 enriched_at=now,
             )
+        )
+        await db.flush()
+
+    async def _persist_net_capital(
+        self,
+        db: AsyncSession,
+        *,
+        broker_dealer: BrokerDealer,
+        net_capital: float | None,
+        excess_net_capital: float | None,
+        total_assets: float | None,
+        required_min_capital: float | None,
+        extracted_report_date: date | None,
+        confidence_score: float | None,
+        source_filing_url: str | None,
+    ) -> None:
+        """Upsert the FinancialMetric row for this re-extraction and refresh
+        the BD rollup when the result clears the confidence threshold.
+
+        ``financial_metrics`` is keyed on ``(bd_id, report_date)`` and both
+        columns plus ``net_capital`` are NOT NULL. If extraction did not
+        surface a ``report_date`` we fall back to the BD's
+        ``last_audit_report_date`` (or ``last_filing_date``) so the on-demand
+        re-extract still persists; if no fallback is available we abort the
+        write rather than fabricate a date.
+
+        Review-queue semantics are preserved:
+
+        * High-confidence rows land tagged ``parsed`` and the BD rollup is
+          refreshed from the latest parsed metric for this firm.
+        * Low-confidence rows land tagged ``needs_review`` and do NOT promote
+          to the BD rollup cache.
+        * Provider-error / no-PDF paths never reach this helper, so no DB
+          write happens for those cases.
+        """
+        if net_capital is None:
+            return
+
+        report_date = (
+            extracted_report_date
+            or broker_dealer.last_audit_report_date
+            or broker_dealer.last_filing_date
+        )
+        if report_date is None:
+            logger.info(
+                "Skipping net-capital persistence for BD %d: no report_date available "
+                "(extraction omitted it and BD has no last_audit_report_date / last_filing_date).",
+                broker_dealer.id,
+            )
+            return
+
+        extraction_status = classify_financial_extraction_status(
+            confidence_score=confidence_score,
+            min_confidence=settings.financial_extraction_min_confidence,
+            has_required_fields=True,
+        )
+
+        existing = (
+            await db.execute(
+                select(FinancialMetric).where(
+                    FinancialMetric.bd_id == broker_dealer.id,
+                    FinancialMetric.report_date == report_date,
+                )
+            )
+        ).scalar_one_or_none()
+
+        if existing is None:
+            db.add(
+                FinancialMetric(
+                    bd_id=broker_dealer.id,
+                    report_date=report_date,
+                    net_capital=net_capital,
+                    excess_net_capital=excess_net_capital,
+                    total_assets=total_assets,
+                    required_min_capital=required_min_capital,
+                    source_filing_url=source_filing_url,
+                    extraction_status=extraction_status,
+                )
+            )
+        else:
+            existing.net_capital = net_capital
+            if excess_net_capital is not None:
+                existing.excess_net_capital = excess_net_capital
+            if total_assets is not None:
+                existing.total_assets = total_assets
+            if required_min_capital is not None:
+                existing.required_min_capital = required_min_capital
+            if source_filing_url is not None:
+                existing.source_filing_url = source_filing_url
+            existing.extraction_status = extraction_status
+
+        await db.flush()
+
+        if extraction_status == STATUS_PARSED:
+            await self._refresh_bd_rollup(db, broker_dealer)
+
+    async def _refresh_bd_rollup(
+        self,
+        db: AsyncSession,
+        broker_dealer: BrokerDealer,
+    ) -> None:
+        """Refresh the denormalized rollup fields on ``broker_dealers`` from
+        the latest ``parsed`` FinancialMetric rows for this firm.
+
+        Mirrors the per-firm slice of
+        ``FocusReportService._refresh_broker_dealer_rollups`` so the
+        firm-detail page stays consistent with the bulk pipeline. ``needs_review``
+        rows are deliberately excluded — they would corrupt master-list numbers
+        with below-threshold confidence values.
+        """
+        metrics = list(
+            (
+                await db.execute(
+                    select(FinancialMetric)
+                    .where(
+                        FinancialMetric.bd_id == broker_dealer.id,
+                        FinancialMetric.extraction_status == STATUS_PARSED,
+                    )
+                    .order_by(FinancialMetric.report_date.desc())
+                )
+            ).scalars()
+        )
+        if not metrics:
+            return
+
+        latest = metrics[0]
+        yoy_growth = calculate_yoy_growth(metrics)
+        broker_dealer.required_min_capital = (
+            float(latest.required_min_capital) if latest.required_min_capital is not None else None
+        )
+        broker_dealer.latest_net_capital = float(latest.net_capital)
+        broker_dealer.latest_excess_net_capital = (
+            float(latest.excess_net_capital) if latest.excess_net_capital is not None else None
+        )
+        broker_dealer.latest_total_assets = (
+            float(latest.total_assets) if latest.total_assets is not None else None
+        )
+        broker_dealer.yoy_growth = yoy_growth
+        broker_dealer.health_status = classify_health_status(
+            latest_net_capital=float(latest.net_capital),
+            required_min_capital=(
+                float(latest.required_min_capital) if latest.required_min_capital is not None else None
+            ),
+            yoy_growth=yoy_growth,
         )
         await db.flush()
