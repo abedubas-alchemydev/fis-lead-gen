@@ -57,6 +57,7 @@ class AlertRepository:
         broker_dealer_id: int | None,
         page: int,
         limit: int,
+        category: str | None = None,
     ) -> AlertListResponse:
         filters = []
         if form_types:
@@ -67,6 +68,10 @@ class AlertRepository:
             filters.append(FilingAlert.is_read.is_(is_read))
         if broker_dealer_id is not None:
             filters.append(FilingAlert.bd_id == broker_dealer_id)
+        if category == "form_bd":
+            filters.append(FilingAlert.form_type == "Form BD")
+        elif category == "deficiency":
+            filters.append(FilingAlert.form_type == "Form 17a-11")
 
         count_stmt = select(func.count(FilingAlert.id))
         if filters:
