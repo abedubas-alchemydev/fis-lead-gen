@@ -21,6 +21,14 @@ from app.schemas.broker_dealer import BrokerDealerListMeta, BrokerDealerListResp
 from app.services.scoring import calculate_lead_score, classify_lead_priority
 from app.services.service_models import MergedBrokerDealerRecord, ProviderDistributionRecord
 
+# Minimum adoption threshold for the master-list types-of-business filter.
+# Anything that appears on only one firm is almost always a free-text "other"
+# value rather than a real FINRA category, and including those one-offs blows
+# the dropdown out to ~3,300 entries. Two firms in agreement is enough signal
+# that the type is shared rather than firm-specific noise.
+TYPES_OF_BUSINESS_MIN_COUNT = 2
+
+
 ALLOWED_SORT_FIELDS = {
     "name": BrokerDealer.name,
     "cik": BrokerDealer.cik,
@@ -338,9 +346,11 @@ class BrokerDealerRepository:
     async def list_types_of_business(self, db: AsyncSession) -> list[dict[str, object]]:
         """Distinct types-of-business across all firms with per-type counts.
 
-        Flattens the JSONB array via `jsonb_array_elements_text`, groups by the
-        extracted text value, and returns `{type, count}` sorted by count desc
-        then alphabetically. Fuels the multi-select filter on the master list.
+        Flattens the JSONB array via `jsonb_array_elements_text`, trims and
+        drops null/empty values, groups by the trimmed text, excludes one-off
+        free-text "other" entries via ``HAVING COUNT(*) >= TYPES_OF_BUSINESS_MIN_COUNT``,
+        and returns `{type, count}` sorted by count desc then alphabetically.
+        Fuels the multi-select filter on the master list.
         """
         type_element = func.jsonb_array_elements_text(BrokerDealer.types_of_business).label("type")
         subq = (
@@ -348,13 +358,17 @@ class BrokerDealerRepository:
             .where(BrokerDealer.types_of_business.is_not(None))
             .subquery()
         )
+        trimmed = func.trim(subq.c.type)
         stmt = (
-            select(subq.c.type, func.count().label("count"))
-            .group_by(subq.c.type)
-            .order_by(func.count().desc(), subq.c.type.asc())
+            select(trimmed.label("type"), func.count().label("count"))
+            .where(trimmed.is_not(None))
+            .where(func.length(trimmed) > 0)
+            .group_by(trimmed)
+            .having(func.count() >= TYPES_OF_BUSINESS_MIN_COUNT)
+            .order_by(func.count().desc(), trimmed.asc())
         )
         rows = (await db.execute(stmt)).all()
-        return [{"type": row.type, "count": int(row.count)} for row in rows if row.type]
+        return [{"type": row.type, "count": int(row.count)} for row in rows]
 
     async def list_clearing_arrangements(self, db: AsyncSession, broker_dealer_id: int) -> list[ClearingArrangement]:
         stmt = (
