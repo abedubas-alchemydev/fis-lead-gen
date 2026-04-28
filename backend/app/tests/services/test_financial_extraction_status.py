@@ -417,7 +417,7 @@ async def test_mixed_run_mixed_status_counts(
 
     call_count = {"n": 0}
 
-    async def _download(_bd, count=2):
+    async def _download(_bd, _dest_dir, count=2):
         call_count["n"] += 1
         return [_make_pdf_record(bd_id=call_count["n"])]
 

@@ -2,8 +2,11 @@ from __future__ import annotations
 
 import asyncio
 import base64
+import contextlib
 import ipaddress
 import logging
+import tempfile
+from collections.abc import Iterator
 from datetime import date
 from pathlib import Path
 from urllib.parse import urljoin, urlparse
@@ -15,6 +18,28 @@ from app.models.broker_dealer import BrokerDealer
 from app.services.service_models import DownloadedPdfRecord
 
 logger = logging.getLogger(__name__)
+
+
+@contextlib.contextmanager
+def pdf_tempdir(prefix: str = "pdf_extract_") -> Iterator[Path]:
+    """Yield a per-extraction working directory; auto-cleaned on exit.
+
+    Replaces the persistent PDF cache that previously sat at
+    ``settings.pdf_cache_dir``. Each download + parse + DB-write cycle owns
+    one of these for its lifetime; when the ``with`` block exits, the
+    directory and any PDFs inside it disappear.
+
+    Honors ``settings.pdf_cache_dir`` as the *parent* directory when set —
+    purely a local-debug knob so a developer can route the temp into a known
+    location and inspect mid-flight. In production the setting is unset and
+    we fall back to the system temp.
+    """
+    parent: Path | None = None
+    if settings.pdf_cache_dir:
+        parent = Path(settings.pdf_cache_dir)
+        parent.mkdir(parents=True, exist_ok=True)
+    with tempfile.TemporaryDirectory(prefix=prefix, dir=parent) as tmp:
+        yield Path(tmp)
 
 # Allowlist of hosts this service may fetch from. All SEC-owned. Extend only
 # after security review — DB-sourced URLs (broker_dealer.filings_index_url)
@@ -51,14 +76,22 @@ def _validate_sec_url(url: str) -> None:
         raise ValueError(f"IP literal {host!r} targets a private or reserved range.")
 
 class PdfDownloaderService:
-    def __init__(self) -> None:
-        self.cache_dir = Path(settings.pdf_cache_dir)
-        self.cache_dir.mkdir(parents=True, exist_ok=True)
+    """Thin SEC PDF fetcher.
 
-    async def download_latest_x17a5_pdf(self, broker_dealer: BrokerDealer) -> DownloadedPdfRecord | None:
-        return await self._download_live_pdf(broker_dealer)
+    The service no longer owns disk state. Each call accepts a ``dest_dir``
+    chosen by the caller — typically a ``tempfile.TemporaryDirectory()``
+    yielded by ``pdf_tempdir`` — and writes the PDF there. When the caller's
+    ``with`` block exits, the file is gone.
+    """
 
-    async def download_recent_x17a5_pdfs(self, broker_dealer: BrokerDealer, count: int = 2) -> list[DownloadedPdfRecord]:
+    async def download_latest_x17a5_pdf(
+        self, broker_dealer: BrokerDealer, dest_dir: Path
+    ) -> DownloadedPdfRecord | None:
+        return await self._download_live_pdf(broker_dealer, dest_dir)
+
+    async def download_recent_x17a5_pdfs(
+        self, broker_dealer: BrokerDealer, dest_dir: Path, count: int = 2
+    ) -> list[DownloadedPdfRecord]:
         """Download the N most recent X-17A-5 PDFs for multi-year financial data."""
         if not broker_dealer.filings_index_url:
             return []
@@ -87,32 +120,23 @@ class PdfDownloaderService:
         results: list[DownloadedPdfRecord] = []
         for filing in top_filings:
             try:
-                record = await self._download_filing_pdf(broker_dealer, filing)
+                record = await self._download_filing_pdf(broker_dealer, filing, dest_dir)
                 if record:
                     results.append(record)
             except Exception:
                 continue
         return results
 
-    async def _download_filing_pdf(self, broker_dealer: BrokerDealer, filing: dict[str, object]) -> DownloadedPdfRecord | None:
-        """Download a single filing's PDF (with caching)."""
+    async def _download_filing_pdf(
+        self,
+        broker_dealer: BrokerDealer,
+        filing: dict[str, object],
+        dest_dir: Path,
+    ) -> DownloadedPdfRecord | None:
+        """Download a single filing's PDF into ``dest_dir``."""
         filing_date = date.fromisoformat(str(filing["filing_date"]))
         accession_slug = str(filing["accession_number"]).replace("-", "")
-        pdf_path = self.cache_dir / f"{broker_dealer.cik}-{accession_slug}.pdf"
-
-        if pdf_path.exists() and pdf_path.stat().st_size > 0:
-            pdf_bytes = pdf_path.read_bytes()
-            pdf_url = await self._resolve_pdf_url(
-                cik=broker_dealer.cik,
-                accession_number=str(filing["accession_number"]),
-                primary_document=str(filing["primary_document"]),
-            )
-            return DownloadedPdfRecord(
-                bd_id=broker_dealer.id, filing_year=filing_date.year,
-                report_date=filing_date, source_filing_url=str(filing["filing_index_url"]),
-                source_pdf_url=pdf_url, local_document_path=str(pdf_path),
-                bytes_base64=base64.b64encode(pdf_bytes).decode("utf-8"),
-            )
+        pdf_path = dest_dir / f"{broker_dealer.cik}-{accession_slug}.pdf"
 
         pdf_url = await self._resolve_pdf_url(
             cik=broker_dealer.cik,
@@ -135,7 +159,9 @@ class PdfDownloaderService:
             bytes_base64=base64.b64encode(pdf_bytes).decode("utf-8"),
         )
 
-    async def _download_live_pdf(self, broker_dealer: BrokerDealer) -> DownloadedPdfRecord | None:
+    async def _download_live_pdf(
+        self, broker_dealer: BrokerDealer, dest_dir: Path
+    ) -> DownloadedPdfRecord | None:
         if not broker_dealer.filings_index_url:
             return None
 
@@ -146,26 +172,7 @@ class PdfDownloaderService:
 
         filing_date = date.fromisoformat(str(filing["filing_date"]))
         accession_slug = str(filing["accession_number"]).replace("-", "")
-        pdf_path = self.cache_dir / f"{broker_dealer.cik}-{accession_slug}.pdf"
-
-        # Cache hit: reuse the already-downloaded PDF to avoid redundant SEC requests.
-        if pdf_path.exists() and pdf_path.stat().st_size > 0:
-            logger.debug("PDF cache hit for BD %d: %s", broker_dealer.id, pdf_path.name)
-            pdf_bytes = pdf_path.read_bytes()
-            pdf_url = await self._resolve_pdf_url(
-                cik=broker_dealer.cik,
-                accession_number=str(filing["accession_number"]),
-                primary_document=str(filing["primary_document"]),
-            )
-            return DownloadedPdfRecord(
-                bd_id=broker_dealer.id,
-                filing_year=filing_date.year,
-                report_date=filing_date,
-                source_filing_url=str(filing["filing_index_url"]),
-                source_pdf_url=pdf_url,
-                local_document_path=str(pdf_path),
-                bytes_base64=base64.b64encode(pdf_bytes).decode("utf-8"),
-            )
+        pdf_path = dest_dir / f"{broker_dealer.cik}-{accession_slug}.pdf"
 
         pdf_url = await self._resolve_pdf_url(
             cik=broker_dealer.cik,
@@ -184,7 +191,10 @@ class PdfDownloaderService:
             )
 
         pdf_path.write_bytes(pdf_bytes)
-        logger.debug("PDF cached for BD %d: %s (%dKB)", broker_dealer.id, pdf_path.name, len(pdf_bytes) // 1024)
+        logger.debug(
+            "PDF downloaded for BD %d: %s (%dKB)",
+            broker_dealer.id, pdf_path.name, len(pdf_bytes) // 1024,
+        )
 
         return DownloadedPdfRecord(
             bd_id=broker_dealer.id,

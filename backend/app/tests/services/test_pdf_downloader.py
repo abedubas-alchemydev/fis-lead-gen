@@ -1,16 +1,20 @@
-"""Tests for pdf_downloader: SSRF guard (S-1) + error-path coverage (S-4).
+"""Tests for pdf_downloader: SSRF guard (S-1) + error-path coverage (S-4)
++ per-extraction tempdir lifecycle (Sprint 2 task #20).
 
-Ref: .claude/focus-fix/diagnosis.md §9 tickets S-1 and S-4.
+Ref: .claude/focus-fix/diagnosis.md §9 tickets S-1 and S-4;
+plans/be-kill-pdf-cache-tempdir-2026-04-28.md.
 """
 
 from __future__ import annotations
+
+from pathlib import Path
 
 import httpx
 import pytest
 import respx
 
 from app.core.config import settings
-from app.services.pdf_downloader import PdfDownloaderService, _validate_sec_url
+from app.services.pdf_downloader import PdfDownloaderService, _validate_sec_url, pdf_tempdir
 
 
 @pytest.fixture
@@ -267,4 +271,196 @@ class TestDownloadBytesErrorPaths:
         # we don't silently follow to evil.com. Either outcome is correct.
         with pytest.raises((RuntimeError, httpx.HTTPStatusError)):
             await downloader._download_bytes_with_retries(_SEC_PDF_URL)
+
+
+# ─────────────────── Sprint 2 task #20: tempdir lifecycle ─────────────
+
+
+class TestPdfTempdirLifecycle:
+    """``pdf_tempdir`` replaces the persistent PDF_CACHE_DIR. Every call
+    site owns one via ``with``; on exit the directory and any PDFs inside
+    it disappear. These tests pin the contract."""
+
+    def test_yields_existing_directory(self) -> None:
+        """The yielded path must exist and be a directory while the
+        ``with`` block is open — pdfplumber and pypdfium2 expect a
+        real directory to write into."""
+        with pdf_tempdir() as tmp_dir:
+            assert isinstance(tmp_dir, Path)
+            assert tmp_dir.exists()
+            assert tmp_dir.is_dir()
+
+    def test_cleans_up_on_exit(self) -> None:
+        """The directory and its contents must be gone after ``with``
+        exits. This is the core promise — without it the persistent
+        cache that grew to ~9 GB on prod would just come back."""
+        with pdf_tempdir() as tmp_dir:
+            captured = tmp_dir
+            # Drop a synthetic PDF inside, simulating a downloaded filing.
+            sample = tmp_dir / "1234567-000123456725000001.pdf"
+            sample.write_bytes(b"%PDF-1.7 synthetic")
+            assert sample.exists()
+
+        # Sanity: tempdir context exited.
+        assert not captured.exists()
+        assert not sample.exists()
+
+    def test_honors_prefix(self) -> None:
+        """The prefix kwarg must land on the directory name so logs and
+        ``ls /tmp`` reveal which extraction owns a given tempdir
+        mid-flight."""
+        with pdf_tempdir(prefix="testprefix_") as tmp_dir:
+            assert tmp_dir.name.startswith("testprefix_")
+
+    def test_honors_settings_pdf_cache_dir_when_set(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
+        """When ``settings.pdf_cache_dir`` is set, tempdirs land inside
+        it (local-debug knob). When unset, the system temp is used.
+        Both behaviors are tested here so neither is silently broken."""
+        # Set the setting to a known parent directory.
+        custom_parent = tmp_path / "fis-pdf-debug"
+        monkeypatch.setattr(settings, "pdf_cache_dir", str(custom_parent))
+
+        with pdf_tempdir(prefix="under_setting_") as tmp_dir:
+            # Tempdir lives directly under the configured parent.
+            assert tmp_dir.parent == custom_parent
+            assert tmp_dir.exists()
+            assert tmp_dir.name.startswith("under_setting_")
+
+        # Cleanup still happens; the parent survives.
+        assert custom_parent.exists()
+        assert not tmp_dir.exists()
+
+    def test_falls_back_to_system_temp_when_setting_unset(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Production runs without the setting — the system temp is the
+        intended landing place."""
+        monkeypatch.setattr(settings, "pdf_cache_dir", None)
+
+        with pdf_tempdir() as tmp_dir:
+            # Just assert it works and the directory is real. The exact
+            # location of the system temp is OS-dependent and not worth
+            # asserting on.
+            assert tmp_dir.exists()
+
+
+# ─────────────────── Sprint 2 task #20: dest_dir routing ──────────────
+
+_SEC_INDEX_URL = (
+    "https://www.sec.gov/Archives/edgar/data/1234567/000123456725000001/index.json"
+)
+_SEC_PRIMARY_PDF_URL = (
+    "https://www.sec.gov/Archives/edgar/data/1234567/000123456725000001/primary.pdf"
+)
+
+
+class TestDownloadFilingPdfWritesToDestDir:
+    """``_download_filing_pdf`` accepts a caller-supplied ``dest_dir``
+    instead of pulling a fixed cache location from config. These tests
+    pin that contract; if a future refactor accidentally re-introduces a
+    global cache lookup, the assertions on path location fail loudly."""
+
+    @respx.mock
+    @pytest.mark.asyncio
+    async def test_writes_pdf_into_supplied_dest_dir(
+        self, tmp_path: Path
+    ) -> None:
+        """Mock the SEC index.json + PDF GETs and assert the downloader
+        wrote the file at ``dest_dir / "{cik}-{accession_slug}.pdf"``,
+        not anywhere else."""
+        from app.models.broker_dealer import BrokerDealer
+
+        # SEC index.json — picks ``primary.pdf`` as the filing's main doc.
+        respx.get(_SEC_INDEX_URL).mock(
+            return_value=httpx.Response(
+                200,
+                json={
+                    "directory": {
+                        "item": [
+                            {"name": "primary.pdf"},
+                        ]
+                    }
+                },
+            )
+        )
+        # Synthetic PDF body — the validator only requires the bytes path
+        # have ``.pdf`` suffix or content-type ``application/pdf``.
+        respx.get(_SEC_PRIMARY_PDF_URL).mock(
+            return_value=httpx.Response(
+                200,
+                content=b"%PDF-1.7 synthetic body",
+                headers={"content-type": "application/pdf"},
+            )
+        )
+
+        bd = BrokerDealer()
+        bd.id = 1
+        bd.cik = "0001234567"
+
+        filing = {
+            "form": "X-17A-5",
+            "accession_number": "0001234567-25-000001",
+            "primary_document": "primary.pdf",
+            "filing_date": "2025-03-31",
+            "filing_index_url": "https://data.sec.gov/submissions/CIK0001234567.json",
+        }
+
+        downloader = PdfDownloaderService()
+        record = await downloader._download_filing_pdf(bd, filing, tmp_path)
+
+        assert record is not None
+        # Path landed in the caller-supplied directory, NOT in
+        # settings.pdf_cache_dir or anywhere else.
+        expected = tmp_path / "0001234567-000123456725000001.pdf"
+        assert Path(record.local_document_path) == expected
+        assert expected.exists()
+        assert expected.read_bytes().startswith(b"%PDF")
+
+    @respx.mock
+    @pytest.mark.asyncio
+    async def test_temp_pdf_is_gone_after_caller_tempdir_exits(self) -> None:
+        """End-to-end check of the new contract: the caller wraps the
+        download in ``with pdf_tempdir()``; once the block exits, the
+        downloaded PDF file is gone. This is the property that makes
+        the 9 GB → < 100 MB footprint claim true."""
+        from app.models.broker_dealer import BrokerDealer
+
+        respx.get(_SEC_INDEX_URL).mock(
+            return_value=httpx.Response(
+                200,
+                json={"directory": {"item": [{"name": "primary.pdf"}]}},
+            )
+        )
+        respx.get(_SEC_PRIMARY_PDF_URL).mock(
+            return_value=httpx.Response(
+                200,
+                content=b"%PDF-1.7 ephemeral",
+                headers={"content-type": "application/pdf"},
+            )
+        )
+
+        bd = BrokerDealer()
+        bd.id = 1
+        bd.cik = "0001234567"
+
+        filing = {
+            "form": "X-17A-5",
+            "accession_number": "0001234567-25-000001",
+            "primary_document": "primary.pdf",
+            "filing_date": "2025-03-31",
+            "filing_index_url": "https://data.sec.gov/submissions/CIK0001234567.json",
+        }
+
+        downloader = PdfDownloaderService()
+        with pdf_tempdir(prefix="lifecycle_") as tmp_dir:
+            record = await downloader._download_filing_pdf(bd, filing, tmp_dir)
+            assert record is not None
+            written_path = Path(record.local_document_path)
+            assert written_path.exists()  # file exists during the with block
+
+        # On ``with`` exit the tempdir and its contents must be gone.
+        assert not written_path.exists()
+        assert not tmp_dir.exists()
 
