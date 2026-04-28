@@ -148,8 +148,10 @@ const ROW_BTN =
 
 // --- Helpers ---------------------------------------------------------------
 
-function formatConfidence(c: number | null): string {
-  if (c === null || Number.isNaN(c)) return "—";
+function formatConfidence(c: number | null): React.ReactNode {
+  if (c === null || Number.isNaN(c)) {
+    return <span title="No confidence score from source">—</span>;
+  }
   return `×${c.toFixed(2)}`;
 }
 
@@ -417,17 +419,22 @@ function MiniStat({
   label,
   value,
   helper,
+  valueTitle,
 }: {
   label: string;
   value: string;
   helper?: string;
+  valueTitle?: string;
 }): React.ReactElement {
   return (
     <div className="rounded-xl border border-[var(--border,rgba(30,64,175,0.1))] bg-[var(--surface-2,#f1f6fd)] px-3.5 py-2.5">
       <p className="text-[11px] font-semibold uppercase tracking-[0.08em] text-[var(--text-muted,#94a3b8)]">
         {label}
       </p>
-      <p className="mt-1 break-words text-[13px] font-semibold text-[var(--text,#0f172a)]">
+      <p
+        className="mt-1 break-words text-[13px] font-semibold text-[var(--text,#0f172a)]"
+        title={valueTitle}
+      >
         {value}
       </p>
       {helper ? (
@@ -841,6 +848,7 @@ export default function ScanDetailPage(): React.ReactElement {
                   ? `${scan.processed_items} / ${scan.total_items}`
                   : "—"
               }
+              valueTitle={scan.total_items > 0 ? undefined : "Scan hasn't started"}
             />
             <MiniStat
               label="Success / Failure"
@@ -855,11 +863,13 @@ export default function ScanDetailPage(): React.ReactElement {
               label="Started"
               value={scan.started_at ? formatDate(scan.started_at) : "—"}
               helper={scan.started_at ? startedLabel : undefined}
+              valueTitle={scan.started_at ? undefined : "Scan still queued"}
             />
             <MiniStat
               label="Completed"
               value={scan.completed_at ? formatDate(scan.completed_at) : "—"}
               helper={scan.completed_at ? completedLabel : undefined}
+              valueTitle={scan.completed_at ? undefined : "Scan still in progress"}
             />
           </div>
         </SectionPanel>
