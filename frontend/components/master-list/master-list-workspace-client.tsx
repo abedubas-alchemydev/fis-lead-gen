@@ -1,13 +1,21 @@
 "use client";
 
-import { useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useState } from "react";
 import Link from "next/link";
 import type { Route } from "next";
+import { useRouter, useSearchParams } from "next/navigation";
 
 import { ArrowDown, ArrowUp, Bell, Search, TrendingDown, TrendingUp } from "lucide-react";
 
 import { apiRequest, buildApiPath } from "@/lib/api";
 import { formatCurrency, formatRelativeTime } from "@/lib/format";
+import {
+  MASTER_LIST_STATE_DEFAULTS,
+  buildMasterListUrl,
+  encodeReturnParam,
+  fromSearchParams,
+  type MasterListQueryState,
+} from "@/lib/master-list-state";
 import { STATE_NAMES, stateCodeFromName } from "@/lib/states";
 import { Combo } from "@/components/ui/combo";
 import {
@@ -139,22 +147,52 @@ function paginationPages(current: number, total: number): PageToken[] {
   return pages;
 }
 
-type MasterListWorkspaceClientProps = {
-  initialClearingPartner?: string;
-  initialClearingType?: string;
-  initialLeadPriority?: string;
-  initialListMode?: ListMode;
-  initialTypesOfBusiness?: string[];
-};
+export function MasterListWorkspaceClient() {
+  // ── URL is the source of truth for filter / sort / page / limit ─────
+  // The workspace state used to live in component-local useState, which
+  // meant returning from a firm-detail page mounted a fresh component
+  // instance with default state and threw away every filter, the
+  // current page, and the sort. Lifting it into URL search params makes
+  // back-nav, share-links, and full reloads all restore the same view.
+  const router = useRouter();
+  const searchParams = useSearchParams();
+  const queryState = useMemo<MasterListQueryState>(
+    () => fromSearchParams(searchParams),
+    [searchParams],
+  );
 
-export function MasterListWorkspaceClient({
-  initialClearingPartner = "",
-  initialClearingType = "All",
-  initialLeadPriority = "All",
-  initialListMode = "primary",
-  initialTypesOfBusiness = [],
-}: MasterListWorkspaceClientProps) {
-  // ── Table data + filter state — preserved from pre-redesign client ─────
+  // Commit a state change to the URL. router.replace (not push) so the
+  // back button still goes to the previous *route*, not the previous
+  // *filter combo* — Deshorn doesn't want to mash Back five times to
+  // get past his last filter mutation.
+  const commit = useCallback(
+    (next: MasterListQueryState) => {
+      router.replace(buildMasterListUrl(next) as Route, { scroll: false });
+    },
+    [router],
+  );
+
+  const updateState = useCallback(
+    (patch: Partial<MasterListQueryState>) => {
+      commit({ ...queryState, ...patch });
+    },
+    [commit, queryState],
+  );
+
+  const stateFilter = queryState.state;
+  const search = queryState.search;
+  const healthFilter = queryState.health;
+  const leadPriorityFilter = queryState.leadPriority;
+  const clearingTypeFilter = queryState.clearingType;
+  const clearingPartnerFilter = queryState.clearingPartner;
+  const typesOfBusinessFilter = queryState.typesOfBusiness;
+  const listMode = queryState.list;
+  const sortBy = queryState.sortBy;
+  const sortDir = queryState.sortDir;
+  const page = queryState.page;
+  const limit = queryState.limit;
+
+  // ── Table data — fetched on every URL-state change ─────────────────
   const [items, setItems] = useState<BrokerDealerListItem[]>([]);
   const [clearingPartners, setClearingPartners] = useState<string[]>([]);
   const [competitorSeeds, setCompetitorSeeds] = useState<string[]>([]);
@@ -172,20 +210,15 @@ export function MasterListWorkspaceClient({
     all: null,
   });
 
-  const [stateFilter, setStateFilter] = useState("");
-  const [searchInput, setSearchInput] = useState("");
-  const [search, setSearch] = useState("");
-  const [healthFilter, setHealthFilter] = useState("All");
-  const [leadPriorityFilter, setLeadPriorityFilter] = useState(initialLeadPriority);
-  const [clearingTypeFilter, setClearingTypeFilter] = useState(initialClearingType);
-  const [clearingPartnerFilter, setClearingPartnerFilter] = useState(initialClearingPartner);
-  const [typesOfBusinessFilter, setTypesOfBusinessFilter] =
-    useState<string[]>(initialTypesOfBusiness);
-  const [listMode, setListMode] = useState<ListMode>(initialListMode);
-  const [sortBy, setSortBy] = useState("name");
-  const [sortDir, setSortDir] = useState<"asc" | "desc">("asc");
-  const [page, setPage] = useState(1);
-  const [limit, setLimit] = useState(25);
+  // Local, *unsubmitted* search input. Only the submitted value lands in
+  // the URL — so typing into the search field doesn't churn the URL on
+  // every keystroke. Hydrated from the URL on first render so reloading
+  // a `/master-list?q=foo` page repopulates the visible input.
+  const [searchInput, setSearchInput] = useState(search);
+  useEffect(() => {
+    setSearchInput(search);
+  }, [search]);
+
   const [meta, setMeta] = useState<BrokerDealerListResponse["meta"]>({
     page: 1,
     limit: 25,
@@ -377,28 +410,18 @@ export function MasterListWorkspaceClient({
 
   function toggleSort(columnKey: string) {
     if (sortBy === columnKey) {
-      setSortDir((current) => (current === "asc" ? "desc" : "asc"));
-      setPage(1);
+      updateState({
+        sortDir: sortDir === "asc" ? "desc" : "asc",
+        page: 1,
+      });
       return;
     }
-    setSortBy(columnKey);
-    setSortDir("asc");
-    setPage(1);
+    updateState({ sortBy: columnKey, sortDir: "asc", page: 1 });
   }
 
   function clearFilters() {
-    setStateFilter("");
-    setSearch("");
     setSearchInput("");
-    setHealthFilter("All");
-    setLeadPriorityFilter("All");
-    setClearingPartnerFilter("");
-    setClearingTypeFilter("All");
-    setTypesOfBusinessFilter([]);
-    setSortBy("name");
-    setSortDir("asc");
-    setPage(1);
-    setLimit(25);
+    commit(MASTER_LIST_STATE_DEFAULTS);
   }
 
   const activeFilterCount = useMemo(() => {
@@ -436,6 +459,20 @@ export function MasterListWorkspaceClient({
 
   const pages = paginationPages(meta.page, meta.total_pages);
 
+  // Encoded return-URL appended to every firm-detail link so the detail
+  // page can rebuild the same filtered/sorted list state. Empty string
+  // when the workspace is at its default state — no point shipping a
+  // no-op envelope through every <Link>.
+  const returnEnvelope = useMemo(
+    () => encodeReturnParam(queryState),
+    [queryState],
+  );
+
+  function detailHref(id: number): Route {
+    const base = `/master-list/${id}`;
+    return (returnEnvelope ? `${base}?return=${returnEnvelope}` : base) as Route;
+  }
+
   return (
     <div className="px-7 pb-12 pt-7 lg:px-9">
       {/* ── Topbar ──────────────────────────────────────────────────────── */}
@@ -450,16 +487,15 @@ export function MasterListWorkspaceClient({
           </h1>
         </div>
         {/* .topbar-actions — search + theme + notifications. The search
-            form wires to the existing searchInput/setSearch state (same
-            submit contract as the toolbar-card search below), so both
-            inputs drive the same filter. The bell pip lights up whenever
-            there are unread deficiency alerts. */}
+            form shares the searchInput / submitted-search contract with
+            the toolbar-card search below, so both inputs drive the same
+            URL-backed filter. The bell pip lights up whenever there are
+            unread deficiency alerts. */}
         <div className="ml-auto flex items-center gap-2.5">
           <form
             onSubmit={(event) => {
               event.preventDefault();
-              setSearch(searchInput.trim());
-              setPage(1);
+              updateState({ search: searchInput.trim(), page: 1 });
             }}
             className="hidden w-[320px] items-center gap-2.5 rounded-[10px] border border-[var(--border,rgba(30,64,175,0.1))] bg-[var(--surface,#ffffff)] px-3.5 py-2 text-[var(--text-dim,#475569)] transition focus-within:border-[var(--accent,#6366f1)] focus-within:shadow-[0_0_0_3px_rgba(99,102,241,0.15)] md:flex"
           >
@@ -506,10 +542,7 @@ export function MasterListWorkspaceClient({
               <button
                 key={mode.value}
                 type="button"
-                onClick={() => {
-                  setListMode(mode.value);
-                  setPage(1);
-                }}
+                onClick={() => updateState({ list: mode.value, page: 1 })}
                 className={`inline-flex items-center gap-2 rounded-[10px] px-4 py-2 text-[13px] transition ${
                   active
                     ? "bg-gradient-to-br from-[#6366f1] to-[#8b5cf6] font-semibold text-white shadow-[0_6px_16px_rgba(99,102,241,0.35)]"
@@ -586,10 +619,7 @@ export function MasterListWorkspaceClient({
             </label>
             <Combo
               value={stateFilter}
-              onChange={(next) => {
-                setStateFilter(next);
-                setPage(1);
-              }}
+              onChange={(next) => updateState({ state: next, page: 1 })}
               options={STATE_NAMES}
               placeholder="Search states…"
               emptyLabel="All states"
@@ -603,10 +633,7 @@ export function MasterListWorkspaceClient({
             </label>
             <Combo
               value={clearingPartnerFilter}
-              onChange={(next) => {
-                setClearingPartnerFilter(next);
-                setPage(1);
-              }}
+              onChange={(next) => updateState({ clearingPartner: next, page: 1 })}
               options={clearingPartners}
               quickChips={competitorSeeds}
               placeholder="Search partners…"
@@ -621,10 +648,9 @@ export function MasterListWorkspaceClient({
             </label>
             <select
               value={clearingTypeFilter}
-              onChange={(event) => {
-                setClearingTypeFilter(event.target.value);
-                setPage(1);
-              }}
+              onChange={(event) =>
+                updateState({ clearingType: event.target.value, page: 1 })
+              }
               className="h-[38px] w-full rounded-[10px] border border-[var(--border,rgba(30,64,175,0.1))] bg-[var(--surface,#ffffff)] px-3 text-[13px] text-[var(--text,#0f172a)] outline-none transition focus:border-[var(--accent,#6366f1)] focus:shadow-[0_0_0_3px_rgba(99,102,241,0.15)]"
             >
               {CLEARING_TYPE_OPTS.map((option) => (
@@ -641,10 +667,9 @@ export function MasterListWorkspaceClient({
             </label>
             <MultiSelectFilter
               value={typesOfBusinessFilter}
-              onChange={(next) => {
-                setTypesOfBusinessFilter(next);
-                setPage(1);
-              }}
+              onChange={(next) =>
+                updateState({ typesOfBusiness: next, page: 1 })
+              }
               options={typesOfBusinessFilterOptions}
               triggerLabel="Types of Business"
               placeholder="Search types…"
@@ -663,10 +688,7 @@ export function MasterListWorkspaceClient({
             </p>
             <Segmented
               value={healthFilter}
-              onChange={(next) => {
-                setHealthFilter(next);
-                setPage(1);
-              }}
+              onChange={(next) => updateState({ health: next, page: 1 })}
               items={HEALTH_ITEMS}
               ariaLabel="Financial health"
             />
@@ -677,10 +699,7 @@ export function MasterListWorkspaceClient({
             </p>
             <Segmented
               value={leadPriorityFilter}
-              onChange={(next) => {
-                setLeadPriorityFilter(next);
-                setPage(1);
-              }}
+              onChange={(next) => updateState({ leadPriority: next, page: 1 })}
               items={PRIORITY_ITEMS}
               ariaLabel="Lead priority"
             />
@@ -693,51 +712,38 @@ export function MasterListWorkspaceClient({
               Active
             </span>
             {stateFilter !== "" ? (
-              <Tag
-                onDismiss={() => {
-                  setStateFilter("");
-                  setPage(1);
-                }}
-              >
+              <Tag onDismiss={() => updateState({ state: "", page: 1 })}>
                 State: {stateFilter}
               </Tag>
             ) : null}
             {clearingPartnerFilter ? (
               <Tag
-                onDismiss={() => {
-                  setClearingPartnerFilter("");
-                  setPage(1);
-                }}
+                onDismiss={() =>
+                  updateState({ clearingPartner: "", page: 1 })
+                }
               >
                 Partner: {clearingPartnerFilter}
               </Tag>
             ) : null}
             {healthFilter !== "All" ? (
-              <Tag
-                onDismiss={() => {
-                  setHealthFilter("All");
-                  setPage(1);
-                }}
-              >
+              <Tag onDismiss={() => updateState({ health: "All", page: 1 })}>
                 Health: {healthLabel(healthFilter)}
               </Tag>
             ) : null}
             {leadPriorityFilter !== "All" ? (
               <Tag
-                onDismiss={() => {
-                  setLeadPriorityFilter("All");
-                  setPage(1);
-                }}
+                onDismiss={() =>
+                  updateState({ leadPriority: "All", page: 1 })
+                }
               >
                 Priority: {priorityLabel(leadPriorityFilter)}
               </Tag>
             ) : null}
             {clearingTypeFilter !== "All" ? (
               <Tag
-                onDismiss={() => {
-                  setClearingTypeFilter("All");
-                  setPage(1);
-                }}
+                onDismiss={() =>
+                  updateState({ clearingType: "All", page: 1 })
+                }
               >
                 Type: {clearingTypeLabel(clearingTypeFilter)}
               </Tag>
@@ -745,12 +751,14 @@ export function MasterListWorkspaceClient({
             {typesOfBusinessFilter.map((type) => (
               <Tag
                 key={`tob-${type}`}
-                onDismiss={() => {
-                  setTypesOfBusinessFilter((current) =>
-                    current.filter((value) => value !== type),
-                  );
-                  setPage(1);
-                }}
+                onDismiss={() =>
+                  updateState({
+                    typesOfBusiness: typesOfBusinessFilter.filter(
+                      (value) => value !== type,
+                    ),
+                    page: 1,
+                  })
+                }
               >
                 Business: {type}
               </Tag>
@@ -768,8 +776,7 @@ export function MasterListWorkspaceClient({
           <form
             onSubmit={(event) => {
               event.preventDefault();
-              setSearch(searchInput.trim());
-              setPage(1);
+              updateState({ search: searchInput.trim(), page: 1 });
             }}
             className="min-w-0"
           >
@@ -793,10 +800,9 @@ export function MasterListWorkspaceClient({
             </label>
             <select
               value={sortBy}
-              onChange={(event) => {
-                setSortBy(event.target.value);
-                setPage(1);
-              }}
+              onChange={(event) =>
+                updateState({ sortBy: event.target.value, page: 1 })
+              }
               className="h-[38px] rounded-[10px] border border-[var(--border,rgba(30,64,175,0.1))] bg-[var(--surface,#ffffff)] px-3 text-[13px] text-[var(--text,#0f172a)] outline-none transition focus:border-[var(--accent,#6366f1)] focus:shadow-[0_0_0_3px_rgba(99,102,241,0.15)]"
             >
               {columns.map((column) => (
@@ -813,10 +819,12 @@ export function MasterListWorkspaceClient({
             </label>
             <select
               value={sortDir}
-              onChange={(event) => {
-                setSortDir(event.target.value as "asc" | "desc");
-                setPage(1);
-              }}
+              onChange={(event) =>
+                updateState({
+                  sortDir: event.target.value as "asc" | "desc",
+                  page: 1,
+                })
+              }
               className="h-[38px] rounded-[10px] border border-[var(--border,rgba(30,64,175,0.1))] bg-[var(--surface,#ffffff)] px-3 text-[13px] text-[var(--text,#0f172a)] outline-none transition focus:border-[var(--accent,#6366f1)] focus:shadow-[0_0_0_3px_rgba(99,102,241,0.15)]"
             >
               <option value="asc">Ascending</option>
@@ -830,10 +838,9 @@ export function MasterListWorkspaceClient({
             </label>
             <select
               value={limit}
-              onChange={(event) => {
-                setLimit(Number(event.target.value));
-                setPage(1);
-              }}
+              onChange={(event) =>
+                updateState({ limit: Number(event.target.value), page: 1 })
+              }
               className="h-[38px] rounded-[10px] border border-[var(--border,rgba(30,64,175,0.1))] bg-[var(--surface,#ffffff)] px-3 text-[13px] text-[var(--text,#0f172a)] outline-none transition focus:border-[var(--accent,#6366f1)] focus:shadow-[0_0_0_3px_rgba(99,102,241,0.15)]"
             >
               {[25, 50, 100].map((pageSize) => (
@@ -948,7 +955,7 @@ export function MasterListWorkspaceClient({
                     >
                       <td className="min-w-[220px] px-5 py-3.5" style={firmCellStyle}>
                         <Link
-                          href={`/master-list/${item.id}` as Route}
+                          href={detailHref(item.id)}
                           className="block font-semibold text-[var(--text,#0f172a)] transition hover:text-[var(--accent,#6366f1)]"
                         >
                           {item.name}
@@ -1054,7 +1061,9 @@ export function MasterListWorkspaceClient({
           <button
             type="button"
             disabled={meta.page <= 1}
-            onClick={() => setPage((current) => Math.max(1, current - 1))}
+            onClick={() =>
+              updateState({ page: Math.max(1, meta.page - 1) })
+            }
             className="rounded-[8px] border border-[var(--border-2,rgba(30,64,175,0.16))] bg-[var(--surface,#ffffff)] px-3 py-1.5 text-[12px] font-medium text-[var(--text-dim,#475569)] transition hover:bg-[var(--surface-2,#f1f6fd)] disabled:cursor-not-allowed disabled:opacity-45"
           >
             Previous
@@ -1071,7 +1080,7 @@ export function MasterListWorkspaceClient({
               <button
                 key={token}
                 type="button"
-                onClick={() => setPage(token)}
+                onClick={() => updateState({ page: token })}
                 aria-current={meta.page === token ? "page" : undefined}
                 className={`min-w-[36px] rounded-[8px] border px-3 py-1.5 text-[12px] font-medium transition ${
                   meta.page === token
@@ -1086,7 +1095,9 @@ export function MasterListWorkspaceClient({
           <button
             type="button"
             disabled={meta.page >= meta.total_pages}
-            onClick={() => setPage((current) => Math.min(meta.total_pages, current + 1))}
+            onClick={() =>
+              updateState({ page: Math.min(meta.total_pages, meta.page + 1) })
+            }
             className="rounded-[8px] border border-[var(--border-2,rgba(30,64,175,0.16))] bg-[var(--surface,#ffffff)] px-3 py-1.5 text-[12px] font-medium text-[var(--text-dim,#475569)] transition hover:bg-[var(--surface-2,#f1f6fd)] disabled:cursor-not-allowed disabled:opacity-45"
           >
             Next
