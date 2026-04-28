@@ -29,6 +29,15 @@ class OpenAIClearingExtraction(BaseModel):
     evidence_excerpt: str | None = Field(default=None, max_length=1200)
 
 
+class OpenAIClassificationExtraction(BaseModel):
+    """Text-only clearing classification, mirrors GeminiClassificationExtraction."""
+    model_config = ConfigDict(extra="forbid")
+
+    classification: Literal["fully_disclosed", "self_clearing", "omnibus", "unknown"]
+    confidence_score: float = Field(ge=0.0, le=1.0)
+    rationale: str = Field(min_length=1, max_length=1000)
+
+
 class OpenAIResponsesClient:
     def __init__(self) -> None:
         self.base_url = settings.openai_api_base.rstrip("/")
@@ -49,6 +58,45 @@ class OpenAIResponsesClient:
             raise OpenAIExtractionError("OpenAI returned invalid JSON for clearing extraction.") from exc
 
         return OpenAIClearingExtraction.model_validate(self._normalize_text_fields(parsed))
+
+    async def extract_classification_data(self, *, prompt: str) -> OpenAIClassificationExtraction:
+        """Run a text-only OpenAI call that returns the canonical clearing label.
+
+        Mirrors GeminiResponsesClient.extract_classification_data. Used by
+        services/clearing_classifier.py when settings.llm_provider == 'openai'.
+        """
+        if not settings.openai_api_key:
+            raise OpenAIConfigurationError("OPENAI_API_KEY is not configured.")
+
+        schema = OpenAIClassificationExtraction.model_json_schema()
+        payload = {
+            "model": settings.openai_pdf_model,
+            "store": False,
+            "input": [
+                {
+                    "role": "user",
+                    "content": [{"type": "input_text", "text": prompt}],
+                }
+            ],
+            "text": {
+                "format": {
+                    "type": "json_schema",
+                    "name": "clearing_classification",
+                    "strict": True,
+                    "schema": schema,
+                }
+            },
+            "max_output_tokens": 400,
+        }
+        response_payload = await self._post_with_retries(payload)
+        response_text = self._extract_response_text(response_payload)
+
+        try:
+            parsed = json.loads(response_text)
+        except json.JSONDecodeError as exc:
+            raise OpenAIExtractionError("OpenAI returned invalid JSON for clearing classification.") from exc
+
+        return OpenAIClassificationExtraction.model_validate(self._normalize_text_fields(parsed))
 
     def _build_payload(self, *, pdf_bytes_base64: str, filename: str, prompt: str) -> dict[str, object]:
         schema = OpenAIClearingExtraction.model_json_schema()

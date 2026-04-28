@@ -51,6 +51,24 @@ class GeminiFinancialExtraction(BaseModel):
     evidence_excerpt: str | None = Field(default=None, max_length=1200)
 
 
+class GeminiClassificationExtraction(BaseModel):
+    """Text-only clearing classification (no PDF input).
+
+    Backs ``services/clearing_classifier.py`` -- a single canonical
+    classifier that consumes the FINRA ``firm_operations_text`` plus the
+    FOCUS report text and returns one of the four Deshorn-canonical
+    labels. Distinct from ``GeminiClearingExtraction`` (which extracts
+    a partner + type from a PDF) because the classifier does not need
+    a partner field, takes plain text rather than an inline PDF, and
+    uses a different prompt/schema.
+    """
+    model_config = ConfigDict(extra="forbid")
+
+    classification: Literal["fully_disclosed", "self_clearing", "omnibus", "unknown"]
+    confidence_score: float = Field(ge=0.0, le=1.0)
+    rationale: str = Field(min_length=1, max_length=1000)
+
+
 class GeminiFocusCeoExtraction(BaseModel):
     """Structured extraction of CEO contact info + net capital from a FOCUS Report PDF."""
     model_config = ConfigDict(extra="forbid")
@@ -123,6 +141,57 @@ class GeminiResponsesClient:
             raise GeminiExtractionError("Gemini returned invalid JSON for clearing extraction.") from exc
 
         return GeminiClearingExtraction.model_validate(self._normalize_text_fields(parsed))
+
+    async def extract_classification_data(self, *, prompt: str) -> GeminiClassificationExtraction:
+        """Run a text-only Gemini call that returns the canonical clearing label.
+
+        Used by ``services/clearing_classifier.py``. The prompt embeds
+        Deshorn's three definitions verbatim and the FINRA + FOCUS source
+        texts; the response is constrained to the four-value enum via a
+        JSON schema. No PDF / Files API path -- the prompt is short
+        enough to live entirely in inline text, and going through the
+        Files API would just add latency.
+        """
+        if not settings.gemini_api_key:
+            raise GeminiConfigurationError("GEMINI_API_KEY is not configured.")
+
+        schema = {
+            "type": "OBJECT",
+            "properties": {
+                "classification": {
+                    "type": "STRING",
+                    "enum": ["fully_disclosed", "self_clearing", "omnibus", "unknown"],
+                },
+                "confidence_score": {"type": "NUMBER"},
+                "rationale": {"type": "STRING"},
+            },
+            "required": ["classification", "confidence_score", "rationale"],
+            "propertyOrdering": ["classification", "confidence_score", "rationale"],
+        }
+
+        payload: dict[str, object] = {
+            "contents": [
+                {
+                    "role": "user",
+                    "parts": [{"text": prompt}],
+                }
+            ],
+            "generationConfig": {
+                "responseMimeType": "application/json",
+                "responseJsonSchema": schema,
+                "temperature": 0.1,
+                "topP": 0.95,
+            },
+        }
+        response_payload = await self._post_with_retries(payload)
+        response_text = self._extract_response_text(response_payload)
+
+        try:
+            parsed = json.loads(response_text)
+        except json.JSONDecodeError as exc:
+            raise GeminiExtractionError("Gemini returned invalid JSON for clearing classification.") from exc
+
+        return GeminiClassificationExtraction.model_validate(self._normalize_text_fields(parsed))
 
     async def extract_financial_data(self, *, pdf_bytes_base64: str, prompt: str) -> GeminiFinancialExtraction:
         if not settings.gemini_api_key:
