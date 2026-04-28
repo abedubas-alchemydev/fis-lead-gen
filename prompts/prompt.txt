@@ -1,0 +1,76 @@
+I need you to replicate the visual design from a reference HTML mockup into
+this existing project with 100% fidelity. Especially the side navigation bar —
+every element, spacing, color, border, icon, hover state, and active state must
+match.
+
+REFERENCE FILE (read this first, in full):
+C:\Users\DSWDSRV-CARAGA\Desktop\dashboard-redesign.html
+
+TARGET PROJECT:
+The current working directory. Before you change anything, detect:
+- The framework (React, Next.js, Angular, Vue, Svelte, plain HTML, etc.)
+- The styling approach (plain CSS, CSS modules, Tailwind, styled-components,
+  SCSS, CSS-in-JS, etc.)
+- The existing dashboard component tree and routing
+- Any existing design-token / theme system already in place
+Adapt the implementation to whatever the project already uses. Do not
+introduce a new framework, styling library, or build step.
+
+WORKFLOW — follow these steps in order:
+
+1. READ the reference HTML file completely. Do not skim. Pay close attention
+   to:
+   - All CSS custom properties in :root and [data-theme="dark"]
+   - The full sidebar markup and every class used (.sidebar, .brand,
+     .brand-logo, .brand-name, .brand-tag, .nav-section, .nav-item,
+     .nav-item.active, .nav-item:hover, .badge, .user-card, .avatar,
+     .user-name, .user-role)
+   - The topbar, KPI grid, trend chart, top leads list, provider
+     distribution, and activity feed
+   - Theme toggle behavior (light default, dark via [data-theme="dark"] on
+     <html>, persisted in localStorage)
+   - Every inline SVG icon — replicate them exactly, do not substitute with
+     icon-library equivalents unless pixel-identical
+
+2. EXPLORE the existing project. Find the current dashboard page, the current
+   sidebar/nav component, and the styling conventions already in use. Report
+   what you find before editing.
+
+3. PROPOSE a plan: list every file you'll create or modify, how design tokens
+   will be structured in the project's styling approach, and how the theme
+   toggle will persist. Wait for my confirmation before making changes.
+
+4. IMPLEMENT the design. Translate the mockup's markup into the project's
+   component model. Port the design tokens exactly — same hex values, same
+   rgba alphas, same spacing, same border-radius, same box-shadows, same
+   transition timings. Keep the light theme as default. Keep the dark theme
+   accessible via the toggle. Do NOT redesign or "improve" anything — match
+   the mockup pixel-for-pixel.
+
+5. PRESERVE existing functionality. Don't break routing, data fetching, auth,
+   state management, or any existing logic. Wire the new visual components
+   to whatever data sources the old dashboard was using. If a piece of the
+   mockup has no data source yet (e.g., trend chart, top leads), leave a
+   clearly commented TODO and use placeholder data that matches the mockup's
+   values.
+
+6. VERIFY. After implementation, open the running app in your browser and
+   compare side-by-side with the mockup at 1440px viewport. List any visual
+   differences you can see — spacing, font weight, color, padding, icon size,
+   anything. Fix them. Repeat until the sidebar and topbar are visually
+   identical and the rest of the page matches the mockup's layout.
+
+CRITICAL RULES:
+- The sidebar must be a 1:1 replica. Same width (260px), same padding,
+  same brand logo block, same nav-section headers, same nav-item vertical
+  rhythm, same active/hover states, same badges with exact colors, same
+  user-card at the bottom. Nothing missing, nothing added.
+- Use the CSS custom property names from the mockup (--bg, --surface,
+  --border, --accent, etc.) wherever the project's styling approach allows,
+  so the theme layer stays maintainable.
+- Light mode must have NO visible gradients on page background, sidebar,
+  or nav items — same as the mockup.
+- Dark mode must keep its ambient glow and gradient sidebar.
+- If the project's styling approach cannot express something from the mockup
+  cleanly, explain the tradeoff in your plan — don't silently approximate.
+- Ask clarifying questions before guessing. Don't invent data shapes.

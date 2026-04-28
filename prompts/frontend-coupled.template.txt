@@ -1,0 +1,232 @@
+================================================================================
+CC CLI 02 — FRONTEND WORKTREE (coupled feature, parallel pattern)
+fis-lead-gen · Next.js 14 (App Router) + BetterAuth + Tailwind
+Feature: {{FEATURE_TITLE}}
+================================================================================
+
+You are Claude Code CLI running inside the FRONTEND git worktree of `fis-lead-gen`.
+Before doing anything, READ `CLAUDE.md` at the repo root AND the feature plan
+at `{{PLAN_PATH}}`. The plan's API contract (§2) is NORMATIVE — the backend
+session is implementing against it in parallel; both sides must match.
+
+This is a COUPLED feature. The BACKEND half is being coded in parallel by
+CC CLI 01 in the other worktree, on branch `feature/be-{{FEATURE_SLUG}}`.
+You code, commit, push, and open your PR RIGHT AWAY — do NOT wait for backend.
+The dependency is enforced at MERGE time via a polling gate (Step 7.5).
+
+What you CAN'T verify until backend lands:
+  - A live smoke test against the new endpoints (they don't exist yet).
+  - Absolute certainty the contract is what shipped (if backend deviates
+    mid-flight, this PR needs a rebase commit — mitigated by treating the
+    plan as the source of truth).
+
+--------------------------------------------------------------------------------
+HARD RULES (from CLAUDE.md)
+--------------------------------------------------------------------------------
+1. Git account: `gh auth switch --user abedubas-alchemydev --hostname github.com`
+   then `gh auth status`. Verify active account before any push.
+2. Zero AI attribution in commits or PRs (no "Co-Authored-By: Claude", no
+   "Generated with Claude Code", no mention of Claude / Anthropic / AI).
+   After every commit: `git log -1 --pretty=full` — verify clean.
+3. Stage files by name. NEVER `git add -A` / `git add .`.
+4. NEVER `--no-verify`, never skip hooks. Failed hook → new commit (never `--amend`).
+5. Frontend talks to backend ONLY through `/api/backend/...` (the BFF proxy),
+   with `credentials: 'include'`. Use `apiRequest` / `buildApiPath` from
+   `lib/api.ts`. Do NOT add Authorization/JWT headers client-side.
+6. Do NOT touch `lib/auth.ts`, the BFF proxy, the admin user-management
+   routes, or `lib/email.ts` unless the plan explicitly calls for it.
+7. UI conventions: Tailwind only, `lib/format.ts` for money/dates/relative
+   times, Lucide icons, (app) group wrapped by `components/layout/app-shell.tsx`.
+8. Long output → `reports/` or `plans/`. Chat reply ≤ 5 lines.
+
+--------------------------------------------------------------------------------
+SCOPE
+--------------------------------------------------------------------------------
+Allowed paths: {{SCOPE_ALLOWED}}
+Forbidden paths: {{SCOPE_FORBIDDEN}}
+If something on the backend needs adjustment, STOP and ping Arvin — do not
+edit backend code from here.
+
+--------------------------------------------------------------------------------
+WORKFLOW
+--------------------------------------------------------------------------------
+
+STEP 0 — Sanity check
+    pwd && git worktree list && git status
+    gh auth switch --user abedubas-alchemydev --hostname github.com
+    gh auth status
+    # If git status is dirty, STOP and ask Arvin.
+
+STEP 1 — Sync local develop (no backend gate here — that's at Step 7.5)
+    git fetch --all --prune
+    git fetch origin develop:develop || {
+        echo "Local develop diverged or checked out elsewhere. STOP."; exit 1;
+    }
+    test "$(git rev-parse develop)" = "$(git rev-parse origin/develop)" \
+        || { echo "Local develop != origin/develop. STOP."; exit 1; }
+
+STEP 2 — Create the feature branch off local develop
+    git switch --detach develop
+    git switch -c feature/fe-{{FEATURE_SLUG}}
+
+STEP 3 — Re-read the plan and note the contract
+    cat {{PLAN_PATH}}
+    # The plan's API contract (§2) is the ground truth. Build TypeScript
+    # types in `lib/*.ts` that mirror it EXACTLY. If backend deviates
+    # mid-flight, we'll find out when CI / manual smoke tests fail after
+    # merge — rebase commit is the remedy, not a blocker.
+
+STEP 4 — Implement
+{{IMPLEMENTATION_STEPS}}
+
+STEP 5 — Verify locally
+{{VERIFY_COMMANDS}}
+    # Smoke test against a live backend is NOT possible yet (backend PR
+    # hasn't merged). That step happens post-merge during the verify pass.
+
+STEP 6 — Commit (Arvin voice, no AI attribution, files by name)
+{{STAGED_FILES}}
+
+    git commit -m "{{FEATURE_TITLE}}
+
+{{COMMIT_BODY}}"
+    git log -1 --pretty=full       # verify clean of any AI trailer
+
+STEP 7 — Push and open the PR as DRAFT (it's blocked on backend)
+    git push -u origin feature/fe-{{FEATURE_SLUG}}
+
+    # Look up the backend PR (it may or may not exist yet).
+    BE_PR=$(gh pr list --head "feature/be-{{FEATURE_SLUG}}" --state all \
+               --json number --jq '.[0].number // ""')
+
+    if [ -n "$BE_PR" ]; then
+        BE_LINK="Blocked on backend PR #$BE_PR."
+    else
+        BE_LINK="Blocked on the backend half (not yet opened)."
+    fi
+
+    gh pr create \
+      --draft \
+      --base develop \
+      --head feature/fe-{{FEATURE_SLUG}} \
+      --title "{{FEATURE_TITLE}}" \
+      --body "$(cat <<EOF
+{{PR_BODY}}
+
+---
+$BE_LINK This PR is open as a DRAFT and will be marked ready + merged
+automatically by the frontend session once the backend PR lands on develop.
+Plan: {{PLAN_PATH}}
+EOF
+)"
+    FE_PR=$(gh pr view --json number --jq '.number')
+    echo "Frontend PR opened as DRAFT: #$FE_PR"
+    gh pr view --json body --jq '.body' | \
+        grep -iE "claude|anthropic|generated with|co-authored-by" \
+        && { echo "AI trailer in PR body — STOP and fix."; exit 1; } || true
+
+STEP 7.5 — POLLING GATE: wait for backend PR to merge into develop
+    echo "Waiting for backend PR (branch feature/be-{{FEATURE_SLUG}}) to merge..."
+    WAIT_START=$(date +%s)
+    MAX_WAIT=3600    # 60 minutes hard cap — if hit, STOP and ping Arvin.
+
+    while true; do
+        # Primary gate: backend PR state from GitHub's API.
+        BE_STATE=$(gh pr list \
+            --head "feature/be-{{FEATURE_SLUG}}" \
+            --base develop \
+            --state all \
+            --json state,mergeCommit \
+            --jq '.[0].state // "NONE"')
+
+        case "$BE_STATE" in
+            MERGED)
+                echo "Backend PR merged. Syncing develop and proceeding."
+                break
+                ;;
+            OPEN)
+                # Surface backend CI status so we see trouble early.
+                BE_CI=$(gh pr list --head "feature/be-{{FEATURE_SLUG}}" \
+                    --json statusCheckRollup --jq \
+                    '.[0].statusCheckRollup | map(.conclusion) | unique | join(",")' \
+                    2>/dev/null || echo "unknown")
+                echo "$(date +%T) Backend PR open, CI: ${BE_CI}. Waiting 60s..."
+                ;;
+            CLOSED)
+                echo "Backend PR closed without merging. STOP — ask Arvin."
+                exit 1
+                ;;
+            NONE)
+                echo "$(date +%T) Backend PR not yet opened. Waiting 60s..."
+                ;;
+        esac
+
+        # Timeout guard
+        NOW=$(date +%s)
+        if [ $((NOW - WAIT_START)) -gt $MAX_WAIT ]; then
+            echo "Waited > ${MAX_WAIT}s. STOP — investigate the backend session."
+            exit 1
+        fi
+
+        sleep 60
+    done
+
+    # Fast-forward local develop with the merged backend commit so our
+    # rebase (if needed) is against the right base.
+    git fetch --all --prune
+    git fetch origin develop:develop
+
+    # If origin/develop moved past our branch base, rebase our feature branch
+    # on top. This keeps the squash merge clean.
+    if ! git merge-base --is-ancestor develop feature/fe-{{FEATURE_SLUG}}; then
+        echo "Rebasing feature/fe-{{FEATURE_SLUG}} onto fresh develop..."
+        git rebase develop
+        git push --force-with-lease origin feature/fe-{{FEATURE_SLUG}}
+    fi
+
+STEP 7.6 — Mark the PR ready and re-trigger CI
+    gh pr ready "$FE_PR"
+    echo "Marked PR #$FE_PR as ready for review."
+
+STEP 8 — Wait for CI green, then merge
+    gh pr checks --watch "$FE_PR"
+    gh pr merge "$FE_PR" --squash --delete-branch --admin
+    # If admin merge refused, STOP and tell Arvin.
+
+STEP 9 — Resync worktree to fresh develop
+    git fetch --all --prune
+    git fetch origin develop:develop || {
+        echo "Could not fast-forward local develop after merge. STOP."; exit 1;
+    }
+    if git switch develop 2>/dev/null; then
+        echo "On local develop."
+    else
+        git switch --detach develop
+        echo "develop checked out in other worktree; this one is detached."
+    fi
+    git branch -D feature/fe-{{FEATURE_SLUG}} 2>/dev/null || true
+    git status
+    git log --oneline -5 develop
+
+STEP 10 — Comment on backend PR and report back
+    MERGE_SHA=$(git rev-parse develop)
+
+    gh pr comment "$BE_PR" --body "Frontend merged at \`$MERGE_SHA\`. Full feature ({{FEATURE_SLUG}}) is now on develop — safe to promote to main." \
+        2>/dev/null || true
+
+    # Chat reply to Arvin (≤5 lines):
+    # - Backend PR URL + merge SHA
+    # - Frontend PR URL + merge SHA
+    # - One-sentence summary
+    # - Any UX rough edges worth a follow-up PR
+    # - Any contract drift that happened mid-flight and had to be reconciled
+
+--------------------------------------------------------------------------------
+SAFE-DEPLOY POSTURE
+--------------------------------------------------------------------------------
+Merging to develop auto-deploys to STAGING (fis-frontend-staging), which shares
+the production Neon DB. New pages + a UI component + API helpers are safe.
+If the feature touches `lib/auth.ts`, the BFF proxy, admin routes, or
+`lib/email.ts`, STOP before pushing and ask Arvin.
+
+================================================================================
