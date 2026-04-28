@@ -303,7 +303,28 @@ export function MasterListWorkspaceClient({
             .sort((a, b) => a.priority - b.priority)
             .map((item) => item.name),
         );
-        setTypesOfBusinessOptions(typesResp);
+        // Defensive parsing: the BE has occasionally returned thousands of
+        // entries (mostly firm-specific free-text "other" values with
+        // count=1) and a handful with null/empty `type` fields. Drop the
+        // malformed ones, sort by count desc with an alpha tiebreak, and
+        // hard-cap at 100 so a future BE regression can't wedge the DOM.
+        const safeTypes: TypeOfBusinessOption[] = (
+          Array.isArray(typesResp) ? typesResp : []
+        )
+          .filter(
+            (opt): opt is TypeOfBusinessOption =>
+              opt != null &&
+              typeof opt.type === "string" &&
+              opt.type.trim().length > 0 &&
+              typeof opt.count === "number" &&
+              opt.count > 0,
+          )
+          .sort(
+            (a, b) =>
+              b.count - a.count || a.type.localeCompare(b.type),
+          )
+          .slice(0, 100);
+        setTypesOfBusinessOptions(safeTypes);
         setListCounts({
           primary: primaryResp.meta.total,
           alternative: alternativeResp.meta.total,
@@ -617,9 +638,8 @@ export function MasterListWorkspaceClient({
               options={typesOfBusinessFilterOptions}
               triggerLabel="Types of Business"
               placeholder="Search types…"
-              emptyLabel={
-                typesOfBusinessLoading ? "Loading…" : "No types match your search"
-              }
+              emptyLabel="No types match your search"
+              noOptionsLabel="No types of business available."
               loading={typesOfBusinessLoading}
               ariaLabel="Types of Business"
             />
