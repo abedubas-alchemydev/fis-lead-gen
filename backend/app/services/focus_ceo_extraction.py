@@ -41,7 +41,7 @@ from app.services.gemini_responses import (
     GeminiExtractionError,
     GeminiResponsesClient,
 )
-from app.services.pdf_downloader import PdfDownloaderService
+from app.services.pdf_downloader import PdfDownloaderService, pdf_tempdir
 from app.services.pdf_text_extractor import extract_from_pdf
 from app.services.scoring import calculate_yoy_growth, classify_health_status
 
@@ -190,10 +190,21 @@ class FocusCeoExtractionService:
         The CEO contact is persisted in the executive_contacts table with
         source="focus_report" so it survives Apollo enrichment cycles.
         """
+        # The tempdir owns the downloaded PDF for the lifetime of this call.
+        # pdfplumber + pypdfium2 + Gemini all read it from disk; on ``with``
+        # exit the file disappears so the container footprint stays flat.
+        with pdf_tempdir(prefix="focus_ceo_extract_") as tmp_dir:
+            return await self._run_extract(db, broker_dealer, tmp_dir)
 
+    async def _run_extract(
+        self,
+        db: AsyncSession,
+        broker_dealer: BrokerDealer,
+        tmp_dir: Path,
+    ) -> FocusCeoExtractionResult:
         # ── Step 1: Download the PDF ──
         try:
-            pdf_record = await self.downloader.download_latest_x17a5_pdf(broker_dealer)
+            pdf_record = await self.downloader.download_latest_x17a5_pdf(broker_dealer, tmp_dir)
         except Exception as exc:
             logger.warning("PDF download failed for BD %d: %s", broker_dealer.id, exc)
             return FocusCeoExtractionResult(
@@ -361,6 +372,21 @@ class FocusCeoExtractionService:
 
         No database connection is held open during this method.
         """
+        # Per-call tempdir — same lifecycle contract as ``extract``: the
+        # downloaded PDF survives both pdfplumber and the Gemini vision
+        # fallback, then is wiped on ``with`` exit.
+        with pdf_tempdir(prefix="focus_ceo_batch_") as tmp_dir:
+            return await self._run_extract_without_db(
+                bd_id, bd_filings_index_url, bd_cik, tmp_dir
+            )
+
+    async def _run_extract_without_db(
+        self,
+        bd_id: int,
+        bd_filings_index_url: str | None,
+        bd_cik: str | None,
+        tmp_dir: Path,
+    ) -> FocusCeoExtractionResult:
         fake_bd = BrokerDealer()
         fake_bd.id = bd_id
         fake_bd.filings_index_url = bd_filings_index_url
@@ -368,7 +394,7 @@ class FocusCeoExtractionService:
 
         # Step 1: Download PDF
         try:
-            pdf_record = await self.downloader.download_latest_x17a5_pdf(fake_bd)
+            pdf_record = await self.downloader.download_latest_x17a5_pdf(fake_bd, tmp_dir)
         except Exception as exc:
             logger.warning("PDF download failed for BD %d: %s", bd_id, exc)
             return FocusCeoExtractionResult(

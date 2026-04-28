@@ -1,9 +1,10 @@
 from __future__ import annotations
 
+import base64
 from datetime import datetime, time, timezone
 
 from fastapi import APIRouter, Body, Depends, HTTPException, Query, status
-from fastapi.responses import FileResponse
+from fastapi.responses import Response
 from pydantic import BaseModel, Field
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -43,7 +44,7 @@ from app.services.finra import FinraService
 from app.services.finra_pdf_service import (
     FinraPdfFetchError,
     FinraPdfNotFound,
-    fetch_and_cache_brokercheck_pdf,
+    fetch_brokercheck_pdf,
 )
 from app.services.focus_ceo_extraction import FocusCeoExtractionService
 from app.services.service_models import FinraBrokerDealerRecord
@@ -135,38 +136,50 @@ async def download_focus_report_pdf(
     broker_dealer_id: int,
     _: AuthenticatedUser = Depends(get_current_user),
     db: AsyncSession = Depends(get_db_session),
-) -> FileResponse:
+) -> Response:
     """Stream the firm's latest X-17A-5 (FOCUS) PDF.
 
-    Reuses the existing PdfDownloaderService cache at PDF_CACHE_DIR/{cik}-{accession}.pdf.
-    First request may take ~5-10s to fetch from SEC; subsequent requests are instant.
+    Downloads the latest filing from SEC EDGAR into a per-request tempdir
+    and serves the bytes directly back to the browser via ``Response``. The
+    persistent PDF cache that previously sat at ``PDF_CACHE_DIR`` was
+    removed in Sprint 2 task #20 (it had grown to ~9 GB on the container).
+    Each click costs one fresh SEC fetch (~5-10s) — acceptable UX for a
+    rare on-demand action.
     """
-    from app.services.pdf_downloader import PdfDownloaderService  # deferred to avoid circular
+    from app.services.pdf_downloader import PdfDownloaderService, pdf_tempdir  # deferred to avoid circular
 
     broker_dealer = await repository.get_broker_dealer(db, broker_dealer_id)
     if broker_dealer is None:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Broker-dealer not found.")
 
     downloader = PdfDownloaderService()
-    try:
-        record = await downloader.download_latest_x17a5_pdf(broker_dealer)
-    except Exception as exc:  # noqa: BLE001
-        raise HTTPException(
-            status_code=status.HTTP_502_BAD_GATEWAY,
-            detail=f"Could not fetch FOCUS report from SEC: {exc}",
-        ) from exc
+    with pdf_tempdir(prefix="focus_report_endpoint_") as tmp_dir:
+        try:
+            record = await downloader.download_latest_x17a5_pdf(broker_dealer, tmp_dir)
+        except Exception as exc:  # noqa: BLE001
+            raise HTTPException(
+                status_code=status.HTTP_502_BAD_GATEWAY,
+                detail=f"Could not fetch FOCUS report from SEC: {exc}",
+            ) from exc
 
-    if record is None or not record.local_document_path:
-        raise HTTPException(
-            status_code=status.HTTP_404_NOT_FOUND,
-            detail="No FOCUS report available for this firm.",
-        )
+        if record is None or not record.bytes_base64:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail="No FOCUS report available for this firm.",
+            )
+
+        # Decode while still inside the tempdir context. The Response carries
+        # the bytes in memory, so the file on disk can be wiped on ``with``
+        # exit without breaking the response stream the way FileResponse
+        # would (FileResponse opens the file at write-time, not at endpoint
+        # return-time).
+        pdf_bytes = base64.b64decode(record.bytes_base64)
 
     filename = f"{broker_dealer.crd_number or broker_dealer.id}-focus-report.pdf"
-    return FileResponse(
-        path=record.local_document_path,
+    return Response(
+        content=pdf_bytes,
         media_type="application/pdf",
-        filename=filename,
+        headers={"Content-Disposition": f"attachment; filename={filename}"},
     )
 
 
@@ -175,12 +188,14 @@ async def download_brokercheck_pdf(
     broker_dealer_id: int,
     _: AuthenticatedUser = Depends(get_current_user),
     db: AsyncSession = Depends(get_db_session),
-) -> FileResponse:
+) -> Response:
     """Stream the firm's FINRA BrokerCheck Detailed Report PDF.
 
-    On-demand fetch with disk cache at PDF_CACHE_DIR/finra/{crd}.pdf. First
-    click takes ~2-5s to hit files.brokercheck.finra.org; subsequent clicks
-    serve from cache.
+    On-demand fetch from files.brokercheck.finra.org (~2-5s). The bytes
+    flow straight from the upstream response into the browser via
+    ``Response`` — no disk involved. The persistent FINRA cache that
+    previously sat at ``PDF_CACHE_DIR/finra`` was removed in Sprint 2
+    task #20.
     """
     broker_dealer = await repository.get_broker_dealer(db, broker_dealer_id)
     if broker_dealer is None:
@@ -192,7 +207,7 @@ async def download_brokercheck_pdf(
         )
 
     try:
-        cache_path = await fetch_and_cache_brokercheck_pdf(broker_dealer.crd_number)
+        pdf_bytes = await fetch_brokercheck_pdf(broker_dealer.crd_number)
     except FinraPdfNotFound as exc:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
@@ -204,10 +219,12 @@ async def download_brokercheck_pdf(
             detail=f"Could not fetch BrokerCheck PDF from FINRA: {exc}",
         ) from exc
 
-    return FileResponse(
-        path=str(cache_path),
+    return Response(
+        content=pdf_bytes,
         media_type="application/pdf",
-        filename=f"{broker_dealer.crd_number}-brokercheck.pdf",
+        headers={
+            "Content-Disposition": f"attachment; filename={broker_dealer.crd_number}-brokercheck.pdf"
+        },
     )
 
 

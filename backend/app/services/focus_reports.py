@@ -27,7 +27,7 @@ from app.services.gemini_responses import (
     GeminiExtractionError,
     GeminiResponsesClient,
 )
-from app.services.pdf_downloader import PdfDownloaderService
+from app.services.pdf_downloader import PdfDownloaderService, pdf_tempdir
 from app.services.scoring import calculate_yoy_growth, classify_health_status
 from app.services.service_models import FinancialMetricRecord
 
@@ -343,129 +343,137 @@ class FocusReportService:
                 skipped_no_url += 1
                 continue
 
-            # Download the 2 most recent X-17A-5 PDFs for multi-year data
-            try:
-                pdf_records = await self.downloader.download_recent_x17a5_pdfs(broker_dealer, count=2)
-            except Exception as exc:
-                logger.warning("PDF download failed for BD %d (%s): %s", broker_dealer.id, broker_dealer.name, exc)
-                skipped_extraction_error += 1
-                continue
-
-            if not pdf_records:
-                skipped_no_pdf += 1
-                continue
-
-            seen_dates: set[str] = set()
-            for pdf_record in pdf_records:
+            # Per-firm tempdir replaces the persistent PDF cache. The
+            # download + Gemini extraction both happen inside this block;
+            # bytes_base64 is captured into memory at download time so the
+            # Gemini calls don't depend on the file persisting on disk past
+            # the ``with`` exit.
+            with pdf_tempdir(prefix="financial_extract_") as tmp_dir:
+                # Download the 2 most recent X-17A-5 PDFs for multi-year data
                 try:
-                    extractions = await self.gemini_client.extract_multi_year_financial_data(
-                        pdf_bytes_base64=pdf_record.bytes_base64,
-                        prompt=self._build_financial_prompt(),
+                    pdf_records = await self.downloader.download_recent_x17a5_pdfs(
+                        broker_dealer, tmp_dir, count=2
                     )
-                except (GeminiConfigurationError, GeminiExtractionError) as exc:
-                    logger.warning(
-                        "Gemini multi-year extraction failed for BD %d filing_year %d: %s",
-                        broker_dealer.id, pdf_record.filing_year, exc,
-                    )
-                    skipped_extraction_error += 1
-                    continue
                 except Exception as exc:
-                    logger.warning(
-                        "Unexpected error in multi-year extraction for BD %d filing_year %d: %s",
-                        broker_dealer.id, pdf_record.filing_year, exc,
-                    )
+                    logger.warning("PDF download failed for BD %d (%s): %s", broker_dealer.id, broker_dealer.name, exc)
                     skipped_extraction_error += 1
                     continue
 
-                if not extractions:
-                    logger.warning(
-                        "Gemini multi-year extraction returned zero rows for BD %d filing_year %d",
-                        broker_dealer.id, pdf_record.filing_year,
-                    )
-                    skipped_extraction_error += 1
+                if not pdf_records:
+                    skipped_no_pdf += 1
                     continue
 
-                # Per-year evaluation (#54 multi-year + #56/Fix G tagging):
-                # the multi-year response is an array of per-fiscal-year
-                # records, each independently eligible. A firm may have year N
-                # pass confidence while year N-1 lands as needs_review.
-                # Counter catalog:
-                #   - records list (parsed + needs_review): YEAR-grain rows
-                #     persisted; parsed vs needs_review determined by the
-                #     confidence classifier. needs_review_count is derived
-                #     from the list after the loop.
-                #   - skipped_low_confidence: YEAR-grain for rows that can't
-                #     persist at all because net_capital is NULL (NOT NULL
-                #     column rules them out regardless of tag).
-                #   - skipped_extraction_error: PDF- or year-grain for
-                #     provider errors, empty arrays, unparseable report_date.
-                #   - skipped_no_url / skipped_no_pdf: FIRM-grain.
-                # Invariant: (parsed rows) + needs_review_count + skipped_no_url
-                # + skipped_no_pdf + skipped_extraction_error +
-                # skipped_low_confidence == total units of work attempted.
-                for extraction in extractions:
-                    # Rows with NULL net_capital can't be persisted at ANY
-                    # extraction_status because net_capital is NOT NULL.
-                    # Route to skipped_low_confidence -- "unpersistable" is
-                    # its own signal, distinct from provider errors.
-                    if extraction.net_capital is None:
-                        logger.warning(
-                            "Financial extraction skipped BD %s: net_capital=None "
-                            "(confidence=%s) cannot persist under NOT NULL constraint",
-                            broker_dealer.id,
-                            extraction.confidence_score,
+                seen_dates: set[str] = set()
+                for pdf_record in pdf_records:
+                    try:
+                        extractions = await self.gemini_client.extract_multi_year_financial_data(
+                            pdf_bytes_base64=pdf_record.bytes_base64,
+                            prompt=self._build_financial_prompt(),
                         )
-                        skipped_low_confidence += 1
-                        continue
-
-                    report_date = self._parse_report_date(extraction.report_date) or pdf_record.report_date
-                    if report_date is None:
+                    except (GeminiConfigurationError, GeminiExtractionError) as exc:
                         logger.warning(
-                            "Financial extraction skipped BD %s: unparseable report_date",
-                            broker_dealer.id,
+                            "Gemini multi-year extraction failed for BD %d filing_year %d: %s",
+                            broker_dealer.id, pdf_record.filing_year, exc,
+                        )
+                        skipped_extraction_error += 1
+                        continue
+                    except Exception as exc:
+                        logger.warning(
+                            "Unexpected error in multi-year extraction for BD %d filing_year %d: %s",
+                            broker_dealer.id, pdf_record.filing_year, exc,
                         )
                         skipped_extraction_error += 1
                         continue
 
-                    # Dedup across PDFs within a firm: if two PDFs each return
-                    # year N (e.g. an amendment + its original), keep the first
-                    # parse of that date. uq_financial_metrics_bd_report_date
-                    # would reject the second insert anyway, but the set skip
-                    # saves a wasted ORM flush. Not counted as a skip bucket --
-                    # already attributed to the first occurrence.
-                    date_key = report_date.isoformat()
-                    if date_key in seen_dates:
-                        continue
-                    seen_dates.add(date_key)
-
-                    # Tag based on LLM confidence (#56 / Fix G). Below-threshold
-                    # rows with a valid net_capital still persist, tagged
-                    # 'needs_review', so the review queue can surface them
-                    # instead of a silent drop. See app.services.extraction_status.
-                    extraction_status = classify_financial_extraction_status(
-                        confidence_score=extraction.confidence_score,
-                        min_confidence=settings.financial_extraction_min_confidence,
-                    )
-                    if extraction_status == STATUS_NEEDS_REVIEW:
+                    if not extractions:
                         logger.warning(
-                            "Financial extraction BD %s tagged needs_review: confidence=%s below min_confidence=%s",
-                            broker_dealer.id,
-                            extraction.confidence_score,
-                            settings.financial_extraction_min_confidence,
+                            "Gemini multi-year extraction returned zero rows for BD %d filing_year %d",
+                            broker_dealer.id, pdf_record.filing_year,
                         )
+                        skipped_extraction_error += 1
+                        continue
 
-                    records.append(
-                        FinancialMetricRecord(
-                            bd_id=broker_dealer.id,
-                            report_date=report_date,
-                            net_capital=extraction.net_capital,
-                            excess_net_capital=extraction.excess_net_capital,
-                            total_assets=extraction.total_assets,
-                            required_min_capital=extraction.required_min_capital,
-                            source_filing_url=pdf_record.source_pdf_url or pdf_record.source_filing_url,
-                            extraction_status=extraction_status,
+                    # Per-year evaluation (#54 multi-year + #56/Fix G tagging):
+                    # the multi-year response is an array of per-fiscal-year
+                    # records, each independently eligible. A firm may have year N
+                    # pass confidence while year N-1 lands as needs_review.
+                    # Counter catalog:
+                    #   - records list (parsed + needs_review): YEAR-grain rows
+                    #     persisted; parsed vs needs_review determined by the
+                    #     confidence classifier. needs_review_count is derived
+                    #     from the list after the loop.
+                    #   - skipped_low_confidence: YEAR-grain for rows that can't
+                    #     persist at all because net_capital is NULL (NOT NULL
+                    #     column rules them out regardless of tag).
+                    #   - skipped_extraction_error: PDF- or year-grain for
+                    #     provider errors, empty arrays, unparseable report_date.
+                    #   - skipped_no_url / skipped_no_pdf: FIRM-grain.
+                    # Invariant: (parsed rows) + needs_review_count + skipped_no_url
+                    # + skipped_no_pdf + skipped_extraction_error +
+                    # skipped_low_confidence == total units of work attempted.
+                    for extraction in extractions:
+                        # Rows with NULL net_capital can't be persisted at ANY
+                        # extraction_status because net_capital is NOT NULL.
+                        # Route to skipped_low_confidence -- "unpersistable" is
+                        # its own signal, distinct from provider errors.
+                        if extraction.net_capital is None:
+                            logger.warning(
+                                "Financial extraction skipped BD %s: net_capital=None "
+                                "(confidence=%s) cannot persist under NOT NULL constraint",
+                                broker_dealer.id,
+                                extraction.confidence_score,
+                            )
+                            skipped_low_confidence += 1
+                            continue
+
+                        report_date = self._parse_report_date(extraction.report_date) or pdf_record.report_date
+                        if report_date is None:
+                            logger.warning(
+                                "Financial extraction skipped BD %s: unparseable report_date",
+                                broker_dealer.id,
+                            )
+                            skipped_extraction_error += 1
+                            continue
+
+                        # Dedup across PDFs within a firm: if two PDFs each return
+                        # year N (e.g. an amendment + its original), keep the first
+                        # parse of that date. uq_financial_metrics_bd_report_date
+                        # would reject the second insert anyway, but the set skip
+                        # saves a wasted ORM flush. Not counted as a skip bucket --
+                        # already attributed to the first occurrence.
+                        date_key = report_date.isoformat()
+                        if date_key in seen_dates:
+                            continue
+                        seen_dates.add(date_key)
+
+                        # Tag based on LLM confidence (#56 / Fix G). Below-threshold
+                        # rows with a valid net_capital still persist, tagged
+                        # 'needs_review', so the review queue can surface them
+                        # instead of a silent drop. See app.services.extraction_status.
+                        extraction_status = classify_financial_extraction_status(
+                            confidence_score=extraction.confidence_score,
+                            min_confidence=settings.financial_extraction_min_confidence,
                         )
-                    )
+                        if extraction_status == STATUS_NEEDS_REVIEW:
+                            logger.warning(
+                                "Financial extraction BD %s tagged needs_review: confidence=%s below min_confidence=%s",
+                                broker_dealer.id,
+                                extraction.confidence_score,
+                                settings.financial_extraction_min_confidence,
+                            )
+
+                        records.append(
+                            FinancialMetricRecord(
+                                bd_id=broker_dealer.id,
+                                report_date=report_date,
+                                net_capital=extraction.net_capital,
+                                excess_net_capital=extraction.excess_net_capital,
+                                total_assets=extraction.total_assets,
+                                required_min_capital=extraction.required_min_capital,
+                                source_filing_url=pdf_record.source_pdf_url or pdf_record.source_filing_url,
+                                extraction_status=extraction_status,
+                            )
+                        )
 
         needs_review_count = sum(
             1 for record in records if record.extraction_status == STATUS_NEEDS_REVIEW

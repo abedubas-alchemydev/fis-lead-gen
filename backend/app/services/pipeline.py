@@ -15,7 +15,7 @@ from app.models.pipeline_run import PipelineRun
 from app.services.broker_dealers import BrokerDealerRepository
 from app.services.classification import apply_classification_to_all
 from app.services.competitors import CompetitorProviderService
-from app.services.pdf_downloader import PdfDownloaderService
+from app.services.pdf_downloader import PdfDownloaderService, pdf_tempdir
 from app.services.pdf_processor import PdfProcessorService
 
 logger = logging.getLogger(__name__)
@@ -62,60 +62,68 @@ class ClearingPipelineService:
                     bd_index + 1, total_bds, pipeline_run.success_count, pipeline_run.failure_count,
                 )
             try:
-                pdf_record = await self.downloader.download_latest_x17a5_pdf(broker_dealer)
-                if pdf_record is None:
+                # Per-iteration tempdir replaces the persistent PDF cache.
+                # Download + LLM parse both happen inside this block; on exit
+                # the PDF is wiped so the container footprint stays flat.
+                # Re-extraction re-downloads (the extracted values are
+                # already persisted to the DB).
+                with pdf_tempdir(prefix="clearing_extract_") as tmp_dir:
+                    pdf_record = await self.downloader.download_latest_x17a5_pdf(
+                        broker_dealer, tmp_dir
+                    )
+                    if pdf_record is None:
+                        extraction_results.append(
+                            {
+                                "bd_id": broker_dealer.id,
+                                "pipeline_run_id": pipeline_run.id,
+                                "filing_year": datetime.now(timezone.utc).year,
+                                "report_date": broker_dealer.last_filing_date,
+                                "source_filing_url": broker_dealer.filings_index_url,
+                                "source_pdf_url": None,
+                                "local_document_path": None,
+                                "clearing_partner": None,
+                                "normalized_partner": None,
+                                "clearing_type": "unknown",
+                                "agreement_date": None,
+                                "extraction_confidence": 0.0,
+                                "extraction_status": "missing_pdf",
+                                "extraction_notes": "No X-17A-5 PDF available for this broker-dealer.",
+                                "is_competitor": False,
+                                "is_verified": False,
+                                "extracted_at": datetime.now(timezone.utc),
+                            }
+                        )
+                        pipeline_run.processed_items += 1
+                        pipeline_run.failure_count += 1
+                        continue
+
+                    parsed = await self.processor.process_downloaded_pdf(pdf_record)
                     extraction_results.append(
                         {
-                            "bd_id": broker_dealer.id,
+                            "bd_id": parsed.bd_id,
                             "pipeline_run_id": pipeline_run.id,
-                            "filing_year": datetime.now(timezone.utc).year,
-                            "report_date": broker_dealer.last_filing_date,
-                            "source_filing_url": broker_dealer.filings_index_url,
-                            "source_pdf_url": None,
-                            "local_document_path": None,
-                            "clearing_partner": None,
-                            "normalized_partner": None,
-                            "clearing_type": "unknown",
-                            "agreement_date": None,
-                            "extraction_confidence": 0.0,
-                            "extraction_status": "missing_pdf",
-                            "extraction_notes": "No X-17A-5 PDF available for this broker-dealer.",
-                            "is_competitor": False,
+                            "filing_year": parsed.filing_year,
+                            "report_date": parsed.report_date,
+                            "source_filing_url": parsed.source_filing_url,
+                            "source_pdf_url": parsed.source_pdf_url,
+                            "local_document_path": parsed.local_document_path,
+                            "clearing_partner": parsed.clearing_partner,
+                            "normalized_partner": self.repository.normalize_partner_name(parsed.clearing_partner),
+                            "clearing_type": parsed.clearing_type,
+                            "agreement_date": parsed.agreement_date,
+                            "extraction_confidence": parsed.extraction_confidence,
+                            "extraction_status": parsed.extraction_status,
+                            "extraction_notes": parsed.extraction_notes,
+                            "is_competitor": self.repository.match_competitor(parsed.clearing_partner, competitors),
                             "is_verified": False,
-                            "extracted_at": datetime.now(timezone.utc),
+                            "extracted_at": parsed.extracted_at,
                         }
                     )
                     pipeline_run.processed_items += 1
-                    pipeline_run.failure_count += 1
-                    continue
-
-                parsed = await self.processor.process_downloaded_pdf(pdf_record)
-                extraction_results.append(
-                    {
-                        "bd_id": parsed.bd_id,
-                        "pipeline_run_id": pipeline_run.id,
-                        "filing_year": parsed.filing_year,
-                        "report_date": parsed.report_date,
-                        "source_filing_url": parsed.source_filing_url,
-                        "source_pdf_url": parsed.source_pdf_url,
-                        "local_document_path": parsed.local_document_path,
-                        "clearing_partner": parsed.clearing_partner,
-                        "normalized_partner": self.repository.normalize_partner_name(parsed.clearing_partner),
-                        "clearing_type": parsed.clearing_type,
-                        "agreement_date": parsed.agreement_date,
-                        "extraction_confidence": parsed.extraction_confidence,
-                        "extraction_status": parsed.extraction_status,
-                        "extraction_notes": parsed.extraction_notes,
-                        "is_competitor": self.repository.match_competitor(parsed.clearing_partner, competitors),
-                        "is_verified": False,
-                        "extracted_at": parsed.extracted_at,
-                    }
-                )
-                pipeline_run.processed_items += 1
-                if parsed.extraction_status == "parsed":
-                    pipeline_run.success_count += 1
-                else:
-                    pipeline_run.failure_count += 1
+                    if parsed.extraction_status == "parsed":
+                        pipeline_run.success_count += 1
+                    else:
+                        pipeline_run.failure_count += 1
             except Exception as exc:
                 logger.exception("Clearing extraction failed for broker-dealer %s", broker_dealer.id)
                 extraction_results.append(

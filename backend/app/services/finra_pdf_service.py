@@ -1,4 +1,4 @@
-"""FINRA BrokerCheck PDF fetch with disk cache.
+"""FINRA BrokerCheck PDF fetch.
 
 The Detailed Report PDF lives at a deterministic URL under
 files.brokercheck.finra.org. Previous implementation imported
@@ -7,12 +7,17 @@ directory is not copied into the backend Docker image (build context is
 ./backend/), so the import raised at runtime and surfaced as a broken
 link on prod. This module inlines the minimal fetch so the endpoint is
 self-contained within backend/.
+
+Per Sprint 2 task #20 (2026-04-27 client meeting), the persistent disk
+cache that previously sat at ``settings.pdf_cache_dir`` has been removed.
+``fetch_brokercheck_pdf`` returns the PDF bytes; the caller (the
+``/brokercheck.pdf`` endpoint) hands them straight back to the browser via
+``Response(content=…)`` without ever touching disk.
 """
 
 from __future__ import annotations
 
 import logging
-from pathlib import Path
 
 import httpx
 
@@ -65,18 +70,3 @@ async def fetch_brokercheck_pdf(crd: str | int) -> bytes:
         )
 
     return response.content
-
-
-async def fetch_and_cache_brokercheck_pdf(crd: str | int) -> Path:
-    """Fetch the PDF if not cached, write to disk, return the cached path."""
-    cache_dir = Path(settings.pdf_cache_dir) / "finra"
-    cache_dir.mkdir(parents=True, exist_ok=True)
-    cache_path = cache_dir / f"{crd}.pdf"
-
-    if cache_path.exists() and cache_path.stat().st_size > 0:
-        return cache_path
-
-    pdf_bytes = await fetch_brokercheck_pdf(crd)
-    cache_path.write_bytes(pdf_bytes)
-    logger.info("Cached FINRA BrokerCheck PDF for CRD %s (%d bytes)", crd, len(pdf_bytes))
-    return cache_path
