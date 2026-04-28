@@ -967,7 +967,9 @@ export function MasterListWorkspaceClient() {
                         ) : null}
                       </td>
                       <td className="whitespace-nowrap px-5 py-3.5 font-mono text-[12px] text-[var(--text-dim,#475569)]">
-                        {item.cik ?? "—"}
+                        {item.cik ?? (
+                          <span title="No SEC registration on file">—</span>
+                        )}
                       </td>
                       <td className="px-5 py-3.5">
                         <div className="flex flex-wrap items-center gap-2">
@@ -1016,7 +1018,12 @@ export function MasterListWorkspaceClient() {
                         {item.latest_net_capital !== null ? (
                           formatCurrency(item.latest_net_capital)
                         ) : (
-                          <span className="text-[var(--text-muted,#94a3b8)]">—</span>
+                          <span
+                            className="text-[var(--text-muted,#94a3b8)]"
+                            title="No FOCUS report on file"
+                          >
+                            —
+                          </span>
                         )}
                       </td>
                       <td className="whitespace-nowrap px-5 py-3.5">
@@ -1035,11 +1042,18 @@ export function MasterListWorkspaceClient() {
                             {item.yoy_growth.toFixed(1)}%
                           </span>
                         ) : (
-                          <span className="text-[var(--text-muted,#94a3b8)]">—</span>
+                          <span
+                            className="text-[var(--text-muted,#94a3b8)]"
+                            title="Needs ≥2 historical FOCUS filings"
+                          >
+                            —
+                          </span>
                         )}
                       </td>
                       <td className="whitespace-nowrap px-5 py-3.5 text-[var(--text-muted,#94a3b8)]">
-                        {item.last_filing_date ?? "—"}
+                        {item.last_filing_date ?? (
+                          <span title="No Edgar filing on record">—</span>
+                        )}
                       </td>
                     </tr>
                   );
