@@ -45,6 +45,12 @@ class Settings(BaseSettings):
     pdf_cache_dir: str | None = None
     llm_provider: str = "gemini"
     clearing_extraction_min_confidence: float = 0.7
+    # Confidence floor for the unified LLM-based clearing classifier
+    # (services/clearing_classifier.py). Below this, the broker-dealer's
+    # clearing_classification is set to 'needs_review' instead of the
+    # LLM-returned label, so low-signal rows surface for manual review
+    # rather than silently flipping the canonical column.
+    clearing_classification_min_confidence: float = 0.7
     sec_request_timeout_seconds: float = 30.0
     sec_request_max_retries: int = 3
     sec_submissions_base_url: str = "https://data.sec.gov/submissions"
