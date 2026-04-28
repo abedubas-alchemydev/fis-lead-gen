@@ -20,6 +20,7 @@ import { ArrangementFields } from "@/components/master-list/detail/arrangement-f
 import { ContactRow } from "@/components/master-list/detail/contact-row";
 import { FinancialTrendChart } from "@/components/master-list/detail/financial-trend-chart";
 import { FindEmailsButton } from "@/components/master-list/detail/find-emails-button";
+import { FirmWebsiteLink } from "@/components/master-list/detail/firm-website-link";
 import { FocusReportSection } from "@/components/master-list/detail/focus-report-section";
 import {
   classificationDisplay,
@@ -359,11 +360,6 @@ export function BrokerDealerDetailClient({ brokerDealerId }: { brokerDealerId: s
 
   const { broker_dealer: bd } = profile;
   const location = [bd.city, bd.state].filter(Boolean).join(", ");
-  const websiteHref = bd.website
-    ? bd.website.startsWith("http")
-      ? bd.website
-      : `https://${bd.website}`
-    : null;
   const websiteDomain = bd.website
     ? bd.website.replace(/^https?:\/\//i, "").replace(/\/+$/, "").split("/")[0]?.toLowerCase() ?? null
     : null;
@@ -410,6 +406,7 @@ export function BrokerDealerDetailClient({ brokerDealerId }: { brokerDealerId: s
             </h1>
             <FavoriteButton bdId={bd.id} initialFavorited={profile.is_favorited} />
           </div>
+          <FirmWebsiteLink firmName={bd.name} website={bd.website} />
           <div className="mt-2 flex flex-wrap items-center gap-x-3 gap-y-1 text-[12px] text-[var(--text-muted,#94a3b8)]">
             <span>
               CIK <span className="font-mono text-[var(--text-dim,#475569)]">{bd.cik ?? "N/A"}</span>
@@ -423,20 +420,6 @@ export function BrokerDealerDetailClient({ brokerDealerId }: { brokerDealerId: s
             </span>
             <span aria-hidden>·</span>
             <span>{location || "Location unknown"}</span>
-            {websiteHref ? (
-              <>
-                <span aria-hidden>·</span>
-                <a
-                  href={websiteHref}
-                  target="_blank"
-                  rel="noreferrer"
-                  className="inline-flex items-center gap-1 text-[var(--accent,#6366f1)] hover:underline"
-                >
-                  {bd.website}
-                  <ExternalLink className="h-3 w-3" strokeWidth={2} />
-                </a>
-              </>
-            ) : null}
           </div>
         </div>
         <div className="flex shrink-0 items-center gap-2.5">
