@@ -8,13 +8,19 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.models.competitor_provider import CompetitorProvider
 
+# Bare-brand aliases (RBC, Apex, Axos, Hilltop, Vision) were removed because
+# they collide with sister entities that share the brand prefix but are not
+# the seeded competitor (e.g. "RBC Capital Markets" vs the actual competitor
+# "RBC Correspondent Services"). Pershing is kept as a bare alias because
+# the brand belongs to one firm in our universe. See
+# reports/acg-competitor-audit-2026-04-28.md.
 DEFAULT_COMPETITORS = [
     {"name": "Pershing LLC", "aliases": ["Pershing", "BNY Pershing"], "priority": 10},
-    {"name": "Apex Clearing Corporation", "aliases": ["Apex", "Apex Clearing"], "priority": 20},
-    {"name": "Hilltop Securities Inc.", "aliases": ["Hilltop", "Hilltop Securities"], "priority": 30},
-    {"name": "RBC Correspondent Services", "aliases": ["RBC", "RBC Correspondent"], "priority": 40},
-    {"name": "Axos Clearing LLC", "aliases": ["Axos", "Axos Clearing"], "priority": 50},
-    {"name": "Vision Financial Markets LLC", "aliases": ["Vision", "Vision Financial Markets"], "priority": 60},
+    {"name": "Apex Clearing Corporation", "aliases": ["Apex Clearing"], "priority": 20},
+    {"name": "Hilltop Securities Inc.", "aliases": ["Hilltop Securities"], "priority": 30},
+    {"name": "RBC Correspondent Services", "aliases": ["RBC Correspondent"], "priority": 40},
+    {"name": "Axos Clearing LLC", "aliases": ["Axos Clearing"], "priority": 50},
+    {"name": "Vision Financial Markets LLC", "aliases": ["Vision Financial Markets"], "priority": 60},
 ]
 
 
