@@ -28,6 +28,15 @@ export interface MasterListQueryState {
   clearingPartner: string;
   clearingType: string;
   typesOfBusiness: string[];
+  // Sprint 3 task #15: net-capital range. Dollars (not cents). null when
+  // the filter is unset — keeps `0` distinguishable from "no filter".
+  minNetCapital: number | null;
+  maxNetCapital: number | null;
+  // Sprint 3 task #16: SEC registration date range. ISO `YYYY-MM-DD`
+  // strings — the format native <input type="date"> emits and the BE's
+  // FastAPI date validator accepts.
+  registeredAfter: string | null;
+  registeredBefore: string | null;
   list: ListMode;
   sortBy: string;
   sortDir: SortDir;
@@ -46,6 +55,10 @@ export const MASTER_LIST_STATE_DEFAULTS: MasterListQueryState = {
   clearingPartner: "",
   clearingType: "All",
   typesOfBusiness: [],
+  minNetCapital: null,
+  maxNetCapital: null,
+  registeredAfter: null,
+  registeredBefore: null,
   list: "primary",
   sortBy: "name",
   sortDir: "asc",
@@ -88,6 +101,16 @@ function parseIntInRange(
   return parsed;
 }
 
+// Returns null for a missing or unparseable value so the field reads as
+// "no filter applied" rather than coercing into 0 or NaN. Negative values
+// are rejected — the BE rejects them too (ge=0).
+function parseNonNegativeFloat(raw: string | null): number | null {
+  if (raw === null || raw === "") return null;
+  const parsed = Number.parseFloat(raw);
+  if (!Number.isFinite(parsed) || parsed < 0) return null;
+  return parsed;
+}
+
 export function fromSearchParams(sp: SearchParamsLike): MasterListQueryState {
   const list = sp.get("list");
   const sortDir = sp.get("sort_dir");
@@ -108,6 +131,10 @@ export function fromSearchParams(sp: SearchParamsLike): MasterListQueryState {
     clearingType:
       sp.get("clearing_type") ?? MASTER_LIST_STATE_DEFAULTS.clearingType,
     typesOfBusiness: parseMultiParam(sp, "types_of_business"),
+    minNetCapital: parseNonNegativeFloat(sp.get("min_net_capital")),
+    maxNetCapital: parseNonNegativeFloat(sp.get("max_net_capital")),
+    registeredAfter: sp.get("registered_after") || null,
+    registeredBefore: sp.get("registered_before") || null,
     list:
       list && (LIST_MODES as ReadonlyArray<string>).includes(list)
         ? (list as ListMode)
@@ -156,6 +183,18 @@ export function toSearchParams(state: MasterListQueryState): URLSearchParams {
     state.typesOfBusiness.forEach((entry) =>
       sp.append("types_of_business", entry),
     );
+  }
+  if (state.minNetCapital !== null) {
+    sp.set("min_net_capital", String(state.minNetCapital));
+  }
+  if (state.maxNetCapital !== null) {
+    sp.set("max_net_capital", String(state.maxNetCapital));
+  }
+  if (state.registeredAfter !== null) {
+    sp.set("registered_after", state.registeredAfter);
+  }
+  if (state.registeredBefore !== null) {
+    sp.set("registered_before", state.registeredBefore);
   }
   if (state.list !== MASTER_LIST_STATE_DEFAULTS.list) {
     sp.set("list", state.list);
