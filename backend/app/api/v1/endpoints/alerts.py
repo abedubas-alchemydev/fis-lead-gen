@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from typing import Literal
+
 from fastapi import APIRouter, Depends, HTTPException, Query, status
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -36,6 +38,7 @@ async def list_alerts(
     priority: list[str] | None = Query(default=None),
     read: bool | None = Query(default=None),
     broker_dealer_id: int | None = Query(default=None),
+    category: Literal["form_bd", "deficiency", "all"] | None = Query(default=None),
     page: int = Query(default=1, ge=1),
     limit: int = Query(default=20, ge=1, le=100),
     _: AuthenticatedUser = Depends(get_current_user),
@@ -47,6 +50,7 @@ async def list_alerts(
         priorities=_parse_values(priority),
         is_read=read,
         broker_dealer_id=broker_dealer_id,
+        category=category,
         page=page,
         limit=limit,
     )
