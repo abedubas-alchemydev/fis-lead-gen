@@ -252,9 +252,12 @@ export function BrokerDealerDetailClient({ brokerDealerId }: { brokerDealerId: s
             </Link>{" "}
             <span className="text-[var(--text-dim,#475569)]">/</span> Firm Detail
           </p>
-          <h1 className="mt-1 text-[24px] font-bold tracking-[-0.02em] text-[var(--text,#0f172a)]">
-            {bd.name}
-          </h1>
+          <div className="mt-1 flex flex-wrap items-center gap-3">
+            <h1 className="text-[24px] font-bold tracking-[-0.02em] text-[var(--text,#0f172a)]">
+              {bd.name}
+            </h1>
+            <FavoriteButton bdId={bd.id} initialFavorited={profile.is_favorited} />
+          </div>
           <div className="mt-2 flex flex-wrap items-center gap-x-3 gap-y-1 text-[12px] text-[var(--text-muted,#94a3b8)]">
             <span>
               CIK <span className="font-mono text-[var(--text-dim,#475569)]">{bd.cik ?? "N/A"}</span>
@@ -298,7 +301,6 @@ export function BrokerDealerDetailClient({ brokerDealerId }: { brokerDealerId: s
             )}
             {isHealthChecking ? "Checking…" : "Health Check"}
           </button>
-          <FavoriteButton bdId={bd.id} initialFavorited={profile.is_favorited} />
         </div>
       </div>
 

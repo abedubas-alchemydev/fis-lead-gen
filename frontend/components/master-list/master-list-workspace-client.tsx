@@ -7,8 +7,8 @@ import type { Route } from "next";
 import { ArrowDown, ArrowUp, Bell, Search, TrendingDown, TrendingUp } from "lucide-react";
 
 import { apiRequest, buildApiPath } from "@/lib/api";
-import { formatRelativeTime } from "@/lib/format";
-import { ChipPicker } from "@/components/ui/chip-picker";
+import { formatCurrency, formatRelativeTime } from "@/lib/format";
+import { STATE_NAMES, stateCodeFromName } from "@/lib/states";
 import { Combo } from "@/components/ui/combo";
 import { Dotmark, Segmented, type SegmentedItem } from "@/components/ui/segmented";
 import { Pill, type PillVariant } from "@/components/ui/pill";
@@ -149,7 +149,6 @@ export function MasterListWorkspaceClient({
 }: MasterListWorkspaceClientProps) {
   // ── Table data + filter state — preserved from pre-redesign client ─────
   const [items, setItems] = useState<BrokerDealerListItem[]>([]);
-  const [states, setStates] = useState<string[]>([]);
   const [clearingPartners, setClearingPartners] = useState<string[]>([]);
   const [competitorSeeds, setCompetitorSeeds] = useState<string[]>([]);
   const [listCounts, setListCounts] = useState<Record<ListMode, number | null>>({
@@ -158,7 +157,7 @@ export function MasterListWorkspaceClient({
     all: null,
   });
 
-  const [selectedStates, setSelectedStates] = useState<string[]>([]);
+  const [stateFilter, setStateFilter] = useState("");
   const [searchInput, setSearchInput] = useState("");
   const [search, setSearch] = useState("");
   const [healthFilter, setHealthFilter] = useState("All");
@@ -191,7 +190,7 @@ export function MasterListWorkspaceClient({
     () =>
       buildApiPath("/api/v1/broker-dealers", {
         search,
-        state: selectedStates,
+        state: stateFilter ? [stateCodeFromName(stateFilter) ?? stateFilter] : undefined,
         health: healthFilter === "All" ? undefined : [healthFilter],
         lead_priority: leadPriorityFilter === "All" ? undefined : [leadPriorityFilter],
         clearing_partner: clearingPartnerFilter ? [clearingPartnerFilter] : undefined,
@@ -204,7 +203,7 @@ export function MasterListWorkspaceClient({
       }),
     [
       search,
-      selectedStates,
+      stateFilter,
       healthFilter,
       leadPriorityFilter,
       clearingPartnerFilter,
@@ -253,9 +252,8 @@ export function MasterListWorkspaceClient({
 
     async function loadFilters() {
       try {
-        const [stateResp, partnerResp, competitorResp, primaryResp, alternativeResp, allResp] =
+        const [partnerResp, competitorResp, primaryResp, alternativeResp, allResp] =
           await Promise.all([
-            apiRequest<string[]>("/api/v1/broker-dealers/states"),
             apiRequest<string[]>("/api/v1/broker-dealers/clearing-partners"),
             apiRequest<CompetitorProvidersResponse>("/api/v1/settings/competitors"),
             apiRequest<BrokerDealerListResponse>(
@@ -269,7 +267,6 @@ export function MasterListWorkspaceClient({
             ),
           ]);
         if (!active) return;
-        setStates(stateResp);
         setClearingPartners(partnerResp);
         setCompetitorSeeds(
           competitorResp.items
@@ -285,7 +282,6 @@ export function MasterListWorkspaceClient({
       } catch {
         if (!active) return;
         // Silent on error — filter options degrade to empty; table still loads.
-        setStates([]);
         setClearingPartners([]);
         setCompetitorSeeds([]);
       }
@@ -327,7 +323,7 @@ export function MasterListWorkspaceClient({
   }
 
   function clearFilters() {
-    setSelectedStates([]);
+    setStateFilter("");
     setSearch("");
     setSearchInput("");
     setHealthFilter("All");
@@ -342,14 +338,14 @@ export function MasterListWorkspaceClient({
 
   const activeFilterCount = useMemo(() => {
     let count = 0;
-    if (selectedStates.length > 0) count += 1;
+    if (stateFilter !== "") count += 1;
     if (healthFilter !== "All") count += 1;
     if (leadPriorityFilter !== "All") count += 1;
     if (clearingPartnerFilter !== "") count += 1;
     if (clearingTypeFilter !== "All") count += 1;
     return count;
   }, [
-    selectedStates,
+    stateFilter,
     healthFilter,
     leadPriorityFilter,
     clearingPartnerFilter,
@@ -357,12 +353,6 @@ export function MasterListWorkspaceClient({
   ]);
 
   const pages = paginationPages(meta.page, meta.total_pages);
-
-  const currencyFmt = new Intl.NumberFormat("en-US", {
-    style: "currency",
-    currency: "USD",
-    maximumFractionDigits: 0,
-  });
 
   return (
     <div className="px-7 pb-12 pt-7 lg:px-9">
@@ -510,17 +500,18 @@ export function MasterListWorkspaceClient({
         <div className="mb-4 grid gap-4 lg:grid-cols-3">
           <div>
             <label className="mb-1.5 block text-[11px] font-semibold uppercase tracking-[0.08em] text-[var(--text-muted,#94a3b8)]">
-              States
+              State
             </label>
-            <ChipPicker
-              value={selectedStates}
+            <Combo
+              value={stateFilter}
               onChange={(next) => {
-                setSelectedStates(next);
+                setStateFilter(next);
                 setPage(1);
               }}
-              options={states}
-              placeholder="Add state…"
-              ariaLabel="States"
+              options={STATE_NAMES}
+              placeholder="Search states…"
+              emptyLabel="All states"
+              ariaLabel="State"
             />
           </div>
 
@@ -599,14 +590,14 @@ export function MasterListWorkspaceClient({
             <span className="text-[11px] font-semibold uppercase tracking-[0.08em] text-[var(--text-muted,#94a3b8)]">
               Active
             </span>
-            {selectedStates.length > 0 ? (
+            {stateFilter !== "" ? (
               <Tag
                 onDismiss={() => {
-                  setSelectedStates([]);
+                  setStateFilter("");
                   setPage(1);
                 }}
               >
-                States: {selectedStates.join(", ")}
+                State: {stateFilter}
               </Tag>
             ) : null}
             {clearingPartnerFilter ? (
@@ -670,12 +661,15 @@ export function MasterListWorkspaceClient({
             <label className="mb-1.5 block text-[11px] font-semibold uppercase tracking-[0.08em] text-[var(--text-muted,#94a3b8)]">
               Search firms
             </label>
-            <input
-              value={searchInput}
-              onChange={(event) => setSearchInput(event.target.value)}
-              placeholder="Firm name, CIK, CRD, or SEC file number"
-              className="h-[38px] w-full rounded-[10px] border border-[var(--border,rgba(30,64,175,0.1))] bg-[var(--surface,#ffffff)] px-3 text-[13px] text-[var(--text,#0f172a)] outline-none transition placeholder:text-[var(--text-muted,#94a3b8)] focus:border-[var(--accent,#6366f1)] focus:shadow-[0_0_0_3px_rgba(99,102,241,0.15)]"
-            />
+            <div className="flex h-[38px] w-full items-center gap-2.5 rounded-[10px] border border-[var(--border,rgba(30,64,175,0.1))] bg-[var(--surface,#ffffff)] px-3 transition focus-within:border-[var(--accent,#6366f1)] focus-within:shadow-[0_0_0_3px_rgba(99,102,241,0.15)]">
+              <Search className="h-4 w-4 shrink-0 text-[var(--text-muted,#94a3b8)]" strokeWidth={2} />
+              <input
+                value={searchInput}
+                onChange={(event) => setSearchInput(event.target.value)}
+                placeholder="Firm name, CIK, CRD, or SEC file number"
+                className="min-w-0 flex-1 bg-transparent text-[13px] text-[var(--text,#0f172a)] outline-none placeholder:text-[var(--text-muted,#94a3b8)]"
+              />
+            </div>
           </form>
 
           <div>
@@ -898,7 +892,7 @@ export function MasterListWorkspaceClient({
                       </td>
                       <td className="whitespace-nowrap px-5 py-3.5 tabular-nums">
                         {item.latest_net_capital !== null ? (
-                          currencyFmt.format(item.latest_net_capital)
+                          formatCurrency(item.latest_net_capital)
                         ) : (
                           <span className="text-[var(--text-muted,#94a3b8)]">—</span>
                         )}
