@@ -2,7 +2,8 @@
 
 import Link from "next/link";
 import { useCallback, useEffect, useMemo, useState } from "react";
-import { useRouter } from "next/navigation";
+import { useRouter, useSearchParams } from "next/navigation";
+import type { Route } from "next";
 
 import {
   ArrowLeft,
@@ -37,11 +38,22 @@ import {
 import { SectionPanel } from "@/components/ui/section-panel";
 import { FavoriteButton } from "@/components/master-list/favorite-button";
 import { Pill } from "@/components/ui/pill";
-import { apiRequest } from "@/lib/api";
+import { apiRequest, buildApiPath } from "@/lib/api";
 import { parseArrangementBlob } from "@/lib/arrangements";
 import { recordVisit } from "@/lib/favorites";
 import { formatCurrency, formatDate, formatPercent } from "@/lib/format";
-import type { BrokerDealerProfileResponse, ExecutiveContactItem } from "@/lib/types";
+import {
+  buildMasterListUrl,
+  encodeReturnParam,
+  parseReturnParam,
+  type MasterListQueryState,
+} from "@/lib/master-list-state";
+import { stateCodeFromName } from "@/lib/states";
+import type {
+  BrokerDealerListResponse,
+  BrokerDealerProfileResponse,
+  ExecutiveContactItem,
+} from "@/lib/types";
 
 // Shared button presets — kept as constants so the page can stay focused on
 // composition rather than re-typing the same Tailwind utility chains.
@@ -50,8 +62,59 @@ const PRIMARY_BTN =
 const SECONDARY_BTN =
   "inline-flex items-center justify-center gap-2 rounded-[10px] border border-[var(--border-2,rgba(30,64,175,0.16))] bg-[var(--surface,#ffffff)] px-4 py-2 text-[13px] font-medium text-[var(--text-dim,#475569)] transition hover:bg-[var(--surface-2,#f1f6fd)] hover:text-[var(--text,#0f172a)] disabled:cursor-not-allowed disabled:opacity-45";
 
+// Builds the same /api/v1/broker-dealers query the master list emits,
+// from a recovered MasterListQueryState. Mirrors the queryPath useMemo
+// in master-list-workspace-client.tsx so the two callers stay in lock
+// step — Next Lead must walk the *exact* same result set the user was
+// looking at when they clicked into the firm.
+function listPathFromReturnState(
+  state: MasterListQueryState,
+  pageOverride?: number,
+): string {
+  return buildApiPath("/api/v1/broker-dealers", {
+    search: state.search,
+    state: state.state
+      ? [stateCodeFromName(state.state) ?? state.state]
+      : undefined,
+    health: state.health === "All" ? undefined : [state.health],
+    lead_priority:
+      state.leadPriority === "All" ? undefined : [state.leadPriority],
+    clearing_partner: state.clearingPartner ? [state.clearingPartner] : undefined,
+    clearing_type:
+      state.clearingType === "All" ? undefined : [state.clearingType],
+    types_of_business:
+      state.typesOfBusiness.length > 0 ? state.typesOfBusiness : undefined,
+    list: state.list,
+    sort_by: state.sortBy,
+    sort_dir: state.sortDir,
+    page: pageOverride ?? state.page,
+    limit: state.limit,
+  });
+}
+
 export function BrokerDealerDetailClient({ brokerDealerId }: { brokerDealerId: string }) {
   const router = useRouter();
+  const searchParams = useSearchParams();
+
+  // The master-list workspace appends ?return=<encoded-url> to every
+  // row link (see master-list-workspace-client.tsx). When present, it's
+  // the source of truth for the user's filtered/sorted/paginated view.
+  // When absent (deep-link, bookmark, direct visit), Next Lead falls
+  // back to the global /adjacent endpoint so the button still works.
+  const returnRaw = searchParams.get("return");
+  const returnState = useMemo(
+    () => parseReturnParam(returnRaw),
+    [returnRaw],
+  );
+  const returnEnvelope = useMemo(
+    () => (returnState ? encodeReturnParam(returnState) : ""),
+    [returnState],
+  );
+  const masterListHref = useMemo<Route>(
+    () => (returnState ? (buildMasterListUrl(returnState) as Route) : "/master-list"),
+    [returnState],
+  );
+
   const [profile, setProfile] = useState<BrokerDealerProfileResponse | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [enrichError, setEnrichError] = useState<string | null>(null);
@@ -62,17 +125,106 @@ export function BrokerDealerDetailClient({ brokerDealerId }: { brokerDealerId: s
   const [prevId, setPrevId] = useState<number | null>(null);
   const [nextId, setNextId] = useState<number | null>(null);
 
-  // Fetch adjacent IDs for Next/Previous Lead navigation
+  // Resolve adjacent firm IDs.
+  //
+  // With a `return` envelope, fetch the same filtered/sorted page the
+  // user came from, locate the current firm by id, and step ±1. When
+  // the firm sits at a page boundary, fetch the neighbouring page to
+  // surface the cross-page neighbour. No wrap at the head/tail of the
+  // result set — the button disables.
+  //
+  // Without an envelope, fall back to the existing /adjacent endpoint
+  // so deep-link visits keep their previous behaviour.
   useEffect(() => {
-    apiRequest<{ prev_id: number | null; next_id: number | null }>(
-      `/api/v1/broker-dealers/${brokerDealerId}/adjacent`,
-    )
-      .then((adj) => {
+    let active = true;
+    const numericId = Number(brokerDealerId);
+
+    async function resolveFromReturnState(state: MasterListQueryState) {
+      const response = await apiRequest<BrokerDealerListResponse>(
+        listPathFromReturnState(state),
+      );
+      if (!active) return;
+
+      const idx = response.items.findIndex((item) => item.id === numericId);
+      if (idx === -1) {
+        // The firm dropped out of the user's view between the master
+        // list and now (data refresh, filter narrowing, etc.). Fall
+        // back to the global walker so the buttons still navigate.
+        await resolveFromAdjacent();
+        return;
+      }
+
+      let prev: number | null = null;
+      let next: number | null = null;
+
+      if (idx > 0) {
+        prev = response.items[idx - 1].id;
+      } else if (response.meta.page > 1) {
+        const prevPage = await apiRequest<BrokerDealerListResponse>(
+          listPathFromReturnState(state, response.meta.page - 1),
+        );
+        if (!active) return;
+        if (prevPage.items.length > 0) {
+          prev = prevPage.items[prevPage.items.length - 1].id;
+        }
+      }
+
+      if (idx < response.items.length - 1) {
+        next = response.items[idx + 1].id;
+      } else if (response.meta.page < response.meta.total_pages) {
+        const nextPage = await apiRequest<BrokerDealerListResponse>(
+          listPathFromReturnState(state, response.meta.page + 1),
+        );
+        if (!active) return;
+        if (nextPage.items.length > 0) {
+          next = nextPage.items[0].id;
+        }
+      }
+
+      setPrevId(prev);
+      setNextId(next);
+    }
+
+    async function resolveFromAdjacent() {
+      try {
+        const adj = await apiRequest<{
+          prev_id: number | null;
+          next_id: number | null;
+        }>(`/api/v1/broker-dealers/${brokerDealerId}/adjacent`);
+        if (!active) return;
         setPrevId(adj.prev_id);
         setNextId(adj.next_id);
-      })
-      .catch(() => {});
-  }, [brokerDealerId]);
+      } catch {
+        if (active) {
+          setPrevId(null);
+          setNextId(null);
+        }
+      }
+    }
+
+    if (returnState && Number.isFinite(numericId)) {
+      void resolveFromReturnState(returnState).catch(() => {
+        if (active) void resolveFromAdjacent();
+      });
+    } else {
+      void resolveFromAdjacent();
+    }
+
+    return () => {
+      active = false;
+    };
+  }, [brokerDealerId, returnState]);
+
+  // Build a same-shape /master-list/{id} link that preserves the same
+  // return envelope so chaining Next Lead doesn't lose the master-list
+  // context after the first click.
+  const buildAdjacentHref = useCallback(
+    (id: number): Route => {
+      const base = `/master-list/${id}`;
+      return (returnEnvelope ? `${base}?return=${returnEnvelope}` : base) as Route;
+    },
+    [returnEnvelope],
+  );
 
   // Fire-and-forget visit tracking. The backend upserts on (user_id, bd_id)
   // so a failure here never blocks render or mutates the detail payload.
@@ -245,7 +397,7 @@ export function BrokerDealerDetailClient({ brokerDealerId }: { brokerDealerId: s
           <p className="text-[12px] uppercase tracking-[0.06em] text-[var(--text-muted,#94a3b8)]">
             Enterprise Dashboard <span className="text-[var(--text-dim,#475569)]">/</span>{" "}
             <Link
-              href="/master-list"
+              href={masterListHref}
               className="transition hover:text-[var(--text-dim,#475569)]"
             >
               Master List
@@ -331,14 +483,14 @@ export function BrokerDealerDetailClient({ brokerDealerId }: { brokerDealerId: s
         <button
           type="button"
           disabled={!prevId}
-          onClick={() => prevId && router.push(`/master-list/${prevId}`)}
+          onClick={() => prevId && router.push(buildAdjacentHref(prevId))}
           className={SECONDARY_BTN}
         >
           <ArrowLeft className="h-4 w-4" strokeWidth={2} />
           Previous Lead
         </button>
         <Link
-          href="/master-list"
+          href={masterListHref}
           className="text-[12px] uppercase tracking-[0.08em] text-[var(--text-muted,#94a3b8)] transition hover:text-[var(--text,#0f172a)]"
         >
           Back to Master List
@@ -346,7 +498,7 @@ export function BrokerDealerDetailClient({ brokerDealerId }: { brokerDealerId: s
         <button
           type="button"
           disabled={!nextId}
-          onClick={() => nextId && router.push(`/master-list/${nextId}`)}
+          onClick={() => nextId && router.push(buildAdjacentHref(nextId))}
           className={SECONDARY_BTN}
         >
           Next Lead

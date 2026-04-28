@@ -9,9 +9,9 @@ import {
   XCircle,
 } from "lucide-react";
 import Link from "next/link";
-import { useParams } from "next/navigation";
+import { useParams, useSearchParams } from "next/navigation";
 import type { Route } from "next";
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 
 import { EnrichAllButton } from "@/components/email-extractor/enrich-all-button";
 import { Pill, type PillVariant } from "@/components/ui/pill";
@@ -19,6 +19,7 @@ import { SectionPanel } from "@/components/ui/section-panel";
 import { useToast } from "@/components/ui/use-toast";
 import { apiRequest } from "@/lib/api";
 import { formatDate, formatRelativeTime } from "@/lib/format";
+import { buildMasterListUrl, parseReturnParam } from "@/lib/master-list-state";
 
 // --- Types (mirror backend/app/schemas/email_extractor.py) -----------------
 
@@ -442,6 +443,26 @@ export default function ScanDetailPage(): React.ReactElement {
   const params = useParams<{ scanId: string }>();
   const scanId = Number(params?.scanId);
 
+  // When a `return` envelope is present (the user reached this scan
+  // via "Find emails" on a firm-detail page that was itself entered
+  // from the master list), wire the right-rail back-link to land them
+  // on the same paginated/filtered/sorted master-list view they left.
+  // Direct visits / bookmarks fall back to the email-extractor hub.
+  const searchParams = useSearchParams();
+  const returnState = useMemo(
+    () => parseReturnParam(searchParams.get("return")),
+    [searchParams],
+  );
+  const backLink = useMemo<{ href: Route; label: string }>(() => {
+    if (returnState) {
+      return {
+        href: buildMasterListUrl(returnState) as Route,
+        label: "Back to Master List",
+      };
+    }
+    return { href: "/email-extractor" as Route, label: "Back to Email Extractor" };
+  }, [returnState]);
+
   const [scan, setScan] = useState<ScanResponse | null>(null);
   const [loadError, setLoadError] = useState<string | null>(null);
   const [timedOut, setTimedOut] = useState(false);
@@ -759,9 +780,9 @@ export default function ScanDetailPage(): React.ReactElement {
           </div>
         </div>
         <div className="flex shrink-0 items-center gap-2.5">
-          <Link href={"/email-extractor" as Route} className={SECONDARY_BTN}>
+          <Link href={backLink.href} className={SECONDARY_BTN}>
             <ArrowLeft className="h-4 w-4" strokeWidth={2} />
-            Back to Email Extractor
+            {backLink.label}
           </Link>
         </div>
       </div>

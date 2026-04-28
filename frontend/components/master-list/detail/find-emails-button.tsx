@@ -1,7 +1,7 @@
 "use client";
 
 import { useState } from "react";
-import { useRouter } from "next/navigation";
+import { useRouter, useSearchParams } from "next/navigation";
 import type { Route } from "next";
 import { Search } from "lucide-react";
 
@@ -12,8 +12,12 @@ import { apiRequest } from "@/lib/api";
 // domain), kicks off a scan via
 //   POST /api/v1/email-extractor/scans
 // and routes to the resulting scan detail page on success. Disabled when no
-// domain can be resolved or while a scan creation is in flight. Behaviour
-// preserved verbatim from the pre-restyle inline IIFE.
+// domain can be resolved or while a scan creation is in flight.
+//
+// Threads the firm-detail page's `?return=` envelope (originating on
+// the master list) through to the scan-detail URL so the email-
+// extractor breadcrumb can land the user back on the exact filtered/
+// sorted master-list state they came from.
 export function FindEmailsButton({
   brokerDealerId,
   resolvedDomain,
@@ -22,6 +26,7 @@ export function FindEmailsButton({
   resolvedDomain: string | null;
 }) {
   const router = useRouter();
+  const searchParams = useSearchParams();
   const [isStarting, setIsStarting] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
@@ -39,7 +44,11 @@ export function FindEmailsButton({
           bd_id: Number(brokerDealerId),
         }),
       });
-      router.push(`/email-extractor/${created.id}` as Route);
+      const returnRaw = searchParams.get("return");
+      const destination = returnRaw
+        ? `/email-extractor/${created.id}?return=${returnRaw}`
+        : `/email-extractor/${created.id}`;
+      router.push(destination as Route);
     } catch (err) {
       setError(err instanceof Error ? err.message : "Could not start scan");
       setIsStarting(false);
