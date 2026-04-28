@@ -1,7 +1,9 @@
 "use client";
 
-import { useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useState } from "react";
 import Link from "next/link";
+import type { Route } from "next";
+import { useRouter, useSearchParams } from "next/navigation";
 
 import { ArrowRight, Check, CheckCheck } from "lucide-react";
 
@@ -16,6 +18,38 @@ import type {
   AlertsBulkReadResponse,
   AlertReadResponse,
 } from "@/lib/types";
+
+// ── Category tab catalog ──────────────────────────────────────────────
+// Sprint 4 task #18: Deshorn flagged at the 2026-04-27 meeting that
+// deficiency notices were leading the alerts page and felt noisy. Form
+// BD filings are the primary alert category; deficiency notices the
+// secondary. Three-tab UI on top of the existing filters card mirrors
+// the master-list Primary / Alternative / All Firms pattern, wired to
+// the BE `category` query param shipped in PR #122/#124.
+type AlertCategory = "form_bd" | "deficiency" | "all";
+
+const ALERT_CATEGORIES: ReadonlyArray<{ value: AlertCategory; label: string }> = [
+  { value: "form_bd", label: "Form BD" },
+  { value: "deficiency", label: "Deficiency Notices" },
+  { value: "all", label: "All Alerts" },
+];
+
+const ALERT_CATEGORY_VALUES: ReadonlyArray<AlertCategory> = [
+  "form_bd",
+  "deficiency",
+  "all",
+];
+
+// Default lands on Form BD per Deshorn's request. Default is omitted
+// from the URL so plain `/alerts` is the canonical share-link.
+const DEFAULT_CATEGORY: AlertCategory = "form_bd";
+
+function parseCategoryParam(raw: string | null): AlertCategory {
+  if (raw && (ALERT_CATEGORY_VALUES as ReadonlyArray<string>).includes(raw)) {
+    return raw as AlertCategory;
+  }
+  return DEFAULT_CATEGORY;
+}
 
 // Filter option catalogs — kept as module-level constants so the arrays are
 // referentially stable between renders (mirrors master-list-workspace-client).
@@ -93,6 +127,16 @@ export function AlertsClient({
   initialFormType = "All",
   initialPriority = "All",
 }: AlertsClientProps) {
+  const router = useRouter();
+  const searchParams = useSearchParams();
+  // Active category tab — read on every render from the URL so reload,
+  // back-nav, and share-link drops all restore the correct tab without
+  // a separate useState mirror that could drift.
+  const tab = useMemo(
+    () => parseCategoryParam(searchParams.get("tab")),
+    [searchParams],
+  );
+
   const [items, setItems] = useState<AlertListItem[]>([]);
   const [formType, setFormType] = useState(initialFormType);
   const [priority, setPriority] = useState(initialPriority);
@@ -107,17 +151,53 @@ export function AlertsClient({
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [markAllPending, setMarkAllPending] = useState(false);
+  // Per-tab unfiltered totals shown in the tab badges. null until the
+  // bootstrap fetch lands; null sticks if a category fetch fails so
+  // the badge just hides for that tab (Promise.allSettled, mirrors
+  // the master-list bootstrap fix).
+  const [categoryCounts, setCategoryCounts] = useState<
+    Record<AlertCategory, number | null>
+  >({
+    form_bd: null,
+    deficiency: null,
+    all: null,
+  });
+
+  // Tab click handler. router.replace (not push) so tab clicks don't
+  // pollute browser history with one entry per click — same Deshorn-
+  // driven decision as the master-list filter commits. Default tab
+  // (form_bd) is stripped from the URL so /alerts stays the canonical
+  // share-link.
+  const setTab = useCallback(
+    (next: AlertCategory) => {
+      const params = new URLSearchParams(searchParams.toString());
+      if (next === DEFAULT_CATEGORY) {
+        params.delete("tab");
+      } else {
+        params.set("tab", next);
+      }
+      const query = params.toString();
+      const url = query ? `/alerts?${query}` : "/alerts";
+      router.replace(url as Route, { scroll: false });
+      setPage(1);
+    },
+    [router, searchParams],
+  );
 
   const queryPath = useMemo(
     () =>
       buildApiPath("/api/v1/alerts", {
+        // Always pin the category to whatever tab the URL says we're
+        // on. The BE accepts `all` explicitly (it's a no-op there) so
+        // the request shape stays uniform across tabs.
+        category: tab,
         form_type: formType === "All" ? undefined : [formType],
         priority: priority === "All" ? undefined : [priority],
         read: readFilter === "all" ? undefined : readFilter === "read",
         page,
         limit: 20,
       }),
-    [formType, priority, readFilter, page],
+    [tab, formType, priority, readFilter, page],
   );
 
   useEffect(() => {
@@ -144,6 +224,47 @@ export function AlertsClient({
       active = false;
     };
   }, [queryPath]);
+
+  // One-shot tab-count bootstrap. Three `?category=X&limit=1` probes in
+  // parallel; Promise.allSettled so a single failed count never wipes
+  // the tab row — mirrors the master-list filter-bootstrap resilience
+  // pattern from the same sprint.
+  useEffect(() => {
+    let active = true;
+
+    async function loadCategoryCounts() {
+      const [formBdResult, deficiencyResult, allResult] = await Promise.allSettled([
+        apiRequest<AlertListResponse>(
+          buildApiPath("/api/v1/alerts", { category: "form_bd", limit: 1 }),
+        ),
+        apiRequest<AlertListResponse>(
+          buildApiPath("/api/v1/alerts", { category: "deficiency", limit: 1 }),
+        ),
+        apiRequest<AlertListResponse>(
+          buildApiPath("/api/v1/alerts", { category: "all", limit: 1 }),
+        ),
+      ]);
+      if (!active) return;
+
+      setCategoryCounts({
+        form_bd:
+          formBdResult.status === "fulfilled"
+            ? formBdResult.value.meta.total
+            : null,
+        deficiency:
+          deficiencyResult.status === "fulfilled"
+            ? deficiencyResult.value.meta.total
+            : null,
+        all:
+          allResult.status === "fulfilled" ? allResult.value.meta.total : null,
+      });
+    }
+
+    void loadCategoryCounts();
+    return () => {
+      active = false;
+    };
+  }, []);
 
   async function markRead(alertId: number) {
     try {
@@ -211,6 +332,48 @@ export function AlertsClient({
         </div>
         <div className="ml-auto">
           <TopActions />
+        </div>
+      </div>
+
+      {/* ── Tabs (category switch — Form BD primary, Deficiency secondary,
+              All Alerts everything) ──────────────────────────────────────── */}
+      <div className="mb-4 flex flex-wrap items-center gap-4">
+        <div
+          role="tablist"
+          aria-label="Alert category"
+          className="inline-flex rounded-[12px] border border-[var(--border,rgba(30,64,175,0.1))] bg-[var(--surface-2,#f1f6fd)] p-1"
+        >
+          {ALERT_CATEGORIES.map((mode) => {
+            const active = tab === mode.value;
+            const count = categoryCounts[mode.value];
+            return (
+              <button
+                key={mode.value}
+                type="button"
+                role="tab"
+                aria-selected={active}
+                onClick={() => setTab(mode.value)}
+                className={`inline-flex items-center gap-2 rounded-[10px] px-4 py-2 text-[13px] transition ${
+                  active
+                    ? "bg-gradient-to-br from-[#6366f1] to-[#8b5cf6] font-semibold text-white shadow-[0_6px_16px_rgba(99,102,241,0.35)]"
+                    : "font-medium text-[var(--text-dim,#475569)] hover:bg-[var(--surface,#ffffff)] hover:text-[var(--text,#0f172a)]"
+                }`}
+              >
+                {mode.label}
+                {count !== null ? (
+                  <span
+                    className={`inline-flex rounded-full px-2 py-0.5 text-[11px] font-semibold ${
+                      active
+                        ? "bg-white/20 text-white"
+                        : "bg-[var(--surface-3,#dbeafe)] text-[var(--text-dim,#475569)]"
+                    }`}
+                  >
+                    {count.toLocaleString()}
+                  </span>
+                ) : null}
+              </button>
+            );
+          })}
         </div>
       </div>
 
