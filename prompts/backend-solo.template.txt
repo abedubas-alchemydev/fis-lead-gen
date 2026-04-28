@@ -1,0 +1,119 @@
+================================================================================
+CC CLI 01 — BACKEND WORKTREE (solo feature, no frontend coupling)
+fis-lead-gen · FastAPI + SQLAlchemy + Alembic + pytest
+Feature: {{FEATURE_TITLE}}
+================================================================================
+
+You are Claude Code CLI running inside the BACKEND git worktree of `fis-lead-gen`.
+Before doing anything, READ `CLAUDE.md` at the repo root AND the feature plan
+at `{{PLAN_PATH}}` if one exists (not every BE-only feature needs a plan file).
+
+This is a SOLO feature: no frontend change is required, so there's no
+coordination with CC CLI 02. CC CLI 02 may be running an unrelated
+FE-only feature in parallel — don't touch frontend code.
+
+--------------------------------------------------------------------------------
+HARD RULES (from CLAUDE.md and ~/.claude/rules)
+--------------------------------------------------------------------------------
+1. Git account: `gh auth switch --user abedubas-alchemydev --hostname github.com`
+   then `gh auth status`. Verify active account before any push.
+2. Zero AI attribution in commits or PRs. After every commit:
+   `git log -1 --pretty=full` — verify clean.
+3. Stage files by name. NEVER `git add -A`.
+4. NEVER `--no-verify`, never skip hooks. Failed hook → new commit (never `--amend`).
+5. DB schema changes are Alembic migrations, round-tripped with downgrade.
+6. Backend secrets in `backend/.env` only.
+7. PRD locks preserved.
+8. Python: PEP 8, type annotations, black + isort + ruff, pytest, `logging` not `print`.
+9. Long output → `reports/` or `plans/`. Chat reply ≤ 5 lines.
+
+--------------------------------------------------------------------------------
+SCOPE
+--------------------------------------------------------------------------------
+Allowed paths: {{SCOPE_ALLOWED}}
+Forbidden paths: {{SCOPE_FORBIDDEN}} (always includes frontend/**)
+
+--------------------------------------------------------------------------------
+WORKFLOW
+--------------------------------------------------------------------------------
+
+STEP 0 — Sanity check
+    pwd && git worktree list && git status
+    gh auth switch --user abedubas-alchemydev --hostname github.com
+    gh auth status
+
+STEP 1 — Sync local develop
+    git fetch --all --prune
+    git fetch origin develop:develop || {
+        echo "Local develop diverged or checked out elsewhere. STOP."; exit 1;
+    }
+    test "$(git rev-parse develop)" = "$(git rev-parse origin/develop)" \
+        || { echo "Local develop != origin/develop. STOP."; exit 1; }
+
+STEP 2 — Create the feature branch
+    git switch --detach develop
+    git switch -c feature/be-{{FEATURE_SLUG}}
+
+STEP 3 — Plan (if not already written)
+    If this is non-trivial, write plans/{{FEATURE_SLUG}}-$(date +%F).md with
+    approach + files + migrations + test plan before implementing. Confirm
+    with Arvin in chat (≤ 5 lines) before writing code.
+
+STEP 4 — Implement
+{{IMPLEMENTATION_STEPS}}
+
+STEP 5 — Verify locally
+{{VERIFY_COMMANDS}}
+    cd backend && alembic upgrade head && alembic downgrade -1 && alembic upgrade head
+
+STEP 6 — Commit
+{{STAGED_FILES}}
+
+    git commit -m "{{FEATURE_TITLE}}
+
+{{COMMIT_BODY}}"
+    git log -1 --pretty=full
+
+STEP 7 — Push and open the PR
+    git push -u origin feature/be-{{FEATURE_SLUG}}
+    gh pr create \
+      --base develop \
+      --head feature/be-{{FEATURE_SLUG}} \
+      --title "{{FEATURE_TITLE}}" \
+      --body "$(cat <<'EOF'
+{{PR_BODY}}
+EOF
+)"
+    gh pr view --json body --jq '.body' | \
+        grep -iE "claude|anthropic|generated with|co-authored-by" \
+        && { echo "AI trailer in PR body — STOP and fix."; exit 1; } || true
+
+STEP 8 — Wait for CI green, then merge
+    gh pr checks --watch
+    gh pr merge --squash --delete-branch --admin
+
+STEP 9 — Resync worktree to fresh develop
+    git fetch --all --prune
+    git fetch origin develop:develop
+    if git switch develop 2>/dev/null; then
+        echo "On local develop."
+    else
+        git switch --detach develop
+    fi
+    git branch -D feature/be-{{FEATURE_SLUG}} 2>/dev/null || true
+    git status
+    git log --oneline -5 develop
+
+STEP 10 — Report back to Arvin (chat, ≤ 5 lines)
+    - PR URL + merged commit SHA
+    - One-sentence summary
+    - Anything skipped or follow-ups
+
+--------------------------------------------------------------------------------
+SAFE-DEPLOY POSTURE
+--------------------------------------------------------------------------------
+Merging to develop auto-deploys to STAGING. Destructive migrations (DROP /
+RENAME / backfills on existing rows) must be flagged to Arvin AFTER Step 6
+and BEFORE Step 7. Pure additive changes are safe.
+
+================================================================================

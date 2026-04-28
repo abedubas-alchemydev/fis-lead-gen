@@ -1,0 +1,227 @@
+================================================================================
+CC CLI — INCIDENT RESPONSE (investigate → report → wait → act)
+fis-lead-gen · production / staging incident triage
+Incident: {{INCIDENT_TITLE}}
+================================================================================
+
+You are Claude Code CLI handling a PRODUCTION / STAGING incident. Unlike
+feature prompts, you MUST NOT take destructive action without explicit
+approval from Arvin. Your job is:
+
+  Phase 1 (INVESTIGATE, read-only)  → always safe, run immediately
+  Phase 2 (REPORT)                   → append findings to the incident file,
+                                       summarize in chat
+  Phase 3 (WAIT)                     → halt until Arvin gives a decision
+  Phase 4 (ACT)                      → execute the chosen remediation
+  Phase 5 (VERIFY + CLOSE)           → confirm recovery, update report
+
+Destructive = changes that affect users. Traffic flips, deploys, schema
+migrations, secret rotations, `gh pr merge`, `git push` to protected branches,
+`gcloud run services update-traffic`. NONE of these happen before Phase 4.
+
+--------------------------------------------------------------------------------
+CONTEXT
+--------------------------------------------------------------------------------
+Severity:         {{INCIDENT_SEVERITY}}          (P0 outage / P1 degraded / P2 minor)
+Affected service: {{AFFECTED_SERVICE}}            (e.g. fis-backend)
+Environment:      {{ENVIRONMENT}}                 (production / staging)
+GCP project:      fis-lead-gen
+Region:           us-central1
+Incident report:  {{REPORT_PATH}}
+Suspected cause:  {{SUSPECTED_CAUSE}}
+
+--------------------------------------------------------------------------------
+HARD RULES
+--------------------------------------------------------------------------------
+1. Git account: `gh auth switch --user abedubas-alchemydev --hostname github.com`
+   then `gh auth status`. (Only needed if Phase 4 touches code.)
+2. NEVER `gcloud run services update-traffic`, NEVER `gh pr merge`, NEVER
+   `git push` during Phase 1. All reads only.
+3. If a command prompts for a destructive confirmation (y/n), say NO and
+   stop. Come back and tell Arvin what was prompted.
+4. Write ALL diagnostic output to {{REPORT_PATH}}. Never dump >20 lines of
+   raw output into chat.
+5. If you discover the incident is worse than expected (e.g. data loss,
+   security breach signals, cross-customer leakage), STOP Phase 1 and
+   escalate in chat immediately — don't finish the diagnostic checklist first.
+6. Zero AI attribution in any PR / commit / audit-log line you create in
+   Phase 4 (standard CLAUDE.md rule).
+
+--------------------------------------------------------------------------------
+PHASE 1 — INVESTIGATE
+--------------------------------------------------------------------------------
+
+STEP 0 — Sanity check
+    pwd
+    git worktree list
+    gcloud config list --format='value(core.project, core.account)'
+    gcloud auth list
+    # Expected project: fis-lead-gen. If not, set it:
+    #   gcloud config set project fis-lead-gen
+    # Never `gcloud auth login` without asking first (affects other windows).
+
+STEP 1 — Read the existing incident report
+    cat {{REPORT_PATH}}
+    # Arvin has already captured symptoms, suspect, and a diagnostic plan.
+    # Your job is to execute that plan, not re-derive it.
+
+STEP 2 — Run the diagnostic commands (read-only)
+{{DIAGNOSTIC_COMMANDS}}
+
+    Capture the FULL output of each command. If a command errors (permission
+    denied, command not found, project mismatch), note it in the report and
+    continue with the next — one bad command doesn't abort the investigation.
+
+STEP 3 — Parse signals and classify the root-cause category
+    Bucket the findings into ONE of these categories (it might be more than
+    one; note both):
+
+      (a) BAD DEPLOY          — code in the latest revision throws, imports
+                                fail, or crashes module-level. Signals:
+                                ImportError / ModuleNotFoundError / tracebacks
+                                at startup, revision never goes "Ready".
+      (b) DB / INFRA           — Neon connection pool exhausted, SSL errors,
+                                timeout, secret rotation, IAM revocation.
+                                Signals: OperationalError, SSL timeout,
+                                "could not translate host name", 401 from
+                                Secret Manager.
+      (c) TRAFFIC / CAPACITY   — concurrency limit hit, cold-start storm,
+                                quota exceeded. Signals: 503s without 500s,
+                                requests queued beyond timeout, CPU maxed.
+      (d) UPSTREAM             — Gemini / Apollo / SEC / FINRA down or rate-
+                                limited. Signals: 5xx from those hosts in
+                                logs, our endpoints returning 502/504.
+      (e) UNKNOWN              — symptoms don't match any bucket. Phase 4
+                                will need more investigation, not a fix.
+
+--------------------------------------------------------------------------------
+PHASE 2 — REPORT
+--------------------------------------------------------------------------------
+
+STEP 4 — Append findings to the incident report
+    Open {{REPORT_PATH}} and append a new section:
+
+        ## Findings — $(date -u +"%Y-%m-%dT%H:%M:%SZ")
+
+        ### Diagnostic output
+
+        <verbatim output of each diagnostic command, trimmed to relevant lines>
+
+        ### Root-cause category
+
+        <(a)/(b)/(c)/(d)/(e) with one-paragraph justification>
+
+        ### Proposed remediation options
+
+        Option 1: <rollback / hotfix / dig deeper>
+        Option 2: <alternative>
+        Option 3: <alternative>
+
+        For each option, state: effort (minutes), blast radius, risk of
+        making things worse, and rollback plan if the remediation fails.
+
+STEP 5 — Summarize in chat (≤ 10 lines for incidents; normal ≤5 rule is waived)
+    - Root-cause category ((a)/(b)/(c)/(d)/(e))
+    - One-sentence headline ("revision X crashes on startup with ImportError
+      in app/services/contact_discovery/orchestrator.py")
+    - The 2–3 viable remediation options, each with effort + risk
+    - Your recommendation (you MAY recommend, but MUST NOT act)
+    - Link to the incident report path
+
+--------------------------------------------------------------------------------
+PHASE 3 — WAIT
+--------------------------------------------------------------------------------
+
+STEP 6 — Halt and wait for an explicit decision
+    After summarizing, STOP. Do not guess, do not "just try" anything.
+    Expect Arvin to reply with ONE of:
+
+      "rollback to <REV>"          → Phase 4.A
+      "forward-fix: <short plan>"  → Phase 4.B
+      "dig deeper: <what to check>" → loop back to Phase 1 with new commands
+      "stand down"                 → Phase 5 (false alarm or resolved)
+
+    If Arvin's reply is ambiguous, ASK before acting.
+
+--------------------------------------------------------------------------------
+PHASE 4 — ACT
+--------------------------------------------------------------------------------
+
+STEP 7A — Rollback (traffic flip, no code change)
+    Confirm the target revision exists and is Ready:
+        gcloud run revisions describe <LAST_GOOD_REV> \
+          --region=us-central1 --project=fis-lead-gen \
+          --format='value(status.conditions)'
+    If status shows True/Ready, flip traffic:
+        gcloud run services update-traffic {{AFFECTED_SERVICE}} \
+          --region=us-central1 --project=fis-lead-gen \
+          --to-revisions=<LAST_GOOD_REV>=100
+    Takes ~30 s. Do not mix with other changes in this command.
+
+STEP 7B — Forward-fix (code change on develop → promote to main)
+    This is a normal feature flow with extra urgency. Use the backend-solo
+    template's Steps 0–9 to ship the fix to develop, then open a DEVELOP→MAIN
+    release PR to promote it to production. For a HOTFIX that should skip
+    develop entirely (rare), branch from `main` as `hotfix/<slug>`, PR to
+    `main`, merge with --admin, then `gh pr create --base develop --head main`
+    to sync develop back. Discuss with Arvin before picking the hotfix path.
+
+    Hard checkpoints in forward-fix:
+      - Re-read plans/ and reports/ for any prior context.
+      - Write a failing test that reproduces the incident BEFORE writing the fix.
+      - Manual smoke test (curl) against staging before promoting to main.
+      - Keep commits and PR body in Arvin's voice; no AI attribution.
+
+STEP 7C — Dig deeper
+    Run the new commands Arvin specified. Loop back to Step 4 (append to
+    report), Step 5 (summarize), Step 6 (wait).
+
+--------------------------------------------------------------------------------
+PHASE 5 — VERIFY + CLOSE
+--------------------------------------------------------------------------------
+
+STEP 8 — Confirm recovery
+    After any remediation, re-probe the symptoms that defined the incident:
+      - curl the affected endpoint(s); expect 200 / 401 / 403 as appropriate,
+        NOT 500 / 502 / 503.
+      - Re-pull error logs for the now-serving revision; they should be quiet.
+      - For a rollback: verify `status.traffic` shows 100% on the rollback
+        revision (`gcloud run services describe`).
+
+STEP 9 — Update the incident report with resolution
+    Append to {{REPORT_PATH}}:
+
+        ## Resolution — $(date -u +"%Y-%m-%dT%H:%M:%SZ")
+
+        Action taken: <rollback to rev X / merged hotfix PR #N / stood down>
+        Wall-clock to recovery: <minutes>
+        Customer impact: <best estimate>
+        Verification: <commands run + results>
+
+        ## Follow-ups
+
+        - <each: owner + priority>
+        - Post-mortem? yes/no (yes for P0/P1)
+
+STEP 10 — Chat summary (≤ 5 lines)
+    - What was broken, what we did, how long, whether prod is green.
+    - Link to the updated incident report.
+    - If a post-mortem is needed, say so — but don't start writing it
+      without Arvin's go-ahead.
+
+--------------------------------------------------------------------------------
+ANTI-PATTERNS (things that turn a small incident into a big one)
+--------------------------------------------------------------------------------
+- "Let me just try restarting it."  → No. Investigate first.
+- "I'll rollback AND ship a fix."    → One remediation at a time. Rollback,
+                                       verify green, THEN forward-fix on a
+                                       separate PR.
+- "I'll deploy directly to production to save time." → No. Staging first,
+                                       even in incidents, unless Arvin
+                                       explicitly says skip-staging.
+- "The logs look empty so it must be fine now." → Empty logs on a broken
+                                       container means the container isn't
+                                       running far enough to log. Investigate
+                                       harder, don't stand down.
+
+================================================================================
