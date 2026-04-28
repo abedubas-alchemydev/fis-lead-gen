@@ -271,45 +271,55 @@ export function MasterListWorkspaceClient({
     let active = true;
 
     async function loadFilters() {
-      try {
-        const [
-          partnerResp,
-          competitorResp,
-          typesResp,
-          primaryResp,
-          alternativeResp,
-          allResp,
-        ] = await Promise.all([
-          apiRequest<string[]>("/api/v1/broker-dealers/clearing-partners"),
-          apiRequest<CompetitorProvidersResponse>("/api/v1/settings/competitors"),
-          apiRequest<TypeOfBusinessOption[]>(
-            "/api/v1/broker-dealers/types-of-business",
-          ),
-          apiRequest<BrokerDealerListResponse>(
-            buildApiPath("/api/v1/broker-dealers", { list: "primary", limit: 1 }),
-          ),
-          apiRequest<BrokerDealerListResponse>(
-            buildApiPath("/api/v1/broker-dealers", { list: "alternative", limit: 1 }),
-          ),
-          apiRequest<BrokerDealerListResponse>(
-            buildApiPath("/api/v1/broker-dealers", { list: "all", limit: 1 }),
-          ),
-        ]);
-        if (!active) return;
-        setClearingPartners(partnerResp);
+      // Each fetch is settled independently so one failing endpoint (e.g.
+      // a 403 on /settings/competitors for the Viewer role) does not wipe
+      // every other filter on the page.
+      const [
+        partner,
+        competitor,
+        types,
+        primary,
+        alternative,
+        all,
+      ] = await Promise.allSettled([
+        apiRequest<string[]>("/api/v1/broker-dealers/clearing-partners"),
+        apiRequest<CompetitorProvidersResponse>("/api/v1/settings/competitors"),
+        apiRequest<TypeOfBusinessOption[]>(
+          "/api/v1/broker-dealers/types-of-business",
+        ),
+        apiRequest<BrokerDealerListResponse>(
+          buildApiPath("/api/v1/broker-dealers", { list: "primary", limit: 1 }),
+        ),
+        apiRequest<BrokerDealerListResponse>(
+          buildApiPath("/api/v1/broker-dealers", { list: "alternative", limit: 1 }),
+        ),
+        apiRequest<BrokerDealerListResponse>(
+          buildApiPath("/api/v1/broker-dealers", { list: "all", limit: 1 }),
+        ),
+      ]);
+      if (!active) return;
+
+      setClearingPartners(partner.status === "fulfilled" ? partner.value : []);
+
+      if (competitor.status === "fulfilled") {
         setCompetitorSeeds(
-          competitorResp.items
+          competitor.value.items
             .filter((item) => item.is_active)
             .sort((a, b) => a.priority - b.priority)
             .map((item) => item.name),
         );
+      } else {
+        setCompetitorSeeds([]);
+      }
+
+      if (types.status === "fulfilled") {
         // Defensive parsing: the BE has occasionally returned thousands of
         // entries (mostly firm-specific free-text "other" values with
         // count=1) and a handful with null/empty `type` fields. Drop the
         // malformed ones, sort by count desc with an alpha tiebreak, and
         // hard-cap at 100 so a future BE regression can't wedge the DOM.
         const safeTypes: TypeOfBusinessOption[] = (
-          Array.isArray(typesResp) ? typesResp : []
+          Array.isArray(types.value) ? types.value : []
         )
           .filter(
             (opt): opt is TypeOfBusinessOption =>
@@ -325,20 +335,20 @@ export function MasterListWorkspaceClient({
           )
           .slice(0, 100);
         setTypesOfBusinessOptions(safeTypes);
-        setListCounts({
-          primary: primaryResp.meta.total,
-          alternative: alternativeResp.meta.total,
-          all: allResp.meta.total,
-        });
-      } catch {
-        if (!active) return;
-        // Silent on error — filter options degrade to empty; table still loads.
-        setClearingPartners([]);
-        setCompetitorSeeds([]);
+      } else {
         setTypesOfBusinessOptions([]);
-      } finally {
-        if (active) setTypesOfBusinessLoading(false);
       }
+
+      setListCounts({
+        primary: primary.status === "fulfilled" ? primary.value.meta.total : null,
+        alternative:
+          alternative.status === "fulfilled"
+            ? alternative.value.meta.total
+            : null,
+        all: all.status === "fulfilled" ? all.value.meta.total : null,
+      });
+
+      setTypesOfBusinessLoading(false);
     }
 
     void loadFilters();
