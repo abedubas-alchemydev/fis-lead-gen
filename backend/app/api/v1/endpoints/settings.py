@@ -77,7 +77,6 @@ async def list_competitors(
     current_user: AuthenticatedUser = Depends(get_current_user),
     db: AsyncSession = Depends(get_db_session),
 ) -> CompetitorProvidersResponse:
-    _ensure_admin(current_user)
     return CompetitorProvidersResponse(items=await repository.list_competitor_providers(db))
 
 
