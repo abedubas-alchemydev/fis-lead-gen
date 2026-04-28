@@ -18,6 +18,8 @@ import {
 } from "@/lib/master-list-state";
 import { STATE_NAMES, stateCodeFromName } from "@/lib/states";
 import { Combo } from "@/components/ui/combo";
+import { NetCapitalRangeFilter } from "@/components/master-list/filters/net-capital-range-filter";
+import { RegistrationDateRangeFilter } from "@/components/master-list/filters/registration-date-range-filter";
 import {
   MultiSelectFilter,
   type MultiSelectFilterOption,
@@ -186,6 +188,10 @@ export function MasterListWorkspaceClient() {
   const clearingTypeFilter = queryState.clearingType;
   const clearingPartnerFilter = queryState.clearingPartner;
   const typesOfBusinessFilter = queryState.typesOfBusiness;
+  const minNetCapitalFilter = queryState.minNetCapital;
+  const maxNetCapitalFilter = queryState.maxNetCapital;
+  const registeredAfterFilter = queryState.registeredAfter;
+  const registeredBeforeFilter = queryState.registeredBefore;
   const listMode = queryState.list;
   const sortBy = queryState.sortBy;
   const sortDir = queryState.sortDir;
@@ -247,6 +253,13 @@ export function MasterListWorkspaceClient() {
         clearing_type: clearingTypeFilter === "All" ? undefined : [clearingTypeFilter],
         types_of_business:
           typesOfBusinessFilter.length > 0 ? typesOfBusinessFilter : undefined,
+        // null → undefined so buildApiPath omits the key. The BE rejects
+        // negative values (ge=0) which the FE filter component already
+        // refuses to emit, so passing the raw number through is safe.
+        min_net_capital: minNetCapitalFilter ?? undefined,
+        max_net_capital: maxNetCapitalFilter ?? undefined,
+        registered_after: registeredAfterFilter ?? undefined,
+        registered_before: registeredBeforeFilter ?? undefined,
         list: listMode,
         sort_by: sortBy,
         sort_dir: sortDir,
@@ -261,6 +274,10 @@ export function MasterListWorkspaceClient() {
       clearingPartnerFilter,
       clearingTypeFilter,
       typesOfBusinessFilter,
+      minNetCapitalFilter,
+      maxNetCapitalFilter,
+      registeredAfterFilter,
+      registeredBeforeFilter,
       listMode,
       sortBy,
       sortDir,
@@ -432,6 +449,10 @@ export function MasterListWorkspaceClient() {
     if (clearingPartnerFilter !== "") count += 1;
     if (clearingTypeFilter !== "All") count += 1;
     if (typesOfBusinessFilter.length > 0) count += 1;
+    if (minNetCapitalFilter !== null) count += 1;
+    if (maxNetCapitalFilter !== null) count += 1;
+    if (registeredAfterFilter !== null) count += 1;
+    if (registeredBeforeFilter !== null) count += 1;
     return count;
   }, [
     stateFilter,
@@ -440,6 +461,10 @@ export function MasterListWorkspaceClient() {
     clearingPartnerFilter,
     clearingTypeFilter,
     typesOfBusinessFilter,
+    minNetCapitalFilter,
+    maxNetCapitalFilter,
+    registeredAfterFilter,
+    registeredBeforeFilter,
   ]);
 
   // Memoized options shape for the multi-select. Sorted by count desc with
@@ -706,6 +731,33 @@ export function MasterListWorkspaceClient() {
           </div>
         </div>
 
+        <div className="mt-4 grid gap-4 lg:grid-cols-2">
+          <NetCapitalRangeFilter
+            min={minNetCapitalFilter}
+            max={maxNetCapitalFilter}
+            onChange={(patch) => {
+              const next: Partial<MasterListQueryState> = { page: 1 };
+              if (patch.min !== undefined) next.minNetCapital = patch.min;
+              if (patch.max !== undefined) next.maxNetCapital = patch.max;
+              updateState(next);
+            }}
+          />
+          <RegistrationDateRangeFilter
+            registeredAfter={registeredAfterFilter}
+            registeredBefore={registeredBeforeFilter}
+            onChange={(patch) => {
+              const next: Partial<MasterListQueryState> = { page: 1 };
+              if (patch.registeredAfter !== undefined) {
+                next.registeredAfter = patch.registeredAfter;
+              }
+              if (patch.registeredBefore !== undefined) {
+                next.registeredBefore = patch.registeredBefore;
+              }
+              updateState(next);
+            }}
+          />
+        </div>
+
         {activeFilterCount > 0 ? (
           <div className="mt-4 flex flex-wrap items-center gap-2 border-t border-dashed border-[var(--border,rgba(30,64,175,0.1))] pt-3">
             <span className="text-[11px] font-semibold uppercase tracking-[0.08em] text-[var(--text-muted,#94a3b8)]">
@@ -763,6 +815,42 @@ export function MasterListWorkspaceClient() {
                 Business: {type}
               </Tag>
             ))}
+            {minNetCapitalFilter !== null ? (
+              <Tag
+                onDismiss={() =>
+                  updateState({ minNetCapital: null, page: 1 })
+                }
+              >
+                Net capital ≥ {formatCurrency(minNetCapitalFilter)}
+              </Tag>
+            ) : null}
+            {maxNetCapitalFilter !== null ? (
+              <Tag
+                onDismiss={() =>
+                  updateState({ maxNetCapital: null, page: 1 })
+                }
+              >
+                Net capital ≤ {formatCurrency(maxNetCapitalFilter)}
+              </Tag>
+            ) : null}
+            {registeredAfterFilter !== null ? (
+              <Tag
+                onDismiss={() =>
+                  updateState({ registeredAfter: null, page: 1 })
+                }
+              >
+                Registered after {registeredAfterFilter}
+              </Tag>
+            ) : null}
+            {registeredBeforeFilter !== null ? (
+              <Tag
+                onDismiss={() =>
+                  updateState({ registeredBefore: null, page: 1 })
+                }
+              >
+                Registered before {registeredBeforeFilter}
+              </Tag>
+            ) : null}
           </div>
         ) : null}
       </div>

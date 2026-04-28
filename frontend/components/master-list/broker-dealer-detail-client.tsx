@@ -85,6 +85,10 @@ function listPathFromReturnState(
       state.clearingType === "All" ? undefined : [state.clearingType],
     types_of_business:
       state.typesOfBusiness.length > 0 ? state.typesOfBusiness : undefined,
+    min_net_capital: state.minNetCapital ?? undefined,
+    max_net_capital: state.maxNetCapital ?? undefined,
+    registered_after: state.registeredAfter ?? undefined,
+    registered_before: state.registeredBefore ?? undefined,
     list: state.list,
     sort_by: state.sortBy,
     sort_dir: state.sortDir,
