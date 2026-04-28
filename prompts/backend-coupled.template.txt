@@ -1,0 +1,181 @@
+================================================================================
+CC CLI 01 — BACKEND WORKTREE (coupled feature, parallel pattern)
+fis-lead-gen · FastAPI + SQLAlchemy + Alembic + pytest
+Feature: {{FEATURE_TITLE}}
+================================================================================
+
+You are Claude Code CLI running inside the BACKEND git worktree of `fis-lead-gen`.
+Before doing anything, READ `CLAUDE.md` at the repo root AND the feature plan
+at `{{PLAN_PATH}}`. The plan file is the contract that this PR must satisfy;
+do not deviate from it without asking Arvin first.
+
+This is a COUPLED feature. The FRONTEND half is being coded in parallel by
+CC CLI 02 in the other worktree, on branch `feature/fe-{{FEATURE_SLUG}}`.
+Your job is to ship the backend half and clear the gate that lets the frontend
+half merge.
+
+--------------------------------------------------------------------------------
+HARD RULES (from CLAUDE.md and ~/.claude/rules)
+--------------------------------------------------------------------------------
+1. Git account: `gh auth switch --user abedubas-alchemydev --hostname github.com`
+   then `gh auth status`. Verify active account before any push.
+2. Zero AI attribution in commits or PRs (no "Co-Authored-By: Claude", no
+   "Generated with Claude Code", no mention of Claude / Anthropic / AI).
+   After every commit: `git log -1 --pretty=full` — verify clean.
+3. Stage files by name. NEVER `git add -A` / `git add .`.
+4. NEVER `--no-verify`, never skip hooks. Failed hook → new commit (never `--amend`).
+5. DB schema changes are Alembic migrations. Autogenerate, inspect, upgrade,
+   round-trip with downgrade to confirm reversibility.
+6. Backend secrets in `backend/.env` only.
+7. PRD locks preserved (9-col CSV / 100-row cap / scoring-weight sum to 100 /
+   review-queue semantics / Gemini key shape guard).
+8. Python: PEP 8, type annotations everywhere, black + isort + ruff, pytest,
+   `logging` not `print`.
+9. Long output → `reports/` or `plans/`. Chat reply ≤ 5 lines.
+
+--------------------------------------------------------------------------------
+SCOPE
+--------------------------------------------------------------------------------
+Allowed paths: {{SCOPE_ALLOWED}}
+Forbidden paths: {{SCOPE_FORBIDDEN}}
+If the plan implies a frontend change, that's CC CLI 02's job — do NOT edit
+frontend code from here.
+
+--------------------------------------------------------------------------------
+WORKFLOW
+--------------------------------------------------------------------------------
+
+STEP 0 — Sanity check
+    pwd && git worktree list && git status
+    gh auth switch --user abedubas-alchemydev --hostname github.com
+    gh auth status
+    # If git status is dirty, STOP and ask Arvin.
+
+STEP 1 — Sync local develop with remote
+    git fetch --all --prune
+    git fetch origin develop:develop || {
+        echo "Local develop diverged or checked out elsewhere. STOP."; exit 1;
+    }
+    test "$(git rev-parse develop)" = "$(git rev-parse origin/develop)" \
+        || { echo "Local develop != origin/develop. STOP."; exit 1; }
+
+STEP 2 — Create the feature branch off local develop
+    git switch --detach develop
+    git switch -c feature/be-{{FEATURE_SLUG}}
+
+STEP 3 — Re-read the plan and lock the API contract
+    cat {{PLAN_PATH}}
+    # The API contract in the plan is NORMATIVE — the frontend session is
+    # implementing against it right now in parallel. If you find you need
+    # to change a field name, return code, or response shape, STOP and
+    # tell Arvin before editing — the frontend will have to rebase.
+
+STEP 4 — Implement
+{{IMPLEMENTATION_STEPS}}
+
+STEP 5 — Verify locally
+{{VERIFY_COMMANDS}}
+    # Migration round-trip:
+    cd backend && alembic upgrade head && alembic downgrade -1 && alembic upgrade head
+
+STEP 6 — Commit (Arvin voice, no AI attribution, files by name)
+{{STAGED_FILES}}
+
+    git commit -m "{{FEATURE_TITLE}}
+
+{{COMMIT_BODY}}"
+    git log -1 --pretty=full       # verify clean of any AI trailer
+
+STEP 7 — Push and open the PR with a cross-link to the frontend PR
+    git push -u origin feature/be-{{FEATURE_SLUG}}
+
+    # Look up the frontend PR number (if already opened). It's fine if it
+    # doesn't exist yet — frontend may still be pushing. We'll link later.
+    FE_PR=$(gh pr list --head "feature/fe-{{FEATURE_SLUG}}" --state all \
+               --json number --jq '.[0].number // ""')
+
+    if [ -n "$FE_PR" ]; then
+        FE_LINK="Frontend half: #$FE_PR (blocked on this PR's merge)."
+    else
+        FE_LINK="Frontend half: not yet opened; will be cross-linked post-merge."
+    fi
+
+    gh pr create \
+      --base develop \
+      --head feature/be-{{FEATURE_SLUG}} \
+      --title "{{FEATURE_TITLE}}" \
+      --body "$(cat <<EOF
+{{PR_BODY}}
+
+---
+$FE_LINK
+Plan: {{PLAN_PATH}}
+EOF
+)"
+    BE_PR=$(gh pr view --json number --jq '.number')
+    echo "Backend PR opened: #$BE_PR"
+    # Verify PR body has zero AI attribution before continuing:
+    gh pr view --json body --jq '.body' | \
+        grep -iE "claude|anthropic|generated with|co-authored-by" \
+        && { echo "AI trailer in PR body — STOP and fix."; exit 1; } || true
+
+STEP 8 — Wait for CI green, then merge
+    gh pr checks --watch
+    gh pr merge --squash --delete-branch --admin
+    # If admin merge refused, STOP and tell Arvin.
+
+STEP 9 — Resync worktree to fresh develop
+    git fetch --all --prune
+    git fetch origin develop:develop || {
+        echo "Could not fast-forward local develop after merge. STOP."; exit 1;
+    }
+    if git switch develop 2>/dev/null; then
+        echo "On local develop."
+    else
+        git switch --detach develop
+        echo "develop checked out in other worktree; this one is detached."
+    fi
+    git branch -D feature/be-{{FEATURE_SLUG}} 2>/dev/null || true
+    git status
+    git log --oneline -5 develop
+
+STEP 10 — Signal the frontend PR that the gate is clear
+    MERGE_SHA=$(git rev-parse develop)
+
+    # Re-query frontend PR (it should definitely exist by now since the
+    # frontend session has been coding in parallel for ~25 min).
+    FE_PR=$(gh pr list --head "feature/fe-{{FEATURE_SLUG}}" --state open \
+               --json number --jq '.[0].number // ""')
+
+    if [ -n "$FE_PR" ]; then
+        gh pr comment "$FE_PR" --body "Backend merged at \`$MERGE_SHA\`. Gate is clear — the frontend session's polling loop will pick this up within 60 s and proceed to merge."
+        echo "Posted clearance comment on frontend PR #$FE_PR."
+    else
+        echo "WARNING: frontend PR not found. Frontend session may not have reached the PR-creation step yet; it will still detect the merged backend PR via its polling loop."
+    fi
+
+    # Print the human-readable confirmation:
+    cat <<BANNER
+
+================================================================================
+  BACKEND DONE — feature/{{FEATURE_SLUG}} backend half merged as $MERGE_SHA.
+  Frontend PR (#$FE_PR) will auto-proceed via its polling gate.
+================================================================================
+
+BANNER
+
+    # Chat reply to Arvin (≤5 lines):
+    # - Backend PR URL + merge SHA
+    # - Frontend PR URL (if known)
+    # - One-sentence summary
+    # - Anything skipped or that needs a follow-up
+
+--------------------------------------------------------------------------------
+SAFE-DEPLOY POSTURE
+--------------------------------------------------------------------------------
+Merging to develop auto-deploys to STAGING (fis-backend-staging), which shares
+the production Neon DB. Destructive migrations (DROP / RENAME / backfills on
+existing rows) must be flagged to Arvin AFTER Step 6 and BEFORE Step 7. Pure
+additive changes (new tables, new columns with defaults) are safe.
+
+================================================================================

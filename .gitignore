@@ -23,7 +23,7 @@ CLAUDE_CODE_SESSION_PROMPT.md
 EVERYTHING_CLAUDE_CODE_RESEARCH.md
 PROJECT_ANALYSIS.md
 plans/
-prompts/
+prompts/cc-cli-*.txt
 reports/
 # Catch future AI / Claude / prompt / research-note variants at the root.
 *_CLAUDE_*.md
