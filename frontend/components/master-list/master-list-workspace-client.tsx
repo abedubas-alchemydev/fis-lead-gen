@@ -7,7 +7,7 @@ import type { Route } from "next";
 import { ArrowDown, ArrowUp, Bell, Search, TrendingDown, TrendingUp } from "lucide-react";
 
 import { apiRequest, buildApiPath } from "@/lib/api";
-import { formatRelativeTime } from "@/lib/format";
+import { formatCurrency, formatRelativeTime } from "@/lib/format";
 import { ChipPicker } from "@/components/ui/chip-picker";
 import { Combo } from "@/components/ui/combo";
 import { Dotmark, Segmented, type SegmentedItem } from "@/components/ui/segmented";
@@ -357,12 +357,6 @@ export function MasterListWorkspaceClient({
   ]);
 
   const pages = paginationPages(meta.page, meta.total_pages);
-
-  const currencyFmt = new Intl.NumberFormat("en-US", {
-    style: "currency",
-    currency: "USD",
-    maximumFractionDigits: 0,
-  });
 
   return (
     <div className="px-7 pb-12 pt-7 lg:px-9">
@@ -898,7 +892,7 @@ export function MasterListWorkspaceClient({
                       </td>
                       <td className="whitespace-nowrap px-5 py-3.5 tabular-nums">
                         {item.latest_net_capital !== null ? (
-                          currencyFmt.format(item.latest_net_capital)
+                          formatCurrency(item.latest_net_capital)
                         ) : (
                           <span className="text-[var(--text-muted,#94a3b8)]">—</span>
                         )}

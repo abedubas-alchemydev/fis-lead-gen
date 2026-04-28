@@ -3,10 +3,13 @@ export function formatCurrency(value: number | null) {
     return "N/A";
   }
 
+  // Compact notation makes the unit visible (e.g. "$74.3M", "$1.5B") so
+  // capital values can never be read as bare numbers when a column truncates.
   return new Intl.NumberFormat("en-US", {
     style: "currency",
     currency: "USD",
-    maximumFractionDigits: 0
+    notation: "compact",
+    maximumFractionDigits: 1
   }).format(value);
 }
 
