@@ -24,7 +24,12 @@ export interface MultiSelectFilterProps {
   options: ReadonlyArray<MultiSelectFilterOption>;
   triggerLabel: string;
   placeholder?: string;
+  // Shown when the user has typed a query and no option label matches.
   emptyLabel?: string;
+  // Shown when the option list itself is empty (fetch returned nothing or
+  // every entry was dropped as malformed). Falls back to `emptyLabel` so
+  // existing callers keep working.
+  noOptionsLabel?: string;
   loading?: boolean;
   ariaLabel?: string;
   className?: string;
@@ -37,6 +42,7 @@ export function MultiSelectFilter({
   triggerLabel,
   placeholder = "Search…",
   emptyLabel = "No matches",
+  noOptionsLabel,
   loading = false,
   ariaLabel,
   className = "",
@@ -140,6 +146,10 @@ export function MultiSelectFilter({
             {loading ? (
               <li className="px-3 py-2 text-[12px] text-[var(--text-muted,#94a3b8)]">
                 Loading…
+              </li>
+            ) : options.length === 0 ? (
+              <li className="px-3 py-2 text-[12px] text-[var(--text-muted,#94a3b8)]">
+                {noOptionsLabel ?? emptyLabel}
               </li>
             ) : filtered.length === 0 ? (
               <li className="px-3 py-2 text-[12px] text-[var(--text-muted,#94a3b8)]">
