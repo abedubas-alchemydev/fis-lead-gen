@@ -333,7 +333,7 @@ class TestCounterSumInvariant:
         pdf_b = _make_pdf_record(bd_id=200, filing_year=2026)
         pdf_c = _make_pdf_record(bd_id=300, filing_year=2026)
 
-        def _download_side_effect(bd, count: int = 2):  # type: ignore[no-untyped-def]
+        def _download_side_effect(bd, _dest_dir, count: int = 2):  # type: ignore[no-untyped-def]
             if bd.id == 100:
                 return [pdf_a]
             if bd.id == 200:

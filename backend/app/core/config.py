@@ -35,7 +35,14 @@ class Settings(BaseSettings):
     sec_user_agent: str = "Alchemy Dev compliance@alchemy.dev"
     edgar_rate_limit_per_second: int = 10
     finra_rate_limit_per_second: int = 2
-    pdf_cache_dir: str = ".tmp/pdf-cache"
+    # Deprecated as a persistent cache. Previously held every parsed FOCUS
+    # PDF on disk, which grew to ~9 GB on the fis-backend container. Now an
+    # optional *parent* directory for per-extraction tempdirs (see
+    # ``app.services.pdf_downloader.pdf_tempdir``). Leave unset in production
+    # — the system temp is used and each extraction wipes its own working
+    # directory on exit. Local devs can point this at a fixed location to
+    # inspect a download mid-flight.
+    pdf_cache_dir: str | None = None
     llm_provider: str = "gemini"
     clearing_extraction_min_confidence: float = 0.7
     sec_request_timeout_seconds: float = 30.0
