@@ -141,6 +141,16 @@ class Settings(BaseSettings):
     smtp_verify_from_address: str = "verify@email-extractor.local"
     smtp_verify_helo_host: str = "email-extractor.local"
 
+    # Cloud Scheduler / OIDC dual-auth for Tier 2 pipeline trigger endpoints.
+    # ``cloud_scheduler_sa_email`` is the only ``email`` claim accepted on the
+    # OIDC path of ``_ensure_admin_or_scheduler_sa``. Defaults to the runtime
+    # SA used by the production fis-backend Cloud Run service.
+    cloud_scheduler_sa_email: str = "136029935063-compute@developer.gserviceaccount.com"
+    # Required ``aud`` claim on incoming Google-signed OIDC tokens. Must match
+    # the public Cloud Run URL the scheduler job targets — *not* the custom
+    # domain — because Cloud Scheduler signs tokens against the *.run.app URL.
+    backend_audience: str = "https://fis-backend-136029935063.us-central1.run.app"
+
     @computed_field
     @property
     def cors_origins(self) -> list[str]:
