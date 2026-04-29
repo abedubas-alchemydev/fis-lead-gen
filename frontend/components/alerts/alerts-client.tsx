@@ -5,7 +5,7 @@ import Link from "next/link";
 import type { Route } from "next";
 import { useRouter, useSearchParams } from "next/navigation";
 
-import { ArrowRight, Check, CheckCheck } from "lucide-react";
+import { AlertTriangle, ArrowRight, Check, CheckCheck } from "lucide-react";
 
 import { TopActions } from "@/components/layout/top-actions";
 import { Pill, type PillVariant } from "@/components/ui/pill";
@@ -18,6 +18,9 @@ import type {
   AlertsBulkReadResponse,
   AlertReadResponse,
 } from "@/lib/types";
+
+import { AlertsLoadingSkeleton } from "./alerts-loading-skeleton";
+import { EmptyAlertsState } from "./empty-alerts-state";
 
 // ── Category tab catalog ──────────────────────────────────────────────
 // Sprint 4 task #18: Deshorn flagged at the 2026-04-27 meeting that
@@ -149,6 +152,12 @@ export function AlertsClient({
     total_pages: 1,
   });
   const [loading, setLoading] = useState(true);
+  // `loadError` is for the initial-fetch failure path — surfaces as a
+  // centered "Couldn't load alerts" card with Retry inside the list
+  // body. `error` (kept) is for inline action failures (markRead /
+  // markAllRead) and renders as the existing red banner above the list.
+  const [loadError, setLoadError] = useState<string | null>(null);
+  const [reloadKey, setReloadKey] = useState(0);
   const [error, setError] = useState<string | null>(null);
   const [markAllPending, setMarkAllPending] = useState(false);
   // Per-tab unfiltered totals shown in the tab badges. null until the
@@ -203,7 +212,7 @@ export function AlertsClient({
   useEffect(() => {
     let active = true;
     setLoading(true);
-    setError(null);
+    setLoadError(null);
 
     async function loadAlerts() {
       try {
@@ -211,9 +220,14 @@ export function AlertsClient({
         if (!active) return;
         setItems(response.items);
         setMeta(response.meta);
-      } catch (loadError) {
+      } catch (fetchError) {
         if (!active) return;
-        setError(loadError instanceof Error ? loadError.message : "Unable to load alerts.");
+        setItems([]);
+        setLoadError(
+          fetchError instanceof Error
+            ? fetchError.message
+            : "Unable to load alerts.",
+        );
       } finally {
         if (active) setLoading(false);
       }
@@ -223,7 +237,7 @@ export function AlertsClient({
     return () => {
       active = false;
     };
-  }, [queryPath]);
+  }, [queryPath, reloadKey]);
 
   // One-shot tab-count bootstrap. Three `?category=X&limit=1` probes in
   // parallel; Promise.allSettled so a single failed count never wipes
@@ -512,22 +526,14 @@ export function AlertsClient({
 
         <div className="px-5 py-2">
           {loading ? (
-            <div>
-              {Array.from({ length: 6 }).map((_, index) => (
-                <div
-                  key={`alert-loading-${index}`}
-                  className="border-t border-[var(--border,rgba(30,64,175,0.1))] py-4 first:border-t-0"
-                >
-                  <div className="h-3 w-32 animate-pulse rounded bg-[var(--surface-2,#f1f6fd)]" />
-                  <div className="mt-2 h-4 w-48 animate-pulse rounded bg-[var(--surface-2,#f1f6fd)]" />
-                  <div className="mt-2 h-3 w-full animate-pulse rounded bg-[var(--surface-2,#f1f6fd)]" />
-                </div>
-              ))}
-            </div>
+            <AlertsLoadingSkeleton />
+          ) : loadError ? (
+            <LoadErrorCard
+              message={loadError}
+              onRetry={() => setReloadKey((k) => k + 1)}
+            />
           ) : items.length === 0 ? (
-            <div className="my-4 rounded-lg border border-dashed border-[var(--border,rgba(30,64,175,0.1))] px-4 py-10 text-center text-sm text-[var(--text-muted,#94a3b8)]">
-              No alerts match the current filters.
-            </div>
+            <EmptyAlertsState />
           ) : (
             <div>
               {items.map((alert) => {
@@ -657,6 +663,39 @@ export function AlertsClient({
           </button>
         </div>
       </div>
+    </div>
+  );
+}
+
+// Inline helper for the initial-fetch failure path. Mirrors the
+// ErrorState shape used in /my-favorites' favorite-list-items-pane —
+// dashed-border centered card with the error message and a Retry
+// button. Single-use, so kept inline rather than extracted.
+function LoadErrorCard({
+  message,
+  onRetry,
+}: {
+  message: string;
+  onRetry: () => void;
+}) {
+  return (
+    <div className="my-4 rounded-2xl border border-dashed border-[var(--border,rgba(30,64,175,0.1))] bg-[var(--surface-2,#f1f6fd)] px-6 py-12 text-center">
+      <div className="mx-auto grid h-14 w-14 place-items-center rounded-full bg-[rgba(239,68,68,0.1)] text-[var(--pill-red-text,#b91c1c)]">
+        <AlertTriangle className="h-6 w-6" strokeWidth={1.75} aria-hidden />
+      </div>
+      <h3 className="mt-5 text-[15px] font-semibold tracking-[-0.01em] text-[var(--text,#0f172a)]">
+        Couldn&apos;t load alerts
+      </h3>
+      <p className="mx-auto mt-2 max-w-sm text-[13px] leading-5 text-[var(--text-dim,#475569)]">
+        {message}
+      </p>
+      <button
+        type="button"
+        onClick={onRetry}
+        className="mt-5 inline-flex h-[34px] items-center rounded-[10px] border border-[var(--border-2,rgba(30,64,175,0.16))] bg-[var(--surface,#ffffff)] px-4 text-[13px] font-semibold text-[var(--text-dim,#475569)] transition hover:bg-[var(--surface,#ffffff)] hover:text-[var(--text,#0f172a)]"
+      >
+        Retry
+      </button>
     </div>
   );
 }
