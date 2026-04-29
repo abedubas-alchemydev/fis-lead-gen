@@ -33,6 +33,23 @@ export function buildApiPath(
   return query ? `${path}?${query}` : path;
 }
 
+// Thrown by apiRequest on non-2xx responses. Preserves status + parsed
+// `detail` (FastAPI's standard error envelope) so phase-2 favorite-list
+// callers can distinguish 400 validation from 404 not-found and surface
+// the BE's message inline. Extends Error so existing callers using
+// `err instanceof Error ? err.message : ...` keep working unchanged.
+export class ApiError extends Error {
+  readonly status: number;
+  readonly detail: string;
+
+  constructor(status: number, detail: string) {
+    super(detail || `Request failed with status ${status}`);
+    this.name = "ApiError";
+    this.status = status;
+    this.detail = detail;
+  }
+}
+
 export async function apiRequest<T>(path: string, init?: RequestInit): Promise<T> {
   const response = await fetch(`${resolveApiBaseUrl()}${path}`, {
     ...init,
@@ -44,15 +61,38 @@ export async function apiRequest<T>(path: string, init?: RequestInit): Promise<T
   });
 
   if (!response.ok) {
-    const message = await response.text();
-    throw new Error(message || `Request failed with status ${response.status}`);
+    const text = await response.text();
+    let detail = text;
+    if (text) {
+      try {
+        const parsed = JSON.parse(text) as unknown;
+        if (
+          parsed &&
+          typeof parsed === "object" &&
+          "detail" in parsed &&
+          typeof (parsed as { detail: unknown }).detail === "string"
+        ) {
+          detail = (parsed as { detail: string }).detail;
+        }
+      } catch {
+        // Non-JSON body — fall back to raw text.
+      }
+    }
+    throw new ApiError(response.status, detail);
+  }
+
+  if (response.status === 204) {
+    return undefined as T;
   }
 
   return response.json() as Promise<T>;
 }
 
-// ── Favorite-lists (#17 phase 1, GET only) ────────────────────────────────
-// Multi-list view shipped in PR #140. Phase 2 will add POST/PUT/DELETE.
+// ── Favorite-lists (#17 phase 1 GET, phase 2 POST/PUT/DELETE) ────────────
+// Multi-list view shipped in PR #140. Phase 2 (this PR) adds writable
+// surface — create, rename, delete — for the /my-favorites sidebar.
+// Default-list rules are enforced by the BE (400) and mirrored in the UI
+// so the kebab disables Rename/Delete for default lists.
 import type {
   FavoriteList,
   PaginatedFavoriteListItems
@@ -73,4 +113,27 @@ export async function getFavoriteListItems(
       page_size: pageSize
     })
   );
+}
+
+export async function createFavoriteList(name: string): Promise<FavoriteList> {
+  return apiRequest<FavoriteList>("/api/v1/favorite-lists", {
+    method: "POST",
+    body: JSON.stringify({ name })
+  });
+}
+
+export async function renameFavoriteList(
+  listId: number,
+  name: string
+): Promise<FavoriteList> {
+  return apiRequest<FavoriteList>(`/api/v1/favorite-lists/${listId}`, {
+    method: "PUT",
+    body: JSON.stringify({ name })
+  });
+}
+
+export async function deleteFavoriteList(listId: number): Promise<void> {
+  await apiRequest<void>(`/api/v1/favorite-lists/${listId}`, {
+    method: "DELETE"
+  });
 }

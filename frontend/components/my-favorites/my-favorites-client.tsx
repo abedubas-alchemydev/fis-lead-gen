@@ -6,7 +6,13 @@ import { useCallback, useEffect, useMemo, useState } from "react";
 
 import { SectionPanel } from "@/components/ui/section-panel";
 import { useToast } from "@/components/ui/use-toast";
-import { getFavoriteLists } from "@/lib/api";
+import {
+  ApiError,
+  createFavoriteList,
+  deleteFavoriteList,
+  getFavoriteLists,
+  renameFavoriteList,
+} from "@/lib/api";
 import type { FavoriteList } from "@/types/favorite-list";
 
 import { FavoriteListItemsPane } from "./favorite-list-items-pane";
@@ -14,13 +20,20 @@ import { FavoriteListsSidebar } from "./favorite-lists-sidebar";
 
 const PAGE_SIZE = 20;
 
-// Phase-1 read-only multi-list workspace at /my-favorites. Composes the
-// list sidebar (left rail) + items pane (right). URL params `?list=` and
-// `?page=` drive selection so back-nav, share-links, and reloads all
-// restore the same view — same pattern as master-list-workspace-client.
+// Multi-list workspace at /my-favorites. Composes the list sidebar (left
+// rail) + items pane (right). URL params `?list=` and `?page=` drive
+// selection so back-nav, share-links, and reloads all restore the same
+// view — same pattern as master-list-workspace-client.
 //
-// Phase 2 (next sprint) will add create / rename / delete UI once the BE
-// POST/PUT/DELETE endpoints land.
+// Phase 1 (PR #144) shipped read-only sidebar + items pane.
+// Phase 2 (#17, this PR) adds optimistic create / rename / delete handlers
+// that the sidebar calls. Each handler snapshots prior state, mutates
+// locally, and re-throws ApiError so inline forms can show the BE's
+// `detail`. Errors revert the optimistic state and surface a toast;
+// success toasts give explicit confirmation, especially for delete (the
+// dialog disappears so there's nothing else to anchor feedback to).
+// Phase 3 will add per-firm "save to list" / "remove from list" pickers
+// from the master list and firm-detail pages.
 export function MyFavoritesClient() {
   const router = useRouter();
   const searchParams = useSearchParams();
@@ -110,6 +123,89 @@ export function MyFavoritesClient() {
     [replaceParams],
   );
 
+  const handleCreate = useCallback(
+    async (name: string) => {
+      // Negative id distinguishes the optimistic placeholder from any real
+      // server-issued BigInteger id; the sidebar uses `id < 0` to disable
+      // selection + kebab on the placeholder until reconciliation.
+      const tempId = -Date.now();
+      const placeholder: FavoriteList = {
+        id: tempId,
+        name,
+        is_default: false,
+        item_count: 0,
+        created_at: new Date().toISOString(),
+      };
+      setLists((prev) => [...prev, placeholder]);
+      try {
+        const created = await createFavoriteList(name);
+        setLists((prev) => prev.map((l) => (l.id === tempId ? created : l)));
+        toast.success(`Created '${created.name}'.`);
+      } catch (err) {
+        setLists((prev) => prev.filter((l) => l.id !== tempId));
+        if (err instanceof ApiError) throw err;
+        const message =
+          err instanceof Error ? err.message : "Couldn't create list.";
+        toast.error(message);
+        throw err;
+      }
+    },
+    [toast],
+  );
+
+  const handleRename = useCallback(
+    async (listId: number, name: string) => {
+      const previous = lists.find((l) => l.id === listId);
+      if (!previous) {
+        throw new Error("List not found");
+      }
+      setLists((prev) =>
+        prev.map((l) => (l.id === listId ? { ...l, name } : l)),
+      );
+      try {
+        const updated = await renameFavoriteList(listId, name);
+        setLists((prev) => prev.map((l) => (l.id === listId ? updated : l)));
+        toast.success(`Renamed to '${updated.name}'.`);
+      } catch (err) {
+        setLists((prev) => prev.map((l) => (l.id === listId ? previous : l)));
+        if (err instanceof ApiError) throw err;
+        const message =
+          err instanceof Error ? err.message : "Couldn't rename list.";
+        toast.error(message);
+        throw err;
+      }
+    },
+    [lists, toast],
+  );
+
+  const handleDelete = useCallback(
+    async (listId: number) => {
+      const target = lists.find((l) => l.id === listId);
+      if (!target) {
+        throw new Error("List not found");
+      }
+      const previousLists = lists;
+      setLists((prev) => prev.filter((l) => l.id !== listId));
+      // If the deleted list was active, drop the URL pin so the parent's
+      // activeList memo falls back to lists[0] (the default).
+      if (activeList?.id === listId) {
+        replaceParams({ list: null, page: null });
+      }
+      try {
+        await deleteFavoriteList(listId);
+        toast.success(`Deleted '${target.name}'.`);
+      } catch (err) {
+        setLists(previousLists);
+        if (err instanceof ApiError) throw err;
+        const message =
+          err instanceof Error ? err.message : "Couldn't delete list.";
+        toast.error(message);
+        throw err;
+      }
+    },
+    [activeList?.id, lists, replaceParams, toast],
+  );
+
   const totalSaved = useMemo(
     () => lists.reduce((sum, list) => sum + list.item_count, 0),
     [lists],
@@ -137,6 +233,9 @@ export function MyFavoritesClient() {
               activeListId={activeList?.id ?? null}
               loading={loadingLists}
               onSelect={handleSelectList}
+              onCreate={handleCreate}
+              onRename={handleRename}
+              onDelete={handleDelete}
             />
           </aside>
           <section aria-label="Favorite list contents" className="min-w-0">
