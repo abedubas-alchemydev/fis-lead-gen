@@ -14,7 +14,12 @@ import pytest
 import respx
 
 from app.core.config import settings
-from app.services.pdf_downloader import PdfDownloaderService, _validate_sec_url, pdf_tempdir
+from app.services.pdf_downloader import (
+    PdfDownloaderService,
+    _StreamingPdfTooLargeError,
+    _validate_sec_url,
+    pdf_tempdir,
+)
 
 
 @pytest.fixture
@@ -463,4 +468,268 @@ class TestDownloadFilingPdfWritesToDestDir:
         # On ``with`` exit the tempdir and its contents must be gone.
         assert not written_path.exists()
         assert not tmp_dir.exists()
+
+
+# ─────────────────── ADR-0001 phase 2: streaming download ─────────────
+
+
+class TestStreamToPath:
+    """``_stream_to_path`` is the new flag-on download path. Bytes never
+    aggregate in process memory — they flow through ``aiter_bytes`` straight
+    to the caller-supplied target file. These tests pin the contract."""
+
+    @respx.mock
+    @pytest.mark.asyncio
+    async def test_chunked_bytes_match_what_was_streamed(
+        self, tmp_path: Path, patch_sec_retries: None, no_backoff_sleep: None
+    ) -> None:
+        """The bytes written to disk must equal the concatenation of the
+        chunks the upstream produced. Trivially true for a single-chunk
+        response, but locks in the contract for future multi-chunk respx
+        mocks."""
+        full_body = b"%PDF-1.7\n" + (b"abcdefgh" * 4096) + b"\n%%EOF"
+        respx.get(_SEC_PDF_URL).mock(
+            return_value=httpx.Response(
+                200,
+                content=full_body,
+                headers={"content-type": "application/pdf"},
+            )
+        )
+
+        target = tmp_path / "streamed.pdf"
+        downloader = PdfDownloaderService()
+
+        byte_size = await downloader._stream_to_path(
+            _SEC_PDF_URL, target, max_size_bytes=10 * 1024 * 1024
+        )
+
+        assert byte_size == len(full_body)
+        assert target.exists()
+        assert target.read_bytes() == full_body
+
+    @respx.mock
+    @pytest.mark.asyncio
+    async def test_target_file_deleted_on_caller_tempdir_exit(
+        self, patch_sec_retries: None, no_backoff_sleep: None
+    ) -> None:
+        """End-to-end with ``pdf_tempdir``: the streamed PDF disappears once
+        the caller's ``with`` block exits. This is the property that makes
+        the 9 GB → 0 GB persistent-cache claim true under the streaming
+        path too."""
+        body = b"%PDF-1.7 streamed-then-deleted"
+        respx.get(_SEC_PDF_URL).mock(
+            return_value=httpx.Response(
+                200,
+                content=body,
+                headers={"content-type": "application/pdf"},
+            )
+        )
+
+        downloader = PdfDownloaderService()
+        with pdf_tempdir(prefix="stream_lifecycle_") as tmp_dir:
+            target = tmp_dir / "streamed.pdf"
+            await downloader._stream_to_path(_SEC_PDF_URL, target, max_size_bytes=1024)
+            assert target.exists()
+
+        assert not target.exists()
+        assert not tmp_dir.exists()
+
+    @respx.mock
+    @pytest.mark.asyncio
+    async def test_403_propagates_after_retries(
+        self,
+        tmp_path: Path,
+        patch_sec_retries: None,
+        no_backoff_sleep: None,
+    ) -> None:
+        """4xx still surfaces an HTTP error after retries are exhausted —
+        the streaming refactor does not change the existing failure
+        contract."""
+        route = respx.get(_SEC_PDF_URL).mock(return_value=httpx.Response(403))
+        downloader = PdfDownloaderService()
+
+        with pytest.raises(httpx.HTTPStatusError):
+            await downloader._stream_to_path(
+                _SEC_PDF_URL, tmp_path / "streamed.pdf", max_size_bytes=1024 * 1024
+            )
+
+        assert route.call_count == 3
+
+    @respx.mock
+    @pytest.mark.asyncio
+    async def test_5xx_propagates_after_retries(
+        self,
+        tmp_path: Path,
+        patch_sec_retries: None,
+        no_backoff_sleep: None,
+    ) -> None:
+        """5xx is also retried then surfaced. Mirrors the contract on
+        ``_download_bytes_with_retries``."""
+        route = respx.get(_SEC_PDF_URL).mock(return_value=httpx.Response(503))
+        downloader = PdfDownloaderService()
+
+        with pytest.raises(httpx.HTTPStatusError):
+            await downloader._stream_to_path(
+                _SEC_PDF_URL, tmp_path / "streamed.pdf", max_size_bytes=1024 * 1024
+            )
+
+        assert route.call_count == 3
+
+    @respx.mock
+    @pytest.mark.asyncio
+    async def test_oversize_raises_streaming_too_large_and_drops_partial_file(
+        self,
+        tmp_path: Path,
+        patch_sec_retries: None,
+        no_backoff_sleep: None,
+    ) -> None:
+        """If the streamed payload crosses ``max_size_bytes`` mid-flight,
+        the helper raises ``_StreamingPdfTooLargeError`` and removes the
+        partial file. Caller treats this as a missing-PDF result rather
+        than retrying — re-running the same fetch produces the same
+        oversized payload."""
+        body = b"X" * (256 * 1024)  # 256 KB
+        respx.get(_SEC_PDF_URL).mock(
+            return_value=httpx.Response(
+                200,
+                content=body,
+                headers={"content-type": "application/pdf"},
+            )
+        )
+
+        target = tmp_path / "streamed.pdf"
+        downloader = PdfDownloaderService()
+
+        with pytest.raises(_StreamingPdfTooLargeError):
+            await downloader._stream_to_path(
+                _SEC_PDF_URL, target, max_size_bytes=64 * 1024  # below body size
+            )
+
+        # Partial file must be cleaned up.
+        assert not target.exists()
+
+    @respx.mock
+    @pytest.mark.asyncio
+    async def test_non_pdf_content_raises_runtime(
+        self,
+        tmp_path: Path,
+        patch_sec_retries: None,
+        no_backoff_sleep: None,
+    ) -> None:
+        """Same content-type / .pdf-suffix heuristic as the legacy path."""
+        non_pdf_url = (
+            "https://www.sec.gov/Archives/edgar/data/1234567/000123456725000001/weird"
+        )
+        respx.get(non_pdf_url).mock(
+            return_value=httpx.Response(
+                200,
+                content=b"<html/>",
+                headers={"content-type": "text/html"},
+            )
+        )
+
+        downloader = PdfDownloaderService()
+        with pytest.raises(RuntimeError, match="did not resolve to a PDF"):
+            await downloader._stream_to_path(
+                non_pdf_url, tmp_path / "streamed.pdf", max_size_bytes=1024 * 1024
+            )
+
+
+class TestDownloadFilingPdfFlagBranching:
+    """``_download_filing_pdf`` branches on ``settings.llm_use_files_api``.
+    These tests pin both branches so a future regression cannot silently
+    change behavior on either side of the flag."""
+
+    @respx.mock
+    @pytest.mark.asyncio
+    async def test_flag_off_populates_bytes_base64(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Default-off path: byte-for-byte identical to today's behavior.
+        ``bytes_base64`` is populated; ``file_id`` is None."""
+        from app.models.broker_dealer import BrokerDealer
+
+        monkeypatch.setattr(settings, "llm_use_files_api", False)
+
+        respx.get(_SEC_INDEX_URL).mock(
+            return_value=httpx.Response(
+                200,
+                json={"directory": {"item": [{"name": "primary.pdf"}]}},
+            )
+        )
+        respx.get(_SEC_PRIMARY_PDF_URL).mock(
+            return_value=httpx.Response(
+                200,
+                content=b"%PDF-1.7 legacy-path-body",
+                headers={"content-type": "application/pdf"},
+            )
+        )
+
+        bd = BrokerDealer()
+        bd.id = 1
+        bd.cik = "0001234567"
+        filing = {
+            "form": "X-17A-5",
+            "accession_number": "0001234567-25-000001",
+            "primary_document": "primary.pdf",
+            "filing_date": "2025-03-31",
+            "filing_index_url": "https://data.sec.gov/submissions/CIK0001234567.json",
+        }
+
+        downloader = PdfDownloaderService()
+        record = await downloader._download_filing_pdf(bd, filing, tmp_path)
+
+        assert record is not None
+        assert record.bytes_base64  # populated under flag-off
+        assert record.file_id is None
+        assert record.accession_number == "0001234567-25-000001"
+
+    @respx.mock
+    @pytest.mark.asyncio
+    async def test_flag_on_streams_and_leaves_bytes_base64_empty(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Flag-on path: PDF is streamed to disk, ``bytes_base64`` stays
+        empty, ``accession_number`` is stamped on the record so the LLM
+        client can use it as the LRU key. ``file_id`` is None at this
+        layer — the LLM client populates it after upload."""
+        from app.models.broker_dealer import BrokerDealer
+
+        monkeypatch.setattr(settings, "llm_use_files_api", True)
+
+        respx.get(_SEC_INDEX_URL).mock(
+            return_value=httpx.Response(
+                200,
+                json={"directory": {"item": [{"name": "primary.pdf"}]}},
+            )
+        )
+        respx.get(_SEC_PRIMARY_PDF_URL).mock(
+            return_value=httpx.Response(
+                200,
+                content=b"%PDF-1.7 streamed-flag-on",
+                headers={"content-type": "application/pdf"},
+            )
+        )
+
+        bd = BrokerDealer()
+        bd.id = 1
+        bd.cik = "0001234567"
+        filing = {
+            "form": "X-17A-5",
+            "accession_number": "0001234567-25-000001",
+            "primary_document": "primary.pdf",
+            "filing_date": "2025-03-31",
+            "filing_index_url": "https://data.sec.gov/submissions/CIK0001234567.json",
+        }
+
+        downloader = PdfDownloaderService()
+        record = await downloader._download_filing_pdf(bd, filing, tmp_path)
+
+        assert record is not None
+        assert record.bytes_base64 == ""  # empty under flag-on
+        assert record.file_id is None
+        assert record.accession_number == "0001234567-25-000001"
+        # PDF was actually written to disk by the streaming path.
+        assert Path(record.local_document_path).exists()
+        assert Path(record.local_document_path).read_bytes() == b"%PDF-1.7 streamed-flag-on"
 
