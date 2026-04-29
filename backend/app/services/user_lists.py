@@ -47,6 +47,13 @@ async def _get_or_create_default_list_id(db: AsyncSession, user_id: str) -> int:
     time, so the write path bootstraps it lazily here. Idempotent via
     ``ON CONFLICT (user_id, name) DO NOTHING`` plus a follow-up SELECT for
     the lost-race path.
+
+    Args:
+        db: Async DB session.
+        user_id: BetterAuth user id.
+
+    Returns:
+        Primary key of the user's default favorite list.
     """
     stmt = select(FavoriteList.id).where(
         FavoriteList.user_id == user_id,
@@ -69,7 +76,22 @@ async def _get_or_create_default_list_id(db: AsyncSession, user_id: str) -> int:
 
 
 async def _get_default_list_id(db: AsyncSession, user_id: str) -> int | None:
-    """Read-only lookup. Returns ``None`` when the user has no default list yet."""
+    """Read-only lookup of the user's default favorite-list id.
+
+    Returns ``None`` when the user has no default list yet -- the expected
+    happy path for users who haven't favorited anything; the write path
+    creates the list lazily on the first favorite. Read-side callers
+    (``remove_favorite`` / ``list_favorites`` / ``is_favorited``) treat
+    ``None`` as an empty result, not an error.
+
+    Args:
+        db: Async DB session.
+        user_id: BetterAuth user id.
+
+    Returns:
+        Default list's primary key, or ``None`` when the user has not
+        favorited anything yet.
+    """
     stmt = select(FavoriteList.id).where(
         FavoriteList.user_id == user_id,
         FavoriteList.is_default.is_(True),
@@ -86,6 +108,14 @@ async def add_favorite(
     existing row is returned unchanged. ``ON CONFLICT DO NOTHING`` gives us
     that semantics without races; we fall back to a plain SELECT when the
     INSERT is a no-op so the caller always gets the canonical row back.
+
+    Args:
+        db: Async DB session.
+        user_id: BetterAuth user id.
+        bd_id: Broker-dealer primary key.
+
+    Returns:
+        Persisted ``FavoriteListItem`` row (existing or newly inserted).
     """
     list_id = await _get_or_create_default_list_id(db, user_id)
     insert_stmt = (
@@ -113,6 +143,14 @@ async def remove_favorite(db: AsyncSession, user_id: str, bd_id: int) -> None:
     Idempotent: a DELETE against a row that doesn't exist is a no-op, which
     matches the HTTP 204 contract on ``DELETE /broker-dealers/{id}/favorite``.
     A user with no default list at all is also a no-op (nothing to remove).
+
+    Args:
+        db: Async DB session.
+        user_id: BetterAuth user id.
+        bd_id: Broker-dealer primary key.
+
+    Returns:
+        ``None``.
     """
     list_id = await _get_default_list_id(db, user_id)
     if list_id is None:
@@ -136,6 +174,16 @@ async def list_favorites(
 
     Sorted ``created_at DESC`` (newest first) per plan §2.1. A user with no
     default list yet returns an empty page.
+
+    Args:
+        db: Async DB session.
+        user_id: BetterAuth user id.
+        limit: Page size (already validated by the endpoint layer).
+        offset: Page offset.
+
+    Returns:
+        ``(items, total)`` -- ``items`` is the page of summary rows and
+        ``total`` is the unpaginated count for the user's default list.
     """
     list_id = await _get_default_list_id(db, user_id)
     if list_id is None:
@@ -176,6 +224,14 @@ async def record_visit(db: AsyncSession, user_id: str, bd_id: int) -> UserVisit:
     ``visit_count`` and slide ``last_visited_at`` forward while preserving
     ``first_visited_at``. A single statement keeps the write atomic -- no
     read-then-write race.
+
+    Args:
+        db: Async DB session.
+        user_id: BetterAuth user id.
+        bd_id: Broker-dealer primary key.
+
+    Returns:
+        Persisted ``UserVisit`` row reflecting the post-upsert state.
     """
     stmt = insert(UserVisit).values(user_id=user_id, bd_id=bd_id)
     upsert = stmt.on_conflict_do_update(
@@ -199,6 +255,17 @@ async def list_visits(
     """Return a page of the user's visit history plus the total count.
 
     Sorted ``last_visited_at DESC`` (most recently viewed first) per plan §2.2.
+
+    Args:
+        db: Async DB session.
+        user_id: BetterAuth user id.
+        limit: Page size (already validated by the endpoint layer).
+        offset: Page offset.
+
+    Returns:
+        ``(items, total)`` -- ``items`` is the page of summary rows annotated
+        with ``last_visited_at`` and ``visit_count``; ``total`` is the user's
+        full visit count.
     """
     total_stmt = select(func.count(UserVisit.id)).where(UserVisit.user_id == user_id)
     total = int((await db.execute(total_stmt)).scalar_one())
@@ -237,6 +304,15 @@ async def is_favorited(
     the firm isn't pinned to it. The profile endpoint uses this to stamp
     ``is_favorited`` + ``favorited_at`` onto the response so the heart toggle
     renders in the correct state on first paint.
+
+    Args:
+        db: Async DB session.
+        user_id: BetterAuth user id.
+        bd_id: Broker-dealer primary key.
+
+    Returns:
+        ``(is_favorited, favorited_at)``: ``(True, datetime)`` when the firm
+        is on the user's default list; ``(False, None)`` otherwise.
     """
     list_id = await _get_default_list_id(db, user_id)
     if list_id is None:
@@ -256,6 +332,13 @@ def _bd_to_summary(broker_dealer: BrokerDealer) -> dict[str, object]:
 
     Kept local (not on the model) so the summary schema stays the only
     authority over which fields ship in the favorites / visits lists.
+
+    Args:
+        broker_dealer: ORM row to project.
+
+    Returns:
+        Dict with the 12 summary fields used by ``FavoriteListItemSchema``
+        and ``VisitListItem``.
     """
     return {
         "id": broker_dealer.id,
