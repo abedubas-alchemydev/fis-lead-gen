@@ -2,7 +2,7 @@
 
 import Link from "next/link";
 import type { Route } from "next";
-import { Clock } from "lucide-react";
+import { AlertTriangle, Clock } from "lucide-react";
 import { useEffect, useMemo, useState } from "react";
 
 import { Pill, type PillVariant } from "@/components/ui/pill";
@@ -13,6 +13,9 @@ import {
   MASTER_LIST_STATE_DEFAULTS,
   encodeReturnParam,
 } from "@/lib/master-list-state";
+
+import { EmptyVisitedState } from "./empty-visited-state";
+import { VisitedLoadingSkeleton } from "./visited-loading-skeleton";
 
 const PAGE_SIZE = 25;
 
@@ -64,12 +67,20 @@ export function VisitedFirmsClient() {
   const [offset, setOffset] = useState(0);
   const [loading, setLoading] = useState(true);
   const [loadingMore, setLoadingMore] = useState(false);
-  const [error, setError] = useState<string | null>(null);
+  // Two error channels:
+  //   loadError       — initial-fetch failure → in-panel LoadErrorCard with Retry.
+  //   paginationError — Load-more failure   → existing red banner above the panel.
+  // Splitting them so a transient Load-more failure doesn't blow away the
+  // already-rendered first page, and so initial-fetch failures get the
+  // same visual treatment as on /alerts.
+  const [loadError, setLoadError] = useState<string | null>(null);
+  const [paginationError, setPaginationError] = useState<string | null>(null);
+  const [reloadKey, setReloadKey] = useState(0);
 
   useEffect(() => {
     let active = true;
     setLoading(true);
-    setError(null);
+    setLoadError(null);
 
     listVisits({ limit: PAGE_SIZE, offset: 0 })
       .then((response) => {
@@ -80,7 +91,8 @@ export function VisitedFirmsClient() {
       })
       .catch((err) => {
         if (!active) return;
-        setError(err instanceof Error ? err.message : "Unable to load visit history.");
+        setItems([]);
+        setLoadError(err instanceof Error ? err.message : "Unable to load visit history.");
       })
       .finally(() => {
         if (active) setLoading(false);
@@ -89,18 +101,19 @@ export function VisitedFirmsClient() {
     return () => {
       active = false;
     };
-  }, []);
+  }, [reloadKey]);
 
   async function loadMore() {
     if (loadingMore) return;
     setLoadingMore(true);
+    setPaginationError(null);
     try {
       const response = await listVisits({ limit: PAGE_SIZE, offset });
       setItems((current) => [...current, ...response.items]);
       setTotal(response.total);
       setOffset((current) => current + response.items.length);
     } catch (err) {
-      setError(err instanceof Error ? err.message : "Unable to load more visits.");
+      setPaginationError(err instanceof Error ? err.message : "Unable to load more visits.");
     } finally {
       setLoadingMore(false);
     }
@@ -152,9 +165,9 @@ export function VisitedFirmsClient() {
         <span>Read-only — open a firm to add it here.</span>
       </div>
 
-      {error ? (
+      {paginationError ? (
         <div className="mb-4 rounded-2xl border border-red-100 bg-red-50 px-4 py-3 text-sm text-red-700">
-          {error}
+          {paginationError}
         </div>
       ) : null}
 
@@ -171,20 +184,14 @@ export function VisitedFirmsClient() {
         }
       >
         {loading ? (
-          <div>
-            {Array.from({ length: 4 }).map((_, index) => (
-              <div
-                key={`visit-loading-${index}`}
-                className="border-t border-[var(--border,rgba(30,64,175,0.1))] py-4 first:border-t-0"
-              >
-                <div className="h-3 w-32 animate-pulse rounded bg-[var(--surface-2,#f1f6fd)]" />
-                <div className="mt-2 h-4 w-48 animate-pulse rounded bg-[var(--surface-2,#f1f6fd)]" />
-                <div className="mt-2 h-3 w-64 animate-pulse rounded bg-[var(--surface-2,#f1f6fd)]" />
-              </div>
-            ))}
-          </div>
+          <VisitedLoadingSkeleton />
+        ) : loadError ? (
+          <LoadErrorCard
+            message={loadError}
+            onRetry={() => setReloadKey((k) => k + 1)}
+          />
         ) : items.length === 0 ? (
-          <EmptyState />
+          <EmptyVisitedState />
         ) : (
           <div>
             {items.map((item) => (
@@ -198,7 +205,7 @@ export function VisitedFirmsClient() {
         )}
       </SectionPanel>
 
-      {hasMore && !loading ? (
+      {hasMore && !loading && !loadError ? (
         <div className="mt-4 flex justify-center">
           <button
             type="button"
@@ -305,25 +312,35 @@ function VisitRow({
   );
 }
 
-function EmptyState() {
+// Inline helper for the initial-fetch failure path. Mirrors the
+// LoadErrorCard shipped on /alerts — dashed-border centered card with
+// the error message and a Retry button. Single-use, so kept inline
+// rather than extracted.
+function LoadErrorCard({
+  message,
+  onRetry,
+}: {
+  message: string;
+  onRetry: () => void;
+}) {
   return (
-    <div className="my-2 rounded-2xl bg-[var(--surface-2,#f1f6fd)] px-6 py-12 text-center">
-      <div className="mx-auto grid h-14 w-14 place-items-center rounded-full bg-[var(--surface-3,#dbeafe)] text-[var(--text-dim,#475569)]">
-        <Clock className="h-6 w-6" strokeWidth={1.75} aria-hidden />
+    <div className="my-4 rounded-2xl border border-dashed border-[var(--border,rgba(30,64,175,0.1))] bg-[var(--surface-2,#f1f6fd)] px-6 py-12 text-center">
+      <div className="mx-auto grid h-14 w-14 place-items-center rounded-full bg-[rgba(239,68,68,0.1)] text-[var(--pill-red-text,#b91c1c)]">
+        <AlertTriangle className="h-6 w-6" strokeWidth={1.75} aria-hidden />
       </div>
       <h3 className="mt-5 text-[15px] font-semibold tracking-[-0.01em] text-[var(--text,#0f172a)]">
-        No visits yet
+        Couldn&apos;t load your visit history
       </h3>
       <p className="mx-auto mt-2 max-w-sm text-[13px] leading-5 text-[var(--text-dim,#475569)]">
-        Open a firm from the master list and it will appear here so you can pick back up
-        where you left off.
+        {message}
       </p>
-      <Link
-        href="/master-list"
-        className="mt-5 inline-flex items-center gap-2 rounded-[10px] bg-gradient-to-br from-[#6366f1] to-[#8b5cf6] px-4 py-2 text-[13px] font-semibold text-white shadow-[0_6px_16px_rgba(99,102,241,0.35)] transition hover:brightness-110"
+      <button
+        type="button"
+        onClick={onRetry}
+        className="mt-5 inline-flex h-[34px] items-center rounded-[10px] border border-[var(--border-2,rgba(30,64,175,0.16))] bg-[var(--surface,#ffffff)] px-4 text-[13px] font-semibold text-[var(--text-dim,#475569)] transition hover:bg-[var(--surface,#ffffff)] hover:text-[var(--text,#0f172a)]"
       >
-        Browse the master list
-      </Link>
+        Retry
+      </button>
     </div>
   );
 }
