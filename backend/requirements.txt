@@ -15,7 +15,11 @@ selectolax>=0.3.21
 # google-auth is required by app.services.auth._ensure_admin_or_scheduler_sa to
 # verify Google-signed OIDC tokens from Cloud Scheduler hitting the Tier 2
 # pipeline trigger endpoints (filing-monitor / populate-all / initial-load).
+# ``requests`` is an optional google-auth dep that ``google.auth.transport.requests``
+# imports lazily — without it the OIDC verification path raises ImportError at
+# request time. Pin both so the runtime path resolves on a clean install.
 google-auth>=2.30.0
+requests>=2.32.0
 # py3-validate-email — SMTP RCPT TO probe for email_extractor. Package name on
 # PyPI is `py3-validate-email` but imports as `validate_email`. Pinned because
 # SMTP handshake semantics have drifted across minor versions.
