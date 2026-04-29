@@ -1,6 +1,7 @@
 "use client";
 
 import Link from "next/link";
+import type { Route } from "next";
 import { Clock } from "lucide-react";
 import { useEffect, useMemo, useState } from "react";
 
@@ -8,6 +9,10 @@ import { Pill, type PillVariant } from "@/components/ui/pill";
 import { SectionPanel } from "@/components/ui/section-panel";
 import { listVisits, type VisitListItem } from "@/lib/favorites";
 import { formatCurrency, formatPercent, formatRelativeTime } from "@/lib/format";
+import {
+  MASTER_LIST_STATE_DEFAULTS,
+  encodeReturnParam,
+} from "@/lib/master-list-state";
 
 const PAGE_SIZE = 25;
 
@@ -111,6 +116,21 @@ export function VisitedFirmsClient() {
     [items],
   );
 
+  // Sprint 6 task #29: thread `source=visited` into the firm-detail
+  // URL so the Next-Lead button on /master-list/{id} walks the visit
+  // history (not the master-list result set) and the breadcrumb
+  // back-link reads "Back to Visited Firms".
+  const detailHrefSuffix = useMemo(() => {
+    const env = encodeReturnParam({
+      ...MASTER_LIST_STATE_DEFAULTS,
+      source: "visited",
+    });
+    return env ? `?return=${env}` : "";
+  }, []);
+
+  const buildDetailHref = (id: number): Route =>
+    `/master-list/${id}${detailHrefSuffix}` as Route;
+
   return (
     <>
       {/* ── Live-match strip (mirrors master-list / alerts / export) ────── */}
@@ -168,7 +188,11 @@ export function VisitedFirmsClient() {
         ) : (
           <div>
             {items.map((item) => (
-              <VisitRow key={item.id} item={item} />
+              <VisitRow
+                key={item.id}
+                item={item}
+                detailHref={buildDetailHref(item.id)}
+              />
             ))}
           </div>
         )}
@@ -190,7 +214,13 @@ export function VisitedFirmsClient() {
   );
 }
 
-function VisitRow({ item }: { item: VisitListItem }) {
+function VisitRow({
+  item,
+  detailHref,
+}: {
+  item: VisitListItem;
+  detailHref: Route;
+}) {
   const priorityVar = priorityVariant(item.lead_priority);
   return (
     <div className="flex gap-3 border-t border-[var(--border,rgba(30,64,175,0.1))] py-4 first:border-t-0">
@@ -226,7 +256,7 @@ function VisitRow({ item }: { item: VisitListItem }) {
           </span>
         </div>
         <Link
-          href={`/master-list/${item.id}`}
+          href={detailHref}
           className="mb-1 block text-[14px] font-semibold text-[var(--text,#0f172a)] transition hover:text-[#6366f1]"
         >
           {item.name}

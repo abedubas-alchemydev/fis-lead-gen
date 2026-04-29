@@ -19,6 +19,12 @@
 
 export type ListMode = "primary" | "alternative" | "all";
 export type SortDir = "asc" | "desc";
+// Sprint 6 task #29: which workspace the user came from when they
+// landed on /master-list/{id}. Drives the detail-page Next-Lead walker
+// (which list to step through) and the breadcrumb back-link copy +
+// href. "master-list" is the existing behavior; "favorites" and
+// "visited" are added in this PR.
+export type DetailSource = "master-list" | "favorites" | "visited";
 
 export interface MasterListQueryState {
   search: string;
@@ -42,6 +48,7 @@ export interface MasterListQueryState {
   sortDir: SortDir;
   page: number;
   limit: number;
+  source: DetailSource;
 }
 
 // Defaults are the same values the workspace component used as initial
@@ -64,11 +71,17 @@ export const MASTER_LIST_STATE_DEFAULTS: MasterListQueryState = {
   sortDir: "asc",
   page: 1,
   limit: 25,
+  source: "master-list",
 };
 
 const LIST_MODES: ReadonlyArray<ListMode> = ["primary", "alternative", "all"];
 const SORT_DIRS: ReadonlyArray<SortDir> = ["asc", "desc"];
 const ALLOWED_LIMITS: ReadonlyArray<number> = [25, 50, 100];
+const DETAIL_SOURCES: ReadonlyArray<DetailSource> = [
+  "master-list",
+  "favorites",
+  "visited",
+];
 
 // Minimal interface so callers can pass either a real URLSearchParams
 // or Next.js's ReadonlyURLSearchParams (which exposes the same surface
@@ -114,6 +127,7 @@ function parseNonNegativeFloat(raw: string | null): number | null {
 export function fromSearchParams(sp: SearchParamsLike): MasterListQueryState {
   const list = sp.get("list");
   const sortDir = sp.get("sort_dir");
+  const source = sp.get("source");
   const limit = parseIntInRange(
     sp.get("limit"),
     MASTER_LIST_STATE_DEFAULTS.limit,
@@ -152,6 +166,10 @@ export function fromSearchParams(sp: SearchParamsLike): MasterListQueryState {
     limit: (ALLOWED_LIMITS as ReadonlyArray<number>).includes(limit)
       ? limit
       : MASTER_LIST_STATE_DEFAULTS.limit,
+    source:
+      source && (DETAIL_SOURCES as ReadonlyArray<string>).includes(source)
+        ? (source as DetailSource)
+        : MASTER_LIST_STATE_DEFAULTS.source,
   };
 }
 
@@ -211,6 +229,9 @@ export function toSearchParams(state: MasterListQueryState): URLSearchParams {
   if (state.limit !== MASTER_LIST_STATE_DEFAULTS.limit) {
     sp.set("limit", String(state.limit));
   }
+  if (state.source !== MASTER_LIST_STATE_DEFAULTS.source) {
+    sp.set("source", state.source);
+  }
 
   return sp;
 }
@@ -218,6 +239,27 @@ export function toSearchParams(state: MasterListQueryState): URLSearchParams {
 export function buildMasterListUrl(state: MasterListQueryState): string {
   const query = toSearchParams(state).toString();
   return query ? `/master-list?${query}` : "/master-list";
+}
+
+// Resolves the user's source workspace URL — the page they were on
+// before clicking into /master-list/{id}. Used by the detail-page
+// breadcrumb back-link so /my-favorites and /visited-firms users land
+// back on the right page (and not on /master-list, which is the bug
+// task #29 fixes).
+//
+// For "favorites" and "visited" the URL is bare today — those pages
+// don't expose URL-backed sort/page state because the BE pins the sort
+// (created_at DESC / last_visited_at DESC). When sort support lands,
+// this is the single place to add the query string.
+export function buildSourceListUrl(state: MasterListQueryState): string {
+  switch (state.source) {
+    case "favorites":
+      return "/my-favorites";
+    case "visited":
+      return "/visited-firms";
+    default:
+      return buildMasterListUrl(state);
+  }
 }
 
 // Parses a `return` envelope param produced by encodeReturnParam below.

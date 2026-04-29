@@ -41,12 +41,17 @@ import { FavoriteButton } from "@/components/master-list/favorite-button";
 import { Pill } from "@/components/ui/pill";
 import { apiRequest, buildApiPath } from "@/lib/api";
 import { parseArrangementBlob } from "@/lib/arrangements";
-import { recordVisit } from "@/lib/favorites";
+import {
+  recordVisit,
+  type FavoriteListResponse,
+  type VisitListResponse,
+} from "@/lib/favorites";
 import { formatCurrency, formatDate, formatPercent } from "@/lib/format";
 import {
-  buildMasterListUrl,
+  buildSourceListUrl,
   encodeReturnParam,
   parseReturnParam,
+  type DetailSource,
   type MasterListQueryState,
 } from "@/lib/master-list-state";
 import { stateCodeFromName } from "@/lib/states";
@@ -55,6 +60,23 @@ import type {
   BrokerDealerProfileResponse,
   ExecutiveContactItem,
 } from "@/lib/types";
+
+// Sprint 6 task #29: workspace-aware breadcrumb labels keyed by the
+// `source` param threaded through the return envelope so the detail
+// page can render "Back to My Favorites" / "Back to Visited Firms"
+// instead of always saying "Back to Master List".
+const SOURCE_LABELS: Record<DetailSource, { breadcrumb: string; back: string }> = {
+  "master-list": { breadcrumb: "Master List", back: "Back to Master List" },
+  favorites: { breadcrumb: "My Favorites", back: "Back to My Favorites" },
+  visited: { breadcrumb: "Visited Firms", back: "Back to Visited Firms" },
+};
+
+// Cap the favorites / visits walker fetch at the BE's max page size.
+// Typical users have < 100 entries so a single round trip resolves
+// prev/next; users with > 100 fall through to /adjacent (same fallback
+// as a no-envelope deep-link). Cross-page walking is omitted on
+// purpose — see plans/fe-favorites-visited-sort-2026-04-29.md.
+const USER_LIST_WALKER_LIMIT = 100;
 
 // Shared button presets — kept as constants so the page can stay focused on
 // composition rather than re-typing the same Tailwind utility chains.
@@ -115,9 +137,19 @@ export function BrokerDealerDetailClient({ brokerDealerId }: { brokerDealerId: s
     () => (returnState ? encodeReturnParam(returnState) : ""),
     [returnState],
   );
-  const masterListHref = useMemo<Route>(
-    () => (returnState ? (buildMasterListUrl(returnState) as Route) : "/master-list"),
+  // Source-aware back-link href + copy. Defaults to /master-list when
+  // there's no return envelope so deep-link visits keep their previous
+  // breadcrumb behaviour.
+  const sourceListHref = useMemo<Route>(
+    () =>
+      returnState
+        ? (buildSourceListUrl(returnState) as Route)
+        : "/master-list",
     [returnState],
+  );
+  const sourceLabels = useMemo(
+    () => SOURCE_LABELS[returnState?.source ?? "master-list"],
+    [returnState?.source],
   );
 
   const [profile, setProfile] = useState<BrokerDealerProfileResponse | null>(null);
@@ -207,10 +239,44 @@ export function BrokerDealerDetailClient({ brokerDealerId }: { brokerDealerId: s
       }
     }
 
+    // Sprint 6 task #29: walk the user's favorites or visit history
+    // when the source envelope says so. The BE pins the sort
+    // (created_at DESC for favorites, last_visited_at DESC for
+    // visits) so a single limit=100 fetch covers the typical user.
+    // Past 100, we degrade to the global /adjacent walker — same
+    // fallback as a deep-link visit.
+    async function resolveFromUserList(
+      source: Exclude<DetailSource, "master-list">,
+    ) {
+      const path = source === "favorites" ? "/api/v1/favorites" : "/api/v1/visits";
+      const response = await apiRequest<FavoriteListResponse | VisitListResponse>(
+        buildApiPath(path, {
+          limit: USER_LIST_WALKER_LIMIT,
+          offset: 0,
+        }),
+      );
+      if (!active) return;
+
+      const items = response.items;
+      const idx = items.findIndex((item) => item.id === numericId);
+      if (idx === -1) {
+        await resolveFromAdjacent();
+        return;
+      }
+      setPrevId(idx > 0 ? items[idx - 1].id : null);
+      setNextId(idx < items.length - 1 ? items[idx + 1].id : null);
+    }
+
     if (returnState && Number.isFinite(numericId)) {
-      void resolveFromReturnState(returnState).catch(() => {
-        if (active) void resolveFromAdjacent();
-      });
+      if (returnState.source === "favorites" || returnState.source === "visited") {
+        void resolveFromUserList(returnState.source).catch(() => {
+          if (active) void resolveFromAdjacent();
+        });
+      } else {
+        void resolveFromReturnState(returnState).catch(() => {
+          if (active) void resolveFromAdjacent();
+        });
+      }
     } else {
       void resolveFromAdjacent();
     }
@@ -397,10 +463,10 @@ export function BrokerDealerDetailClient({ brokerDealerId }: { brokerDealerId: s
           <p className="text-[12px] uppercase tracking-[0.06em] text-[var(--text-muted,#94a3b8)]">
             Enterprise Dashboard <span className="text-[var(--text-dim,#475569)]">/</span>{" "}
             <Link
-              href={masterListHref}
+              href={sourceListHref}
               className="transition hover:text-[var(--text-dim,#475569)]"
             >
-              Master List
+              {sourceLabels.breadcrumb}
             </Link>{" "}
             <span className="text-[var(--text-dim,#475569)]">/</span> Firm Detail
           </p>
@@ -477,10 +543,10 @@ export function BrokerDealerDetailClient({ brokerDealerId }: { brokerDealerId: s
           Previous Lead
         </button>
         <Link
-          href={masterListHref}
+          href={sourceListHref}
           className="text-[12px] uppercase tracking-[0.08em] text-[var(--text-muted,#94a3b8)] transition hover:text-[var(--text,#0f172a)]"
         >
-          Back to Master List
+          {sourceLabels.back}
         </Link>
         <button
           type="button"
