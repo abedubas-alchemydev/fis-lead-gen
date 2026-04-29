@@ -19,7 +19,7 @@ from app.models.financial_metric import FinancialMetric
 from app.models.pipeline_run import PipelineRun
 from app.models.scoring_setting import ScoringSetting
 from app.schemas.broker_dealer import BrokerDealerListMeta, BrokerDealerListResponse
-from app.services.scoring import calculate_lead_score, classify_lead_priority
+from app.services.scoring import CompetitorLookup, calculate_lead_score, classify_lead_priority
 from app.services.service_models import MergedBrokerDealerRecord, ProviderDistributionRecord
 
 # Minimum adoption threshold for the master-list types-of-business filter.
@@ -526,13 +526,14 @@ class BrokerDealerRepository:
             db.add(settings)
             await db.flush()
 
+        competitor_lookup = CompetitorLookup.from_providers(
+            await self.list_competitor_providers(db)
+        )
+
         for broker_dealer in broker_dealers:
             score = calculate_lead_score(
-                yoy_growth=float(broker_dealer.yoy_growth) if broker_dealer.yoy_growth is not None else None,
-                clearing_type=broker_dealer.current_clearing_type,
-                is_competitor=bool(broker_dealer.current_clearing_is_competitor),
-                health_status=broker_dealer.health_status,
-                registration_date=broker_dealer.registration_date,
+                firm=broker_dealer,
+                competitor_lookup=competitor_lookup,
                 weights=settings,
             )
             broker_dealer.lead_score = score
