@@ -103,7 +103,17 @@ class ClearingClassifierService:
         "fully-disclosed basis is Fully Disclosed, not Self-Clearing, "
         "even if the named clearing partner is itself a self-clearing firm.\n"
         "  - Omnibus is rare. Only use it when the firm clearly clears "
-        "for OTHER firms in addition to its own customers."
+        "for OTHER firms in addition to its own customers.\n\n"
+        "ADDITIONAL OMNIBUS SIGNAL: if the firm's PRIMARY business is "
+        "providing clearing services to OTHER broker-dealers (e.g. the "
+        "firm name explicitly contains 'Clearing', or the FOCUS report "
+        "describes the firm's revenue as predominantly clearing-fee-based, "
+        "or the firm is listed on FINRA as a national clearing service), "
+        "classify as OMNIBUS regardless of the FINRA 'does hold or "
+        "maintain funds or securities' boilerplate (which both omnibus "
+        "and self-clearing institutionals trigger). When in doubt between "
+        "self_clearing and omnibus, prefer omnibus when the firm CLEARS "
+        "FOR OTHERS as its main service."
     )
 
     def __init__(self) -> None:
