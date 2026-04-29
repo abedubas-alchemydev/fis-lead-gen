@@ -2,13 +2,38 @@
 
 import { useEffect, useMemo, useState } from "react";
 
-import { Download } from "lucide-react";
+import { CheckCircle2, Download, Loader2, TriangleAlert, X } from "lucide-react";
 
+import { EmptyExportMatchesState } from "@/components/export/empty-export-matches-state";
 import { TopActions } from "@/components/layout/top-actions";
 import { SectionPanel } from "@/components/ui/section-panel";
 import { Segmented, type SegmentedItem } from "@/components/ui/segmented";
-import { apiRequest, buildApiPath } from "@/lib/api";
+import { ApiError, apiRequest, buildApiPath } from "@/lib/api";
 import type { ExportCsvResponse, ExportPreviewResponse } from "@/lib/types";
+
+// Classified failure surfaced from the BE. `cap` is rendered as a
+// dedicated amber banner near the Export button; `validation` flags
+// a user-fixable filter rejection; `generic` covers everything else
+// (network, 5xx). Lets us preserve `ApiError.detail` as a sub-line
+// without showing the same red panel for every failure shape.
+type ExportFailure =
+  | { kind: "cap"; detail: string }
+  | { kind: "validation"; detail: string }
+  | { kind: "generic"; detail: string };
+
+function classifyFailure(err: unknown): ExportFailure {
+  if (err instanceof ApiError) {
+    if (err.status === 429) return { kind: "cap", detail: err.detail };
+    if (err.status >= 400 && err.status < 500) {
+      return { kind: "validation", detail: err.detail };
+    }
+    return { kind: "generic", detail: err.detail };
+  }
+  if (err instanceof Error) return { kind: "generic", detail: err.message };
+  return { kind: "generic", detail: "Unexpected error." };
+}
+
+const SUCCESS_DISMISS_MS = 6_000;
 
 type ListMode = "primary" | "alternative" | "all";
 
@@ -43,8 +68,9 @@ export function ExportClient({
   const [leadPriority, setLeadPriority] = useState("All");
   const [health, setHealth] = useState("All");
   const [preview, setPreview] = useState<ExportPreviewResponse | null>(null);
-  const [error, setError] = useState<string | null>(null);
+  const [failure, setFailure] = useState<ExportFailure | null>(null);
   const [isExporting, setIsExporting] = useState(false);
+  const [success, setSuccess] = useState<{ filename: string; rows: number; remaining: number } | null>(null);
 
   const queryPath = useMemo(
     () =>
@@ -60,18 +86,29 @@ export function ExportClient({
     try {
       const response = await apiRequest<ExportPreviewResponse>(queryPath);
       setPreview(response);
-      setError(null);
+      setFailure(null);
     } catch (loadError) {
-      setError(loadError instanceof Error ? loadError.message : "Unable to load export preview.");
+      setFailure(classifyFailure(loadError));
     }
   }
 
   useEffect(() => {
     void loadPreview();
+    // Filter changes invalidate any prior success banner — the new
+    // selection wasn't what the user just exported.
+    setSuccess(null);
   }, [queryPath]);
+
+  // Auto-dismiss the success banner so it doesn't sit forever.
+  useEffect(() => {
+    if (!success) return;
+    const handle = window.setTimeout(() => setSuccess(null), SUCCESS_DISMISS_MS);
+    return () => window.clearTimeout(handle);
+  }, [success]);
 
   async function exportCsv() {
     setIsExporting(true);
+    setSuccess(null);
     try {
       const response = await apiRequest<ExportCsvResponse>(
         buildApiPath("/api/v1/export", {
@@ -90,9 +127,15 @@ export function ExportClient({
       link.click();
       link.remove();
       URL.revokeObjectURL(url);
+      setFailure(null);
+      setSuccess({
+        filename: response.filename,
+        rows: response.exported_records,
+        remaining: response.remaining_exports_today,
+      });
       await loadPreview();
     } catch (exportError) {
-      setError(exportError instanceof Error ? exportError.message : "Unable to export CSV.");
+      setFailure(classifyFailure(exportError));
     } finally {
       setIsExporting(false);
     }
@@ -116,6 +159,8 @@ export function ExportClient({
   const matchingRecords = preview?.matching_records ?? null;
   const requestedRecords = preview?.requested_records ?? null;
   const quotaExhausted = remainingExports !== null && remainingExports <= 0;
+  const noMatches = matchingRecords === 0;
+  const showCapBanner = quotaExhausted || failure?.kind === "cap";
 
   return (
     <div className="px-7 pb-12 pt-7 lg:px-9">
@@ -225,41 +270,97 @@ export function ExportClient({
         </div>
       </div>
 
-      {error ? (
-        <div className="mb-4 rounded-2xl border border-red-100 bg-red-50 px-4 py-3 text-sm text-red-700">
-          {error}
+      {success ? (
+        <div
+          role="status"
+          className="mb-4 flex items-start gap-3 rounded-2xl border border-emerald-100 bg-emerald-50 px-4 py-3 text-sm text-emerald-800"
+        >
+          <CheckCircle2 className="mt-0.5 h-4 w-4 shrink-0" strokeWidth={2.25} aria-hidden />
+          <div className="min-w-0 flex-1">
+            <p className="font-semibold">
+              Exported{" "}
+              <span className="font-mono text-[12.5px]">{success.filename}</span>
+            </p>
+            <p className="mt-0.5 text-[12.5px] text-emerald-800/80">
+              {success.rows.toLocaleString()} row{success.rows === 1 ? "" : "s"} downloaded ·{" "}
+              {success.remaining} of 3 export{success.remaining === 1 ? "" : "s"} left today.
+            </p>
+          </div>
+          <button
+            type="button"
+            onClick={() => setSuccess(null)}
+            className="-mr-1 -mt-1 grid h-6 w-6 place-items-center rounded-md text-emerald-700/70 transition hover:bg-emerald-100 hover:text-emerald-900"
+            aria-label="Dismiss success message"
+          >
+            <X className="h-3.5 w-3.5" strokeWidth={2.25} aria-hidden />
+          </button>
+        </div>
+      ) : null}
+
+      {failure && failure.kind !== "cap" ? (
+        <div
+          role="alert"
+          className={`mb-4 flex items-start gap-3 rounded-2xl border px-4 py-3 text-sm ${
+            failure.kind === "validation"
+              ? "border-amber-100 bg-amber-50 text-amber-900"
+              : "border-red-100 bg-red-50 text-red-700"
+          }`}
+        >
+          <TriangleAlert className="mt-0.5 h-4 w-4 shrink-0" strokeWidth={2.25} aria-hidden />
+          <div className="min-w-0 flex-1">
+            <p className="font-semibold">
+              {failure.kind === "validation" ? "Filter rejected" : "Couldn't load export"}
+            </p>
+            <p className="mt-0.5 text-[12.5px] opacity-90">
+              {failure.detail || (failure.kind === "validation"
+                ? "The current filter combination is not allowed."
+                : "Try again in a moment.")}
+            </p>
+          </div>
+          <button
+            type="button"
+            onClick={() => setFailure(null)}
+            className="-mr-1 -mt-1 grid h-6 w-6 place-items-center rounded-md opacity-70 transition hover:bg-black/5 hover:opacity-100"
+            aria-label="Dismiss error"
+          >
+            <X className="h-3.5 w-3.5" strokeWidth={2.25} aria-hidden />
+          </button>
         </div>
       ) : null}
 
       {/* ── Preview + Rules grid ─────────────────────────────────────────── */}
       <div className="grid gap-4 lg:grid-cols-2">
         <SectionPanel eyebrow="Preview" title="Selection summary">
-          <div className="grid gap-3">
-            <div className="rounded-2xl bg-[var(--surface-2,#f1f6fd)] px-4 py-4">
-              <p className="text-[11px] font-semibold uppercase tracking-[0.1em] text-[var(--text-muted,#94a3b8)]">
-                Matching records
-              </p>
-              <p className="mt-1 text-[24px] font-bold tracking-[-0.02em] text-[var(--text,#0f172a)]">
-                {matchingRecords === null ? "—" : matchingRecords.toLocaleString()}
-              </p>
+          {noMatches ? (
+            <EmptyExportMatchesState />
+          ) : (
+            <div className="grid gap-3">
+              <div className="rounded-2xl bg-[var(--surface-2,#f1f6fd)] px-4 py-4">
+                <p className="text-[11px] font-semibold uppercase tracking-[0.1em] text-[var(--text-muted,#94a3b8)]">
+                  Matching records
+                </p>
+                <p className="mt-1 text-[24px] font-bold tracking-[-0.02em] text-[var(--text,#0f172a)]">
+                  {matchingRecords === null ? "—" : matchingRecords.toLocaleString()}
+                </p>
+              </div>
+              <div className="rounded-2xl bg-[var(--surface-2,#f1f6fd)] px-4 py-4">
+                <p className="text-[11px] font-semibold uppercase tracking-[0.1em] text-[var(--text-muted,#94a3b8)]">
+                  Exported this run
+                </p>
+                <p className="mt-1 text-[24px] font-bold tracking-[-0.02em] text-[var(--text,#0f172a)]">
+                  {requestedRecords === null ? "—" : requestedRecords.toLocaleString()}
+                </p>
+              </div>
+              <div className="rounded-2xl bg-[var(--surface-2,#f1f6fd)] px-4 py-4">
+                <p className="text-[11px] font-semibold uppercase tracking-[0.1em] text-[var(--text-muted,#94a3b8)]">
+                  Remaining today
+                </p>
+                <p className="mt-1 text-[24px] font-bold tracking-[-0.02em] text-[var(--text,#0f172a)]">
+                  {remainingExports === null ? "—" : remainingExports.toLocaleString()}
+                </p>
+              </div>
             </div>
-            <div className="rounded-2xl bg-[var(--surface-2,#f1f6fd)] px-4 py-4">
-              <p className="text-[11px] font-semibold uppercase tracking-[0.1em] text-[var(--text-muted,#94a3b8)]">
-                Exported this run
-              </p>
-              <p className="mt-1 text-[24px] font-bold tracking-[-0.02em] text-[var(--text,#0f172a)]">
-                {requestedRecords === null ? "—" : requestedRecords.toLocaleString()}
-              </p>
-            </div>
-            <div className="rounded-2xl bg-[var(--surface-2,#f1f6fd)] px-4 py-4">
-              <p className="text-[11px] font-semibold uppercase tracking-[0.1em] text-[var(--text-muted,#94a3b8)]">
-                Remaining today
-              </p>
-              <p className="mt-1 text-[24px] font-bold tracking-[-0.02em] text-[var(--text,#0f172a)]">
-                {remainingExports === null ? "—" : remainingExports.toLocaleString()}
-              </p>
-            </div>
-          </div>
+          )}
         </SectionPanel>
 
         <SectionPanel eyebrow="Restricted CSV" title="Export rules">
@@ -278,14 +379,33 @@ export function ExportClient({
             </li>
           </ul>
           <div className="mt-5 flex flex-col gap-2 border-t border-dashed border-[var(--border,rgba(30,64,175,0.1))] pt-4">
+            {showCapBanner ? (
+              <div
+                role="alert"
+                className="flex items-start gap-2.5 rounded-2xl border border-amber-200 bg-amber-50 px-3.5 py-3 text-[12.5px] text-amber-900"
+              >
+                <TriangleAlert className="mt-0.5 h-4 w-4 shrink-0" strokeWidth={2.25} aria-hidden />
+                <div>
+                  <p className="font-semibold">Daily cap reached</p>
+                  <p className="mt-0.5 opacity-90">
+                    You&apos;ve used all 3 exports today. The cap resets at midnight UTC.
+                  </p>
+                </div>
+              </div>
+            ) : null}
             <button
               type="button"
               onClick={() => void exportCsv()}
-              disabled={isExporting || quotaExhausted}
+              disabled={isExporting || quotaExhausted || noMatches}
+              aria-busy={isExporting || undefined}
               className="inline-flex w-fit items-center gap-2 rounded-[10px] bg-gradient-to-br from-[#6366f1] to-[#8b5cf6] px-4 py-2 text-[13px] font-semibold text-white shadow-[0_6px_16px_rgba(99,102,241,0.35)] transition hover:brightness-110 disabled:cursor-not-allowed disabled:opacity-60 disabled:hover:brightness-100"
             >
-              <Download className="h-4 w-4" strokeWidth={2} />
-              {isExporting ? "Preparing CSV…" : "Export CSV"}
+              {isExporting ? (
+                <Loader2 className="h-4 w-4 animate-spin" strokeWidth={2} aria-hidden />
+              ) : (
+                <Download className="h-4 w-4" strokeWidth={2} aria-hidden />
+              )}
+              {isExporting ? "Generating CSV…" : "Export CSV"}
             </button>
             <p className="text-[11px] text-[var(--text-muted,#94a3b8)]">
               Up to 100 rows · 9 permitted columns · resets at midnight UTC.
