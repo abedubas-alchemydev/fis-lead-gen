@@ -40,7 +40,7 @@ export function FirmWebsiteLink({
     );
   }
 
-  const googleHref = `https://www.google.com/search?q=${encodeURIComponent(firmName)}`;
+  const googleHref = `https://www.google.com/search?q=${encodeURIComponent(`${firmName} broker-dealer`)}`;
   return (
     <div className="mt-1.5">
       <a
