@@ -48,6 +48,19 @@ def pdf_tempdir(prefix: str = "pdf_extract_") -> Iterator[Path]:
 _SEC_ALLOWED_HOSTS = frozenset({"www.sec.gov", "data.sec.gov", "efts.sec.gov"})
 
 
+class _StreamingPdfTooLargeError(Exception):
+    """Internal: the streamed PDF crossed the configured size ceiling.
+
+    Raised by ``PdfDownloaderService._stream_to_path`` mid-stream so the
+    caller can return a missing-PDF result rather than retrying. Lives at
+    module scope so the streaming method and its callers share one type.
+    """
+
+    def __init__(self, byte_size: int) -> None:
+        super().__init__(f"streamed PDF exceeded ceiling at {byte_size} bytes")
+        self.byte_size = byte_size
+
+
 def _validate_sec_url(url: str) -> None:
     """Reject non-SEC, non-HTTPS, or private-IP targets before any network call.
 
@@ -135,20 +148,53 @@ class PdfDownloaderService:
     ) -> DownloadedPdfRecord | None:
         """Download a single filing's PDF into ``dest_dir``."""
         filing_date = date.fromisoformat(str(filing["filing_date"]))
-        accession_slug = str(filing["accession_number"]).replace("-", "")
+        accession_number = str(filing["accession_number"])
+        accession_slug = accession_number.replace("-", "")
         pdf_path = dest_dir / f"{broker_dealer.cik}-{accession_slug}.pdf"
 
         pdf_url = await self._resolve_pdf_url(
             cik=broker_dealer.cik,
-            accession_number=str(filing["accession_number"]),
+            accession_number=accession_number,
             primary_document=str(filing["primary_document"]),
         )
         if pdf_url is None:
             return None
 
-        pdf_bytes = await self._download_bytes_with_retries(pdf_url)
         max_size_mb = settings.gemini_inline_pdf_max_size_mb if settings.llm_provider == "gemini" else settings.openai_max_pdf_size_mb
-        if len(pdf_bytes) > max_size_mb * 1024 * 1024:
+        max_pdf_size_bytes = max_size_mb * 1024 * 1024
+
+        if settings.llm_use_files_api:
+            # Streaming path (ADR-0001 phase 2). The PDF lands on disk
+            # chunk-by-chunk via httpx.stream + aiter_bytes; bytes never
+            # aggregate in memory during the SEC fetch. The downstream LLM call
+            # consumes ``local_document_path`` and uploads to the provider Files
+            # API, also from disk in chunks. ``bytes_base64`` is left empty —
+            # consumers that still rely on it (focus-report endpoint at
+            # api/v1/endpoints/broker_dealers, multi-year financial pipeline)
+            # are out of scope for this PR and must remain on the flag-off path
+            # until a follow-up migrates them.
+            try:
+                byte_size = await self._stream_to_path(
+                    pdf_url, pdf_path, max_pdf_size_bytes
+                )
+            except _StreamingPdfTooLargeError:
+                return None
+            if byte_size == 0:
+                return None
+            return DownloadedPdfRecord(
+                bd_id=broker_dealer.id, filing_year=filing_date.year,
+                report_date=filing_date,
+                source_filing_url=str(filing["filing_index_url"]),
+                source_pdf_url=pdf_url, local_document_path=str(pdf_path),
+                bytes_base64="",
+                accession_number=accession_number,
+            )
+
+        # Legacy path (default-off): byte-for-byte identical to today's
+        # behavior. Buffers response.content in memory, base64-encodes for
+        # downstream inline LLM calls and the focus-report endpoint.
+        pdf_bytes = await self._download_bytes_with_retries(pdf_url)
+        if len(pdf_bytes) > max_pdf_size_bytes:
             return None
 
         pdf_path.write_bytes(pdf_bytes)
@@ -157,6 +203,7 @@ class PdfDownloaderService:
             report_date=filing_date, source_filing_url=str(filing["filing_index_url"]),
             source_pdf_url=pdf_url, local_document_path=str(pdf_path),
             bytes_base64=base64.b64encode(pdf_bytes).decode("utf-8"),
+            accession_number=accession_number,
         )
 
     async def _download_live_pdf(
@@ -171,20 +218,54 @@ class PdfDownloaderService:
             return None
 
         filing_date = date.fromisoformat(str(filing["filing_date"]))
-        accession_slug = str(filing["accession_number"]).replace("-", "")
+        accession_number = str(filing["accession_number"])
+        accession_slug = accession_number.replace("-", "")
         pdf_path = dest_dir / f"{broker_dealer.cik}-{accession_slug}.pdf"
 
         pdf_url = await self._resolve_pdf_url(
             cik=broker_dealer.cik,
-            accession_number=str(filing["accession_number"]),
+            accession_number=accession_number,
             primary_document=str(filing["primary_document"]),
         )
         if pdf_url is None:
             return None
 
-        pdf_bytes = await self._download_bytes_with_retries(pdf_url)
         max_size_mb = settings.gemini_inline_pdf_max_size_mb if settings.llm_provider == "gemini" else settings.openai_max_pdf_size_mb
         max_pdf_size_bytes = max_size_mb * 1024 * 1024
+
+        if settings.llm_use_files_api:
+            # Streaming path (ADR-0001 phase 2). See docstring on
+            # ``_download_filing_pdf`` for the rationale and the consumer
+            # caveats. Mirrors that path here for the latest-filing entry
+            # point used by the clearing pipeline.
+            try:
+                byte_size = await self._stream_to_path(
+                    pdf_url, pdf_path, max_pdf_size_bytes
+                )
+            except _StreamingPdfTooLargeError as exc:
+                raise RuntimeError(
+                    f"Downloaded PDF exceeds the configured {max_size_mb}MB inline ingestion limit for the selected provider."
+                ) from exc
+            if byte_size == 0:
+                return None
+            logger.debug(
+                "PDF streamed for BD %d: %s (%dKB)",
+                broker_dealer.id, pdf_path.name, byte_size // 1024,
+            )
+            return DownloadedPdfRecord(
+                bd_id=broker_dealer.id,
+                filing_year=filing_date.year,
+                report_date=filing_date,
+                source_filing_url=str(filing["filing_index_url"]),
+                source_pdf_url=pdf_url,
+                local_document_path=str(pdf_path),
+                bytes_base64="",
+                accession_number=accession_number,
+            )
+
+        # Legacy path (default-off): byte-for-byte identical to today's
+        # behavior.
+        pdf_bytes = await self._download_bytes_with_retries(pdf_url)
         if len(pdf_bytes) > max_pdf_size_bytes:
             raise RuntimeError(
                 f"Downloaded PDF exceeds the configured {max_size_mb}MB inline ingestion limit for the selected provider."
@@ -204,6 +285,7 @@ class PdfDownloaderService:
             source_pdf_url=pdf_url,
             local_document_path=str(pdf_path),
             bytes_base64=base64.b64encode(pdf_bytes).decode("utf-8"),
+            accession_number=accession_number,
         )
 
     async def _find_latest_x17a5_filing(
@@ -362,5 +444,70 @@ class PdfDownloaderService:
                 await asyncio.sleep(min(2**attempt, 8))
 
         raise RuntimeError("Unable to download SEC PDF after retries.") from last_error
+
+    async def _stream_to_path(
+        self, url: str, target_path: Path, max_size_bytes: int
+    ) -> int:
+        """Stream a SEC PDF to ``target_path`` chunk-by-chunk.
+
+        Used under ``settings.llm_use_files_api == True`` (ADR-0001 phase 2).
+        Memory ceiling per call is the chunk size (64 KB), regardless of the
+        filing's total size — the response body never aggregates in process
+        memory the way ``_download_bytes_with_retries`` does.
+
+        Returns the total byte count written, or 0 if the response was empty.
+        Raises ``_StreamingPdfTooLargeError`` if the streamed size exceeds
+        ``max_size_bytes`` (the partial file is removed before raising). All
+        other errors mirror ``_download_bytes_with_retries``: HTTP and
+        transport failures retry with exponential backoff.
+        """
+        _validate_sec_url(url)
+        headers = {
+            "User-Agent": settings.sec_user_agent,
+            "Accept": "application/pdf,application/octet-stream;q=0.9,*/*;q=0.8",
+        }
+        last_error: Exception | None = None
+
+        for attempt in range(1, settings.sec_request_max_retries + 1):
+            try:
+                async with httpx.AsyncClient(
+                    timeout=settings.sec_request_timeout_seconds,
+                    headers=headers,
+                    follow_redirects=False,
+                ) as client:
+                    async with client.stream("GET", url) as response:
+                        response.raise_for_status()
+                        content_type = response.headers.get("content-type", "").lower()
+                        if "pdf" not in content_type and not url.lower().endswith(".pdf"):
+                            raise RuntimeError("SEC filing did not resolve to a PDF document.")
+
+                        byte_size = 0
+                        with target_path.open("wb") as fh:
+                            async for chunk in response.aiter_bytes(chunk_size=64 * 1024):
+                                if not chunk:
+                                    continue
+                                byte_size += len(chunk)
+                                if byte_size > max_size_bytes:
+                                    fh.close()
+                                    target_path.unlink(missing_ok=True)
+                                    raise _StreamingPdfTooLargeError(byte_size)
+                                fh.write(chunk)
+                        return byte_size
+            except _StreamingPdfTooLargeError:
+                # Size guard exceeded: do not retry — re-running the same
+                # request will produce the same oversized payload. Surface
+                # to the caller so it can return a missing-PDF result.
+                raise
+            except (httpx.HTTPError, RuntimeError) as exc:
+                last_error = exc
+                # Drop any partial file from a failed attempt so the next
+                # try starts clean and we never serve a truncated PDF to
+                # a downstream consumer.
+                target_path.unlink(missing_ok=True)
+                if attempt == settings.sec_request_max_retries:
+                    raise
+                await asyncio.sleep(min(2**attempt, 8))
+
+        raise RuntimeError("Unable to stream SEC PDF after retries.") from last_error
 
 
