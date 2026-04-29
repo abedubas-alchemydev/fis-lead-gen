@@ -413,3 +413,322 @@ class TestPdfDispatchInlineVsFilesApi:
         monkeypatch.setattr(settings, "gemini_api_key", bad_key)
         with pytest.raises(GeminiConfigurationError, match="invalid shape"):
             GeminiResponsesClient()
+
+
+# ─────────────────── ADR-0001 phase 2: extract_clearing_data_from_path ───────────────────
+
+
+_CLEARING_RESPONSE = httpx.Response(
+    200,
+    json={
+        "candidates": [
+            {
+                "content": {
+                    "parts": [
+                        {
+                            "text": (
+                                '{"clearing_partner": "Pershing LLC", '
+                                '"clearing_type": "fully_disclosed", '
+                                '"agreement_date": null, '
+                                '"confidence_score": 0.92, '
+                                '"rationale": "synthetic test response"}'
+                            )
+                        }
+                    ]
+                }
+            }
+        ]
+    },
+)
+
+
+@pytest.fixture
+def clear_files_api_lru():
+    """Reset the in-process Files API LRU before AND after each test so
+    state from one test cannot leak into the next."""
+    from app.services.gemini_responses import _file_id_cache_clear_for_tests
+
+    _file_id_cache_clear_for_tests()
+    yield
+    _file_id_cache_clear_for_tests()
+
+
+def _make_synthetic_pdf_on_disk(tmp_path, size_kb: int = 8):
+    """Write a small synthetic PDF to disk and return its Path. The byte
+    content shape (starts with ``%PDF-1.4``) is structurally plausible but
+    no actual PDF parsing happens in these tests."""
+    from pathlib import Path as _P
+
+    target = tmp_path / "synthetic.pdf"
+    target.write_bytes(b"%PDF-1.4\n" + (b"x" * (size_kb * 1024 - 9)))
+    return _P(target)
+
+
+class TestExtractClearingDataFromPath:
+    """``extract_clearing_data_from_path`` is the new flag-on entry point.
+    These tests exercise the Files-API-default path (upload + reference by
+    file_uri, no inline base64 anywhere on the wire)."""
+
+    @respx.mock
+    @pytest.mark.asyncio
+    async def test_uploads_and_references_file_uri(
+        self,
+        patch_valid_key: None,
+        no_backoff_sleep: None,
+        clear_files_api_lru,
+        tmp_path,
+    ) -> None:
+        """First call uploads the PDF, then references the returned file_uri
+        in generateContent. The downstream call must NOT carry inline base64."""
+        local_path = _make_synthetic_pdf_on_disk(tmp_path)
+
+        upload_route = respx.post(url__regex=_FILES_UPLOAD_URL_PATTERN).mock(
+            return_value=httpx.Response(
+                200,
+                json={
+                    "file": {
+                        "name": "files/abc123",
+                        "uri": "https://generativelanguage.googleapis.com/v1beta/files/abc123",
+                        "state": "ACTIVE",
+                        "mimeType": "application/pdf",
+                    }
+                },
+            )
+        )
+
+        captured: dict[str, bytes] = {}
+
+        def capture_and_respond(request: httpx.Request) -> httpx.Response:
+            captured["body"] = request.content
+            return _CLEARING_RESPONSE
+
+        generate_route = respx.post(_GEMINI_URL).mock(side_effect=capture_and_respond)
+
+        client = GeminiResponsesClient()
+        result = await client.extract_clearing_data_from_path(
+            local_path=local_path,
+            accession_number="0001234567-25-000001",
+            prompt="extract clearing",
+        )
+
+        assert result.clearing_partner == "Pershing LLC"
+        assert upload_route.call_count == 1
+        assert generate_route.call_count == 1
+        body = captured["body"]
+        assert b'"file_data"' in body
+        assert b'"file_uri"' in body
+        assert b"files/abc123" in body
+        assert b'"inline_data"' not in body
+
+    @respx.mock
+    @pytest.mark.asyncio
+    async def test_lru_reuses_file_id_on_second_call_within_ttl(
+        self,
+        patch_valid_key: None,
+        no_backoff_sleep: None,
+        clear_files_api_lru,
+        tmp_path,
+    ) -> None:
+        """Two calls on the same accession inside the TTL window result in
+        ONE upload and TWO generateContent calls. The LRU is the load-bearing
+        bit of phase 2's cost story — without it every retry inside a batch
+        re-uploads the filing."""
+        local_path = _make_synthetic_pdf_on_disk(tmp_path)
+
+        upload_route = respx.post(url__regex=_FILES_UPLOAD_URL_PATTERN).mock(
+            return_value=httpx.Response(
+                200,
+                json={
+                    "file": {
+                        "name": "files/abc123",
+                        "uri": "https://generativelanguage.googleapis.com/v1beta/files/abc123",
+                        "state": "ACTIVE",
+                        "mimeType": "application/pdf",
+                    }
+                },
+            )
+        )
+        generate_route = respx.post(_GEMINI_URL).mock(return_value=_CLEARING_RESPONSE)
+
+        client = GeminiResponsesClient()
+        await client.extract_clearing_data_from_path(
+            local_path=local_path,
+            accession_number="0001234567-25-000001",
+            prompt="extract clearing",
+        )
+        await client.extract_clearing_data_from_path(
+            local_path=local_path,
+            accession_number="0001234567-25-000001",
+            prompt="extract clearing",
+        )
+
+        assert upload_route.call_count == 1, "second call should hit the LRU, not re-upload"
+        assert generate_route.call_count == 2
+
+    @respx.mock
+    @pytest.mark.asyncio
+    async def test_lru_distinct_accessions_each_upload(
+        self,
+        patch_valid_key: None,
+        no_backoff_sleep: None,
+        clear_files_api_lru,
+        tmp_path,
+    ) -> None:
+        """Distinct accession numbers each get their own upload — the LRU
+        keys on accession, not on local_path. A re-file (new accession on
+        the same firm) forces a fresh upload by construction."""
+        local_path = _make_synthetic_pdf_on_disk(tmp_path)
+
+        upload_responses = iter([
+            httpx.Response(200, json={"file": {
+                "name": "files/aaa", "uri": "https://x/v1beta/files/aaa",
+                "state": "ACTIVE", "mimeType": "application/pdf",
+            }}),
+            httpx.Response(200, json={"file": {
+                "name": "files/bbb", "uri": "https://x/v1beta/files/bbb",
+                "state": "ACTIVE", "mimeType": "application/pdf",
+            }}),
+        ])
+
+        upload_route = respx.post(url__regex=_FILES_UPLOAD_URL_PATTERN).mock(
+            side_effect=lambda request: next(upload_responses)
+        )
+        respx.post(_GEMINI_URL).mock(return_value=_CLEARING_RESPONSE)
+
+        client = GeminiResponsesClient()
+        await client.extract_clearing_data_from_path(
+            local_path=local_path, accession_number="0001234567-25-000001",
+            prompt="p",
+        )
+        await client.extract_clearing_data_from_path(
+            local_path=local_path, accession_number="0001234567-25-000002",
+            prompt="p",
+        )
+
+        assert upload_route.call_count == 2
+
+    @pytest.mark.asyncio
+    async def test_lru_expires_entries_past_ttl(
+        self,
+        patch_valid_key: None,
+        no_backoff_sleep: None,
+        clear_files_api_lru,
+    ) -> None:
+        """A cache entry older than ``_FILE_ID_TTL`` is evicted on read.
+        Drives the LRU helpers directly so we don't have to time-travel
+        respx mocks."""
+        from datetime import datetime, timedelta, timezone
+
+        from app.services.gemini_responses import (
+            _FILE_ID_CACHE,
+            _FILE_ID_TTL,
+            _file_id_cache_get,
+            _file_id_cache_put,
+        )
+
+        await _file_id_cache_put(
+            "0001234567-25-000001",
+            "files/old",
+            "https://x/v1beta/files/old",
+        )
+        # Backdate the entry past the TTL window.
+        key = "000123456725000001"
+        file_name, file_uri, _stamp = _FILE_ID_CACHE[key]
+        _FILE_ID_CACHE[key] = (
+            file_name, file_uri,
+            datetime.now(timezone.utc) - _FILE_ID_TTL - timedelta(minutes=1),
+        )
+
+        hit = await _file_id_cache_get("0001234567-25-000001")
+        assert hit is None  # expired entries are evicted, not returned.
+
+    @pytest.mark.asyncio
+    async def test_lru_caps_at_max_entries_evicts_oldest(
+        self, clear_files_api_lru
+    ) -> None:
+        """Beyond ``_FILE_ID_CACHE_MAX_ENTRIES``, the oldest entry is
+        evicted. Bounded memory is the load-bearing property — without it
+        a full catalog refill could pin GBs of file_id metadata."""
+        from app.services.gemini_responses import (
+            _FILE_ID_CACHE,
+            _FILE_ID_CACHE_MAX_ENTRIES,
+            _file_id_cache_get,
+            _file_id_cache_put,
+        )
+
+        # Fill cap + 1 entries; the first one must be evicted.
+        for i in range(_FILE_ID_CACHE_MAX_ENTRIES + 1):
+            await _file_id_cache_put(
+                f"acc-{i:06d}", f"files/{i}", f"https://x/v1beta/files/{i}"
+            )
+
+        assert len(_FILE_ID_CACHE) == _FILE_ID_CACHE_MAX_ENTRIES
+        assert await _file_id_cache_get("acc-000000") is None  # evicted
+        assert await _file_id_cache_get(f"acc-{_FILE_ID_CACHE_MAX_ENTRIES:06d}") is not None
+
+    @respx.mock
+    @pytest.mark.asyncio
+    async def test_expired_file_id_evicts_and_retries_once(
+        self,
+        patch_valid_key: None,
+        no_backoff_sleep: None,
+        clear_files_api_lru,
+        tmp_path,
+    ) -> None:
+        """If generateContent returns 404 / PERMISSION_DENIED (the symptom
+        of an expired file_uri), the client evicts the cache entry,
+        re-uploads, and retries the call exactly once."""
+        from app.services.gemini_responses import (
+            _file_id_cache_clear_for_tests,
+            _file_id_cache_put,
+        )
+
+        _file_id_cache_clear_for_tests()
+        await _file_id_cache_put(
+            "0001234567-25-000001",
+            "files/stale",
+            "https://x/v1beta/files/stale",
+        )
+
+        local_path = _make_synthetic_pdf_on_disk(tmp_path)
+
+        upload_route = respx.post(url__regex=_FILES_UPLOAD_URL_PATTERN).mock(
+            return_value=httpx.Response(
+                200,
+                json={
+                    "file": {
+                        "name": "files/fresh",
+                        "uri": "https://x/v1beta/files/fresh",
+                        "state": "ACTIVE",
+                        "mimeType": "application/pdf",
+                    }
+                },
+            )
+        )
+
+        # First generateContent call hits the stale file_uri → 404.
+        # Second one (after re-upload) returns success.
+        generate_responses = iter([
+            httpx.Response(
+                404,
+                json={"error": {
+                    "status": "PERMISSION_DENIED",
+                    "message": "You do not have permission to access File files/stale or it may not exist.",
+                }},
+            ),
+            _CLEARING_RESPONSE,
+        ])
+        generate_route = respx.post(_GEMINI_URL).mock(
+            side_effect=lambda request: next(generate_responses)
+        )
+
+        client = GeminiResponsesClient()
+        result = await client.extract_clearing_data_from_path(
+            local_path=local_path,
+            accession_number="0001234567-25-000001",
+            prompt="extract clearing",
+        )
+
+        assert result.clearing_partner == "Pershing LLC"
+        assert upload_route.call_count == 1, "single re-upload after eviction"
+        assert generate_route.call_count == 2, "stale call + retry call"

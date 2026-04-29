@@ -184,7 +184,25 @@ class DownloadedPdfRecord:
     source_filing_url: str | None
     source_pdf_url: str | None
     local_document_path: str
+    # Inline base64 of the PDF bytes. Populated under the legacy
+    # ``LLM_USE_FILES_API=false`` path so today's downstream consumers
+    # (api/v1/endpoints/broker_dealers focus-report endpoint, focus-CEO
+    # extraction, focus-reports financial multi-year extraction) keep
+    # functioning byte-for-byte unchanged. Under ``LLM_USE_FILES_API=true``
+    # the clearing-extraction path streams the bytes to disk and skips this
+    # allocation; ``file_id`` carries the provider Files API reference
+    # instead. ADR-0001 phase 2.
     bytes_base64: str
+    # SEC accession number (e.g. ``0001234567-25-000001``). Used as the LRU
+    # key alongside the provider name when ``LLM_USE_FILES_API=true``: a
+    # re-file gets a new accession by construction, so re-files automatically
+    # force a fresh upload — staleness collapses out of the design.
+    accession_number: str | None = None
+    # Provider-scoped Files API reference (e.g. ``files/abc123`` for Gemini,
+    # ``file-abc123`` for OpenAI). Populated by the LLM client after a
+    # successful upload under ``LLM_USE_FILES_API=true``. None on the legacy
+    # path. The downloader never sets this — it is provider-side state.
+    file_id: str | None = None
 
 
 @dataclass(slots=True)

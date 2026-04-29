@@ -107,6 +107,14 @@ class Settings(BaseSettings):
     # flat. Smaller PDFs stay on the inline base64 path (fewer round-trips,
     # lower latency). Set above gemini_inline_pdf_max_size_mb to disable.
     gemini_files_api_threshold_mb: int = 20
+    # When True, the LLM-bound clearing-extraction path uploads PDFs to the
+    # provider Files API (Gemini / OpenAI) instead of inline base64. ADR-0001
+    # phase 2. Default off so the rollout is reversible by flag flip; the
+    # default-off codepath is byte-for-byte identical to today's behavior.
+    # Per-process LRU keyed by ``(cik, accession_number)`` reuses uploaded
+    # ``file_id`` references inside the 23h TTL window (1h margin under the
+    # provider's 24h server-side TTL).
+    llm_use_files_api: bool = Field(default=False, alias="LLM_USE_FILES_API")
     openai_api_key: str | None = None
     openai_api_base: str = "https://api.openai.com/v1"
     openai_pdf_model: str = "gpt-4o"

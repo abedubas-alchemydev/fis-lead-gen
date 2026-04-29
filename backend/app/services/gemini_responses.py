@@ -6,6 +6,9 @@ import json
 import logging
 import re
 import secrets
+from collections import OrderedDict
+from datetime import datetime, timedelta, timezone
+from pathlib import Path
 from typing import Literal
 from urllib.parse import urlparse
 
@@ -17,6 +20,77 @@ from app.core.config import settings
 logger = logging.getLogger(__name__)
 
 _GEMINI_KEY_SHAPE = re.compile(r"^AIzaSy[A-Za-z0-9_\-]{33}$")
+
+# ─────────────────────── Files API LRU (ADR-0001 phase 2) ───────────────────
+#
+# Per-process cache mapping ``accession_number → (file_name, file_uri,
+# uploaded_at)``. Hot revisions reuse uploaded ``file_id`` references inside
+# the 23h TTL window (1h margin under Gemini's 24h server-side TTL), so
+# retries within a single batch hit the provider-side cache instead of paying
+# re-upload cost. Drains naturally on each Cloud Run revision — no persistent
+# state, rollback-by-flag-flip is sufficient.
+#
+# Race semantics: the lock is held only while reading and writing the
+# OrderedDict. Uploads themselves run OUTSIDE the lock so concurrent uploads
+# of distinct accessions don't serialize. Two concurrent calls on the *same*
+# accession may both upload before either writes — benign double-upload, the
+# second writer wins and the orphan file TTLs out on Google's side.
+_FILE_ID_CACHE: "OrderedDict[str, tuple[str, str, datetime]]" = OrderedDict()
+_FILE_ID_CACHE_LOCK = asyncio.Lock()
+_FILE_ID_TTL = timedelta(hours=23)
+_FILE_ID_CACHE_MAX_ENTRIES = 256
+
+
+def _file_id_cache_key(accession_number: str) -> str:
+    """Canonical LRU key. Strips dashes so the cache hits whether the caller
+    passed ``0001234567-25-000001`` or ``000123456725000001``."""
+    return accession_number.replace("-", "")
+
+
+async def _file_id_cache_get(accession_number: str) -> tuple[str, str] | None:
+    """Return ``(file_name, file_uri)`` if the accession has a fresh entry."""
+    key = _file_id_cache_key(accession_number)
+    async with _FILE_ID_CACHE_LOCK:
+        hit = _FILE_ID_CACHE.get(key)
+        if hit is None:
+            return None
+        file_name, file_uri, uploaded_at = hit
+        if datetime.now(timezone.utc) - uploaded_at >= _FILE_ID_TTL:
+            # Expired — drop and treat as a miss.
+            _FILE_ID_CACHE.pop(key, None)
+            return None
+        _FILE_ID_CACHE.move_to_end(key)
+        return file_name, file_uri
+
+
+async def _file_id_cache_put(
+    accession_number: str, file_name: str, file_uri: str
+) -> None:
+    """Insert or refresh a cache entry. Evicts the oldest if over capacity."""
+    key = _file_id_cache_key(accession_number)
+    async with _FILE_ID_CACHE_LOCK:
+        _FILE_ID_CACHE[key] = (file_name, file_uri, datetime.now(timezone.utc))
+        _FILE_ID_CACHE.move_to_end(key)
+        while len(_FILE_ID_CACHE) > _FILE_ID_CACHE_MAX_ENTRIES:
+            _FILE_ID_CACHE.popitem(last=False)
+
+
+async def _file_id_cache_evict(accession_number: str) -> None:
+    """Drop a cache entry, e.g. after a 404 from generateContent."""
+    key = _file_id_cache_key(accession_number)
+    async with _FILE_ID_CACHE_LOCK:
+        _FILE_ID_CACHE.pop(key, None)
+
+
+def _file_id_cache_clear_for_tests() -> None:
+    """Test-only helper. Sync because tests typically run inside event loops
+    and don't need the lock for setup/teardown isolation."""
+    _FILE_ID_CACHE.clear()
+
+
+class _FilesApiFileExpired(Exception):
+    """Internal: ``generateContent`` returned 404/INVALID_ARGUMENT for a
+    cached file_uri. Triggers one cache eviction + retry."""
 
 
 class GeminiConfigurationError(RuntimeError):
@@ -102,6 +176,32 @@ class GeminiResponsesClient:
                 f"Expected 39 chars matching ^AIzaSy[A-Za-z0-9_-]{{33}}$."
             )
 
+    @staticmethod
+    def _clearing_schema() -> dict[str, object]:
+        return {
+            "type": "OBJECT",
+            "properties": {
+                "clearing_partner": {"type": ["STRING", "NULL"]},
+                "clearing_type": {
+                    "type": "STRING",
+                    "enum": ["fully_disclosed", "self_clearing", "omnibus", "unknown"],
+                },
+                "agreement_date": {"type": ["STRING", "NULL"]},
+                "confidence_score": {"type": "NUMBER"},
+                "rationale": {"type": "STRING"},
+                "evidence_excerpt": {"type": ["STRING", "NULL"]},
+            },
+            "required": ["clearing_type", "confidence_score", "rationale"],
+            "propertyOrdering": [
+                "clearing_partner",
+                "clearing_type",
+                "agreement_date",
+                "confidence_score",
+                "rationale",
+                "evidence_excerpt",
+            ],
+        }
+
     async def extract_clearing_data(self, *, pdf_bytes_base64: str, prompt: str) -> GeminiClearingExtraction:
         if not settings.gemini_api_key:
             raise GeminiConfigurationError("GEMINI_API_KEY is not configured.")
@@ -109,29 +209,7 @@ class GeminiResponsesClient:
         response_payload = await self._dispatch_pdf_extract(
             pdf_bytes_base64=pdf_bytes_base64,
             prompt=prompt,
-            schema={
-                "type": "OBJECT",
-                "properties": {
-                    "clearing_partner": {"type": ["STRING", "NULL"]},
-                    "clearing_type": {
-                        "type": "STRING",
-                        "enum": ["fully_disclosed", "self_clearing", "omnibus", "unknown"],
-                    },
-                    "agreement_date": {"type": ["STRING", "NULL"]},
-                    "confidence_score": {"type": "NUMBER"},
-                    "rationale": {"type": "STRING"},
-                    "evidence_excerpt": {"type": ["STRING", "NULL"]},
-                },
-                "required": ["clearing_type", "confidence_score", "rationale"],
-                "propertyOrdering": [
-                    "clearing_partner",
-                    "clearing_type",
-                    "agreement_date",
-                    "confidence_score",
-                    "rationale",
-                    "evidence_excerpt",
-                ],
-            },
+            schema=self._clearing_schema(),
         )
         response_text = self._extract_response_text(response_payload)
 
@@ -141,6 +219,42 @@ class GeminiResponsesClient:
             raise GeminiExtractionError("Gemini returned invalid JSON for clearing extraction.") from exc
 
         return GeminiClearingExtraction.model_validate(self._normalize_text_fields(parsed))
+
+    async def extract_clearing_data_from_path(
+        self,
+        *,
+        local_path: Path,
+        accession_number: str,
+        prompt: str,
+    ) -> GeminiClearingExtraction:
+        """Files-API-default clearing extraction (ADR-0001 phase 2).
+
+        Uploads the PDF via the Files API (or reuses an LRU-cached file_uri
+        for the same ``accession_number``), then sends a ``generateContent``
+        call that references the uploaded file by ``file_uri`` — no inline
+        base64 is ever sent on the wire. On a 404 / "expired file" response
+        the cache entry is evicted and the upload + call are retried once.
+        """
+        if not settings.gemini_api_key:
+            raise GeminiConfigurationError("GEMINI_API_KEY is not configured.")
+
+        response_payload = await self._call_pdf_via_files_api(
+            local_path=local_path,
+            accession_number=accession_number,
+            prompt=prompt,
+            schema=self._clearing_schema(),
+        )
+        response_text = self._extract_response_text(response_payload)
+        try:
+            parsed = json.loads(response_text)
+        except json.JSONDecodeError as exc:
+            raise GeminiExtractionError(
+                "Gemini returned invalid JSON for clearing extraction."
+            ) from exc
+
+        return GeminiClearingExtraction.model_validate(
+            self._normalize_text_fields(parsed)
+        )
 
     async def extract_classification_data(self, *, prompt: str) -> GeminiClassificationExtraction:
         """Run a text-only Gemini call that returns the canonical clearing label.
@@ -519,6 +633,121 @@ class GeminiResponsesClient:
         response (NOT the full URI).
         """
         return f"{self.base_url}/{file_name}"
+
+    async def _call_pdf_via_files_api(
+        self,
+        *,
+        local_path: Path,
+        accession_number: str,
+        prompt: str,
+        schema: dict[str, object],
+    ) -> dict[str, object]:
+        """Run a Gemini PDF extraction with the Files API as the upload path.
+
+        Looks up ``accession_number`` in the LRU first; on a hit, reuses the
+        cached file_uri. On a miss, uploads the PDF from ``local_path`` via
+        the streaming multipart helper and stores the result.
+
+        Handles the expired-file_id retry: if ``generateContent`` returns 404
+        / "INVALID_ARGUMENT" / "PERMISSION_DENIED" referencing a stale
+        ``file_uri``, the entry is evicted, the file is re-uploaded, and the
+        call is retried exactly once.
+        """
+        try:
+            file_name, file_uri = await self._upload_or_reuse_file(
+                local_path=local_path, accession_number=accession_number
+            )
+        except _FilesApiFileExpired:
+            # Defensive: the cache helper itself shouldn't raise this, but if
+            # it ever propagates from a future caller, treat as miss + retry.
+            await _file_id_cache_evict(accession_number)
+            file_name, file_uri = await self._upload_or_reuse_file(
+                local_path=local_path, accession_number=accession_number
+            )
+
+        payload = self._build_files_api_payload(
+            file_uri=file_uri, prompt=prompt, schema=schema
+        )
+        try:
+            return await self._post_with_retries(payload)
+        except GeminiExtractionError as exc:
+            # Retry exactly once if the failure smells like a stale file_uri.
+            # Gemini surfaces this as 404 or 400 with a message containing
+            # "PERMISSION_DENIED" / "File ... not found".
+            if not self._looks_like_stale_file_id(exc):
+                raise
+            logger.info(
+                "Files API file_uri %s appears stale (accession=%s); evicting "
+                "and retrying upload + generateContent once.",
+                file_name, accession_number,
+            )
+            await _file_id_cache_evict(accession_number)
+            # Force re-upload by going around _upload_or_reuse_file's hit path.
+            new_file_name, new_file_uri = await self._upload_pdf_from_path(local_path)
+            await _file_id_cache_put(accession_number, new_file_name, new_file_uri)
+            payload = self._build_files_api_payload(
+                file_uri=new_file_uri, prompt=prompt, schema=schema
+            )
+            return await self._post_with_retries(payload)
+
+    @staticmethod
+    def _looks_like_stale_file_id(exc: GeminiExtractionError) -> bool:
+        """Heuristic for the expired-file_id failure mode.
+
+        Gemini returns 404 with a body like ``{"error": {"status":
+        "PERMISSION_DENIED", "message": "You do not have permission to
+        access File files/abc123 or it may not exist."}}`` for an expired
+        or deleted file reference. Match on the status text or the
+        404 marker in the wrapped error message.
+        """
+        text = str(exc).lower()
+        return any(
+            marker in text
+            for marker in (
+                "status 404",
+                "permission_denied",
+                "not have permission",
+                "may not exist",
+                "file not found",
+            )
+        )
+
+    async def _upload_or_reuse_file(
+        self, *, local_path: Path, accession_number: str
+    ) -> tuple[str, str]:
+        """LRU-aware Files API upload. Returns ``(file_name, file_uri)``.
+
+        The lock guards only the cache mutations; the upload itself runs
+        outside the lock so concurrent requests on distinct accessions don't
+        serialize. Two concurrent uploads of the same accession are benign
+        (second writer wins, orphaned file TTLs out server-side).
+        """
+        hit = await _file_id_cache_get(accession_number)
+        if hit is not None:
+            return hit
+        file_name, file_uri = await self._upload_pdf_from_path(local_path)
+        await _file_id_cache_put(accession_number, file_name, file_uri)
+        return file_name, file_uri
+
+    async def _upload_pdf_from_path(self, local_path: Path) -> tuple[str, str]:
+        """Upload a PDF from disk via the Files API multipart endpoint.
+
+        Reads the PDF off the local tempfile rather than taking pre-buffered
+        ``pdf_bytes`` like ``_upload_pdf_to_files_api``. Skips the base64
+        encode round-trip from the legacy inline path: bytes flow disk →
+        request body → wire, with no extra ~33%-overhead encoding step.
+        Memory ceiling per upload is one filing size (the request body
+        buffer) instead of two (decoded bytes + base64 string + outbound
+        inline payload), which is the bulk of the win on this leg.
+
+        The actual SEC fetch upstream of this call already streams to disk
+        chunk-by-chunk via ``PdfDownloaderService._stream_to_path`` — the
+        filing never aggregates in-process during ingestion.
+        """
+        # Off-loop the disk read so a busy event loop doesn't stall on a
+        # 50 MB filesystem read while other coroutines are pending.
+        pdf_bytes = await asyncio.to_thread(local_path.read_bytes)
+        return await self._upload_pdf_to_files_api(pdf_bytes)
 
     async def _upload_pdf_to_files_api(self, pdf_bytes: bytes) -> tuple[str, str]:
         """Upload PDF bytes via multipart/related and return ``(name, uri)``.
