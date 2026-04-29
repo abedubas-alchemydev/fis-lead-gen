@@ -5,15 +5,16 @@ import Link from "next/link";
 import type { Route } from "next";
 import { useRouter, useSearchParams } from "next/navigation";
 
-import { ArrowDown, ArrowUp, Bell, Search, TrendingDown, TrendingUp } from "lucide-react";
+import { ArrowDown, ArrowUp, Bell, Search, TrendingDown, TrendingUp, X } from "lucide-react";
 
 import { apiRequest, buildApiPath } from "@/lib/api";
 import { formatCurrency, formatRelativeTime } from "@/lib/format";
 import {
-  MASTER_LIST_STATE_DEFAULTS,
   buildMasterListUrl,
+  clearAllFilters,
   encodeReturnParam,
   fromSearchParams,
+  hasActiveFilters,
   type MasterListQueryState,
 } from "@/lib/master-list-state";
 import { STATE_NAMES, stateCodeFromName } from "@/lib/states";
@@ -438,11 +439,14 @@ export function MasterListWorkspaceClient() {
 
   function clearFilters() {
     setSearchInput("");
-    commit(MASTER_LIST_STATE_DEFAULTS);
+    commit(clearAllFilters(queryState));
   }
+
+  const filtersActive = hasActiveFilters(queryState);
 
   const activeFilterCount = useMemo(() => {
     let count = 0;
+    if (search !== "") count += 1;
     if (stateFilter !== "") count += 1;
     if (healthFilter !== "All") count += 1;
     if (leadPriorityFilter !== "All") count += 1;
@@ -455,6 +459,7 @@ export function MasterListWorkspaceClient() {
     if (registeredBeforeFilter !== null) count += 1;
     return count;
   }, [
+    search,
     stateFilter,
     healthFilter,
     leadPriorityFilter,
@@ -628,13 +633,16 @@ export function MasterListWorkspaceClient() {
               Refine the workspace
             </h3>
           </div>
-          <button
-            type="button"
-            onClick={clearFilters}
-            className="rounded-[6px] border border-[var(--border-2,rgba(30,64,175,0.16))] bg-transparent px-2.5 py-1 text-[11px] font-semibold text-[var(--text-dim,#475569)] transition hover:bg-[var(--surface-2,#f1f6fd)] hover:text-[var(--text,#0f172a)]"
-          >
-            Clear filters
-          </button>
+          {filtersActive ? (
+            <button
+              type="button"
+              onClick={clearFilters}
+              className="inline-flex items-center gap-1.5 rounded-[6px] border border-[var(--border-2,rgba(30,64,175,0.16))] bg-transparent px-2.5 py-1 text-[11px] font-semibold text-[var(--text-dim,#475569)] transition hover:bg-[var(--surface-2,#f1f6fd)] hover:text-[var(--text,#0f172a)]"
+            >
+              <X aria-hidden className="h-3.5 w-3.5" strokeWidth={2} />
+              Clear filters
+            </button>
+          ) : null}
         </div>
 
         <div className="mb-4 grid gap-4 md:grid-cols-2 lg:grid-cols-4">
