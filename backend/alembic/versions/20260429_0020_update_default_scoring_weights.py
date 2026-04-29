@@ -1,7 +1,7 @@
 """update default scoring weights for ACG ICP
 
-Revision ID: 20260429_0021
-Revises: 20260429_0020
+Revision ID: 20260429_0020
+Revises: 20260429_0019
 Create Date: 2026-04-29
 
 Data-only migration. No schema change.
@@ -38,8 +38,8 @@ from collections.abc import Sequence
 from alembic import op
 
 
-revision: str = "20260429_0021"
-down_revision: str | None = "20260429_0020"
+revision: str = "20260429_0020"
+down_revision: str | None = "20260429_0019"
 branch_labels: str | Sequence[str] | None = None
 depends_on: str | Sequence[str] | None = None
 
