@@ -41,13 +41,19 @@ export function FavoriteListsSidebar({
   const [deletingList, setDeletingList] = useState<FavoriteList | null>(null);
 
   if (loading) {
+    // Skeleton previews the actual row layout — name on the left, count
+    // pill on the right — so the sidebar doesn't visually shift when
+    // the lists fetch resolves.
     return (
-      <div className="space-y-2" aria-busy>
+      <div className="space-y-1" aria-busy>
         {Array.from({ length: 4 }).map((_, index) => (
           <div
             key={`sidebar-skel-${index}`}
-            className="h-[44px] animate-pulse rounded-lg bg-[var(--surface-2,#f1f6fd)]"
-          />
+            className="flex h-[44px] items-center gap-2 rounded-lg px-3 py-2"
+          >
+            <div className="h-3.5 min-w-0 flex-1 animate-pulse rounded bg-[var(--surface-2,#f1f6fd)]" />
+            <div className="h-3 w-6 shrink-0 animate-pulse rounded bg-[var(--surface-2,#f1f6fd)]" />
+          </div>
         ))}
       </div>
     );

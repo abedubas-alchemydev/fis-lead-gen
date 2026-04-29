@@ -2,7 +2,7 @@
 
 import Link from "next/link";
 import type { Route } from "next";
-import { ArrowRight, ChevronLeft, ChevronRight, Star } from "lucide-react";
+import { ArrowRight, ChevronLeft, ChevronRight } from "lucide-react";
 import { useEffect, useMemo, useState } from "react";
 
 import { getFavoriteListItems } from "@/lib/api";
@@ -12,6 +12,8 @@ import {
   encodeReturnParam,
 } from "@/lib/master-list-state";
 import type { FavoriteList, FavoriteListItem } from "@/types/favorite-list";
+
+import { EmptyItemsState } from "./empty-items-state";
 
 // Right pane on /my-favorites. Fetches the active list's items and
 // renders a paginated list with broker-dealer links into the firm-
@@ -99,7 +101,7 @@ export function FavoriteListItemsPane({
           }}
         />
       ) : items.length === 0 ? (
-        <EmptyState />
+        <EmptyItemsState />
       ) : (
         <ul role="list" className="divide-y divide-[var(--border,rgba(30,64,175,0.1))]">
           {items.map((item) => {
@@ -162,16 +164,25 @@ export function FavoriteListItemsPane({
   );
 }
 
+// Skeleton rows preview the eventual row shape (name + subtext + Review
+// chip on the right) so the loading state doesn't visually jump when the
+// fetch resolves.
 function ItemsSkeleton() {
   return (
-    <div className="space-y-2" aria-busy>
+    <ul role="list" className="divide-y divide-[var(--border,rgba(30,64,175,0.1))]" aria-busy>
       {Array.from({ length: 6 }).map((_, index) => (
-        <div
+        <li
           key={`items-skel-${index}`}
-          className="h-[58px] animate-pulse rounded-lg bg-[var(--surface-2,#f1f6fd)]"
-        />
+          className="flex items-center gap-3 py-3"
+        >
+          <div className="min-w-0 flex-1 space-y-2">
+            <div className="h-3.5 w-2/3 animate-pulse rounded bg-[var(--surface-2,#f1f6fd)]" />
+            <div className="h-3 w-1/3 animate-pulse rounded bg-[var(--surface-2,#f1f6fd)]" />
+          </div>
+          <div className="h-6 w-[68px] shrink-0 animate-pulse rounded-md bg-[var(--surface-2,#f1f6fd)]" />
+        </li>
       ))}
-    </div>
+    </ul>
   );
 }
 
@@ -199,18 +210,3 @@ function ErrorState({
   );
 }
 
-function EmptyState() {
-  return (
-    <div className="my-2 flex flex-col items-center gap-3 rounded-lg border border-dashed border-[var(--border,rgba(30,64,175,0.1))] px-4 py-10 text-center">
-      <div className="grid h-12 w-12 place-items-center rounded-full bg-[var(--surface-2,#f1f6fd)] text-[var(--text-muted,#94a3b8)]">
-        <Star className="h-5 w-5" strokeWidth={1.75} aria-hidden />
-      </div>
-      <h3 className="text-[14px] font-semibold text-[var(--text,#0f172a)]">
-        No firms in this list yet
-      </h3>
-      <p className="max-w-sm text-[13px] leading-5 text-[var(--text-dim,#475569)]">
-        Save firms from the master list or firm detail page to add them here.
-      </p>
-    </div>
-  );
-}
