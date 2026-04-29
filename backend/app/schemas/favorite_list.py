@@ -72,3 +72,14 @@ class FavoriteListItemCreate(BaseModel):
     """Request body for ``POST /api/v1/favorite-lists/{list_id}/items``."""
 
     broker_dealer_id: int = Field(ge=1)
+
+
+class FavoriteListWithMembership(FavoriteListResponse):
+    """One row in ``GET /api/v1/broker-dealers/{firm_id}/favorite-lists``.
+
+    Extends ``FavoriteListResponse`` with ``is_member`` so the FE list-picker
+    can render checked states for lists that already contain ``firm_id``
+    without a second round-trip per list.
+    """
+
+    is_member: bool

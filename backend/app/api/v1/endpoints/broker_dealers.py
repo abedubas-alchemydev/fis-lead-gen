@@ -6,11 +6,13 @@ from datetime import date, datetime, time, timezone
 from fastapi import APIRouter, Body, Depends, HTTPException, Query, status
 from fastapi.responses import Response
 from pydantic import BaseModel, Field
+from sqlalchemy import exists, func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.config import settings
 from app.db.session import get_db_session
 from app.models.broker_dealer import BrokerDealer
+from app.models.favorite_list import FavoriteList, FavoriteListItem
 from app.schemas.auth import AuthenticatedUser
 from app.schemas.broker_dealer import (
     BrokerDealerDetail,
@@ -25,6 +27,7 @@ from app.schemas.broker_dealer import (
     FinancialMetricsResponse,
     RegistrationComplianceSummary,
 )
+from app.schemas.favorite_list import FavoriteListWithMembership
 from app.schemas.favorites import FavoriteResponse
 from app.services.contacts import ExecutiveContactService
 from app.schemas.pipeline import ClearingArrangementsResponse
@@ -519,6 +522,69 @@ async def unfavorite_broker_dealer(
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Broker-dealer not found.")
 
     await remove_favorite(db, current_user.id, broker_dealer_id)
+
+
+@router.get(
+    "/{firm_id}/favorite-lists",
+    response_model=list[FavoriteListWithMembership],
+)
+async def get_firm_favorite_lists(
+    firm_id: int,
+    current_user: AuthenticatedUser = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db_session),
+) -> list[FavoriteListWithMembership]:
+    """Return the calling user's lists with an ``is_member`` flag for ``firm_id``.
+
+    Powers the FE list-picker so each list can render a checked state without
+    a per-list round-trip. ``item_count`` is computed via the same outer-join
+    sub-aggregate that ``GET /favorite-lists`` uses so the list-picker can
+    show ``Watchlist A · 3 firms`` next to the checkbox. Default list first,
+    then by ``created_at`` ascending — matches the sidebar ordering.
+    """
+    firm_check = await db.execute(
+        select(BrokerDealer.id).where(BrokerDealer.id == firm_id)
+    )
+    if firm_check.scalar_one_or_none() is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Firm not found.")
+
+    item_count_sq = (
+        select(
+            FavoriteListItem.list_id.label("list_id"),
+            func.count(FavoriteListItem.id).label("count"),
+        )
+        .group_by(FavoriteListItem.list_id)
+        .subquery()
+    )
+    is_member_expr = (
+        exists()
+        .where(
+            FavoriteListItem.list_id == FavoriteList.id,
+            FavoriteListItem.broker_dealer_id == firm_id,
+        )
+        .label("is_member")
+    )
+    stmt = (
+        select(
+            FavoriteList,
+            func.coalesce(item_count_sq.c.count, 0).label("item_count"),
+            is_member_expr,
+        )
+        .outerjoin(item_count_sq, FavoriteList.id == item_count_sq.c.list_id)
+        .where(FavoriteList.user_id == current_user.id)
+        .order_by(FavoriteList.is_default.desc(), FavoriteList.created_at.asc())
+    )
+    rows = (await db.execute(stmt)).all()
+    return [
+        FavoriteListWithMembership(
+            id=fl.id,
+            name=fl.name,
+            is_default=fl.is_default,
+            item_count=int(count),
+            created_at=fl.created_at,
+            is_member=bool(is_member),
+        )
+        for fl, count, is_member in rows
+    ]
 
 
 @router.post("/{broker_dealer_id}/visit", status_code=status.HTTP_204_NO_CONTENT)
