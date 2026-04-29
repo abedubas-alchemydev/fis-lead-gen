@@ -1,5 +1,15 @@
 """Service layer for per-user favorites and visit history.
 
+Favorites now live in ``favorite_list_item`` filtered to the user's default
+``favorite_list`` (named "Favorites", ``is_default=true``). The legacy
+``user_favorite`` single-table flow was dropped in migration ``20260429_0021``;
+this module bridges the legacy ``POST /broker-dealers/{id}/favorite`` /
+``GET /favorites`` endpoints onto the new playlist-style schema while phase 4
+of #17 swaps those endpoints over to the explicit list APIs.
+
+Public function signatures are preserved so endpoint callers don't change:
+``add_favorite``, ``remove_favorite``, ``is_favorited``, ``list_favorites``.
+
 All writes go through ``INSERT ... ON CONFLICT`` so the UI can fire the same
 POST twice (double-click, retry) without tripping a 500. The endpoint layer
 is therefore free of its own idempotency guard: the DB is the source of truth.
@@ -19,32 +29,77 @@ from sqlalchemy.dialects.postgresql import insert
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.models.broker_dealer import BrokerDealer
-from app.models.user_favorite import UserFavorite
+from app.models.favorite_list import FavoriteList, FavoriteListItem
 from app.models.user_visit import UserVisit
-from app.schemas.favorites import FavoriteListItem
+from app.schemas.favorites import FavoriteListItem as FavoriteListItemSchema
 from app.schemas.visits import VisitListItem
 
 
-async def add_favorite(db: AsyncSession, user_id: str, bd_id: int) -> UserFavorite:
-    """Favorite a broker-dealer for a user.
+_DEFAULT_LIST_NAME = "Favorites"
 
-    Idempotent: if the ``(user_id, bd_id)`` pair already exists the existing
-    row is returned unchanged. ``ON CONFLICT DO NOTHING`` gives us that
-    semantics without races; we fall back to a plain SELECT when the INSERT
-    is a no-op so the caller always gets the canonical row back.
+
+async def _get_or_create_default_list_id(db: AsyncSession, user_id: str) -> int:
+    """Return the user's default ``favorite_list`` id, creating it if absent.
+
+    Migration ``20260429_0019`` backfilled a default list for every user who
+    already had legacy favorites at upgrade time. Users who signed up after
+    the migration won't have one until they favorite something for the first
+    time, so the write path bootstraps it lazily here. Idempotent via
+    ``ON CONFLICT (user_id, name) DO NOTHING`` plus a follow-up SELECT for
+    the lost-race path.
     """
-    stmt = (
-        insert(UserFavorite)
-        .values(user_id=user_id, bd_id=bd_id)
-        .on_conflict_do_nothing(index_elements=["user_id", "bd_id"])
-        .returning(UserFavorite)
+    stmt = select(FavoriteList.id).where(
+        FavoriteList.user_id == user_id,
+        FavoriteList.is_default.is_(True),
     )
-    row = (await db.execute(stmt)).scalar_one_or_none()
+    existing = (await db.execute(stmt)).scalar_one_or_none()
+    if existing is not None:
+        return existing
+
+    insert_stmt = (
+        insert(FavoriteList)
+        .values(user_id=user_id, name=_DEFAULT_LIST_NAME, is_default=True)
+        .on_conflict_do_nothing(index_elements=["user_id", "name"])
+        .returning(FavoriteList.id)
+    )
+    inserted = (await db.execute(insert_stmt)).scalar_one_or_none()
+    if inserted is not None:
+        return inserted
+    return (await db.execute(stmt)).scalar_one()
+
+
+async def _get_default_list_id(db: AsyncSession, user_id: str) -> int | None:
+    """Read-only lookup. Returns ``None`` when the user has no default list yet."""
+    stmt = select(FavoriteList.id).where(
+        FavoriteList.user_id == user_id,
+        FavoriteList.is_default.is_(True),
+    )
+    return (await db.execute(stmt)).scalar_one_or_none()
+
+
+async def add_favorite(
+    db: AsyncSession, user_id: str, bd_id: int
+) -> FavoriteListItem:
+    """Favorite a broker-dealer for a user via their default list.
+
+    Idempotent: if the ``(list_id, broker_dealer_id)`` pair already exists the
+    existing row is returned unchanged. ``ON CONFLICT DO NOTHING`` gives us
+    that semantics without races; we fall back to a plain SELECT when the
+    INSERT is a no-op so the caller always gets the canonical row back.
+    """
+    list_id = await _get_or_create_default_list_id(db, user_id)
+    insert_stmt = (
+        insert(FavoriteListItem)
+        .values(list_id=list_id, broker_dealer_id=bd_id)
+        .on_conflict_do_nothing(index_elements=["list_id", "broker_dealer_id"])
+        .returning(FavoriteListItem)
+    )
+    row = (await db.execute(insert_stmt)).scalar_one_or_none()
     if row is None:
         existing = await db.execute(
-            select(UserFavorite).where(
-                UserFavorite.user_id == user_id,
-                UserFavorite.bd_id == bd_id,
+            select(FavoriteListItem).where(
+                FavoriteListItem.list_id == list_id,
+                FavoriteListItem.broker_dealer_id == bd_id,
             )
         )
         row = existing.scalar_one()
@@ -53,15 +108,19 @@ async def add_favorite(db: AsyncSession, user_id: str, bd_id: int) -> UserFavori
 
 
 async def remove_favorite(db: AsyncSession, user_id: str, bd_id: int) -> None:
-    """Unfavorite a broker-dealer for a user.
+    """Unfavorite a broker-dealer from the user's default list.
 
     Idempotent: a DELETE against a row that doesn't exist is a no-op, which
     matches the HTTP 204 contract on ``DELETE /broker-dealers/{id}/favorite``.
+    A user with no default list at all is also a no-op (nothing to remove).
     """
+    list_id = await _get_default_list_id(db, user_id)
+    if list_id is None:
+        return
     await db.execute(
-        delete(UserFavorite).where(
-            UserFavorite.user_id == user_id,
-            UserFavorite.bd_id == bd_id,
+        delete(FavoriteListItem).where(
+            FavoriteListItem.list_id == list_id,
+            FavoriteListItem.broker_dealer_id == bd_id,
         )
     )
     await db.commit()
@@ -72,27 +131,36 @@ async def list_favorites(
     user_id: str,
     limit: int,
     offset: int,
-) -> tuple[list[FavoriteListItem], int]:
-    """Return a page of the user's favorites plus the total count.
+) -> tuple[list[FavoriteListItemSchema], int]:
+    """Return a page of the user's default-list favorites plus the total count.
 
-    Sorted ``created_at DESC`` (newest first) per plan §2.1. The covering
-    index ``ix_user_favorite_created_at`` matches the sort direction.
+    Sorted ``created_at DESC`` (newest first) per plan §2.1. A user with no
+    default list yet returns an empty page.
     """
-    total_stmt = select(func.count(UserFavorite.id)).where(UserFavorite.user_id == user_id)
+    list_id = await _get_default_list_id(db, user_id)
+    if list_id is None:
+        return [], 0
+
+    total_stmt = select(func.count(FavoriteListItem.id)).where(
+        FavoriteListItem.list_id == list_id
+    )
     total = int((await db.execute(total_stmt)).scalar_one())
 
     data_stmt = (
-        select(BrokerDealer, UserFavorite.created_at)
-        .join(UserFavorite, UserFavorite.bd_id == BrokerDealer.id)
-        .where(UserFavorite.user_id == user_id)
-        .order_by(UserFavorite.created_at.desc(), UserFavorite.id.desc())
+        select(BrokerDealer, FavoriteListItem.created_at)
+        .join(
+            FavoriteListItem,
+            FavoriteListItem.broker_dealer_id == BrokerDealer.id,
+        )
+        .where(FavoriteListItem.list_id == list_id)
+        .order_by(FavoriteListItem.created_at.desc(), FavoriteListItem.id.desc())
         .offset(offset)
         .limit(limit)
     )
     rows: Sequence = (await db.execute(data_stmt)).all()
 
     items = [
-        FavoriteListItem.model_validate(
+        FavoriteListItemSchema.model_validate(
             {**_bd_to_summary(broker_dealer), "favorited_at": favorited_at}
         )
         for broker_dealer, favorited_at in rows
@@ -165,13 +233,17 @@ async def is_favorited(
 ) -> tuple[bool, datetime | None]:
     """Check whether the user has favorited this broker-dealer.
 
-    Returns ``(False, None)`` when no row exists. The profile endpoint uses
-    this to stamp ``is_favorited`` + ``favorited_at`` onto the response so
-    the heart toggle renders in the correct state on first paint.
+    Returns ``(False, None)`` when the user has no default list yet, or when
+    the firm isn't pinned to it. The profile endpoint uses this to stamp
+    ``is_favorited`` + ``favorited_at`` onto the response so the heart toggle
+    renders in the correct state on first paint.
     """
-    stmt = select(UserFavorite.created_at).where(
-        UserFavorite.user_id == user_id,
-        UserFavorite.bd_id == bd_id,
+    list_id = await _get_default_list_id(db, user_id)
+    if list_id is None:
+        return False, None
+    stmt = select(FavoriteListItem.created_at).where(
+        FavoriteListItem.list_id == list_id,
+        FavoriteListItem.broker_dealer_id == bd_id,
     )
     created_at = (await db.execute(stmt)).scalar_one_or_none()
     if created_at is None:
