@@ -95,6 +95,7 @@ export async function apiRequest<T>(path: string, init?: RequestInit): Promise<T
 // so the kebab disables Rename/Delete for default lists.
 import type {
   FavoriteList,
+  FavoriteListWithMembership,
   PaginatedFavoriteListItems
 } from "@/types/favorite-list";
 
@@ -136,4 +137,38 @@ export async function deleteFavoriteList(listId: number): Promise<void> {
   await apiRequest<void>(`/api/v1/favorite-lists/${listId}`, {
     method: "DELETE"
   });
+}
+
+// ── Per-firm list membership (#17 phase 3) ────────────────────────────────
+// The picker on master-list rows + the firm-detail header reads
+// `getListsForFirm` to render checkboxes pre-flagged with current
+// membership, then mutates via add/remove. POST/DELETE reuse the
+// phase-2 items endpoints — no new BE there.
+
+export async function getListsForFirm(
+  firmId: number
+): Promise<FavoriteListWithMembership[]> {
+  return apiRequest<FavoriteListWithMembership[]>(
+    `/api/v1/broker-dealers/${firmId}/favorite-lists`
+  );
+}
+
+export async function addFirmToList(
+  listId: number,
+  firmId: number
+): Promise<void> {
+  await apiRequest<void>(`/api/v1/favorite-lists/${listId}/items`, {
+    method: "POST",
+    body: JSON.stringify({ broker_dealer_id: firmId })
+  });
+}
+
+export async function removeFirmFromList(
+  listId: number,
+  firmId: number
+): Promise<void> {
+  await apiRequest<void>(
+    `/api/v1/favorite-lists/${listId}/items/${firmId}`,
+    { method: "DELETE" }
+  );
 }
