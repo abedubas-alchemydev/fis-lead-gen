@@ -1,7 +1,7 @@
 """Drop user_favorite safety-net table (post #17 phase 1+2 soak).
 
-Revision ID: 20260429_0020
-Revises: 20260429_0019
+Revision ID: 20260429_0021
+Revises: 20260429_0020
 Create Date: 2026-04-29
 
 Phase 3 of #17. ``user_favorite`` was retained as a rollback safety-net by the
@@ -10,6 +10,14 @@ flow could be reverted to without data loss while the new ``favorite_list`` /
 ``favorite_list_item`` tables soaked. Phases 1+2 have now ridden one full
 release cycle in production (PRs #140, #144, #150, #152) without incident, so
 the table is no longer needed as a fallback.
+
+Renumbering note — this migration was originally authored as ``20260429_0020``
+and merged via PR #157 / release PR #158, but a parallel CLI's data-only
+migration (``20260429_0020_update_default_scoring_weights``, PR #159 / #160)
+raced into ``develop`` with the same revision id. Both deploys failed with
+"Multiple head revisions are present". Renumbered to ``20260429_0021`` so the
+chain stays linear: 0019 -> 0020 (scoring weights) -> 0021 (drop safety-net).
+The ordering is safe — the two migrations touch disjoint tables.
 
 Reversibility note — ``downgrade`` recreates the table with the EXACT schema
 defined by ``20260424_0016`` (same column types, FK targets, indexes, and
@@ -29,8 +37,8 @@ import sqlalchemy as sa
 from alembic import op
 
 
-revision: str = "20260429_0020"
-down_revision: str | None = "20260429_0019"
+revision: str = "20260429_0021"
+down_revision: str | None = "20260429_0020"
 branch_labels: str | Sequence[str] | None = None
 depends_on: str | Sequence[str] | None = None
 
