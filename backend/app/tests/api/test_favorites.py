@@ -4,6 +4,10 @@ Integration-marked -- the endpoints touch a real Postgres. Auth is mocked via
 ``app.dependency_overrides`` so we don't need to hand-craft a BetterAuth
 session cookie in every test; the 401-without-cookie case runs the real
 ``get_current_user`` to prove it rejects pre-DB.
+
+Favorites now persist into ``favorite_list_item`` against the user's default
+``favorite_list``; ``add_favorite`` lazily seeds the default list. Cleanup
+deletes the user's ``favorite_list`` rows (CASCADE handles the items).
 """
 
 from __future__ import annotations
@@ -19,7 +23,7 @@ from app.db.session import SessionLocal
 from app.main import app
 from app.models.auth import AuthUser
 from app.models.broker_dealer import BrokerDealer
-from app.models.user_favorite import UserFavorite
+from app.models.favorite_list import FavoriteList
 from app.models.user_visit import UserVisit
 from app.schemas.auth import AuthenticatedUser
 from app.services.auth import get_current_user
@@ -67,7 +71,8 @@ async def _seed_bd(name: str = "Test BD") -> int:
 async def _cleanup(user_ids: list[str], bd_ids: list[int]) -> None:
     async with SessionLocal() as session:
         if user_ids:
-            await session.execute(delete(UserFavorite).where(UserFavorite.user_id.in_(user_ids)))
+            # FavoriteList CASCADE -> favorite_list_item rows.
+            await session.execute(delete(FavoriteList).where(FavoriteList.user_id.in_(user_ids)))
             await session.execute(delete(UserVisit).where(UserVisit.user_id.in_(user_ids)))
             await session.execute(delete(AuthUser).where(AuthUser.id.in_(user_ids)))
         if bd_ids:
