@@ -50,3 +50,27 @@ export async function apiRequest<T>(path: string, init?: RequestInit): Promise<T
 
   return response.json() as Promise<T>;
 }
+
+// ── Favorite-lists (#17 phase 1, GET only) ────────────────────────────────
+// Multi-list view shipped in PR #140. Phase 2 will add POST/PUT/DELETE.
+import type {
+  FavoriteList,
+  PaginatedFavoriteListItems
+} from "@/types/favorite-list";
+
+export async function getFavoriteLists(): Promise<FavoriteList[]> {
+  return apiRequest<FavoriteList[]>("/api/v1/favorite-lists");
+}
+
+export async function getFavoriteListItems(
+  listId: number,
+  page: number,
+  pageSize: number
+): Promise<PaginatedFavoriteListItems> {
+  return apiRequest<PaginatedFavoriteListItems>(
+    buildApiPath(`/api/v1/favorite-lists/${listId}/items`, {
+      page,
+      page_size: pageSize
+    })
+  );
+}
