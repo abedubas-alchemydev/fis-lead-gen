@@ -9,6 +9,10 @@ integration`` locally against the Docker stack or staging.
 Each test seeds its own ``AuthUser`` + ``BrokerDealer`` rows, does its work,
 then cleans up in reverse-dependency order. That keeps tests independent
 without the cost of a full DB reset between cases.
+
+Favorites now live in ``favorite_list_item`` keyed off the user's default
+``favorite_list``; ``add_favorite`` lazily seeds that default list. Cleanup
+deletes the user's ``favorite_list`` rows (CASCADE handles the items).
 """
 
 from __future__ import annotations
@@ -22,7 +26,7 @@ from sqlalchemy import delete, select
 from app.db.session import SessionLocal
 from app.models.auth import AuthUser
 from app.models.broker_dealer import BrokerDealer
-from app.models.user_favorite import UserFavorite
+from app.models.favorite_list import FavoriteList, FavoriteListItem
 from app.models.user_visit import UserVisit
 from app.services.user_lists import (
     add_favorite,
@@ -64,11 +68,32 @@ async def _make_broker_dealer(name: str = "Test BD") -> int:
         return bd.id
 
 
+async def _default_list_items(user_id: str) -> list[FavoriteListItem]:
+    """Return the user's default-list items, or [] when no default list yet."""
+    async with SessionLocal() as session:
+        return list(
+            (
+                await session.execute(
+                    select(FavoriteListItem)
+                    .join(FavoriteList, FavoriteList.id == FavoriteListItem.list_id)
+                    .where(
+                        FavoriteList.user_id == user_id,
+                        FavoriteList.is_default.is_(True),
+                    )
+                )
+            ).scalars()
+        )
+
+
 async def _cleanup(user_ids: list[str], bd_ids: list[int]) -> None:
-    """Delete favorites/visits/user/bd rows in dependency order."""
+    """Delete favorite-lists/visits/user/bd rows in dependency order.
+
+    Deleting ``favorite_list`` cascades to ``favorite_list_item`` via the
+    ``ON DELETE CASCADE`` on its FK, so we don't need a separate items pass.
+    """
     async with SessionLocal() as session:
         if user_ids:
-            await session.execute(delete(UserFavorite).where(UserFavorite.user_id.in_(user_ids)))
+            await session.execute(delete(FavoriteList).where(FavoriteList.user_id.in_(user_ids)))
             await session.execute(delete(UserVisit).where(UserVisit.user_id.in_(user_ids)))
             await session.execute(delete(AuthUser).where(AuthUser.id.in_(user_ids)))
         if bd_ids:
@@ -87,13 +112,9 @@ async def test_add_favorite_is_idempotent() -> None:
         assert first.id == second.id
         assert first.created_at == second.created_at
 
-        async with SessionLocal() as session:
-            rows = (
-                await session.execute(
-                    select(UserFavorite).where(UserFavorite.user_id == user_id)
-                )
-            ).scalars().all()
+        rows = await _default_list_items(user_id)
         assert len(rows) == 1
+        assert rows[0].broker_dealer_id == bd_id
     finally:
         await _cleanup([user_id], [bd_id])
 
@@ -106,12 +127,7 @@ async def test_remove_favorite_is_idempotent_when_absent() -> None:
             await remove_favorite(session, user_id, bd_id)  # never favorited
             await remove_favorite(session, user_id, bd_id)  # still a no-op
 
-        async with SessionLocal() as session:
-            rows = (
-                await session.execute(
-                    select(UserFavorite).where(UserFavorite.user_id == user_id)
-                )
-            ).scalars().all()
+        rows = await _default_list_items(user_id)
         assert rows == []
     finally:
         await _cleanup([user_id], [bd_id])
@@ -127,12 +143,7 @@ async def test_remove_favorite_deletes_existing_row() -> None:
         async with SessionLocal() as session:
             await remove_favorite(session, user_id, bd_id)
 
-        async with SessionLocal() as session:
-            rows = (
-                await session.execute(
-                    select(UserFavorite).where(UserFavorite.user_id == user_id)
-                )
-            ).scalars().all()
+        rows = await _default_list_items(user_id)
         assert rows == []
     finally:
         await _cleanup([user_id], [bd_id])

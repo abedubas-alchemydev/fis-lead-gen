@@ -223,8 +223,10 @@ class BrokerDealerProfileResponse(BaseModel):
     executive_contacts: list[ExecutiveContactItem]
     registration_compliance: RegistrationComplianceSummary
     deficiency_status: DeficiencyStatusSummary
-    # Per-user favorite state for the firm detail page. Populated from
-    # `user_favorite` against the calling session's user_id so the heart
-    # toggle renders in its correct state on the first paint.
+    # Per-user favorite state for the firm detail page. Populated from the
+    # calling user's default ``favorite_list`` (its ``favorite_list_item``
+    # rows) so the heart toggle renders in its correct state on the first
+    # paint. The legacy ``user_favorite`` table was dropped in 20260429_0021
+    # (and again, idempotently, in 20260429_0022).
     is_favorited: bool = False
     favorited_at: datetime | None = None
