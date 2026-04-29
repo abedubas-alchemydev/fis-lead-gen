@@ -390,3 +390,87 @@ async def test_endpoint_passes_none_for_omitted_range_params(stubbed_endpoint) -
     assert kwargs["max_net_capital"] is None
     assert kwargs["registered_after"] is None
     assert kwargs["registered_before"] is None
+
+
+async def test_endpoint_rejects_inverted_net_capital_bounds(stubbed_endpoint) -> None:
+    """min > max is a client error, not a silent zero-row response.
+
+    A user pasting an inverted band (lower > upper) gets a 422 with a clear
+    message; the repository is never called.
+    """
+    async with _client() as client:
+        response = await client.get(
+            "/api/v1/broker-dealers",
+            params={"min_net_capital": "10000000", "max_net_capital": "5000000"},
+        )
+    assert response.status_code == 422
+    body = response.json()
+    assert "min_net_capital" in body["detail"]
+    stubbed_endpoint.assert_not_called()
+
+
+async def test_endpoint_accepts_equal_net_capital_bounds(stubbed_endpoint) -> None:
+    """Bounds are inclusive on both ends: min == max is a single-point band,
+    not an inversion. Documents the boundary so a future tightening of the
+    422 guard doesn't accidentally reject equality."""
+    async with _client() as client:
+        response = await client.get(
+            "/api/v1/broker-dealers",
+            params={"min_net_capital": "5000000", "max_net_capital": "5000000"},
+        )
+    assert response.status_code == 200, response.text
+    kwargs = stubbed_endpoint.await_args.kwargs
+    assert kwargs["min_net_capital"] == 5_000_000.0
+    assert kwargs["max_net_capital"] == 5_000_000.0
+
+
+async def test_endpoint_rejects_inverted_registration_dates(stubbed_endpoint) -> None:
+    """registered_after > registered_before -> 422, repository never called."""
+    async with _client() as client:
+        response = await client.get(
+            "/api/v1/broker-dealers",
+            params={
+                "registered_after": "2024-12-31",
+                "registered_before": "2020-01-01",
+            },
+        )
+    assert response.status_code == 422
+    body = response.json()
+    assert "registered_after" in body["detail"]
+    stubbed_endpoint.assert_not_called()
+
+
+async def test_endpoint_accepts_equal_registration_dates(stubbed_endpoint) -> None:
+    """Same-day band is valid (inclusive on both ends)."""
+    async with _client() as client:
+        response = await client.get(
+            "/api/v1/broker-dealers",
+            params={
+                "registered_after": "2020-06-15",
+                "registered_before": "2020-06-15",
+            },
+        )
+    assert response.status_code == 200, response.text
+    kwargs = stubbed_endpoint.await_args.kwargs
+    assert kwargs["registered_after"] == date(2020, 6, 15)
+    assert kwargs["registered_before"] == date(2020, 6, 15)
+
+
+@pytest.mark.asyncio
+async def test_range_filters_combine_with_state_filter(
+    repository: BrokerDealerRepository,
+) -> None:
+    """Regression: range filters AND-join with the existing ``state`` filter
+    instead of replacing it. A request that scopes to NY firms with a
+    net-capital floor must keep both predicates in the same WHERE."""
+    session = _StagedSession()
+
+    await repository.list_broker_dealers(
+        session,
+        **{**_default_kwargs(), "states": ["NY"]},
+        min_net_capital=2_500_000.0,
+    )
+
+    where = _captured_where_sql(session)
+    assert "broker_dealers.state in ('ny')" in where
+    assert "broker_dealers.latest_net_capital >= 2500000.0" in where
