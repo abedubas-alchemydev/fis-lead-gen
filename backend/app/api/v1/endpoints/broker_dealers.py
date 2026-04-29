@@ -89,6 +89,25 @@ async def list_broker_dealers(
     _: AuthenticatedUser = Depends(get_current_user),
     db: AsyncSession = Depends(get_db_session),
 ) -> BrokerDealerListResponse:
+    if (
+        min_net_capital is not None
+        and max_net_capital is not None
+        and min_net_capital > max_net_capital
+    ):
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail="min_net_capital must be less than or equal to max_net_capital.",
+        )
+    if (
+        registered_after is not None
+        and registered_before is not None
+        and registered_after > registered_before
+    ):
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail="registered_after must be on or before registered_before.",
+        )
+
     return await repository.list_broker_dealers(
         db,
         search=search,
