@@ -37,7 +37,7 @@ import {
   toOfficerEntity,
 } from "@/components/master-list/detail/name-matching";
 import { SectionPanel } from "@/components/ui/section-panel";
-import { FavoriteButton } from "@/components/master-list/favorite-button";
+import { ListPicker } from "@/components/list-picker/list-picker";
 import { Pill } from "@/components/ui/pill";
 import { apiRequest, buildApiPath } from "@/lib/api";
 import { parseArrangementBlob } from "@/lib/arrangements";
@@ -474,7 +474,11 @@ export function BrokerDealerDetailClient({ brokerDealerId }: { brokerDealerId: s
             <h1 className="text-[24px] font-bold tracking-[-0.02em] text-[var(--text,#0f172a)]">
               {bd.name}
             </h1>
-            <FavoriteButton bdId={bd.id} initialFavorited={profile.is_favorited} />
+            <ListPicker
+              firmId={bd.id}
+              variant="detail"
+              initialDefaultMember={profile.is_favorited}
+            />
           </div>
           <FirmWebsiteLink firmName={bd.name} website={bd.website} />
           <div className="mt-2 flex flex-wrap items-center gap-x-3 gap-y-1 text-[12px] text-[var(--text-muted,#94a3b8)]">

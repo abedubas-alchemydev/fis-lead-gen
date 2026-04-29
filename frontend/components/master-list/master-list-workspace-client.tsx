@@ -19,6 +19,7 @@ import {
 } from "@/lib/master-list-state";
 import { STATE_NAMES, stateCodeFromName } from "@/lib/states";
 import { Combo } from "@/components/ui/combo";
+import { ListPicker } from "@/components/list-picker/list-picker";
 import { NetCapitalRangeFilter } from "@/components/master-list/filters/net-capital-range-filter";
 import { RegistrationDateRangeFilter } from "@/components/master-list/filters/registration-date-range-filter";
 import {
@@ -1050,17 +1051,22 @@ export function MasterListWorkspaceClient() {
                       className="border-t border-[var(--border,rgba(30,64,175,0.1))] align-top transition hover:bg-[var(--row-hover,rgba(99,102,241,0.04))]"
                     >
                       <td className="min-w-[220px] px-5 py-3.5" style={firmCellStyle}>
-                        <Link
-                          href={detailHref(item.id)}
-                          className="block font-semibold text-[var(--text,#0f172a)] transition hover:text-[var(--accent,#6366f1)]"
-                        >
-                          {item.name}
-                        </Link>
-                        {location ? (
-                          <div className="mt-0.5 text-[11px] uppercase tracking-[0.04em] text-[var(--text-muted,#94a3b8)]">
-                            {location}
+                        <div className="flex items-start justify-between gap-3">
+                          <div className="min-w-0 flex-1">
+                            <Link
+                              href={detailHref(item.id)}
+                              className="block font-semibold text-[var(--text,#0f172a)] transition hover:text-[var(--accent,#6366f1)]"
+                            >
+                              {item.name}
+                            </Link>
+                            {location ? (
+                              <div className="mt-0.5 text-[11px] uppercase tracking-[0.04em] text-[var(--text-muted,#94a3b8)]">
+                                {location}
+                              </div>
+                            ) : null}
                           </div>
-                        ) : null}
+                          <ListPicker firmId={item.id} variant="row" />
+                        </div>
                       </td>
                       <td className="whitespace-nowrap px-5 py-3.5 font-mono text-[12px] text-[var(--text-dim,#475569)]">
                         {item.cik ?? (
