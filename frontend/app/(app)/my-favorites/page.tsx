@@ -1,5 +1,5 @@
-import { FavoritesClient } from "@/components/favorites/favorites-client";
 import { TopActions } from "@/components/layout/top-actions";
+import { MyFavoritesClient } from "@/components/my-favorites/my-favorites-client";
 
 export default function MyFavoritesPage() {
   return (
@@ -20,7 +20,7 @@ export default function MyFavoritesPage() {
         </div>
       </div>
 
-      <FavoritesClient />
+      <MyFavoritesClient />
     </div>
   );
 }
