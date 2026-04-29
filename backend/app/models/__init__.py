@@ -7,6 +7,7 @@ from app.models.discovered_email import DiscoveredEmail
 from app.models.email_verification import EmailVerification
 from app.models.executive_contact import ExecutiveContact
 from app.models.extraction_run import ExtractionRun
+from app.models.favorite_list import FavoriteList, FavoriteListItem
 from app.models.financial_metric import FinancialMetric
 from app.models.filing_alert import FilingAlert
 from app.models.industry_arrangement import IndustryArrangement
@@ -29,6 +30,8 @@ __all__ = [
     "EmailVerification",
     "ExecutiveContact",
     "ExtractionRun",
+    "FavoriteList",
+    "FavoriteListItem",
     "FinancialMetric",
     "FilingAlert",
     "IndustryArrangement",
