@@ -1,7 +1,8 @@
 "use client";
 
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 
+import { DashboardErrorCard } from "@/components/dashboard/dashboard-error-card";
 import { apiRequest } from "@/lib/api";
 import type { TimeSeriesBucket, TimeSeriesRange, TimeSeriesResponse } from "@/lib/types";
 
@@ -94,7 +95,15 @@ export function LeadVolumeTrendCard() {
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [size, setSize] = useState<Size>({ width: 0, height: 0 });
+  // Bumping reloadKey re-runs the fetch effect — wired to the Retry
+  // button rendered by DashboardErrorCard so the user can recover from
+  // an initial-fetch failure without a full page reload.
+  const [reloadKey, setReloadKey] = useState(0);
   const containerRef = useRef<HTMLDivElement | null>(null);
+
+  const handleRetry = useCallback(() => {
+    setReloadKey((k) => k + 1);
+  }, []);
 
   // Measure the chart container so the viewBox can mirror actual pixel
   // dimensions — this is what keeps strokes un-stretched when the card
@@ -139,7 +148,7 @@ export function LeadVolumeTrendCard() {
     return () => {
       active = false;
     };
-  }, [range]);
+  }, [range, reloadKey]);
 
   const yMax = useMemo(() => {
     let max = 1;
@@ -214,14 +223,31 @@ export function LeadVolumeTrendCard() {
       </div>
 
       {error ? (
-        <div className="mb-2 rounded-lg bg-red-50 px-3 py-2 text-xs text-red-700">
-          {error}
+        <div className="min-h-0 flex-1">
+          <DashboardErrorCard
+            title="Couldn&rsquo;t load trend data"
+            message={error}
+            onRetry={handleRetry}
+          />
         </div>
-      ) : null}
-
+      ) : (
+      <>
       {/* Chart wrapper grows to fill remaining card height. `min-h-0` lets
           flex-1 actually shrink below the SVG's intrinsic content size. */}
       <div ref={containerRef} className="min-h-0 w-full flex-1">
+        {loading && buckets.length === 0 ? (
+          <div aria-busy className="flex h-full w-full flex-col">
+            <div className="min-h-0 flex-1 animate-pulse rounded-lg bg-[var(--surface-2,#f1f6fd)]" />
+            <div className="mt-2 flex justify-between gap-2">
+              {Array.from({ length: 5 }).map((_, i) => (
+                <div
+                  key={`trend-skel-label-${i}`}
+                  className="h-2.5 w-10 animate-pulse rounded bg-[var(--surface-2,#f1f6fd)]"
+                />
+              ))}
+            </div>
+          </div>
+        ) : (
         <svg className="block h-full w-full" viewBox={viewBox}>
           <defs>
             <linearGradient id="trend-area-a" x1="0" x2="0" y1="0" y2="1">
@@ -296,6 +322,7 @@ export function LeadVolumeTrendCard() {
             </g>
           ) : null}
         </svg>
+        )}
       </div>
 
       {/* .legend: 12px, gap 16px, mt 8px, color text-dim. */}
@@ -309,6 +336,8 @@ export function LeadVolumeTrendCard() {
           Deficiency alerts
         </span>
       </div>
+      </>
+      )}
     </div>
   );
 }
