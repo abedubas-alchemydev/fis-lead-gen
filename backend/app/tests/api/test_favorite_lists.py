@@ -1,8 +1,8 @@
-"""API-layer tests for /favorite-lists (#17 phase 1, GET only).
+"""API-layer tests for /favorite-lists (#17 phases 1-2).
 
 Integration-marked — touches a real Postgres so the FK + UNIQUE constraints
 exercise. Auth is mocked via ``app.dependency_overrides`` (same pattern as
-``test_favorites.py``); the 401 case runs the real ``get_current_user`` to
+``test_favorites.py``); the 401 cases run the real ``get_current_user`` to
 prove it rejects pre-DB.
 """
 
@@ -13,7 +13,7 @@ from datetime import datetime
 
 import httpx
 import pytest
-from sqlalchemy import delete
+from sqlalchemy import delete, select
 
 from app.db.session import SessionLocal
 from app.main import app
@@ -234,3 +234,421 @@ async def test_lists_are_user_scoped() -> None:
     finally:
         app.dependency_overrides.clear()
         await _cleanup([user_a, user_b], [])
+
+
+# ---------------------------------------------------------------------------
+# Phase 2 — POST/PUT/DELETE
+# ---------------------------------------------------------------------------
+
+
+async def test_create_favorite_list_401_without_session_cookie() -> None:
+    async with _client() as client:
+        response = await client.post(
+            "/api/v1/favorite-lists", json={"name": "X"}
+        )
+    assert response.status_code == 401
+
+
+async def test_update_favorite_list_401_without_session_cookie() -> None:
+    async with _client() as client:
+        response = await client.put(
+            "/api/v1/favorite-lists/1", json={"name": "X"}
+        )
+    assert response.status_code == 401
+
+
+async def test_delete_favorite_list_401_without_session_cookie() -> None:
+    async with _client() as client:
+        response = await client.delete("/api/v1/favorite-lists/1")
+    assert response.status_code == 401
+
+
+async def test_add_item_401_without_session_cookie() -> None:
+    async with _client() as client:
+        response = await client.post(
+            "/api/v1/favorite-lists/1/items", json={"broker_dealer_id": 1}
+        )
+    assert response.status_code == 401
+
+
+async def test_remove_item_401_without_session_cookie() -> None:
+    async with _client() as client:
+        response = await client.delete("/api/v1/favorite-lists/1/items/1")
+    assert response.status_code == 401
+
+
+async def test_create_favorite_list_creates_owned_row() -> None:
+    user_id = await _seed_user()
+    await _seed_default_list(user_id)
+    app.dependency_overrides[get_current_user] = lambda: _override_user(user_id)
+    try:
+        async with _client() as client:
+            response = await client.post(
+                "/api/v1/favorite-lists", json={"name": "  Watchlist A  "}
+            )
+        assert response.status_code == 201
+        body = response.json()
+        assert body["name"] == "Watchlist A"
+        assert body["is_default"] is False
+        assert body["item_count"] == 0
+
+        async with _client() as client:
+            listing = await client.get("/api/v1/favorite-lists")
+        assert listing.status_code == 200
+        names = [row["name"] for row in listing.json()]
+        assert names == ["Favorites", "Watchlist A"]
+    finally:
+        app.dependency_overrides.clear()
+        await _cleanup([user_id], [])
+
+
+async def test_create_favorite_list_duplicate_name_returns_400() -> None:
+    user_id = await _seed_user()
+    await _seed_default_list(user_id)
+    app.dependency_overrides[get_current_user] = lambda: _override_user(user_id)
+    try:
+        async with _client() as client:
+            first = await client.post(
+                "/api/v1/favorite-lists", json={"name": "Watchlist"}
+            )
+        assert first.status_code == 201
+
+        async with _client() as client:
+            dup = await client.post(
+                "/api/v1/favorite-lists", json={"name": "Watchlist"}
+            )
+        assert dup.status_code == 400
+        assert "already exists" in dup.json()["detail"]
+    finally:
+        app.dependency_overrides.clear()
+        await _cleanup([user_id], [])
+
+
+async def test_create_favorite_list_blank_name_returns_422() -> None:
+    user_id = await _seed_user()
+    app.dependency_overrides[get_current_user] = lambda: _override_user(user_id)
+    try:
+        async with _client() as client:
+            empty = await client.post(
+                "/api/v1/favorite-lists", json={"name": ""}
+            )
+        assert empty.status_code == 422
+
+        async with _client() as client:
+            whitespace = await client.post(
+                "/api/v1/favorite-lists", json={"name": "   "}
+            )
+        assert whitespace.status_code == 422
+    finally:
+        app.dependency_overrides.clear()
+        await _cleanup([user_id], [])
+
+
+async def test_create_favorite_list_oversize_name_returns_422() -> None:
+    user_id = await _seed_user()
+    app.dependency_overrides[get_current_user] = lambda: _override_user(user_id)
+    try:
+        async with _client() as client:
+            response = await client.post(
+                "/api/v1/favorite-lists", json={"name": "x" * 81}
+            )
+        assert response.status_code == 422
+    finally:
+        app.dependency_overrides.clear()
+        await _cleanup([user_id], [])
+
+
+async def test_update_favorite_list_renames_non_default() -> None:
+    user_id = await _seed_user()
+    await _seed_default_list(user_id)
+    async with SessionLocal() as session:
+        custom = FavoriteList(user_id=user_id, name="Old", is_default=False)
+        session.add(custom)
+        await session.commit()
+        await session.refresh(custom)
+        custom_id = custom.id
+
+    app.dependency_overrides[get_current_user] = lambda: _override_user(user_id)
+    try:
+        async with _client() as client:
+            response = await client.put(
+                f"/api/v1/favorite-lists/{custom_id}", json={"name": "New Name"}
+            )
+        assert response.status_code == 200
+        body = response.json()
+        assert body["id"] == custom_id
+        assert body["name"] == "New Name"
+        assert body["is_default"] is False
+    finally:
+        app.dependency_overrides.clear()
+        await _cleanup([user_id], [])
+
+
+async def test_update_default_favorite_list_returns_400() -> None:
+    user_id = await _seed_user()
+    default_id = await _seed_default_list(user_id)
+    app.dependency_overrides[get_current_user] = lambda: _override_user(user_id)
+    try:
+        async with _client() as client:
+            response = await client.put(
+                f"/api/v1/favorite-lists/{default_id}",
+                json={"name": "Renamed"},
+            )
+        assert response.status_code == 400
+        assert "default" in response.json()["detail"].lower()
+    finally:
+        app.dependency_overrides.clear()
+        await _cleanup([user_id], [])
+
+
+async def test_update_favorite_list_duplicate_name_returns_400() -> None:
+    user_id = await _seed_user()
+    await _seed_default_list(user_id)
+    async with SessionLocal() as session:
+        first = FavoriteList(user_id=user_id, name="Alpha", is_default=False)
+        second = FavoriteList(user_id=user_id, name="Bravo", is_default=False)
+        session.add(first)
+        session.add(second)
+        await session.commit()
+        await session.refresh(second)
+        second_id = second.id
+
+    app.dependency_overrides[get_current_user] = lambda: _override_user(user_id)
+    try:
+        async with _client() as client:
+            response = await client.put(
+                f"/api/v1/favorite-lists/{second_id}", json={"name": "Alpha"}
+            )
+        assert response.status_code == 400
+        assert "already exists" in response.json()["detail"]
+    finally:
+        app.dependency_overrides.clear()
+        await _cleanup([user_id], [])
+
+
+async def test_update_favorite_list_404_for_foreign_list() -> None:
+    owner = await _seed_user()
+    intruder = await _seed_user()
+    async with SessionLocal() as session:
+        fl = FavoriteList(user_id=owner, name="Owners", is_default=False)
+        session.add(fl)
+        await session.commit()
+        await session.refresh(fl)
+        fl_id = fl.id
+
+    app.dependency_overrides[get_current_user] = lambda: _override_user(intruder)
+    try:
+        async with _client() as client:
+            response = await client.put(
+                f"/api/v1/favorite-lists/{fl_id}", json={"name": "Pwned"}
+            )
+        assert response.status_code == 404
+    finally:
+        app.dependency_overrides.clear()
+        await _cleanup([owner, intruder], [])
+
+
+async def test_delete_favorite_list_removes_list_and_cascades_items() -> None:
+    user_id = await _seed_user()
+    await _seed_default_list(user_id)
+    bd_id = await _seed_bd(name="BD-To-Cascade")
+    async with SessionLocal() as session:
+        custom = FavoriteList(user_id=user_id, name="ToDelete", is_default=False)
+        session.add(custom)
+        await session.commit()
+        await session.refresh(custom)
+        custom_id = custom.id
+        session.add(FavoriteListItem(list_id=custom_id, broker_dealer_id=bd_id))
+        await session.commit()
+
+    app.dependency_overrides[get_current_user] = lambda: _override_user(user_id)
+    try:
+        async with _client() as client:
+            response = await client.delete(f"/api/v1/favorite-lists/{custom_id}")
+        assert response.status_code == 204
+
+        async with SessionLocal() as session:
+            list_remaining = await session.execute(
+                select(FavoriteList).where(FavoriteList.id == custom_id)
+            )
+            assert list_remaining.scalar_one_or_none() is None
+            items_remaining = await session.execute(
+                select(FavoriteListItem).where(FavoriteListItem.list_id == custom_id)
+            )
+            assert items_remaining.scalar_one_or_none() is None
+    finally:
+        app.dependency_overrides.clear()
+        await _cleanup([user_id], [bd_id])
+
+
+async def test_delete_default_favorite_list_returns_400() -> None:
+    user_id = await _seed_user()
+    default_id = await _seed_default_list(user_id)
+    app.dependency_overrides[get_current_user] = lambda: _override_user(user_id)
+    try:
+        async with _client() as client:
+            response = await client.delete(f"/api/v1/favorite-lists/{default_id}")
+        assert response.status_code == 400
+        assert "default" in response.json()["detail"].lower()
+    finally:
+        app.dependency_overrides.clear()
+        await _cleanup([user_id], [])
+
+
+async def test_delete_favorite_list_404_for_foreign_list() -> None:
+    owner = await _seed_user()
+    intruder = await _seed_user()
+    async with SessionLocal() as session:
+        fl = FavoriteList(user_id=owner, name="Owners", is_default=False)
+        session.add(fl)
+        await session.commit()
+        await session.refresh(fl)
+        fl_id = fl.id
+
+    app.dependency_overrides[get_current_user] = lambda: _override_user(intruder)
+    try:
+        async with _client() as client:
+            response = await client.delete(f"/api/v1/favorite-lists/{fl_id}")
+        assert response.status_code == 404
+    finally:
+        app.dependency_overrides.clear()
+        await _cleanup([owner, intruder], [])
+
+
+async def test_add_item_inserts_and_is_idempotent() -> None:
+    user_id = await _seed_user()
+    list_id = await _seed_default_list(user_id)
+    bd_id = await _seed_bd(name="BD-Add")
+    app.dependency_overrides[get_current_user] = lambda: _override_user(user_id)
+    try:
+        async with _client() as client:
+            first = await client.post(
+                f"/api/v1/favorite-lists/{list_id}/items",
+                json={"broker_dealer_id": bd_id},
+            )
+        assert first.status_code == 200
+        first_body = first.json()
+        assert first_body["broker_dealer_id"] == bd_id
+        assert first_body["broker_dealer_name"] == "BD-Add"
+        first_added_at = first_body["added_at"]
+
+        async with _client() as client:
+            second = await client.post(
+                f"/api/v1/favorite-lists/{list_id}/items",
+                json={"broker_dealer_id": bd_id},
+            )
+        assert second.status_code == 200
+        second_body = second.json()
+        assert second_body["broker_dealer_id"] == bd_id
+        assert second_body["added_at"] == first_added_at
+
+        async with SessionLocal() as session:
+            count_result = await session.execute(
+                select(FavoriteListItem).where(
+                    FavoriteListItem.list_id == list_id,
+                    FavoriteListItem.broker_dealer_id == bd_id,
+                )
+            )
+            rows = count_result.scalars().all()
+            assert len(rows) == 1
+    finally:
+        app.dependency_overrides.clear()
+        await _cleanup([user_id], [bd_id])
+
+
+async def test_add_item_404_for_unknown_firm() -> None:
+    user_id = await _seed_user()
+    list_id = await _seed_default_list(user_id)
+    app.dependency_overrides[get_current_user] = lambda: _override_user(user_id)
+    try:
+        async with _client() as client:
+            response = await client.post(
+                f"/api/v1/favorite-lists/{list_id}/items",
+                json={"broker_dealer_id": 99999999},
+            )
+        assert response.status_code == 404
+        assert response.json()["detail"] == "Firm not found"
+    finally:
+        app.dependency_overrides.clear()
+        await _cleanup([user_id], [])
+
+
+async def test_add_item_404_for_foreign_list() -> None:
+    owner = await _seed_user()
+    intruder = await _seed_user()
+    list_id = await _seed_default_list(owner)
+    bd_id = await _seed_bd(name="BD-Foreign-Add")
+    app.dependency_overrides[get_current_user] = lambda: _override_user(intruder)
+    try:
+        async with _client() as client:
+            response = await client.post(
+                f"/api/v1/favorite-lists/{list_id}/items",
+                json={"broker_dealer_id": bd_id},
+            )
+        assert response.status_code == 404
+    finally:
+        app.dependency_overrides.clear()
+        await _cleanup([owner, intruder], [bd_id])
+
+
+async def test_remove_item_removes_present_row() -> None:
+    user_id = await _seed_user()
+    list_id = await _seed_default_list(user_id)
+    bd_id = await _seed_bd(name="BD-Remove")
+    await _seed_list_item(list_id, bd_id)
+
+    app.dependency_overrides[get_current_user] = lambda: _override_user(user_id)
+    try:
+        async with _client() as client:
+            response = await client.delete(
+                f"/api/v1/favorite-lists/{list_id}/items/{bd_id}"
+            )
+        assert response.status_code == 204
+
+        async with SessionLocal() as session:
+            remaining = await session.execute(
+                select(FavoriteListItem).where(
+                    FavoriteListItem.list_id == list_id,
+                    FavoriteListItem.broker_dealer_id == bd_id,
+                )
+            )
+            assert remaining.scalar_one_or_none() is None
+    finally:
+        app.dependency_overrides.clear()
+        await _cleanup([user_id], [bd_id])
+
+
+async def test_remove_item_404_when_absent() -> None:
+    user_id = await _seed_user()
+    list_id = await _seed_default_list(user_id)
+    bd_id = await _seed_bd(name="BD-Absent")
+
+    app.dependency_overrides[get_current_user] = lambda: _override_user(user_id)
+    try:
+        async with _client() as client:
+            response = await client.delete(
+                f"/api/v1/favorite-lists/{list_id}/items/{bd_id}"
+            )
+        assert response.status_code == 404
+    finally:
+        app.dependency_overrides.clear()
+        await _cleanup([user_id], [bd_id])
+
+
+async def test_remove_item_404_for_foreign_list() -> None:
+    owner = await _seed_user()
+    intruder = await _seed_user()
+    list_id = await _seed_default_list(owner)
+    bd_id = await _seed_bd(name="BD-Foreign-Remove")
+    await _seed_list_item(list_id, bd_id)
+
+    app.dependency_overrides[get_current_user] = lambda: _override_user(intruder)
+    try:
+        async with _client() as client:
+            response = await client.delete(
+                f"/api/v1/favorite-lists/{list_id}/items/{bd_id}"
+            )
+        assert response.status_code == 404
+    finally:
+        app.dependency_overrides.clear()
+        await _cleanup([owner, intruder], [bd_id])
