@@ -357,6 +357,80 @@ class TestSelfClearingInversionRegression:
         assert result.value != "self_clearing"
 
 
+# ─────────────────────── Omnibus refinement (Apex-shape) ───────────────────────
+
+
+class TestOmnibusClearingServicesPrimaryBusiness:
+    """Regression guard for the 2026-04-29 spot-check finding.
+
+    The #19 classifier returned 0 omnibus firms out of 3,002. Spot-check
+    found Apex Clearing Corporation (CIK 0000278331) classified as
+    self_clearing -- but Apex's entire business is providing clearing
+    services to other broker-dealers, which is textbook omnibus by
+    Deshorn's canonical definitions.
+
+    The fix is a prompt-side refinement (ADDITIONAL OMNIBUS SIGNAL clause)
+    that nudges the LLM to prefer omnibus over self_clearing when the
+    firm's primary business is clearing for others. We assert two things:
+
+      1. The build_prompt() output now contains the new signal clause so
+         the LLM actually sees the refinement (prompt-construction path).
+      2. When the LLM answers omnibus for an Apex-shape input, the result
+         round-trips faithfully (integration shape with mocked HTTP).
+    """
+
+    def test_prompt_includes_omnibus_clearing_services_signal(
+        self, patch_gemini_provider: None
+    ) -> None:
+        """The new ADDITIONAL OMNIBUS SIGNAL clause must reach the LLM."""
+        service = ClearingClassifierService()
+        prompt = service.build_prompt(
+            "APEX CLEARING CORPORATION operations text", None
+        )
+        assert "ADDITIONAL OMNIBUS SIGNAL" in prompt
+        assert "PRIMARY business" in prompt
+        assert "CLEARS FOR OTHERS" in prompt
+
+    @pytest.mark.asyncio
+    async def test_apex_clearing_classifies_as_omnibus(
+        self, patch_gemini_provider: None
+    ) -> None:
+        """Firms whose primary business is providing clearing services to
+        other broker-dealers should classify as omnibus regardless of the
+        FINRA 'does hold' boilerplate (which both omnibus and self-clearing
+        institutionals trigger).
+        """
+        finra_text = (
+            "This firm does hold or maintain funds or securities or provide "
+            "clearing services for other broker-dealer(s)."
+        )
+        focus_text = (
+            "Revenue derived predominantly from clearing fees charged to "
+            "introducing broker-dealers under fully-disclosed and omnibus "
+            "clearing arrangements."
+        )
+        with respx.mock() as router:
+            router.post(_GEMINI_URL).mock(
+                return_value=_gemini_response(
+                    classification="omnibus",
+                    confidence=0.93,
+                    rationale=(
+                        "Firm name and FOCUS revenue mix both indicate the "
+                        "firm's primary business is providing clearing "
+                        "services to other broker-dealers, matching the "
+                        "ADDITIONAL OMNIBUS SIGNAL clause."
+                    ),
+                )
+            )
+            result = await classify(
+                firm_operations_text=finra_text,
+                focus_report_text=focus_text,
+            )
+
+        assert result.value == "omnibus"
+        assert result.confidence >= 0.9
+
+
 # ─────────────────────── Service-level construction ───────────────────────
 
 
