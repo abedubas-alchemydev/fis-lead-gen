@@ -2,6 +2,7 @@
 
 import { Check, ChevronDown, Heart, Loader2 } from "lucide-react";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { createPortal } from "react-dom";
 
 import { useToast } from "@/components/ui/use-toast";
 import {
@@ -58,16 +59,74 @@ export function ListPicker({
     () => new Set(),
   );
   const rootRef = useRef<HTMLDivElement | null>(null);
+  const popoverRef = useRef<HTMLDivElement | null>(null);
   const toast = useToast();
 
+  // Portal mount + computed fixed-positioning. The popover used to render
+  // as a `position: absolute` child of the trigger, which got clipped by
+  // ancestor `overflow: hidden` (the master-list table card wraps every
+  // row in `overflow-hidden rounded-2xl`). Portaling to document.body and
+  // anchoring with `position: fixed` to the trigger's bounding rect lets
+  // the popover escape every clipping boundary.
+  const [mounted, setMounted] = useState(false);
+  const [position, setPosition] = useState<{
+    top: number;
+    left?: number;
+    right?: number;
+  } | null>(null);
+
+  useEffect(() => {
+    setMounted(true);
+  }, []);
+
+  const computePosition = useCallback(() => {
+    const trigger = rootRef.current;
+    if (!trigger) return;
+    const rect = trigger.getBoundingClientRect();
+    const top = rect.bottom + 8; // matches the prior `mt-2` spacing
+    if (variant === "row") {
+      // Anchor popover's right edge to trigger's right edge — keeps the
+      // 18rem-wide panel from drifting off the viewport's right side.
+      setPosition({ top, right: window.innerWidth - rect.right });
+    } else {
+      setPosition({ top, left: rect.left });
+    }
+  }, [variant]);
+
   // Outside-click closes. mousedown so checkbox-toggle clicks below win.
+  // Both the trigger root AND the portaled popover panel must be excluded
+  // — the panel lives in document.body, outside rootRef's DOM subtree.
   useEffect(() => {
     function onDocumentMouseDown(event: globalThis.MouseEvent) {
-      if (!rootRef.current?.contains(event.target as Node)) setOpen(false);
+      const target = event.target as Node;
+      if (rootRef.current?.contains(target)) return;
+      if (popoverRef.current?.contains(target)) return;
+      setOpen(false);
     }
     document.addEventListener("mousedown", onDocumentMouseDown);
     return () => document.removeEventListener("mousedown", onDocumentMouseDown);
   }, []);
+
+  // While open, keep the popover glued to the trigger across viewport
+  // resizes and scrolls in any ancestor (capture phase catches nested
+  // scroll containers like the table card's `overflow-x-auto`).
+  useEffect(() => {
+    if (!open) return;
+    function onUpdate() {
+      computePosition();
+    }
+    window.addEventListener("resize", onUpdate);
+    window.addEventListener("scroll", onUpdate, true);
+    return () => {
+      window.removeEventListener("resize", onUpdate);
+      window.removeEventListener("scroll", onUpdate, true);
+    };
+  }, [open, computePosition]);
+
+  const togglePicker = useCallback(() => {
+    if (!open) computePosition();
+    setOpen((v) => !v);
+  }, [open, computePosition]);
 
   // Lazy fetch on first open. AbortController so a quick close
   // doesn't paint stale data.
@@ -180,12 +239,107 @@ export function ListPicker({
     return "Save to a list";
   }, [variant, defaultIsMember]);
 
+  const popoverPanel =
+    open && position ? (
+      <div
+        ref={popoverRef}
+        style={{
+          position: "fixed",
+          top: position.top,
+          ...(position.left !== undefined ? { left: position.left } : {}),
+          ...(position.right !== undefined ? { right: position.right } : {}),
+        }}
+        className="z-[60] w-72 overflow-hidden rounded-[10px] border border-[var(--border,rgba(30,64,175,0.1))] bg-[var(--surface,#ffffff)] shadow-[var(--shadow-card,0_1px_2px_rgba(15,23,42,0.04),0_4px_14px_rgba(15,23,42,0.05))]"
+        role="dialog"
+        aria-label="Favorite-list picker"
+        onClick={(e) => e.stopPropagation()}
+      >
+        <div className="border-b border-[var(--border,rgba(30,64,175,0.1))] px-3 py-2">
+          <p className="text-[11px] font-semibold uppercase tracking-[0.08em] text-[var(--text-muted,#94a3b8)]">
+            Save to lists
+          </p>
+        </div>
+
+        {lists === null && fetchError === null ? (
+          <div className="flex items-center gap-2 px-3 py-3 text-[12px] text-[var(--text-muted,#94a3b8)]">
+            <Loader2
+              className="h-3.5 w-3.5 animate-spin"
+              strokeWidth={2.5}
+            />
+            Loading…
+          </div>
+        ) : null}
+
+        {fetchError !== null ? (
+          <div className="px-3 py-3 text-[12px] text-[var(--pill-red-text,#b91c1c)]">
+            {fetchError}
+          </div>
+        ) : null}
+
+        {lists !== null && lists.length === 0 ? (
+          <div className="px-3 py-4 text-[12px] text-[var(--text-muted,#94a3b8)]">
+            You have no favorite lists yet. Create one in My Favorites.
+          </div>
+        ) : null}
+
+        {lists !== null && lists.length > 0 ? (
+          <ul role="listbox" className="max-h-72 overflow-auto py-1">
+            {lists.map((list) => {
+              const checked = list.is_member;
+              const pending = pendingIds.has(list.id);
+              return (
+                <li key={list.id}>
+                  <label
+                    className={`flex cursor-pointer items-center gap-2.5 px-3 py-2 text-[13px] transition hover:bg-[var(--surface-2,#f1f6fd)] ${
+                      checked
+                        ? "text-[var(--text,#0f172a)]"
+                        : "text-[var(--text-dim,#475569)]"
+                    } ${pending ? "opacity-60" : ""}`}
+                  >
+                    <input
+                      type="checkbox"
+                      checked={checked}
+                      disabled={pending}
+                      onChange={() => void handleToggle(list)}
+                      className="h-4 w-4 shrink-0 rounded border-[var(--border-2,rgba(30,64,175,0.16))] text-[var(--accent,#6366f1)] focus:ring-[var(--accent,#6366f1)]"
+                    />
+                    <span className="min-w-0 flex-1 truncate">
+                      {list.name}
+                      {list.is_default ? (
+                        <span className="ml-2 inline-flex items-center rounded-full bg-[rgba(99,102,241,0.12)] px-1.5 py-0.5 text-[10px] font-semibold uppercase tracking-[0.06em] text-[#4338ca]">
+                          Default
+                        </span>
+                      ) : null}
+                    </span>
+                    <span className="shrink-0 text-[11px] tabular-nums text-[var(--text-muted,#94a3b8)]">
+                      {list.item_count.toLocaleString()}
+                    </span>
+                    {pending ? (
+                      <Loader2
+                        className="h-3.5 w-3.5 shrink-0 animate-spin text-[var(--text-muted,#94a3b8)]"
+                        strokeWidth={2.5}
+                      />
+                    ) : checked ? (
+                      <Check
+                        className="h-3.5 w-3.5 shrink-0 text-[var(--accent,#6366f1)]"
+                        strokeWidth={2.5}
+                      />
+                    ) : null}
+                  </label>
+                </li>
+              );
+            })}
+          </ul>
+        ) : null}
+      </div>
+    ) : null;
+
   return (
     <div ref={rootRef} className="relative inline-flex">
       {variant === "detail" ? (
         <DetailTrigger
           open={open}
-          onClick={() => setOpen((v) => !v)}
+          onClick={togglePicker}
           favorited={defaultIsMember}
           ariaLabel={triggerLabel}
         />
@@ -195,100 +349,15 @@ export function ListPicker({
           onClick={(e) => {
             e.preventDefault();
             e.stopPropagation();
-            setOpen((v) => !v);
+            togglePicker();
           }}
           ariaLabel={triggerLabel}
         />
       )}
 
-      {open ? (
-        <div
-          className={`absolute z-20 mt-2 w-72 overflow-hidden rounded-[10px] border border-[var(--border,rgba(30,64,175,0.1))] bg-[var(--surface,#ffffff)] shadow-[var(--shadow-card,0_1px_2px_rgba(15,23,42,0.04),0_4px_14px_rgba(15,23,42,0.05))] ${
-            variant === "row" ? "right-0 top-full" : "left-0 top-full"
-          }`}
-          role="dialog"
-          aria-label="Favorite-list picker"
-          onClick={(e) => e.stopPropagation()}
-        >
-          <div className="border-b border-[var(--border,rgba(30,64,175,0.1))] px-3 py-2">
-            <p className="text-[11px] font-semibold uppercase tracking-[0.08em] text-[var(--text-muted,#94a3b8)]">
-              Save to lists
-            </p>
-          </div>
-
-          {lists === null && fetchError === null ? (
-            <div className="flex items-center gap-2 px-3 py-3 text-[12px] text-[var(--text-muted,#94a3b8)]">
-              <Loader2
-                className="h-3.5 w-3.5 animate-spin"
-                strokeWidth={2.5}
-              />
-              Loading…
-            </div>
-          ) : null}
-
-          {fetchError !== null ? (
-            <div className="px-3 py-3 text-[12px] text-[var(--pill-red-text,#b91c1c)]">
-              {fetchError}
-            </div>
-          ) : null}
-
-          {lists !== null && lists.length === 0 ? (
-            <div className="px-3 py-4 text-[12px] text-[var(--text-muted,#94a3b8)]">
-              You have no favorite lists yet. Create one in My Favorites.
-            </div>
-          ) : null}
-
-          {lists !== null && lists.length > 0 ? (
-            <ul role="listbox" className="max-h-72 overflow-auto py-1">
-              {lists.map((list) => {
-                const checked = list.is_member;
-                const pending = pendingIds.has(list.id);
-                return (
-                  <li key={list.id}>
-                    <label
-                      className={`flex cursor-pointer items-center gap-2.5 px-3 py-2 text-[13px] transition hover:bg-[var(--surface-2,#f1f6fd)] ${
-                        checked
-                          ? "text-[var(--text,#0f172a)]"
-                          : "text-[var(--text-dim,#475569)]"
-                      } ${pending ? "opacity-60" : ""}`}
-                    >
-                      <input
-                        type="checkbox"
-                        checked={checked}
-                        disabled={pending}
-                        onChange={() => void handleToggle(list)}
-                        className="h-4 w-4 shrink-0 rounded border-[var(--border-2,rgba(30,64,175,0.16))] text-[var(--accent,#6366f1)] focus:ring-[var(--accent,#6366f1)]"
-                      />
-                      <span className="min-w-0 flex-1 truncate">
-                        {list.name}
-                        {list.is_default ? (
-                          <span className="ml-2 inline-flex items-center rounded-full bg-[rgba(99,102,241,0.12)] px-1.5 py-0.5 text-[10px] font-semibold uppercase tracking-[0.06em] text-[#4338ca]">
-                            Default
-                          </span>
-                        ) : null}
-                      </span>
-                      <span className="shrink-0 text-[11px] tabular-nums text-[var(--text-muted,#94a3b8)]">
-                        {list.item_count.toLocaleString()}
-                      </span>
-                      {pending ? (
-                        <Loader2
-                          className="h-3.5 w-3.5 shrink-0 animate-spin text-[var(--text-muted,#94a3b8)]"
-                          strokeWidth={2.5}
-                        />
-                      ) : checked ? (
-                        <Check
-                          className="h-3.5 w-3.5 shrink-0 text-[var(--accent,#6366f1)]"
-                          strokeWidth={2.5}
-                        />
-                      ) : null}
-                    </label>
-                  </li>
-                );
-              })}
-            </ul>
-          ) : null}
-        </div>
-      ) : null}
+      {mounted && popoverPanel
+        ? createPortal(popoverPanel, document.body)
+        : null}
     </div>
   );
 }
