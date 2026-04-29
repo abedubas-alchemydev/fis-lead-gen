@@ -1,8 +1,9 @@
 "use client";
 
 import Link from "next/link";
+import type { Route } from "next";
 import { ArrowRight, Heart, Star } from "lucide-react";
-import { useEffect, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 
 import { Pill, type PillVariant } from "@/components/ui/pill";
 import { SectionPanel } from "@/components/ui/section-panel";
@@ -13,6 +14,10 @@ import {
   type FavoriteListItem,
 } from "@/lib/favorites";
 import { formatCurrency, formatPercent, formatRelativeTime } from "@/lib/format";
+import {
+  MASTER_LIST_STATE_DEFAULTS,
+  encodeReturnParam,
+} from "@/lib/master-list-state";
 
 const PAGE_SIZE = 25;
 
@@ -145,6 +150,21 @@ export function FavoritesClient() {
 
   const hasMore = items.length < total;
 
+  // Sprint 6 task #29: thread `source=favorites` into the firm-detail
+  // URL so the Next-Lead button on /master-list/{id} walks the
+  // favorites list (not the master-list result set) and the
+  // breadcrumb back-link reads "Back to My Favorites".
+  const detailHrefSuffix = useMemo(() => {
+    const env = encodeReturnParam({
+      ...MASTER_LIST_STATE_DEFAULTS,
+      source: "favorites",
+    });
+    return env ? `?return=${env}` : "";
+  }, []);
+
+  const buildDetailHref = (id: number): Route =>
+    `/master-list/${id}${detailHrefSuffix}` as Route;
+
   return (
     <>
       {/* ── Live-match pill row (mirrors alerts / email-extractor) ──────── */}
@@ -186,6 +206,7 @@ export function FavoritesClient() {
               <FavoriteRow
                 key={item.id}
                 item={item}
+                detailHref={buildDetailHref(item.id)}
                 onRemove={() => void unfavorite(item.id)}
                 removing={removing === item.id}
               />
@@ -213,10 +234,12 @@ export function FavoritesClient() {
 
 function FavoriteRow({
   item,
+  detailHref,
   onRemove,
   removing,
 }: {
   item: FavoriteListItem;
+  detailHref: Route;
   onRemove: () => void;
   removing: boolean;
 }) {
@@ -245,7 +268,7 @@ function FavoriteRow({
           </span>
         </div>
         <Link
-          href={`/master-list/${item.id}`}
+          href={detailHref}
           className="mb-1 block text-[14px] font-semibold text-[var(--text,#0f172a)] transition hover:text-[#6366f1]"
         >
           {item.name}
@@ -291,7 +314,7 @@ function FavoriteRow({
         </p>
         <div className="mt-3 flex flex-wrap gap-2">
           <Link
-            href={`/master-list/${item.id}`}
+            href={detailHref}
             className="inline-flex items-center gap-1 rounded-md border border-[rgba(99,102,241,0.3)] px-2.5 py-1 text-[11px] font-semibold text-[#6366f1] transition hover:bg-[rgba(99,102,241,0.05)]"
           >
             Review
