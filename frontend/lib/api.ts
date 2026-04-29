@@ -98,6 +98,7 @@ import type {
   FavoriteListWithMembership,
   PaginatedFavoriteListItems
 } from "@/types/favorite-list";
+import type { PipelineTriggerResponse } from "@/lib/types";
 
 export async function getFavoriteLists(): Promise<FavoriteList[]> {
   return apiRequest<FavoriteList[]>("/api/v1/favorite-lists");
@@ -170,5 +171,34 @@ export async function removeFirmFromList(
   await apiRequest<void>(
     `/api/v1/favorite-lists/${listId}/items/${firmId}`,
     { method: "DELETE" }
+  );
+}
+
+// ── Tier 2 pipeline triggers ──────────────────────────────────────────────
+// Pairs with cli01 BE PR feature/be-pipeline-endpoints-tier2 which exposes
+// admin-OR-SA-OIDC trigger endpoints for the three long-running pipelines.
+// The /settings/pipelines admin UI calls these via the cookie-session path;
+// Cloud Scheduler hits the same endpoints with SA OIDC for the cadence runs.
+// apiRequest already sends `credentials: "include"`, so admin role is
+// enforced by the BE on the cookie path.
+
+export async function runFilingMonitor(): Promise<PipelineTriggerResponse> {
+  return apiRequest<PipelineTriggerResponse>(
+    "/api/v1/pipeline/run/filing-monitor",
+    { method: "POST" }
+  );
+}
+
+export async function runPopulateAll(): Promise<PipelineTriggerResponse> {
+  return apiRequest<PipelineTriggerResponse>(
+    "/api/v1/pipeline/run/populate-all",
+    { method: "POST" }
+  );
+}
+
+export async function runInitialLoad(): Promise<PipelineTriggerResponse> {
+  return apiRequest<PipelineTriggerResponse>(
+    "/api/v1/pipeline/run/initial-load",
+    { method: "POST" }
   );
 }
