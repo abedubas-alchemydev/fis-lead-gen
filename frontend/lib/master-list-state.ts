@@ -289,3 +289,52 @@ export function encodeReturnParam(state: MasterListQueryState): string {
   if (!query) return "";
   return encodeURIComponent(`/master-list?${query}`);
 }
+
+// True when at least one filter key differs from its default. Filter
+// keys are the user-facing query controls (search, state, health, lead
+// priority, clearing partner / type, types of business, net-capital
+// range, registration-date range). Sort, list mode, page size, page,
+// and source are workspace/navigation state — not filters — so they
+// don't count toward "is anything filtered?".
+export function hasActiveFilters(state: MasterListQueryState): boolean {
+  return (
+    state.search !== MASTER_LIST_STATE_DEFAULTS.search ||
+    state.state !== MASTER_LIST_STATE_DEFAULTS.state ||
+    state.health !== MASTER_LIST_STATE_DEFAULTS.health ||
+    state.leadPriority !== MASTER_LIST_STATE_DEFAULTS.leadPriority ||
+    state.clearingPartner !== MASTER_LIST_STATE_DEFAULTS.clearingPartner ||
+    state.clearingType !== MASTER_LIST_STATE_DEFAULTS.clearingType ||
+    state.typesOfBusiness.length > 0 ||
+    state.minNetCapital !== null ||
+    state.maxNetCapital !== null ||
+    state.registeredAfter !== null ||
+    state.registeredBefore !== null
+  );
+}
+
+// Returns a new state with every filter key reset to its default and
+// the page reset to 1. Preserves sortBy, sortDir, list, limit, and
+// source — those are workspace preferences (which list mode you're
+// on, how things are sorted, how many rows per page, where you came
+// from), not filters. The expectation behind a one-click reset is
+// "show me an unfiltered view of this same list, sorted the way I
+// already had it."
+export function clearAllFilters(
+  state: MasterListQueryState,
+): MasterListQueryState {
+  return {
+    ...state,
+    search: MASTER_LIST_STATE_DEFAULTS.search,
+    state: MASTER_LIST_STATE_DEFAULTS.state,
+    health: MASTER_LIST_STATE_DEFAULTS.health,
+    leadPriority: MASTER_LIST_STATE_DEFAULTS.leadPriority,
+    clearingPartner: MASTER_LIST_STATE_DEFAULTS.clearingPartner,
+    clearingType: MASTER_LIST_STATE_DEFAULTS.clearingType,
+    typesOfBusiness: [],
+    minNetCapital: null,
+    maxNetCapital: null,
+    registeredAfter: null,
+    registeredBefore: null,
+    page: 1,
+  };
+}
