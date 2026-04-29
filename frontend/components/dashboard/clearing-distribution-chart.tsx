@@ -2,6 +2,7 @@
 
 import { useRouter } from "next/navigation";
 
+import { DashboardErrorCard } from "@/components/dashboard/dashboard-error-card";
 import type { ClearingProviderShare } from "@/lib/types";
 
 // Mockup palette — each row gets a stable color pair by position.
@@ -32,15 +33,87 @@ function formatPercentLabel(percentage: number): string {
   return `${percentage.toFixed(1)}%`;
 }
 
-export function ClearingDistributionChart({ items }: { items: ClearingProviderShare[] }) {
+export function ClearingDistributionChart({
+  items,
+  loading = false,
+  error = null,
+  onRetry,
+}: {
+  items: ClearingProviderShare[];
+  loading?: boolean;
+  error?: string | null;
+  onRetry?: () => void;
+}) {
   const router = useRouter();
+
+  // Header shared across loading/error/empty/data branches so the card
+  // chrome (border, shadow, padding, title) stays stable while the
+  // body swaps between states.
+  const cardOuter =
+    "flex h-full flex-col rounded-2xl border border-[var(--border,rgba(30,64,175,0.1))] bg-[var(--surface,#ffffff)] p-5";
+  const cardShadow = {
+    boxShadow:
+      "var(--shadow-card, 0 1px 2px rgba(15,23,42,0.04), 0 4px 14px rgba(15,23,42,0.05))",
+  } as const;
+
+  if (loading) {
+    return (
+      <div className={cardOuter} style={cardShadow}>
+        <div className="mb-4 flex items-center justify-between gap-4">
+          <div>
+            <h3 className="text-[15px] font-semibold tracking-[-0.01em] text-[var(--text,#0f172a)]">
+              Clearing market &mdash; provider distribution
+            </h3>
+            <p className="mt-0.5 text-[12px] text-[var(--text-muted,#94a3b8)]">
+              Click a row to filter the Master List
+            </p>
+          </div>
+        </div>
+        <div aria-busy>
+          {Array.from({ length: 5 }).map((_, idx) => (
+            <div
+              key={`distribution-skel-${idx}`}
+              className="grid w-full grid-cols-[10px_minmax(0,40%)_minmax(80px,1fr)_56px] items-center gap-3.5 border-t border-[var(--border,rgba(30,64,175,0.1))] py-2.5 first:border-t-0"
+            >
+              <span className="h-2.5 w-2.5 animate-pulse rounded-[3px] bg-[var(--surface-2,#f1f6fd)]" />
+              <div className="flex min-w-0 items-center gap-2">
+                <span className="h-3 w-32 animate-pulse rounded bg-[var(--surface-2,#f1f6fd)]" />
+                <span className="h-3 w-12 animate-pulse rounded bg-[var(--surface-2,#f1f6fd)]" />
+              </div>
+              <div className="h-1.5 w-full animate-pulse rounded-full bg-[var(--surface-2,#f1f6fd)]" />
+              <span className="h-3 w-10 animate-pulse rounded bg-[var(--surface-2,#f1f6fd)] justify-self-end" />
+            </div>
+          ))}
+        </div>
+      </div>
+    );
+  }
+
+  if (error) {
+    return (
+      <div className={cardOuter} style={cardShadow}>
+        <div className="mb-4 flex items-center justify-between gap-4">
+          <div>
+            <h3 className="text-[15px] font-semibold tracking-[-0.01em] text-[var(--text,#0f172a)]">
+              Clearing market &mdash; provider distribution
+            </h3>
+            <p className="mt-0.5 text-[12px] text-[var(--text-muted,#94a3b8)]">
+              Click a row to filter the Master List
+            </p>
+          </div>
+        </div>
+        <DashboardErrorCard
+          title="Couldn&rsquo;t load clearing distribution"
+          message={error}
+          onRetry={onRetry ?? (() => undefined)}
+        />
+      </div>
+    );
+  }
 
   if (items.length === 0) {
     return (
-      <div
-        className="rounded-2xl border border-[var(--border,rgba(30,64,175,0.1))] bg-[var(--surface,#ffffff)] p-5"
-        style={{ boxShadow: "var(--shadow-card, 0 1px 2px rgba(15,23,42,0.04), 0 4px 14px rgba(15,23,42,0.05))" }}
-      >
+      <div className={cardOuter} style={cardShadow}>
         <p className="text-[11px] font-semibold uppercase tracking-[0.1em] text-[var(--text-muted,#94a3b8)]">
           Clearing Market
         </p>
