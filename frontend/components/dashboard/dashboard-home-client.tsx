@@ -1,11 +1,13 @@
 "use client";
 
-import { useEffect, useState } from "react";
+import { useCallback, useEffect, useState } from "react";
 
 import { AlertFeedCard } from "@/components/alerts/alert-feed-card";
 import { ClearingDistributionChart } from "@/components/dashboard/clearing-distribution-chart";
+import { DashboardErrorCard } from "@/components/dashboard/dashboard-error-card";
 import { KpiCard } from "@/components/dashboard/kpi-card";
 import type { KpiIconProps } from "@/components/dashboard/kpi-card";
+import { KpiCardSkeleton } from "@/components/dashboard/kpi-card-skeleton";
 import { LeadVolumeTrendCard } from "@/components/dashboard/lead-volume-trend-card";
 import { TopLeadsCard } from "@/components/dashboard/top-leads-card";
 import { TopActions } from "@/components/layout/top-actions";
@@ -53,72 +55,124 @@ function KpiIconTarget({ className, strokeWidth = 2 }: KpiIconProps) {
 }
 
 export function DashboardHomeClient() {
+  // Each KPI value renders as a string so the placeholder "-" can sit
+  // in place until /api/v1/stats resolves. We never read these strings
+  // when statsLoading is true (the grid renders KpiCardSkeleton then),
+  // but they remain initialized for the data-render branch.
   const [totalBds, setTotalBds] = useState<string>("-");
   const [newBds, setNewBds] = useState<string>("-");
   const [deficiencyAlerts, setDeficiencyAlerts] = useState<string>("-");
   const [highValueLeads, setHighValueLeads] = useState<string>("-");
   const [distribution, setDistribution] = useState<ClearingDistributionResponse["items"]>([]);
   const [alerts, setAlerts] = useState<AlertListItem[]>([]);
-  const [error, setError] = useState<string | null>(null);
-  const [alertsError, setAlertsError] = useState<string | null>(null);
+
+  // Per-source state slices so each tile can render its own
+  // loading / error / data state and retry independently. Replaces
+  // the previous single pageLoading gate that blocked all chrome
+  // until the slowest source resolved.
+  const [statsLoading, setStatsLoading] = useState(true);
+  const [statsError, setStatsError] = useState<string | null>(null);
+  const [statsReloadKey, setStatsReloadKey] = useState(0);
+
+  const [distributionLoading, setDistributionLoading] = useState(true);
+  const [distributionError, setDistributionError] = useState<string | null>(null);
+  const [distributionReloadKey, setDistributionReloadKey] = useState(0);
+
   const [alertsLoading, setAlertsLoading] = useState(true);
-  const [pageLoading, setPageLoading] = useState(true);
+  // Two distinct error paths for /api/v1/alerts:
+  //   alertsLoadError    — initial fetch failure → external retry block
+  //   alertsActionError  — mark-read PATCH failure → AlertFeedCard's
+  //                        existing inline banner
+  // Splitting them avoids regressing the mark-read UX when the tile
+  // is in a loaded state and a per-action failure occurs.
+  const [alertsLoadError, setAlertsLoadError] = useState<string | null>(null);
+  const [alertsActionError, setAlertsActionError] = useState<string | null>(null);
+  const [alertsReloadKey, setAlertsReloadKey] = useState(0);
+
+  const handleStatsRetry = useCallback(() => {
+    setStatsReloadKey((k) => k + 1);
+  }, []);
+  const handleDistributionRetry = useCallback(() => {
+    setDistributionReloadKey((k) => k + 1);
+  }, []);
+  const handleAlertsRetry = useCallback(() => {
+    setAlertsReloadKey((k) => k + 1);
+  }, []);
 
   useEffect(() => {
     let active = true;
+    setStatsLoading(true);
+    setStatsError(null);
 
-    async function loadStats() {
-      const [statsResult, distributionResult, alertsResult] = await Promise.allSettled([
-        apiRequest<DashboardStats>("/api/v1/stats"),
-        apiRequest<ClearingDistributionResponse>("/api/v1/stats/clearing-distribution"),
-        apiRequest<AlertListResponse>("/api/v1/alerts?page=1&limit=6")
-      ]);
-
-      if (!active) return;
-
-      if (statsResult.status === "fulfilled") {
-        setTotalBds(statsResult.value.total_active_bds.toLocaleString());
-        setNewBds(statsResult.value.new_bds_30_days.toLocaleString());
-        setDeficiencyAlerts(statsResult.value.deficiency_alerts.toLocaleString());
-        setHighValueLeads(statsResult.value.high_value_leads.toLocaleString());
-      } else {
-        const message = statsResult.reason instanceof Error ? statsResult.reason.message : "Unable to load dashboard stats.";
-        setError(message);
-      }
-
-      if (distributionResult.status === "fulfilled") {
-        setDistribution(distributionResult.value.items);
-      }
-
-      if (alertsResult.status === "fulfilled") {
-        setAlerts(alertsResult.value.items);
-      } else {
-        const message = alertsResult.reason instanceof Error ? alertsResult.reason.message : "Unable to load alerts.";
-        setAlertsError(message);
-      }
-
-      setAlertsLoading(false);
-      setPageLoading(false);
-    }
-
-    void loadStats();
+    apiRequest<DashboardStats>("/api/v1/stats")
+      .then((stats) => {
+        if (!active) return;
+        setTotalBds(stats.total_active_bds.toLocaleString());
+        setNewBds(stats.new_bds_30_days.toLocaleString());
+        setDeficiencyAlerts(stats.deficiency_alerts.toLocaleString());
+        setHighValueLeads(stats.high_value_leads.toLocaleString());
+      })
+      .catch((err) => {
+        if (!active) return;
+        setStatsError(err instanceof Error ? err.message : "Unable to load dashboard stats.");
+      })
+      .finally(() => {
+        if (active) setStatsLoading(false);
+      });
 
     return () => {
       active = false;
     };
-  }, []);
+  }, [statsReloadKey]);
 
-  if (pageLoading) {
-    return (
-      <div className="flex min-h-[50vh] flex-col items-center justify-center gap-5">
-        <div className="relative h-12 w-12">
-          <div className="absolute inset-0 rounded-full border-4 border-slate-200" />
-          <div className="absolute inset-0 animate-spin rounded-full border-4 border-transparent border-t-navy" />
-        </div>
-        <p className="text-sm font-medium tracking-wide text-slate-500">Loading dashboard</p>
-      </div>
-    );
-  }
+  useEffect(() => {
+    let active = true;
+    setDistributionLoading(true);
+    setDistributionError(null);
+
+    apiRequest<ClearingDistributionResponse>("/api/v1/stats/clearing-distribution")
+      .then((resp) => {
+        if (!active) return;
+        setDistribution(resp.items);
+      })
+      .catch((err) => {
+        if (!active) return;
+        setDistributionError(
+          err instanceof Error ? err.message : "Unable to load clearing distribution."
+        );
+      })
+      .finally(() => {
+        if (active) setDistributionLoading(false);
+      });
+
+    return () => {
+      active = false;
+    };
+  }, [distributionReloadKey]);
+
+  useEffect(() => {
+    let active = true;
+    setAlertsLoading(true);
+    setAlertsLoadError(null);
+    setAlertsActionError(null);
+
+    apiRequest<AlertListResponse>("/api/v1/alerts?page=1&limit=6")
+      .then((resp) => {
+        if (!active) return;
+        setAlerts(resp.items);
+      })
+      .catch((err) => {
+        if (!active) return;
+        setAlertsLoadError(err instanceof Error ? err.message : "Unable to load alerts.");
+      })
+      .finally(() => {
+        if (active) setAlertsLoading(false);
+      });
+
+    return () => {
+      active = false;
+    };
+  }, [alertsReloadKey]);
 
   return (
     // App shell <main> owns the canvas bg. Typography is now applied at
@@ -149,59 +203,73 @@ export function DashboardHomeClient() {
         </div>
       </div>
 
-      {/* KPI grid */}
-      <div className="mb-6 grid grid-cols-1 gap-4 md:grid-cols-2 xl:grid-cols-4">
-        <div className="animate-fade-in">
-          <KpiCard
-            title="Total Active BDs"
-            value={totalBds}
-            tone="blue"
-            icon={KpiIconBuilding}
-            helper={error ? "Backend data unavailable" : "All broker-dealers in Master List"}
-            href="/master-list?list=all"
-            trend={{ direction: "up", label: "2.4%" }}
+      {/* KPI grid — branches on stats state:
+          - statsError → full-width DashboardErrorCard with Retry
+          - statsLoading → 4× KpiCardSkeleton mirroring real card geometry
+          - data → 4× KpiCard (existing render) */}
+      {statsError ? (
+        <div className="mb-6">
+          <DashboardErrorCard
+            title="Couldn&rsquo;t load dashboard stats"
+            message={statsError}
+            onRetry={handleStatsRetry}
           />
         </div>
-        <div className="animate-fade-in delay-75">
-          <KpiCard
-            title="New BDs · 30 days"
-            value={newBds}
-            tone="purple"
-            icon={KpiIconPulse}
-            helper="Recent registrations from filing activity"
-            href="/master-list?list=all"
-            trend={{ direction: "down", label: "66%" }}
-          />
+      ) : statsLoading ? (
+        <div className="mb-6 grid grid-cols-1 gap-4 md:grid-cols-2 xl:grid-cols-4">
+          <div className="animate-fade-in"><KpiCardSkeleton /></div>
+          <div className="animate-fade-in delay-75"><KpiCardSkeleton /></div>
+          <div className="animate-fade-in delay-150"><KpiCardSkeleton /></div>
+          <div className="animate-fade-in delay-200"><KpiCardSkeleton /></div>
         </div>
-        <div className="animate-fade-in delay-150">
-          <KpiCard
-            title="Deficiency Alerts"
-            value={deficiencyAlerts}
-            tone="red"
-            icon={KpiIconAlert}
-            helper="Active Form 17a-11 notices"
-            href="/alerts?form_type=Form%2017a-11"
-            trend={{ direction: "up", label: "12" }}
-          />
+      ) : (
+        <div className="mb-6 grid grid-cols-1 gap-4 md:grid-cols-2 xl:grid-cols-4">
+          <div className="animate-fade-in">
+            <KpiCard
+              title="Total Active BDs"
+              value={totalBds}
+              tone="blue"
+              icon={KpiIconBuilding}
+              helper="All broker-dealers in Master List"
+              href="/master-list?list=all"
+              trend={{ direction: "up", label: "2.4%" }}
+            />
+          </div>
+          <div className="animate-fade-in delay-75">
+            <KpiCard
+              title="New BDs · 30 days"
+              value={newBds}
+              tone="purple"
+              icon={KpiIconPulse}
+              helper="Recent registrations from filing activity"
+              href="/master-list?list=all"
+              trend={{ direction: "down", label: "66%" }}
+            />
+          </div>
+          <div className="animate-fade-in delay-150">
+            <KpiCard
+              title="Deficiency Alerts"
+              value={deficiencyAlerts}
+              tone="red"
+              icon={KpiIconAlert}
+              helper="Active Form 17a-11 notices"
+              href="/alerts?form_type=Form%2017a-11"
+              trend={{ direction: "up", label: "12" }}
+            />
+          </div>
+          <div className="animate-fade-in delay-200">
+            <KpiCard
+              title="High-Value Leads"
+              value={highValueLeads}
+              tone="amber"
+              icon={KpiIconTarget}
+              helper="Weighted scoring, last updated 8m ago"
+              href="/master-list?lead_priority=hot"
+              trend={{ direction: "up", label: "5" }}
+            />
+          </div>
         </div>
-        <div className="animate-fade-in delay-200">
-          <KpiCard
-            title="High-Value Leads"
-            value={highValueLeads}
-            tone="amber"
-            icon={KpiIconTarget}
-            helper="Weighted scoring, last updated 8m ago"
-            href="/master-list?lead_priority=hot"
-            trend={{ direction: "up", label: "5" }}
-          />
-        </div>
-      </div>
-
-      {error ? (
-        <div className="mb-6 rounded-2xl border border-red-100 bg-red-50 px-4 py-3 text-sm text-red-700">
-          {error}
-        </div>
-      ) : null}
+      )}
 
       {/* Trend (LEFT, narrower) + top leads (RIGHT, wider) — matches mockup 1fr 1.4fr.
           `h-full` on both animate wrappers forwards the grid row's stretched
@@ -220,24 +288,51 @@ export function DashboardHomeClient() {
       {/* Provider distribution (LEFT, wider) + activity feed (RIGHT, narrower) — 1.4fr 1fr */}
       <div className="grid grid-cols-1 gap-4 xl:grid-cols-[1.4fr_1fr]">
         <div className="animate-fade-in-left delay-[400ms]">
-          <ClearingDistributionChart items={distribution} />
+          <ClearingDistributionChart
+            items={distribution}
+            loading={distributionLoading}
+            error={distributionError}
+            onRetry={handleDistributionRetry}
+          />
         </div>
         <div className="animate-fade-in-right delay-[400ms]">
-          <AlertFeedCard
-            alerts={alerts}
-            loading={alertsLoading}
-            error={alertsError}
-            onMarkRead={(alertId) => {
-              setAlerts((current) =>
-                current.map((item) => (item.id === alertId ? { ...item, is_read: true } : item))
-              );
-              void apiRequest(`/api/v1/alerts/${alertId}/read`, { method: "PATCH" }).catch((markError) => {
-                setAlertsError(
-                  markError instanceof Error ? markError.message : "Unable to update alert state."
+          {alertsLoadError ? (
+            // External retry block when the initial /api/v1/alerts fetch
+            // fails. AlertFeedCard lives under frontend/components/alerts/**
+            // (off-limits this PR), so we render the medallion error card
+            // alongside it instead of modifying the AlertFeedCard signature.
+            // Wrap in the same surface chrome AlertFeedCard uses so the
+            // tile slot keeps a stable visual footprint.
+            <article className="rounded-2xl border border-slate-200/70 bg-white p-5 shadow-[0_1px_2px_rgba(15,23,42,0.04),0_4px_14px_rgba(15,23,42,0.05)]">
+              <div className="mb-4 flex items-start justify-between gap-4">
+                <div>
+                  <h2 className="text-[15px] font-semibold tracking-[-0.01em] text-slate-900">Activity feed</h2>
+                  <p className="mt-0.5 text-xs text-slate-500">Recent filing alerts</p>
+                </div>
+              </div>
+              <DashboardErrorCard
+                title="Couldn&rsquo;t load alerts"
+                message={alertsLoadError}
+                onRetry={handleAlertsRetry}
+              />
+            </article>
+          ) : (
+            <AlertFeedCard
+              alerts={alerts}
+              loading={alertsLoading}
+              error={alertsActionError}
+              onMarkRead={(alertId) => {
+                setAlerts((current) =>
+                  current.map((item) => (item.id === alertId ? { ...item, is_read: true } : item))
                 );
-              });
-            }}
-          />
+                void apiRequest(`/api/v1/alerts/${alertId}/read`, { method: "PATCH" }).catch((markError) => {
+                  setAlertsActionError(
+                    markError instanceof Error ? markError.message : "Unable to update alert state."
+                  );
+                });
+              }}
+            />
+          )}
         </div>
       </div>
     </div>

@@ -1,8 +1,10 @@
 "use client";
 
 import Link from "next/link";
-import { useEffect, useState } from "react";
+import { useCallback, useEffect, useState } from "react";
 
+import { DashboardErrorCard } from "@/components/dashboard/dashboard-error-card";
+import { EmptyTopLeadsState } from "@/components/dashboard/empty-top-leads-state";
 import { apiRequest } from "@/lib/api";
 import type { BrokerDealerListItem, BrokerDealerListResponse } from "@/lib/types";
 
@@ -37,9 +39,20 @@ export function TopLeadsCard() {
   const [items, setItems] = useState<BrokerDealerListItem[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
+  // Bumping reloadKey re-runs the fetch effect — the Retry button in the
+  // error-state DashboardErrorCard wires to this so the user can recover
+  // without a full page reload.
+  const [reloadKey, setReloadKey] = useState(0);
+
+  const handleRetry = useCallback(() => {
+    setReloadKey((k) => k + 1);
+  }, []);
 
   useEffect(() => {
     let active = true;
+    setLoading(true);
+    setError(null);
+
     async function load() {
       try {
         const response = await apiRequest<BrokerDealerListResponse>(
@@ -58,7 +71,7 @@ export function TopLeadsCard() {
     return () => {
       active = false;
     };
-  }, []);
+  }, [reloadKey]);
 
   return (
     // `h-full` so this card sits at the row's stretched height, matching the
@@ -90,24 +103,29 @@ export function TopLeadsCard() {
       </div>
 
       {error ? (
-        <div className="rounded-lg bg-red-50 px-3 py-2 text-sm text-red-700">{error}</div>
+        <DashboardErrorCard
+          title="Couldn&rsquo;t load top leads"
+          message={error}
+          onRetry={handleRetry}
+        />
       ) : loading ? (
-        <div className="space-y-3">
+        <div aria-busy className="space-y-3">
           {Array.from({ length: 5 }).map((_, i) => (
-            <div key={i} className="flex items-center gap-3 border-t border-slate-200/70 py-3 first:border-t-0">
-              <div className="h-9 w-9 animate-pulse rounded-lg bg-slate-100" />
+            <div
+              key={i}
+              className="flex items-center gap-3 border-t border-[var(--border,rgba(30,64,175,0.1))] py-3 first:border-t-0"
+            >
+              <div className="h-9 w-9 animate-pulse rounded-lg bg-[var(--surface-2,#f1f6fd)]" />
               <div className="flex-1">
-                <div className="h-4 w-40 animate-pulse rounded bg-slate-100" />
-                <div className="mt-1.5 h-3 w-32 animate-pulse rounded bg-slate-100" />
+                <div className="h-4 w-40 animate-pulse rounded bg-[var(--surface-2,#f1f6fd)]" />
+                <div className="mt-1.5 h-3 w-32 animate-pulse rounded bg-[var(--surface-2,#f1f6fd)]" />
               </div>
-              <div className="h-7 w-14 animate-pulse rounded bg-slate-100" />
+              <div className="h-7 w-14 animate-pulse rounded bg-[var(--surface-2,#f1f6fd)]" />
             </div>
           ))}
         </div>
       ) : items.length === 0 ? (
-        <div className="rounded-lg border border-dashed border-slate-200 px-4 py-8 text-center text-sm text-slate-500">
-          No high-value leads yet. Check back after the next scoring pass.
-        </div>
+        <EmptyTopLeadsState />
       ) : (
         <div>
           {items.map((item, idx) => {
