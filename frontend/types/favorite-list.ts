@@ -16,6 +16,15 @@ export interface FavoriteList {
   created_at: string;
 }
 
+// #17 phase 3 — GET /api/v1/broker-dealers/{firm_id}/favorite-lists
+// returns the user's lists with an extra `is_member` flag indicating
+// whether THIS firm is currently in THAT list. Used by the list-picker
+// dropdown on master-list rows and the firm-detail page so each
+// checkbox reflects current membership in O(1) reads.
+export interface FavoriteListWithMembership extends FavoriteList {
+  is_member: boolean;
+}
+
 export interface FavoriteListItem {
   broker_dealer_id: number;
   broker_dealer_name: string;
