@@ -75,7 +75,7 @@ export function RecentRunsTable({ refreshKey = 0 }: RecentRunsTableProps) {
         </p>
       ) : null}
 
-      <div className="mt-5 overflow-hidden rounded-2xl border border-slate-200">
+      <div className="mt-5 overflow-x-auto rounded-2xl border border-slate-200">
         <table className="w-full text-left text-sm">
           <thead className="bg-slate-50 text-xs uppercase tracking-[0.18em] text-slate-500">
             <tr>

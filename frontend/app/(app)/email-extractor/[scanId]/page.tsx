@@ -373,7 +373,7 @@ function ResultsTable({
   onEnrich: (emailId: number) => void;
 }): React.ReactElement {
   return (
-    <div className="overflow-hidden rounded-xl border border-[var(--border,rgba(30,64,175,0.1))] bg-[var(--surface,#ffffff)]">
+    <div className="overflow-x-auto rounded-xl border border-[var(--border,rgba(30,64,175,0.1))] bg-[var(--surface,#ffffff)]">
       <table className="w-full text-[13px]">
         <thead className="bg-[var(--surface-2,#f1f6fd)] text-left">
           <tr>
