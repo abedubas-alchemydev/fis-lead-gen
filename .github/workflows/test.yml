@@ -11,8 +11,8 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
-  backend:
-    name: Backend (Python 3.11)
+  backend-unit:
+    name: Backend Unit (Python 3.11)
     runs-on: ubuntu-latest
     timeout-minutes: 10
     defaults:
@@ -40,13 +40,81 @@ jobs:
       - name: Install dependencies
         run: pip install -r requirements-dev.txt
 
-      - name: Run tests
+      - name: Run unit tests
         run: |
           if find app/tests -name "test_*.py" | grep -q .; then
-            pytest app/tests/ -v --tb=short
+            pytest app/tests/ -m "not integration" -v --tb=short
           else
             echo "::notice::No test files found yet."
           fi
+
+  backend-integration:
+    name: Backend Integration (Python 3.11 + Postgres 15)
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    defaults:
+      run:
+        working-directory: backend
+    services:
+      postgres:
+        image: postgres:15
+        env:
+          POSTGRES_USER: testuser
+          POSTGRES_PASSWORD: testpass
+          POSTGRES_DB: testdb
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd pg_isready
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+    env:
+      DATABASE_URL: "postgresql+psycopg://testuser:testpass@localhost:5432/testdb"
+      DATABASE_URL_BACKEND: "postgresql+psycopg://testuser:testpass@localhost:5432/testdb"
+      DATABASE_URL_FRONTEND: "postgresql://testuser:testpass@localhost:5432/testdb"
+      BETTER_AUTH_SECRET: "ci-test-secret-not-real-do-not-use-in-prod"
+      # 39-char placeholder matching ^AIzaSy[A-Za-z0-9_\-]{33}$. Passes the shape
+      # validator in services/gemini_responses.py without calling Gemini.
+      GEMINI_API_KEY: "AIzaSyCITestFakeKey00000000000000000000"
+      OPENAI_API_KEY: "sk-ci-test-fake-not-real"
+      APOLLO_API_KEY: "ci-test-fake"
+      CONTACT_ENRICHMENT_PROVIDER: "disabled"
+      HUNTER_API_KEY: ""
+      SNOV_CLIENT_ID: ""
+      SNOV_CLIENT_SECRET: ""
+      ENVIRONMENT: "test"
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+          cache-dependency-path: backend/requirements-dev.txt
+
+      - name: Install dependencies
+        run: pip install -r requirements-dev.txt
+
+      - name: Wait for Postgres
+        run: |
+          for i in {1..30}; do
+            if pg_isready -h localhost -p 5432 -U testuser; then
+              echo "Postgres ready"; break
+            fi
+            sleep 2
+          done
+
+      - name: Apply Alembic migrations
+        env:
+          # backend/alembic/env.py imports `from app.core.config import settings`.
+          # pytest picks the path up via pytest.ini's `pythonpath = .`, but alembic
+          # has no equivalent here, so we set it explicitly for this step only.
+          PYTHONPATH: "."
+        run: alembic upgrade head
+
+      - name: Run integration tests
+        run: pytest app/tests/ -m "integration" -v --tb=short
 
   frontend:
     name: Frontend (Node 20)
@@ -81,7 +149,7 @@ jobs:
 
   deploy:
     name: Deploy (${{ github.ref == 'refs/heads/main' && 'production' || 'staging' }})
-    needs: [backend, frontend]
+    needs: [backend-unit, backend-integration, frontend]
     if: github.event_name == 'push'
     runs-on: ubuntu-latest
     timeout-minutes: 15
