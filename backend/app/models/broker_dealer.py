@@ -43,6 +43,10 @@ class BrokerDealer(Base):
     last_audit_report_date: Mapped[date | None] = mapped_column(Date, nullable=True)
     # ── Tri-Stream fields (Revision 1) ──
     website: Mapped[str | None] = mapped_column(String(512), nullable=True)
+    # 'finra' (Form BD Web Address) | 'apollo' (organizations/search fallback)
+    # | None when the firm has no website on either source. NULL is the legacy
+    # default for rows that predate the firm-website backfill.
+    website_source: Mapped[str | None] = mapped_column(String(16), nullable=True)
     types_of_business: Mapped[list | None] = mapped_column(JSONB, nullable=True)
     types_of_business_total: Mapped[int | None] = mapped_column(Integer, nullable=True)
     types_of_business_other: Mapped[str | None] = mapped_column(Text, nullable=True)

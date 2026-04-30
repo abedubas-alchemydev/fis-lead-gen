@@ -28,6 +28,13 @@ logger = logging.getLogger(__name__)
 # and enrich return contact channels that violate the names-only rule.
 _APOLLO_PEOPLE_SEARCH_URL: Final = "https://api.apollo.io/api/v1/mixed_people/search"
 
+# Apollo organizations-search endpoint, used as the fallback for
+# ``broker_dealer.website`` when FINRA's Form BD Web Address is empty. The
+# response is rich (location, employee_count, founded_year, technologies,
+# etc.); the parser below trims to ``name`` + ``website_url`` + primary
+# domain so nothing else can leak through this module.
+_APOLLO_ORGS_SEARCH_URL: Final = "https://api.apollo.io/api/v1/organizations/search"
+
 # Officer-rank titles passed to Apollo. Kept tight to senior officer titles
 # so the search returns the people the FOCUS extraction *would* have
 # returned if the PDF had named them.
@@ -83,6 +90,24 @@ class ApolloExecutive:
     first_name: str
     last_name: str
     officer_rank: str
+
+
+@dataclass(slots=True, frozen=True)
+class ApolloOrganization:
+    """Website-only view of an Apollo organization.
+
+    Used to backfill ``broker_dealer.website`` when FINRA's Form BD Web
+    Address is empty. Trimmed at the parser boundary — Apollo's response
+    includes phone, address, employee_count, founded_year, technologies,
+    funding history, and more; none of that survives this module.
+    ``website_url`` may be None when the matched org has no public site,
+    in which case ``domain`` may still carry the primary domain (often a
+    bare ``example.com`` we can prefix with ``https://``).
+    """
+
+    name: str
+    website_url: str | None
+    domain: str | None
 
 
 class ApolloClient:
@@ -182,6 +207,130 @@ class ApolloClient:
         raise ApolloError(
             f"Apollo retries exhausted for '{firm_name}': {last_error}"
         )
+
+    async def search_organization(
+        self,
+        firm_name: str,
+        crd: str | None = None,
+    ) -> ApolloOrganization | None:
+        """Search Apollo for the organization matching ``firm_name``.
+
+        Hits ``POST /v1/organizations/search`` and returns the top match's
+        name + website url + primary domain. Returns ``None`` when Apollo
+        responds with no organizations matching the query — that is the
+        normal "we just don't know this firm" path; the firm's website
+        stays NULL on the broker_dealer row.
+
+        Retries on 429 + 5xx + network errors with the same exponential
+        backoff + jitter as :meth:`search_executives`. Raises
+        ``ApolloError`` after retries are exhausted (or immediately on a
+        non-retryable 4xx) so the caller can mark the firm as a
+        provider-error review item rather than caching the empty result.
+
+        ``crd`` is appended as a free-text keyword so we get a sharper
+        match when several firms share a name. Apollo silently ignores
+        unknown query params, so passing it is safe even on plans where
+        ``q_keywords`` isn't first-class.
+        """
+        firm_name = firm_name.strip()
+        if not firm_name:
+            return None
+
+        payload: dict[str, object] = {
+            "q_organization_name": firm_name,
+            "page": 1,
+            "per_page": _RESULT_LIMIT,
+        }
+        if crd:
+            payload["q_keywords"] = f"CRD {crd}"
+
+        headers = {
+            "Content-Type": "application/json",
+            "Cache-Control": "no-cache",
+            "X-Api-Key": self._api_key,
+        }
+
+        last_error: Exception | None = None
+        for attempt in range(1, self._max_attempts + 1):
+            try:
+                async with httpx.AsyncClient(timeout=self._timeout_s) as client:
+                    response = await client.post(
+                        _APOLLO_ORGS_SEARCH_URL,
+                        headers=headers,
+                        json=payload,
+                    )
+            except httpx.HTTPError as exc:
+                last_error = exc
+                logger.warning(
+                    "Apollo organizations network error for '%s' (attempt %d/%d): %s",
+                    firm_name,
+                    attempt,
+                    self._max_attempts,
+                    exc,
+                )
+                if attempt < self._max_attempts:
+                    await self._backoff(attempt)
+                continue
+
+            if response.status_code == 200:
+                return self._parse_organization(response.json(), firm_name)
+
+            if response.status_code == 429 or 500 <= response.status_code < 600:
+                last_error = ApolloError(
+                    f"Apollo organizations returned {response.status_code}"
+                )
+                logger.warning(
+                    "Apollo organizations transient error %d for '%s' (attempt %d/%d)",
+                    response.status_code,
+                    firm_name,
+                    attempt,
+                    self._max_attempts,
+                )
+                if attempt < self._max_attempts:
+                    await self._backoff(attempt)
+                continue
+
+            raise ApolloError(
+                f"Apollo organizations returned {response.status_code} for '{firm_name}'"
+            )
+
+        raise ApolloError(
+            f"Apollo organizations retries exhausted for '{firm_name}': {last_error}"
+        )
+
+    @staticmethod
+    def _parse_organization(
+        payload: object, firm_name: str
+    ) -> ApolloOrganization | None:
+        """Trim the Apollo organizations payload to name + website + domain.
+
+        Apollo returns the matched org under ``organizations`` (list);
+        ``accounts`` is also present on some plans for org-search, with the
+        same shape. We pick the first entry. If neither key is populated we
+        return None so the caller treats it as "no match" (website stays
+        NULL on the broker_dealer row, identical to the FINRA-empty path).
+        """
+        if not isinstance(payload, dict):
+            return None
+        orgs = payload.get("organizations")
+        if not isinstance(orgs, list) or not orgs:
+            orgs = payload.get("accounts")
+        if not isinstance(orgs, list):
+            return None
+        for org in orgs:
+            if not isinstance(org, dict):
+                continue
+            name = str(org.get("name") or firm_name).strip() or firm_name
+            website_raw = org.get("website_url")
+            domain_raw = org.get("primary_domain") or org.get("domain")
+            website = str(website_raw).strip() if website_raw else None
+            domain = str(domain_raw).strip() if domain_raw else None
+            return ApolloOrganization(
+                name=name,
+                website_url=website or None,
+                domain=domain or None,
+            )
+        return None
 
     @staticmethod
     async def _backoff(attempt: int) -> None:
