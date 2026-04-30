@@ -84,7 +84,7 @@ export function UsersAdminClient({
           </div>
         </div>
       ) : (
-        <div className="overflow-hidden rounded-[24px] border border-slate-200 bg-white shadow-shell">
+        <div className="overflow-x-auto rounded-[24px] border border-slate-200 bg-white shadow-shell">
           <table className="w-full text-left text-sm">
             <thead className="bg-slate-50 text-xs font-semibold uppercase tracking-[0.16em] text-slate-500">
               <tr>
