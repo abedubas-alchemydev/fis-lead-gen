@@ -1085,7 +1085,7 @@ export function MasterListWorkspaceClient() {
                             </span>
                           ) : (
                             <UnknownCell
-                              reason={item.current_clearing_partner_unknown_reason}
+                              reason={item.current_clearing_unknown_reason}
                             />
                           )}
                           {item.current_clearing_is_competitor ? (
@@ -1099,9 +1099,9 @@ export function MasterListWorkspaceClient() {
                             {clearingTypeLabel(item.current_clearing_type)}
                           </Pill>
                           {item.current_clearing_type === null &&
-                          item.current_clearing_type_unknown_reason ? (
+                          item.current_clearing_unknown_reason ? (
                             <UnknownCell
-                              reason={item.current_clearing_type_unknown_reason}
+                              reason={item.current_clearing_unknown_reason}
                               fallback={null}
                               compact
                             />
@@ -1138,7 +1138,7 @@ export function MasterListWorkspaceClient() {
                           formatCurrency(item.latest_net_capital)
                         ) : (
                           <UnknownCell
-                            reason={item.latest_net_capital_unknown_reason}
+                            reason={item.financial_unknown_reason}
                             fallback="—"
                           />
                         )}
@@ -1160,17 +1160,14 @@ export function MasterListWorkspaceClient() {
                           </span>
                         ) : (
                           <UnknownCell
-                            reason={item.yoy_growth_unknown_reason}
+                            reason={item.financial_unknown_reason}
                             fallback="—"
                           />
                         )}
                       </td>
                       <td className="whitespace-nowrap px-5 py-3.5 text-[var(--text-muted,#94a3b8)]">
                         {item.last_filing_date ?? (
-                          <UnknownCell
-                            reason={item.last_filing_date_unknown_reason}
-                            fallback="—"
-                          />
+                          <span title="No Edgar filing on record">—</span>
                         )}
                       </td>
                     </tr>

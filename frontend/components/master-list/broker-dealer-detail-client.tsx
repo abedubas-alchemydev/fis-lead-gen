@@ -522,9 +522,9 @@ export function BrokerDealerDetailClient({ brokerDealerId }: { brokerDealerId: s
             {clearingTypeLabel(bd.current_clearing_type)}
           </Pill>
           {bd.current_clearing_type === null &&
-          bd.current_clearing_type_unknown_reason ? (
+          bd.current_clearing_unknown_reason ? (
             <UnknownCell
-              reason={bd.current_clearing_type_unknown_reason}
+              reason={bd.current_clearing_unknown_reason}
               fallback={null}
               compact
             />
@@ -586,7 +586,7 @@ export function BrokerDealerDetailClient({ brokerDealerId }: { brokerDealerId: s
                   formatCurrency(bd.latest_net_capital)
                 ) : (
                   <UnknownCell
-                    reason={bd.latest_net_capital_unknown_reason}
+                    reason={bd.financial_unknown_reason}
                     fallback="N/A"
                   />
                 )
@@ -599,7 +599,7 @@ export function BrokerDealerDetailClient({ brokerDealerId }: { brokerDealerId: s
                   formatCurrency(bd.latest_excess_net_capital)
                 ) : (
                   <UnknownCell
-                    reason={bd.latest_excess_net_capital_unknown_reason}
+                    reason={bd.financial_unknown_reason}
                     fallback="N/A"
                   />
                 )
@@ -612,7 +612,7 @@ export function BrokerDealerDetailClient({ brokerDealerId }: { brokerDealerId: s
                   formatPercent(bd.yoy_growth)
                 ) : (
                   <UnknownCell
-                    reason={bd.yoy_growth_unknown_reason}
+                    reason={bd.financial_unknown_reason}
                     fallback="N/A"
                   />
                 )
@@ -625,7 +625,7 @@ export function BrokerDealerDetailClient({ brokerDealerId }: { brokerDealerId: s
                   : "text-[var(--pill-red-text,#b91c1c)]"
               }
               helper={
-                bd.yoy_growth === null && !bd.yoy_growth_unknown_reason
+                bd.yoy_growth === null && !bd.financial_unknown_reason
                   ? "Requires 2+ years of data"
                   : undefined
               }
@@ -955,7 +955,7 @@ export function BrokerDealerDetailClient({ brokerDealerId }: { brokerDealerId: s
                       <p className="text-sm font-semibold text-[var(--text,#0f172a)]">
                         {item.clearing_partner ?? (
                           <UnknownCell
-                            reason={item.clearing_partner_unknown_reason}
+                            reason={item.unknown_reason}
                             fallback="Unknown partner"
                           />
                         )}
@@ -968,10 +968,9 @@ export function BrokerDealerDetailClient({ brokerDealerId }: { brokerDealerId: s
                       <Pill variant={clearingTypeVariant(item.clearing_type)}>
                         {clearingTypeLabel(item.clearing_type)}
                       </Pill>
-                      {item.clearing_type === null &&
-                      item.clearing_type_unknown_reason ? (
+                      {item.clearing_type === null && item.unknown_reason ? (
                         <UnknownCell
-                          reason={item.clearing_type_unknown_reason}
+                          reason={item.unknown_reason}
                           fallback={null}
                           compact
                         />

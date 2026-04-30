@@ -1,10 +1,13 @@
 // `unknown_reason` is the BE-provided explanation for why a nullable
-// master-list field is missing. A field is null ⇔ its `_unknown_reason`
-// sibling is populated. Pairs with cli01 BE feature/be-unknown-reasons-api.
+// master-list field is missing. Mirrors backend/app/schemas/unknown_reason.py
+// from cli01's BE PR (#222 / `feature/be-unknown-reasons-api`).
 //
-// The siblings are optional (`?:`) so the FE keeps working before the BE
-// ships — a missing reason renders the existing "Unknown" / "—" fallback
-// without the hover icon. Once BE merges the contract becomes required.
+// The BE consolidates per-group: every `BrokerDealerListItem` carries a
+// `current_clearing_unknown_reason` (covers partner + type) and a
+// `financial_unknown_reason` (covers net capital, excess capital, YoY).
+// Per-row sub-models (ClearingArrangementItem, FinancialMetricItem) carry
+// their own `unknown_reason`. None ⇒ value is present and the cell renders
+// normally. Non-None ⇒ value is missing and the FE renders an info icon.
 export type UnknownReasonCategory =
   | "firm_does_not_disclose"
   | "no_filing_available"
@@ -47,18 +50,18 @@ export type BrokerDealerListItem = {
   lead_score: number | null;
   lead_priority: string | null;
   current_clearing_partner: string | null;
-  current_clearing_partner_unknown_reason?: UnknownReason | null;
   current_clearing_type: string | null;
-  current_clearing_type_unknown_reason?: UnknownReason | null;
   current_clearing_is_competitor: boolean;
   current_clearing_source_filing_url: string | null;
   current_clearing_extraction_confidence: number | null;
   last_audit_report_date: string | null;
-  latest_net_capital_unknown_reason?: UnknownReason | null;
-  latest_excess_net_capital_unknown_reason?: UnknownReason | null;
-  latest_total_assets_unknown_reason?: UnknownReason | null;
-  yoy_growth_unknown_reason?: UnknownReason | null;
-  last_filing_date_unknown_reason?: UnknownReason | null;
+  // BE-derived: populated when current_clearing_partner is None. One reason
+  // covers both the partner and the clearing-type cells in the FE.
+  current_clearing_unknown_reason?: UnknownReason | null;
+  // BE-derived: populated when the rolled-up financial summary is missing
+  // (latest_net_capital / yoy_growth). One reason covers all three financial
+  // tiles (Net Capital / Excess Capital / YoY) in the FE.
+  financial_unknown_reason?: UnknownReason | null;
   // Tri-Stream fields (Revision 1)
   website: string | null;
   types_of_business: string[] | null;
@@ -103,14 +106,14 @@ export type FinancialMetricItem = {
   report_date: string;
   net_capital: number;
   excess_net_capital: number | null;
-  excess_net_capital_unknown_reason?: UnknownReason | null;
   total_assets: number | null;
-  total_assets_unknown_reason?: UnknownReason | null;
   required_min_capital: number | null;
-  required_min_capital_unknown_reason?: UnknownReason | null;
   source_filing_url: string | null;
   extraction_status: string;
   created_at: string;
+  // Populated when extraction_status != "parsed" (needs_review,
+  // provider_error, pipeline_error, missing_pdf). None on parsed rows.
+  unknown_reason?: UnknownReason | null;
 };
 
 export type FinancialMetricsResponse = {
@@ -164,9 +167,7 @@ export type ClearingArrangementItem = {
   source_filing_url: string | null;
   source_pdf_url: string | null;
   clearing_partner: string | null;
-  clearing_partner_unknown_reason?: UnknownReason | null;
   clearing_type: string | null;
-  clearing_type_unknown_reason?: UnknownReason | null;
   agreement_date: string | null;
   extraction_confidence: number | null;
   extraction_status: string;
@@ -175,6 +176,8 @@ export type ClearingArrangementItem = {
   is_verified: boolean;
   extracted_at: string | null;
   created_at: string;
+  // Populated when clearing_partner is None on this row.
+  unknown_reason?: UnknownReason | null;
 };
 
 export type ClearingArrangementsResponse = {
