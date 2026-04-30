@@ -20,6 +20,13 @@ selectolax>=0.3.21
 # request time. Pin both so the runtime path resolves on a clean install.
 google-auth>=2.30.0
 requests>=2.32.0
+# google-cloud-run is required by app.services.cloud_run_client. The
+# /pipeline/set-files-api-flag endpoint flips the LLM_USE_FILES_API env
+# var on fis-backend itself via the Cloud Run Admin API. The wrapper has
+# a strict allowlist (only LLM_USE_FILES_API can be touched) so the
+# blast radius of the runtime SA's roles/run.developer grant stays
+# narrow.
+google-cloud-run>=0.10.0
 # py3-validate-email — SMTP RCPT TO probe for email_extractor. Package name on
 # PyPI is `py3-validate-email` but imports as `validate_email`. Pinned because
 # SMTP handshake semantics have drifted across minor versions.
