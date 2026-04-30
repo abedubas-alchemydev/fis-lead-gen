@@ -1,4 +1,8 @@
-import type { UnknownReason, UnknownReasonCategory } from "@/lib/types";
+import type {
+  ExecutiveSource,
+  UnknownReason,
+  UnknownReasonCategory,
+} from "@/lib/types";
 
 // Human-readable label for each unknown_reason category. Sourced from the
 // cli01 BE contract (feature/be-unknown-reasons-api). Surfaced verbatim in
@@ -19,6 +23,35 @@ export const UNKNOWN_REASON_LABELS: Record<UnknownReasonCategory, string> = {
 export function unknownReasonShort(reason: UnknownReason): string {
   return UNKNOWN_REASON_LABELS[reason.category] ?? "Reason unavailable";
 }
+
+// Visual treatment for the source pill that sits next to an executive
+// contact's name. Sourced from the cli01 BE contract for
+// `feature/be-apollo-executive-enrichment`:
+//   - sec    → null (no badge; SEC filing is the authoritative source)
+//   - apollo → amber "Enriched" pill
+//   - finra  → blue "FINRA officer" pill
+//
+// `tone` stays as a small string union so this module doesn't have to
+// reach into components/ui/pill — the SourceBadge component maps it to
+// a PillVariant. The tooltip explains the source distinction so users
+// can tell at a glance which names are SEC-authoritative.
+export const SOURCE_BADGE: Record<
+  ExecutiveSource,
+  { label: string; tone: "amber" | "blue"; tooltip: string } | null
+> = {
+  sec: null,
+  apollo: {
+    label: "Enriched",
+    tone: "amber",
+    tooltip:
+      "Name from Apollo enrichment, not directly from the firm's SEC filing",
+  },
+  finra: {
+    label: "FINRA officer",
+    tone: "blue",
+    tooltip: "Name from FINRA executive officers (not from FOCUS report)",
+  },
+};
 
 export function formatCurrency(value: number | null) {
   if (value === null) {
