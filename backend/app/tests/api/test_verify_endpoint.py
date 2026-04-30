@@ -17,8 +17,10 @@ provide a deterministic await point.
 from __future__ import annotations
 
 import asyncio
+import secrets
 import time
 from collections.abc import Awaitable, Callable
+from datetime import datetime
 
 import httpx
 import pytest
@@ -32,10 +34,37 @@ from app.models.discovered_email import DiscoveredEmail
 from app.models.email_verification import EmailVerification, SmtpStatus
 from app.models.extraction_run import ExtractionRun, RunStatus
 from app.models.verification_run import VerificationRun
+from app.schemas.auth import AuthenticatedUser
+from app.services.auth import get_current_user
 from app.services.email_extractor import verification_runner
 from app.services.email_extractor.verification_runner import run_smtp_verification
 
 pytestmark = pytest.mark.integration
+
+
+def _override_user() -> AuthenticatedUser:
+    return AuthenticatedUser(
+        id=f"test-user-{secrets.token_hex(6)}",
+        name="Test User",
+        email="verify-endpoint-test@example.com",
+        role="viewer",
+        session_expires_at=datetime(2099, 1, 1),
+    )
+
+
+@pytest.fixture(autouse=True)
+def _bypass_auth() -> object:
+    """Bypass the BetterAuth session probe for every test in this module.
+
+    The endpoints under test depend on ``get_current_user``; the focus here
+    is verification-runner behaviour, not session validation. Same pattern
+    as ``test_email_extractor_enrich_all.py``.
+    """
+    app.dependency_overrides[get_current_user] = _override_user
+    try:
+        yield
+    finally:
+        app.dependency_overrides.clear()
 
 
 SmtpFn = Callable[[str], Awaitable[tuple[SmtpStatus, str | None]]]
