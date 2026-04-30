@@ -21,6 +21,12 @@ from app.models.scoring_setting import ScoringSetting
 from app.schemas.broker_dealer import BrokerDealerListMeta, BrokerDealerListResponse
 from app.services.scoring import CompetitorLookup, calculate_lead_score, classify_lead_priority
 from app.services.service_models import MergedBrokerDealerRecord, ProviderDistributionRecord
+from app.services.unknown_reasons import (
+    UnknownReasonResult,
+    derive_clearing_unknown_reason,
+    derive_financial_unknown_reason,
+    to_unknown_reason,
+)
 
 # Minimum adoption threshold for the master-list types-of-business filter.
 # Anything that appears on only one firm is almost always a free-text "other"
@@ -28,6 +34,8 @@ from app.services.service_models import MergedBrokerDealerRecord, ProviderDistri
 # the dropdown out to ~3,300 entries. Two firms in agreement is enough signal
 # that the type is shared rather than firm-specific noise.
 TYPES_OF_BUSINESS_MIN_COUNT = 2
+
+
 
 
 ALLOWED_SORT_FIELDS = {
@@ -308,6 +316,27 @@ class BrokerDealerRepository:
         pipeline_refreshed_at = (
             (latest_run.completed_at or latest_run.started_at) if latest_run else None
         )
+        unknown_reasons = await self._build_list_unknown_reasons(
+            db, [item.id for item in items]
+        )
+        for item in items:
+            clearing_reason, financial_reason = unknown_reasons.get(
+                item.id, (None, None)
+            )
+            # Mutating the ORM attributes is safe here — the session is about
+            # to drop them at request end, and the response model copy uses
+            # ``model_validate`` which reads attributes by name. Avoids
+            # rebuilding a parallel DTO list just to carry the two extras.
+            item.current_clearing_unknown_reason = (
+                to_unknown_reason(clearing_reason)
+                if item.current_clearing_partner is None
+                else None
+            )
+            item.financial_unknown_reason = (
+                to_unknown_reason(financial_reason)
+                if item.latest_net_capital is None
+                else None
+            )
         return BrokerDealerListResponse(
             items=items,
             meta=BrokerDealerListMeta(
@@ -318,6 +347,59 @@ class BrokerDealerRepository:
                 pipeline_refreshed_at=pipeline_refreshed_at,
             ),
         )
+
+    async def _build_list_unknown_reasons(
+        self,
+        db: AsyncSession,
+        bd_ids: list[int],
+    ) -> dict[int, tuple[UnknownReasonResult | None, UnknownReasonResult | None]]:
+        """Look up the latest clearing + financial row per BD and classify.
+
+        Two queries (one per child table), each filtered by ``bd_id IN
+        :ids`` and ordered so the first row per BD is the most recent. Built
+        once per list response so we never N+1 against the master list. The
+        helper keys back to ``bd_id`` so the caller can attach reasons to
+        each item without re-querying.
+        """
+        if not bd_ids:
+            return {}
+
+        clearing_stmt = (
+            select(ClearingArrangement)
+            .where(ClearingArrangement.bd_id.in_(bd_ids))
+            .order_by(
+                ClearingArrangement.bd_id.asc(),
+                ClearingArrangement.filing_year.desc(),
+                ClearingArrangement.id.desc(),
+            )
+        )
+        latest_clearing: dict[int, ClearingArrangement] = {}
+        for row in (await db.execute(clearing_stmt)).scalars().all():
+            latest_clearing.setdefault(row.bd_id, row)
+
+        financial_stmt = (
+            select(FinancialMetric)
+            .where(FinancialMetric.bd_id.in_(bd_ids))
+            .order_by(
+                FinancialMetric.bd_id.asc(),
+                FinancialMetric.report_date.desc(),
+                FinancialMetric.id.desc(),
+            )
+        )
+        latest_financial: dict[int, FinancialMetric] = {}
+        for row in (await db.execute(financial_stmt)).scalars().all():
+            latest_financial.setdefault(row.bd_id, row)
+
+        out: dict[int, tuple[UnknownReasonResult | None, UnknownReasonResult | None]] = {}
+        for bd_id in bd_ids:
+            clearing_reason = derive_clearing_unknown_reason(
+                latest_clearing.get(bd_id)
+            )
+            financial_reason = derive_financial_unknown_reason(
+                latest_financial.get(bd_id)
+            )
+            out[bd_id] = (clearing_reason, financial_reason)
+        return out
 
     async def get_broker_dealer(self, db: AsyncSession, broker_dealer_id: int) -> BrokerDealer | None:
         return await db.get(BrokerDealer, broker_dealer_id)

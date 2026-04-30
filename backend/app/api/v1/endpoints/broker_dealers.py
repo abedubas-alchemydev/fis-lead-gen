@@ -30,10 +30,16 @@ from app.schemas.broker_dealer import (
 from app.schemas.favorite_list import FavoriteListWithMembership
 from app.schemas.favorites import FavoriteResponse
 from app.services.contacts import ExecutiveContactService
-from app.schemas.pipeline import ClearingArrangementsResponse
+from app.schemas.pipeline import ClearingArrangementItem, ClearingArrangementsResponse
 from app.services.alerts import AlertRepository
 from app.services.auth import get_current_user
 from app.services.broker_dealers import BrokerDealerRepository
+from app.services.unknown_reasons import (
+    derive_clearing_unknown_reason,
+    derive_executive_contact_unknown_reason,
+    derive_financial_unknown_reason,
+    to_unknown_reason,
+)
 from app.services.user_lists import (
     add_favorite,
     is_favorited,
@@ -267,7 +273,21 @@ async def get_broker_dealer(
     broker_dealer = await repository.get_broker_dealer(db, broker_dealer_id)
     if broker_dealer is None:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Broker-dealer not found.")
-    return broker_dealer
+
+    detail = BrokerDealerDetail.model_validate(broker_dealer)
+    arrangements = await repository.list_clearing_arrangements(db, broker_dealer_id)
+    financials = await repository.get_financial_metrics(db, broker_dealer_id)
+    detail.current_clearing_unknown_reason = (
+        to_unknown_reason(derive_clearing_unknown_reason(arrangements[0] if arrangements else None))
+        if broker_dealer.current_clearing_partner is None
+        else None
+    )
+    detail.financial_unknown_reason = (
+        to_unknown_reason(derive_financial_unknown_reason(financials[0] if financials else None))
+        if broker_dealer.latest_net_capital is None
+        else None
+    )
+    return detail
 
 
 @router.get("/{broker_dealer_id}/financials", response_model=FinancialMetricsResponse)
@@ -280,7 +300,13 @@ async def get_broker_dealer_financials(
     if broker_dealer is None:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Broker-dealer not found.")
 
-    return FinancialMetricsResponse(items=await repository.get_financial_metrics(db, broker_dealer_id))
+    rows = await repository.get_financial_metrics(db, broker_dealer_id)
+    items: list[FinancialMetricItem] = []
+    for row in rows:
+        item = FinancialMetricItem.model_validate(row)
+        item.unknown_reason = to_unknown_reason(derive_financial_unknown_reason(row))
+        items.append(item)
+    return FinancialMetricsResponse(items=items)
 
 
 @router.get("/{broker_dealer_id}/clearing-arrangements", response_model=ClearingArrangementsResponse)
@@ -293,7 +319,13 @@ async def get_broker_dealer_clearing_arrangements(
     if broker_dealer is None:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Broker-dealer not found.")
 
-    return ClearingArrangementsResponse(items=await repository.list_clearing_arrangements(db, broker_dealer_id))
+    rows = await repository.list_clearing_arrangements(db, broker_dealer_id)
+    items: list[ClearingArrangementItem] = []
+    for row in rows:
+        item = ClearingArrangementItem.model_validate(row)
+        item.unknown_reason = to_unknown_reason(derive_clearing_unknown_reason(row))
+        items.append(item)
+    return ClearingArrangementsResponse(items=items)
 
 
 @router.get("/{broker_dealer_id}/adjacent")
@@ -678,15 +710,47 @@ async def get_broker_dealer_profile(
 
     favorited, favorited_at = await is_favorited(db, current_user.id, broker_dealer_id)
 
+    detail = BrokerDealerDetail.model_validate(broker_dealer)
+    detail.current_clearing_unknown_reason = (
+        to_unknown_reason(
+            derive_clearing_unknown_reason(clearing_arrangements[0] if clearing_arrangements else None)
+        )
+        if broker_dealer.current_clearing_partner is None
+        else None
+    )
+    detail.financial_unknown_reason = (
+        to_unknown_reason(derive_financial_unknown_reason(financials[0] if financials else None))
+        if broker_dealer.latest_net_capital is None
+        else None
+    )
+
+    financial_items: list[FinancialMetricItem] = []
+    for metric in financials:
+        item = FinancialMetricItem.model_validate(metric)
+        item.unknown_reason = to_unknown_reason(derive_financial_unknown_reason(metric))
+        financial_items.append(item)
+
+    clearing_items: list[ClearingArrangementItem] = []
+    for arrangement in clearing_arrangements:
+        item = ClearingArrangementItem.model_validate(arrangement)
+        item.unknown_reason = to_unknown_reason(derive_clearing_unknown_reason(arrangement))
+        clearing_items.append(item)
+
+    executive_items = [ExecutiveContactItem.model_validate(item) for item in executive_contacts]
+    executive_contacts_unknown_reason = to_unknown_reason(
+        derive_executive_contact_unknown_reason(list(executive_contacts))
+    )
+
     return BrokerDealerProfileResponse(
-        broker_dealer=BrokerDealerDetail.model_validate(broker_dealer),
-        financials=[FinancialMetricItem.model_validate(item) for item in financials],
-        clearing_arrangements=clearing_arrangements,
+        broker_dealer=detail,
+        financials=financial_items,
+        clearing_arrangements=clearing_items,
         introducing_arrangements=introducing_arrangements,
         industry_arrangements=industry_arrangements,
         recent_alerts=recent_alerts,
         filing_history=filing_history[:20],
-        executive_contacts=[ExecutiveContactItem.model_validate(item) for item in executive_contacts],
+        executive_contacts=executive_items,
+        executive_contacts_unknown_reason=executive_contacts_unknown_reason,
         is_favorited=favorited,
         favorited_at=favorited_at,
         registration_compliance=RegistrationComplianceSummary(
