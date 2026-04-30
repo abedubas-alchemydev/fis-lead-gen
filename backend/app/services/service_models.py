@@ -30,6 +30,10 @@ class FinraBrokerDealerRecord:
     business_type: str | None
     # ── Tri-Stream fields (Revision 1 - Stream A) ──
     website: str | None = None
+    # Stamped to 'finra' when ``website`` is populated from the BrokerCheck
+    # detail payload. Stays None for records that fall through to the Apollo
+    # organizations fallback (which restamps to 'apollo' if it finds a hit).
+    website_source: str | None = None
     types_of_business: list[str] | None = None
     direct_owners: list[dict[str, str]] | None = None
     executive_officers: list[dict[str, str]] | None = None
@@ -53,6 +57,9 @@ class MergedBrokerDealerRecord:
     filings_index_url: str | None
     # ── Tri-Stream fields (Revision 1) ──
     website: str | None = None
+    # Carried through from FinraBrokerDealerRecord and updated by the Apollo
+    # organizations fallback. 'finra' | 'apollo' | None.
+    website_source: str | None = None
     types_of_business: list[str] | None = None
     direct_owners: list[dict[str, str]] | None = None
     executive_officers: list[dict[str, str]] | None = None

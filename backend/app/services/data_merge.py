@@ -1,9 +1,11 @@
 from __future__ import annotations
 
+import asyncio
 import logging
 
 from difflib import SequenceMatcher
 
+from app.services.apollo import ApolloClient, ApolloError
 from app.services.normalization import normalize_entity_name, normalize_sec_file_number
 from app.services.service_models import (
     BadSourceRow,
@@ -15,6 +17,13 @@ from app.services.service_models import (
 
 
 logger = logging.getLogger(__name__)
+
+# Pause between successive Apollo organizations calls during the post-merge
+# website fallback. Apollo's documented rate limit is generous, but the merge
+# pass touches every firm in the dataset (~3-4k) so a small jitter keeps the
+# burst below their 429 line and matches the cadence of the executive Apollo
+# enrichment path in ``focus_ceo_extraction.py``.
+_APOLLO_ORG_LOOKUP_DELAY_S: float = 0.25
 
 # ──────────────────────────────────────────────────────────────
 # Configuration constants
@@ -166,6 +175,7 @@ class BrokerDealerMergeService:
                     last_filing_date=edgar_match.last_filing_date,
                     filings_index_url=edgar_match.filings_index_url,
                     website=finra_record.website,
+                    website_source=finra_record.website_source,
                     types_of_business=finra_record.types_of_business,
                     direct_owners=finra_record.direct_owners,
                     executive_officers=finra_record.executive_officers,
@@ -189,6 +199,7 @@ class BrokerDealerMergeService:
                     last_filing_date=None,
                     filings_index_url=None,
                     website=finra_record.website,
+                    website_source=finra_record.website_source,
                     types_of_business=finra_record.types_of_business,
                     direct_owners=finra_record.direct_owners,
                     executive_officers=finra_record.executive_officers,
@@ -209,6 +220,70 @@ class BrokerDealerMergeService:
 
         report.output_count = len(merged)
         return merged, report
+
+    async def apply_apollo_website_fallback(
+        self,
+        records: list[MergedBrokerDealerRecord],
+        apollo_client: ApolloClient,
+        *,
+        delay_s: float = _APOLLO_ORG_LOOKUP_DELAY_S,
+    ) -> dict[str, int]:
+        """Populate ``website`` from Apollo for records that FINRA missed.
+
+        Walks the merged records in place. For each record where ``website``
+        is None, calls ``ApolloClient.search_organization`` with the firm
+        name (and CRD when available) and, on a hit, stamps
+        ``record.website = org.website_url`` plus
+        ``record.website_source = "apollo"``. Records that already have a
+        FINRA-sourced website are skipped — wasted Apollo spend, and the
+        FINRA Form BD value is the authoritative one.
+
+        ``ApolloError`` (5xx / 429-after-retries / network) is the
+        provider-error path. We log a structured warning and continue to
+        the next record so one outage doesn't blow up the whole merge run.
+        The next pipeline run retries naturally because the row's website
+        stays NULL — this is the same convention as the executive Apollo
+        fallback in ``focus_ceo_extraction.py``.
+
+        Returns a counts dict so callers can stamp pipeline_run.notes:
+        ``{"apollo_filled": N, "apollo_no_match": M, "apollo_error": K}``.
+        """
+        counts = {"apollo_filled": 0, "apollo_no_match": 0, "apollo_error": 0}
+        total = len(records)
+        for index, record in enumerate(records):
+            if record.website:
+                continue
+
+            try:
+                org = await apollo_client.search_organization(
+                    record.name, record.crd_number
+                )
+            except ApolloError as exc:
+                logger.warning(
+                    "apollo_org_lookup_failed for '%s' (CRD %s): %s",
+                    record.name,
+                    record.crd_number,
+                    exc,
+                )
+                counts["apollo_error"] += 1
+                # Pause even on error to avoid hammering an already-stressed
+                # provider; the backoff inside the client only spans retries
+                # within one call, not the cadence between distinct calls.
+                if delay_s > 0 and index < total - 1:
+                    await asyncio.sleep(delay_s)
+                continue
+
+            if org is not None and org.website_url:
+                record.website = org.website_url
+                record.website_source = "apollo"
+                counts["apollo_filled"] += 1
+            else:
+                counts["apollo_no_match"] += 1
+
+            if delay_s > 0 and index < total - 1:
+                await asyncio.sleep(delay_s)
+
+        return counts
 
     def _build_name_block_index(
         self,
