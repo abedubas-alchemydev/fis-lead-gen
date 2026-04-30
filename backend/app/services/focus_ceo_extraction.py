@@ -32,6 +32,7 @@ from app.core.config import settings
 from app.models.broker_dealer import BrokerDealer
 from app.models.executive_contact import ExecutiveContact
 from app.models.financial_metric import FinancialMetric
+from app.services.apollo import ApolloClient, ApolloError, ApolloExecutive
 from app.services.extraction_status import (
     STATUS_PARSED,
     classify_financial_extraction_status,
@@ -87,6 +88,22 @@ class FocusCeoExtractionResult:
 
 
 _MAX_VISION_PAYLOAD_BYTES = 4 * 1024 * 1024  # 4MB max total image payload for Gemini
+
+
+# Display title for an Apollo-sourced row keyed by the officer-rank slug
+# the Apollo client emits. The slug is the only title information the
+# names-only fallback persists (we never store the full Apollo title
+# verbatim); this map gives the FE a clean badge label to render.
+_RANK_DISPLAY_TITLES = {
+    "ceo": "Chief Executive Officer",
+    "president": "President",
+    "coo": "Chief Operating Officer",
+    "cfo": "Chief Financial Officer",
+}
+
+
+def _rank_to_display_title(officer_rank: str) -> str:
+    return _RANK_DISPLAY_TITLES.get(officer_rank, "Executive Officer")
 
 
 def _render_pdf_pages_to_images(
@@ -188,13 +205,26 @@ class FocusCeoExtractionService:
           2. Gemini vision (API cost, ~15-30s) — fallback for scanned/non-standard PDFs
 
         The CEO contact is persisted in the executive_contacts table with
-        source="focus_report" so it survives Apollo enrichment cycles.
+        source="focus_report" so it survives Apollo enrichment cycles. When
+        the FOCUS pass yields no executive name, an Apollo + FINRA fallback
+        chain runs against the same session — names only per the CSV-export
+        PRD constraint.
         """
         # The tempdir owns the downloaded PDF for the lifetime of this call.
         # pdfplumber + pypdfium2 + Gemini all read it from disk; on ``with``
         # exit the file disappears so the container footprint stays flat.
         with pdf_tempdir(prefix="focus_ceo_extract_") as tmp_dir:
-            return await self._run_extract(db, broker_dealer, tmp_dir)
+            result = await self._run_extract(db, broker_dealer, tmp_dir)
+
+        # Apollo + FINRA fallback: when FOCUS extraction produced no
+        # executive name, hit Apollo for a names-only lookup. PRD constraint
+        # is strict — no email / phone / LinkedIn pulled or stored on this
+        # path. Provider errors leave the BD untouched so the next pipeline
+        # run retries instead of caching a transient outage as "no execs".
+        if not result.ceo_name:
+            await self._apply_apollo_fallback(db, broker_dealer)
+
+        return result
 
     async def _run_extract(
         self,
@@ -577,6 +607,24 @@ class FocusCeoExtractionService:
                             await write_db.commit()
                     except Exception as db_exc:
                         logger.warning("DB write failed for BD %d, data was extracted but not saved: %s", bd_id, db_exc)
+                else:
+                    # FOCUS extraction yielded no CEO name. Fire the
+                    # Apollo + FINRA fallback chain so ``data_not_present``
+                    # firms still get a name where one exists on Apollo or
+                    # in FINRA's executive_officers blob. PRD constraint:
+                    # names only on this path.
+                    try:
+                        async with SessionLocal() as write_db:
+                            bd = await write_db.get(BrokerDealer, bd_id)
+                            if bd is not None:
+                                await self._apply_apollo_fallback(write_db, bd)
+                                await write_db.commit()
+                    except Exception as fallback_exc:
+                        logger.warning(
+                            "Apollo/FINRA fallback failed for BD %d: %s",
+                            bd_id,
+                            fallback_exc,
+                        )
 
                 if result.extraction_status == "success":
                     print(
@@ -777,3 +825,127 @@ class FocusCeoExtractionService:
             yoy_growth=yoy_growth,
         )
         await db.flush()
+
+    async def _apply_apollo_fallback(
+        self,
+        db: AsyncSession,
+        broker_dealer: BrokerDealer,
+    ) -> None:
+        """Run the Apollo -> FINRA fallback chain when FOCUS extraction
+        produced no executive name.
+
+        Order:
+          1. Skip if the BD already has any ``executive_contact`` row, regardless
+             of source. Avoids wasted Apollo spend and avoids re-creating data
+             a previous /enrich call already produced.
+          2. Apollo people-search (officer-rank titles only). On hit, insert
+             one ``executive_contact`` row per person with ``source='apollo'``
+             and ``email``/``phone``/``linkedin_url`` left NULL — PRD constraint
+             on this path is names-only.
+          3. ``ApolloError`` (5xx, 429, network) is the provider-error path.
+             The function logs and returns — no rows inserted, no BD state
+             touched, so the next pipeline run retries instead of caching the
+             transient outage as a genuine "no executives" result.
+          4. When Apollo returns zero people, fall through to the FINRA
+             ``executive_officers`` JSONB blob (already populated by the FINRA
+             stream) as a final fallback. Rows persisted with ``source='finra'``.
+        """
+        existing = (
+            await db.execute(
+                select(ExecutiveContact.id)
+                .where(ExecutiveContact.bd_id == broker_dealer.id)
+                .limit(1)
+            )
+        ).scalar_one_or_none()
+        if existing is not None:
+            return
+
+        api_key = settings.apollo_api_key
+        if not api_key:
+            await self._apply_finra_fallback(db, broker_dealer)
+            return
+
+        client = ApolloClient(api_key)
+        try:
+            results = await client.search_executives(
+                broker_dealer.name,
+                broker_dealer.crd_number,
+            )
+        except ApolloError as exc:
+            logger.warning(
+                "Apollo provider_error for BD %d (%s): %s",
+                broker_dealer.id,
+                broker_dealer.name,
+                exc,
+            )
+            return
+
+        if results:
+            await self._persist_apollo_results(db, broker_dealer, results)
+            return
+
+        await self._apply_finra_fallback(db, broker_dealer)
+
+    async def _persist_apollo_results(
+        self,
+        db: AsyncSession,
+        broker_dealer: BrokerDealer,
+        results: list[ApolloExecutive],
+    ) -> None:
+        """Insert Apollo-sourced executive_contact rows. Names only — no
+        contact channels are persisted regardless of what the upstream
+        client returned (the client already trims, this is defense-in-depth)."""
+        now = datetime.now(timezone.utc)
+        for executive in results:
+            db.add(
+                ExecutiveContact(
+                    bd_id=broker_dealer.id,
+                    name=f"{executive.first_name} {executive.last_name}".strip(),
+                    title=_rank_to_display_title(executive.officer_rank)[:255],
+                    email=None,
+                    phone=None,
+                    linkedin_url=None,
+                    source="apollo",
+                    enriched_at=now,
+                )
+            )
+        await db.flush()
+
+    async def _apply_finra_fallback(
+        self,
+        db: AsyncSession,
+        broker_dealer: BrokerDealer,
+    ) -> None:
+        """Final fallback: persist FINRA's ``executive_officers`` JSONB list
+        as ``executive_contact`` rows tagged ``source='finra'``. Names only;
+        FINRA's officer payload already contains no contact channels but we
+        defensively NULL them out anyway."""
+        officers = broker_dealer.executive_officers
+        if not isinstance(officers, list) or not officers:
+            return
+
+        now = datetime.now(timezone.utc)
+        inserted = 0
+        for officer in officers:
+            if not isinstance(officer, dict):
+                continue
+            name = str(officer.get("name") or "").strip()
+            if not name:
+                continue
+            title = (str(officer.get("title") or "Executive Officer").strip() or "Executive Officer")[:255]
+            db.add(
+                ExecutiveContact(
+                    bd_id=broker_dealer.id,
+                    name=name,
+                    title=title,
+                    email=None,
+                    phone=None,
+                    linkedin_url=None,
+                    source="finra",
+                    enriched_at=now,
+                )
+            )
+            inserted += 1
+
+        if inserted:
+            await db.flush()
