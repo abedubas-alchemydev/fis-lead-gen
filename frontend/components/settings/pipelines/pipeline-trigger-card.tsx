@@ -71,24 +71,30 @@ export function PipelineTriggerCard({
   }
 
   return (
-    <div className="rounded-[28px] border border-white/80 bg-white/92 p-7 shadow-shell">
+    <div className="rounded-2xl border border-[var(--border,rgba(30,64,175,0.1))] bg-[var(--surface,#ffffff)] p-6 shadow-[var(--shadow-card,0_1px_2px_rgba(15,23,42,0.04),0_4px_14px_rgba(15,23,42,0.05))]">
       <div className="flex flex-wrap items-start justify-between gap-4">
         <div className="max-w-2xl space-y-2">
-          <p className="text-xs font-medium uppercase tracking-[0.22em] text-blue">
+          <p className="text-[11px] font-semibold uppercase tracking-[0.1em] text-[var(--text-muted,#94a3b8)]">
             {cadence}
           </p>
-          <h2 className="text-xl font-semibold text-navy">{pipelineName}</h2>
-          <p className="text-sm leading-6 text-slate-600">{description}</p>
-          <p className="text-xs text-slate-500">
+          <h2 className="text-[15px] font-semibold tracking-[-0.01em] text-[var(--text,#0f172a)]">
+            {pipelineName}
+          </h2>
+          <p className="text-[13px] leading-5 text-[var(--text-dim,#475569)]">
+            {description}
+          </p>
+          <p className="text-xs text-[var(--text-muted,#94a3b8)]">
             Expected duration:{" "}
-            <span className="font-medium text-slate-700">{eta}</span>
+            <span className="font-medium text-[var(--text-dim,#475569)]">
+              {eta}
+            </span>
           </p>
         </div>
         <button
           type="button"
           onClick={() => setConfirming(true)}
           disabled={cooldown}
-          className="inline-flex h-11 items-center rounded-2xl bg-navy px-5 text-sm font-semibold text-white shadow-lg shadow-navy/15 transition hover:bg-[#112b54] hover:shadow-xl hover:shadow-navy/20 disabled:cursor-not-allowed disabled:opacity-60"
+          className="inline-flex w-full items-center justify-center gap-2 rounded-xl bg-[var(--accent,#6366f1)] px-4 py-2.5 text-sm font-semibold text-white shadow-[0_6px_16px_rgba(99,102,241,0.35)] transition hover:brightness-110 disabled:cursor-not-allowed disabled:opacity-60 disabled:shadow-none sm:w-auto"
         >
           {cooldown ? "Started" : "Run now"}
         </button>
