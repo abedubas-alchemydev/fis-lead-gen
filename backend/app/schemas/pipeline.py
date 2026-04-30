@@ -97,3 +97,14 @@ class WipeBdDataResponse(BaseModel):
     rows_deleted: int
     audit_log_id: str
     wiped_at: datetime
+
+
+class SetFilesApiFlagRequest(BaseModel):
+    enabled: bool
+
+
+class SetFilesApiFlagResponse(BaseModel):
+    previous_state: bool
+    new_state: bool
+    revision_name: str
+    ready_at: datetime

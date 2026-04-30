@@ -320,6 +320,7 @@ def test_scheduled_router_is_wired_into_v1_api() -> None:
     assert "/pipeline/run/populate-all" in paths
     assert "/pipeline/run/initial-load" in paths
     assert "/pipeline/wipe-bd-data" in paths
+    assert "/pipeline/set-files-api-flag" in paths
 
 
 # ───────────────────────────── wipe-bd-data ────────────────────────────
@@ -579,6 +580,202 @@ async def test_wipe_bd_data_audit_failure_rolls_back_truncate() -> None:
                 )
         assert session.commit_calls == 0
         assert not any("TRUNCATE" in s for s in session.executed_sql)
+    finally:
+        app.dependency_overrides.pop(get_db_session, None)
+        app.dependency_overrides.pop(get_current_user, None)
+
+
+# ─────────────────────────── set-files-api-flag ────────────────────────
+
+
+class _FakeSetFlagSession:
+    """Minimal session for the set-files-api-flag handler.
+
+    The handler does ``db.add(audit) → await db.commit()`` and nothing
+    else against the session — no flush, no execute. Recording added
+    objects and commit count is enough for the assertions: the audit
+    row was inserted and committed before the Cloud Run RPC fired.
+    """
+
+    def __init__(self) -> None:
+        self.added: list[Any] = []
+        self.commit_calls = 0
+
+    def add(self, obj: Any) -> None:
+        self.added.append(obj)
+
+    async def commit(self) -> None:
+        self.commit_calls += 1
+
+
+def _override_set_flag_session(session: _FakeSetFlagSession) -> None:
+    async def _dep():
+        yield session
+
+    app.dependency_overrides[get_db_session] = _dep
+
+
+async def test_set_files_api_flag_anonymous_returns_403() -> None:
+    """No cookie + no Authorization header → handler doesn't run, no
+    audit row is committed, no Cloud Run RPC is fired."""
+    session = _FakeSetFlagSession()
+    _override_set_flag_session(session)
+    try:
+        async with _client() as client:
+            response = await client.post(
+                "/api/v1/pipeline/set-files-api-flag",
+                json={"enabled": True},
+            )
+        # ``get_current_user`` raises 401 for missing cookies; FastAPI
+        # surfaces that as the response status. Either auth-failure code
+        # is acceptable; the behavioural guarantee is "no auth → no
+        # work happens".
+        assert response.status_code in (401, 403)
+        assert session.commit_calls == 0
+    finally:
+        app.dependency_overrides.pop(get_db_session, None)
+
+
+async def test_set_files_api_flag_non_admin_returns_403() -> None:
+    """Authenticated viewer (non-admin) → 403; no audit row, no
+    Cloud Run RPC."""
+    session = _FakeSetFlagSession()
+    _override_set_flag_session(session)
+    app.dependency_overrides[get_current_user] = _viewer_user
+    try:
+        async with _client() as client:
+            response = await client.post(
+                "/api/v1/pipeline/set-files-api-flag",
+                json={"enabled": True},
+            )
+        assert response.status_code == 403
+        assert session.commit_calls == 0
+    finally:
+        app.dependency_overrides.pop(get_db_session, None)
+        app.dependency_overrides.pop(get_current_user, None)
+
+
+async def test_set_files_api_flag_sa_oidc_returns_403(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """SA OIDC bearer (the path the run/* endpoints accept) is
+    REJECTED. set-files-api-flag uses ``get_current_user`` only — no
+    dual-path. Even a perfectly verified Cloud Scheduler token gets
+    401/403 because it has no session cookie. Flipping a global LLM
+    flag is too destructive of running config to allow via SA bearer.
+    """
+    session = _FakeSetFlagSession()
+    _override_set_flag_session(session)
+
+    def _fake_verify(_token: str, _request: Any, audience: str) -> dict[str, Any]:
+        del audience
+        return {"email": settings.cloud_scheduler_sa_email}
+
+    monkeypatch.setattr("google.oauth2.id_token.verify_oauth2_token", _fake_verify)
+
+    try:
+        async with _client() as client:
+            response = await client.post(
+                "/api/v1/pipeline/set-files-api-flag",
+                headers={"Authorization": "Bearer scheduler-token"},
+                json={"enabled": True},
+            )
+        assert response.status_code in (401, 403)
+        assert session.commit_calls == 0
+    finally:
+        app.dependency_overrides.pop(get_db_session, None)
+
+
+async def test_set_files_api_flag_admin_happy_path(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Admin cookie + valid body → audit row INSERTed and committed,
+    cloud_run_update_env_var called with the allowlisted name only,
+    response shape carries previous_state / new_state / revision_name
+    / ready_at."""
+    session = _FakeSetFlagSession()
+    _override_set_flag_session(session)
+    app.dependency_overrides[get_current_user] = _admin_user
+
+    captured: dict[str, Any] = {}
+
+    async def _fake_update(*, name: str, value: str, **_kw: Any) -> dict[str, Any]:
+        captured["name"] = name
+        captured["value"] = value
+        return {
+            "previous_value": "false",
+            "new_value": value,
+            "revision_name": "fis-backend-00042-abc",
+            "ready_at": "2026-04-30T12:00:00+00:00",
+        }
+
+    monkeypatch.setattr(pipeline_endpoint, "cloud_run_update_env_var", _fake_update)
+
+    try:
+        async with _client() as client:
+            response = await client.post(
+                "/api/v1/pipeline/set-files-api-flag",
+                json={"enabled": True},
+            )
+        assert response.status_code == 200
+        body = response.json()
+        assert body["previous_state"] is False
+        assert body["new_state"] is True
+        assert body["revision_name"] == "fis-backend-00042-abc"
+        assert "ready_at" in body
+
+        # Defense in depth: the handler hardcodes the env name. The
+        # cloud_run_client wrapper has its own allowlist (verified in
+        # test_cloud_run_client.py); this assertion guards the
+        # handler-side hardcoding from drift.
+        assert captured == {"name": "LLM_USE_FILES_API", "value": "true"}
+
+        # Audit row committed BEFORE the Cloud Run RPC fired (separate
+        # transaction guarantee — paper trail intact even if the
+        # rollout fails).
+        audit_rows = [obj for obj in session.added if isinstance(obj, AuditLog)]
+        assert len(audit_rows) == 1
+        assert audit_rows[0].action == "files_api_flag_flipped"
+        assert "true" in (audit_rows[0].details or "").lower()
+        assert session.commit_calls == 1
+    finally:
+        app.dependency_overrides.pop(get_db_session, None)
+        app.dependency_overrides.pop(get_current_user, None)
+
+
+async def test_set_files_api_flag_cloud_run_failure_returns_503(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """If the Cloud Run rollout times out / fails, the audit row was
+    already committed (paper trail intact) but the endpoint returns
+    503 so the caller knows the flag flip didn't take effect."""
+    from app.services.cloud_run_client import CloudRunUpdateError
+
+    session = _FakeSetFlagSession()
+    _override_set_flag_session(session)
+    app.dependency_overrides[get_current_user] = _admin_user
+
+    async def _fake_update(*, name: str, value: str, **_kw: Any) -> dict[str, Any]:
+        del name, value
+        raise CloudRunUpdateError("revision did not become ready within 120s")
+
+    monkeypatch.setattr(pipeline_endpoint, "cloud_run_update_env_var", _fake_update)
+
+    try:
+        async with _client() as client:
+            response = await client.post(
+                "/api/v1/pipeline/set-files-api-flag",
+                json={"enabled": True},
+            )
+        assert response.status_code == 503
+        assert "Cloud Run" in response.json()["detail"]
+
+        # Audit row was committed before the failure — that paper
+        # trail is the load-bearing thing here.
+        assert session.commit_calls == 1
+        audit_rows = [obj for obj in session.added if isinstance(obj, AuditLog)]
+        assert len(audit_rows) == 1
+        assert audit_rows[0].action == "files_api_flag_flipped"
     finally:
         app.dependency_overrides.pop(get_db_session, None)
         app.dependency_overrides.pop(get_current_user, None)

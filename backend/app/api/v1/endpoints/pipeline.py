@@ -16,11 +16,17 @@ from app.schemas.pipeline import (
     CompetitorProvidersResponse,
     PipelineStatusResponse,
     PipelineTriggerResponse,
+    SetFilesApiFlagRequest,
+    SetFilesApiFlagResponse,
     WipeBdDataRequest,
     WipeBdDataResponse,
 )
 from app.services.auth import _ensure_admin_or_scheduler_sa, get_current_user
 from app.services.broker_dealers import BrokerDealerRepository
+from app.services.cloud_run_client import (
+    CloudRunUpdateError,
+    update_env_var as cloud_run_update_env_var,
+)
 from app.services.filing_monitor import FilingMonitorService
 from app.services.pipeline import ClearingPipelineService
 
@@ -427,4 +433,94 @@ async def wipe_bd_data(
         rows_deleted=rows_before,
         audit_log_id=audit_log_id,
         wiped_at=datetime.now(timezone.utc),
+    )
+
+
+@admin_destructive_router.post(
+    "/set-files-api-flag",
+    response_model=SetFilesApiFlagResponse,
+    status_code=200,
+)
+async def set_files_api_flag(
+    request: SetFilesApiFlagRequest,
+    current_user: AuthenticatedUser = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db_session),
+) -> SetFilesApiFlagResponse:
+    """Flip ``LLM_USE_FILES_API`` on the live ``fis-backend`` service.
+
+    The Fresh Regen UI uses this so an operator can toggle the LLM
+    Files-API code path in-flow, instead of running ``gcloud run
+    services update --update-env-vars=...`` between Phase 0 and the
+    actual regeneration. The endpoint:
+
+    1. Rejects anything that isn't an admin role on a BetterAuth
+       session cookie. The Cloud Scheduler SA OIDC dual-path used by
+       the ``/run/*`` endpoints is intentionally **not** wired here —
+       flipping a global LLM flag mid-flight is destructive of running
+       configuration.
+    2. Inserts an ``audit_log`` row (action ``files_api_flag_flipped``)
+       and **commits** before the Cloud Run update fires. Cloud Run
+       updates are not transactional with our DB, so the audit row is
+       committed in its own transaction so a paper trail exists even
+       if the Cloud Run rollout fails afterwards.
+    3. Calls :func:`app.services.cloud_run_client.update_env_var`
+       which has its own application-layer allowlist — only the env
+       name ``LLM_USE_FILES_API`` is accepted. Any other name raises
+       ``ValueError`` before any RPC. This is the guard that keeps
+       the runtime SA's ``roles/run.developer`` IAM grant narrow.
+    4. Polls the Cloud Run service until the new revision is ready
+       (or 120s timeout). Returns the new revision name so the FE can
+       proceed to the regen step with confidence the flag is live.
+
+    Surfaces:
+
+    * ``403`` if the caller is not an admin.
+    * ``503`` if the Cloud Run rollout fails or times out (the audit
+      row is still committed in this case — paper trail intact, the
+      flip just didn't take effect).
+    """
+    if current_user.role != "admin":
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Admin access required.",
+        )
+
+    audit = AuditLog(
+        user_id=current_user.id,
+        action="files_api_flag_flipped",
+        details=json.dumps({"enabled": request.enabled}),
+    )
+    db.add(audit)
+    await db.commit()
+
+    new_value = "true" if request.enabled else "false"
+    try:
+        result = await cloud_run_update_env_var(
+            name="LLM_USE_FILES_API",
+            value=new_value,
+        )
+    except CloudRunUpdateError as exc:
+        logger.error("Cloud Run rollout failed for set-files-api-flag: %s", exc)
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail=f"Cloud Run rollout failed: {exc}",
+        ) from exc
+    except ValueError as exc:
+        # Defense in depth — the handler hardcodes the env name to
+        # LLM_USE_FILES_API, so the wrapper's allowlist check should
+        # never reject it. If it does, something has been altered
+        # (e.g. someone narrowed ALLOWED_ENV_VARS without updating
+        # this caller). Surface as 500 rather than swallowing it.
+        logger.error("cloud_run_client allowlist violation: %s", exc)
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="Internal allowlist violation.",
+        ) from exc
+
+    ready_at = datetime.fromisoformat(result["ready_at"])
+    return SetFilesApiFlagResponse(
+        previous_state=result["previous_value"] == "true",
+        new_state=result["new_value"] == "true",
+        revision_name=result["revision_name"],
+        ready_at=ready_at,
     )
