@@ -98,7 +98,12 @@ import type {
   FavoriteListWithMembership,
   PaginatedFavoriteListItems
 } from "@/types/favorite-list";
-import type { PipelineTriggerResponse } from "@/lib/types";
+import type {
+  PipelineRunItem,
+  PipelineStatusResponse,
+  PipelineTriggerResponse,
+  WipeBdDataResponse
+} from "@/lib/types";
 
 export async function getFavoriteLists(): Promise<FavoriteList[]> {
   return apiRequest<FavoriteList[]>("/api/v1/favorite-lists");
@@ -201,4 +206,39 @@ export async function runInitialLoad(): Promise<PipelineTriggerResponse> {
     "/api/v1/pipeline/run/initial-load",
     { method: "POST" }
   );
+}
+
+// ── Fresh Regen (cli02 FE-1) ──────────────────────────────────────────────
+// POST /api/v1/pipeline/wipe-bd-data is destructive: it deletes all BD
+// data inside an audited transaction and returns the affected tables +
+// row count. Pairs with cli01 BE PR feature/be-pipeline-wipe-bd-data.
+//
+// The BE rejects the call with 400 if `confirmation` doesn't match
+// `WIPE-BD-DATA-{TODAY-UTC}` (today's UTC date) and 403 for non-admin
+// callers. The FE generates the expected string client-side and shows
+// it in the confirmation modal; if the user's clock is off the BE
+// rejection surfaces inline so the mismatch is obvious.
+
+export async function wipeBdData(
+  confirmation: string
+): Promise<WipeBdDataResponse> {
+  return apiRequest<WipeBdDataResponse>("/api/v1/pipeline/wipe-bd-data", {
+    method: "POST",
+    body: JSON.stringify({ confirmation })
+  });
+}
+
+// Poll helper for the chained Fresh Regen flow: after kicking off
+// initial_load or populate_all, we re-fetch /pipeline/clearing and
+// look up our run by id in `recent_runs`. The BE already orders that
+// list newest-first, so this scan stays cheap. Returns null when the
+// run hasn't appeared yet (BE briefly delays surfacing it after
+// trigger).
+export async function findPipelineRun(
+  runId: number
+): Promise<PipelineRunItem | null> {
+  const status = await apiRequest<PipelineStatusResponse>(
+    "/api/v1/pipeline/clearing"
+  );
+  return status.recent_runs.find((run) => run.id === runId) ?? null;
 }
