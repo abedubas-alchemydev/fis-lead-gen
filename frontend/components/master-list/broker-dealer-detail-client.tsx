@@ -39,6 +39,7 @@ import {
 import { SectionPanel } from "@/components/ui/section-panel";
 import { ListPicker } from "@/components/list-picker/list-picker";
 import { Pill } from "@/components/ui/pill";
+import { SourceBadge } from "@/components/master-list/source-badge";
 import { UnknownCell } from "@/components/master-list/unknown-cell";
 import { apiRequest, buildApiPath } from "@/lib/api";
 import { parseArrangementBlob } from "@/lib/arrangements";
@@ -1096,7 +1097,10 @@ function PersonCard({
 }) {
   return (
     <div className="rounded-2xl bg-[var(--surface-2,#f1f6fd)] px-4 py-3 text-sm text-[var(--text-dim,#475569)]">
-      <p className="font-semibold text-[var(--text,#0f172a)]">{name}</p>
+      <p className="flex flex-wrap items-center font-semibold text-[var(--text,#0f172a)]">
+        <span>{name}</span>
+        {contact ? <SourceBadge source={contact.source} /> : null}
+      </p>
       {title ? <p className="mt-1">{title}</p> : null}
       {extra ? <p className="mt-1 text-xs text-[var(--text-muted,#94a3b8)]">{extra}</p> : null}
       {contact ? <ContactRow contact={contact} /> : null}
