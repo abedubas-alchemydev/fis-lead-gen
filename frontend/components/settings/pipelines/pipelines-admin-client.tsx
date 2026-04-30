@@ -8,6 +8,7 @@ import {
   runPopulateAll,
 } from "@/lib/api";
 
+import { FreshRegenCard } from "./fresh-regen-card";
 import { PipelineTriggerCard } from "./pipeline-trigger-card";
 import { RecentRunsTable } from "./recent-runs-table";
 
@@ -63,6 +64,16 @@ export function PipelinesAdminClient() {
           onSuccess={bumpRecentRuns}
         />
       </div>
+
+      <div className="mt-8 flex items-center gap-3" aria-hidden>
+        <span className="h-px flex-1 bg-red-200" />
+        <span className="text-[11px] font-medium uppercase tracking-[0.28em] text-danger">
+          Destructive zone
+        </span>
+        <span className="h-px flex-1 bg-red-200" />
+      </div>
+
+      <FreshRegenCard onSuccess={bumpRecentRuns} />
 
       <RecentRunsTable refreshKey={recentRunsKey} />
     </section>

@@ -276,6 +276,18 @@ export type PipelineTriggerResponse = {
   failure_count: number;
 };
 
+// Returned by POST /api/v1/pipeline/wipe-bd-data on success. Pairs with
+// cli01 BE PR feature/be-pipeline-wipe-bd-data. The BE deletes BD data
+// inside an audited transaction and reports back which tables were hit
+// + the audit log id so admins can correlate the wipe with the
+// follow-on initial_load + populate_all runs that the FE chains.
+export type WipeBdDataResponse = {
+  affected_tables: string[];
+  rows_deleted: number;
+  audit_log_id: number;
+  wiped_at: string;
+};
+
 export type TypeOfBusinessOption = {
   type: string;
   count: number;
