@@ -1,11 +1,12 @@
-"""Endpoints for custom favorites lists (#17 phases 1-2).
+"""Endpoints for custom favorites lists (#17, all phases shipped).
 
-Phase 1 shipped GET only. Phase 2 adds the writable side
-(POST/PUT/DELETE on the list itself plus POST/DELETE on its items).
-
-The legacy ``POST /broker-dealers/{id}/favorite`` path still writes to the
-``user_favorite`` safety-net table; that path is retained for one more
-release cycle of soak before being dropped in a separate cleanup PR.
+Manages user-owned ``favorite_list`` rows and their ``favorite_list_item``
+membership: GET/POST/PUT/DELETE on the lists, plus POST/DELETE on items.
+The companion ``GET /broker-dealers/{id}/favorite-lists`` (in
+``broker_dealers.py``) is the FE list-picker's data source. The legacy
+``user_favorite`` table was dropped in 20260429_0021 (and again,
+idempotently, in 20260429_0022); writes from the legacy POST path were
+rewired onto ``favorite_list_item`` in PR #172.
 """
 
 from __future__ import annotations
