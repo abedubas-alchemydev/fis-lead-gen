@@ -67,20 +67,20 @@ export function ConfirmTriggerDialog({
         }}
         className="absolute inset-0 bg-[rgba(15,23,42,0.45)] backdrop-blur-sm"
       />
-      <div className="relative w-full max-w-[440px] rounded-2xl border border-slate-200 bg-white p-6 shadow-[0_24px_48px_-16px_rgba(15,23,42,0.35)]">
+      <div className="relative w-full max-w-[440px] rounded-2xl border border-[var(--border,rgba(30,64,175,0.1))] bg-[var(--surface,#ffffff)] p-6 shadow-[0_24px_48px_-16px_rgba(15,23,42,0.35)]">
         <h2
           id="confirm-trigger-title"
-          className="text-lg font-semibold tracking-tight text-navy"
+          className="text-[15px] font-semibold tracking-[-0.01em] text-[var(--text,#0f172a)]"
         >
           Trigger {pipelineName}?
         </h2>
         <p
           id="confirm-trigger-body"
-          className="mt-3 text-sm leading-6 text-slate-600"
+          className="mt-3 text-[13px] leading-5 text-[var(--text-dim,#475569)]"
         >
           This kicks off an async run on the backend. Expected duration:{" "}
-          <span className="font-medium text-navy">{eta}</span>. Recent runs
-          will show the new entry once you reload.
+          <span className="font-medium text-[var(--text,#0f172a)]">{eta}</span>.
+          Recent runs will show the new entry once you reload.
         </p>
         <div className="mt-6 flex items-center justify-end gap-3">
           <button
@@ -88,7 +88,7 @@ export function ConfirmTriggerDialog({
             type="button"
             onClick={onCancel}
             disabled={submitting}
-            className="inline-flex h-10 items-center rounded-xl border border-slate-200 bg-white px-4 text-sm font-medium text-slate-700 transition hover:border-slate-300 hover:bg-slate-50 disabled:cursor-not-allowed disabled:opacity-60"
+            className="inline-flex items-center gap-2 rounded-xl border border-[var(--border-2,rgba(30,64,175,0.16))] bg-transparent px-4 py-2 text-sm font-semibold text-[var(--text,#0f172a)] transition hover:bg-[var(--surface-2,#f1f6fd)] disabled:cursor-not-allowed disabled:opacity-60"
           >
             Cancel
           </button>
@@ -96,7 +96,7 @@ export function ConfirmTriggerDialog({
             type="button"
             onClick={handleConfirm}
             disabled={submitting}
-            className="inline-flex h-10 items-center rounded-xl bg-navy px-4 text-sm font-semibold text-white shadow-lg shadow-navy/15 transition hover:bg-[#112b54] disabled:cursor-not-allowed disabled:opacity-60"
+            className="inline-flex items-center gap-2 rounded-xl bg-[var(--accent,#6366f1)] px-4 py-2 text-sm font-semibold text-white shadow-[0_6px_16px_rgba(99,102,241,0.35)] transition hover:brightness-110 disabled:cursor-not-allowed disabled:opacity-60 disabled:shadow-none"
           >
             {submitting ? "Starting…" : "Run now"}
           </button>

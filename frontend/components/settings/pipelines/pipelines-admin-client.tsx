@@ -24,21 +24,28 @@ export function PipelinesAdminClient() {
 
   return (
     <section className="space-y-6">
-      <header className="rounded-[30px] border border-white/80 bg-white/92 p-8 shadow-shell">
-        <p className="text-sm font-medium uppercase tracking-[0.24em] text-blue">
-          Admin Controls
-        </p>
-        <h1 className="mt-3 text-2xl font-semibold text-navy">Pipelines</h1>
-        <p className="mt-3 max-w-3xl text-sm leading-6 text-slate-600">
-          Trigger the three Tier 2 pipelines on demand instead of running
-          the python scripts over SSH. Runs are async and admin-gated; the
-          BE returns a run id immediately and continues processing in the
-          background. Cloud Scheduler hits the same endpoints on a fixed
-          cadence — these manual triggers are for ad-hoc refreshes.
-        </p>
-      </header>
+      {/* Page header — mirrors /settings + /dashboard typography. */}
+      <div className="flex flex-wrap items-center gap-4">
+        <div className="min-w-0">
+          <p className="text-[12px] uppercase tracking-[0.06em] text-[var(--text-muted,#94a3b8)]">
+            Workspace <span className="text-[var(--text-dim,#475569)]">/</span>{" "}
+            Settings <span className="text-[var(--text-dim,#475569)]">/</span>{" "}
+            Pipelines
+          </p>
+          <h1 className="mt-1 text-[24px] font-bold tracking-[-0.02em] text-[var(--text,#0f172a)]">
+            Pipeline triggers
+          </h1>
+          <p className="mt-2 max-w-3xl text-[13px] leading-5 text-[var(--text-dim,#475569)]">
+            Trigger the three Tier 2 pipelines on demand instead of running
+            the python scripts over SSH. Runs are async and admin-gated; the
+            backend returns a run id immediately and continues processing in
+            the background. Cloud Scheduler hits the same endpoints on a
+            fixed cadence — these manual triggers are for ad-hoc refreshes.
+          </p>
+        </div>
+      </div>
 
-      <div className="grid gap-5">
+      <div className="grid gap-6">
         <PipelineTriggerCard
           pipelineName="Filing Monitor"
           cadence="Hourly Cloud Scheduler"
@@ -65,12 +72,14 @@ export function PipelinesAdminClient() {
         />
       </div>
 
-      <div className="mt-8 flex items-center gap-3" aria-hidden>
-        <span className="h-px flex-1 bg-red-200" />
-        <span className="text-[11px] font-medium uppercase tracking-[0.28em] text-danger">
-          Destructive zone
+      <div className="mt-4 flex items-center gap-4 pt-6" aria-hidden>
+        <span className="h-px flex-1 bg-red-500/30" />
+        <span className="inline-flex items-center gap-2 text-[11px] font-semibold uppercase tracking-[0.18em] text-[var(--pill-red-text,#b91c1c)]">
+          <span className="h-1.5 w-1.5 rounded-full bg-red-500" />
+          Destructive zone — manual only
+          <span className="h-1.5 w-1.5 rounded-full bg-red-500" />
         </span>
-        <span className="h-px flex-1 bg-red-200" />
+        <span className="h-px flex-1 bg-red-500/30" />
       </div>
 
       <FreshRegenCard onSuccess={bumpRecentRuns} />
