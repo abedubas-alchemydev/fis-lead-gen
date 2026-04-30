@@ -93,6 +93,7 @@ class BrokerDealerRepository:
                     "last_filing_date": record.last_filing_date,
                     "filings_index_url": record.filings_index_url,
                     "website": record.website,
+                    "website_source": record.website_source,
                     "types_of_business": record.types_of_business,
                     "direct_owners": record.direct_owners,
                     "executive_officers": record.executive_officers,
@@ -122,7 +123,7 @@ class BrokerDealerRepository:
             "crd_number", "sec_file_number", "name", "city", "state",
             "status", "branch_count", "business_type", "registration_date",
             "matched_source", "last_filing_date", "filings_index_url",
-            "website", "types_of_business", "direct_owners",
+            "website", "website_source", "types_of_business", "direct_owners",
             "executive_officers", "firm_operations_text",
         }
 
@@ -143,6 +144,7 @@ class BrokerDealerRepository:
                     "last_filing_date": record.last_filing_date,
                     "filings_index_url": record.filings_index_url,
                     "website": record.website,
+                    "website_source": record.website_source,
                     "types_of_business": record.types_of_business,
                     "direct_owners": record.direct_owners,
                     "executive_officers": record.executive_officers,
@@ -194,6 +196,7 @@ class BrokerDealerRepository:
                             last_filing_date=record.last_filing_date,
                             filings_index_url=record.filings_index_url,
                             website=record.website,
+                            website_source=record.website_source,
                             types_of_business=record.types_of_business,
                             direct_owners=record.direct_owners,
                             executive_officers=record.executive_officers,

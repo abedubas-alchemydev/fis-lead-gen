@@ -124,6 +124,35 @@ class FinraService:
 
         return records
 
+    async def fetch_website_by_crd(
+        self,
+        client: httpx.AsyncClient,
+        crd_number: str,
+    ) -> str | None:
+        """Fetch the Form BD "Web Address" for a single CRD.
+
+        Thin public wrapper around :meth:`_fetch_firm_detail` plus the
+        same Form-BD-canonical key list that ``_apply_detail_to_record``
+        uses. Built for the website backfill (see
+        ``scripts/backfill_firm_websites.py``) so the one-shot script
+        reuses the live field-name list instead of duplicating it.
+        Returns None when the firm has no Web Address on file or the
+        detail fetch failed (network / 5xx after retries).
+        """
+        detail = await self._fetch_firm_detail(client, crd_number)
+        if detail is None:
+            return None
+        source = self._extract_detail_source(detail)
+        if source is None:
+            return None
+        return self._clean_text(
+            source.get("firm_ia_main_web_address")
+            or source.get("firm_main_web_address")
+            or source.get("firm_web_address")
+            or source.get("firm_website")
+            or source.get("firm_bc_scope_url")
+        )
+
     async def _fetch_firm_detail(
         self,
         client: httpx.AsyncClient,
@@ -163,10 +192,24 @@ class FinraService:
         if source is None:
             return
 
-        # Website
-        website = self._clean_text(source.get("firm_website") or source.get("firm_bc_scope_url"))
+        # Website. The BrokerCheck Form BD "Web Address" field surfaces under
+        # several keys depending on the search vs. detail endpoint and how the
+        # firm filed Form BD: ``firm_ia_main_web_address`` is the canonical
+        # snake-cased Form BD field, ``firm_main_web_address`` /
+        # ``firm_web_address`` show up on some firms, and ``firm_website`` /
+        # ``firm_bc_scope_url`` were the original keys we plucked. Try the
+        # Form-BD-canonical ones first so production rows are mostly populated
+        # straight from FINRA without needing the Apollo fallback.
+        website = self._clean_text(
+            source.get("firm_ia_main_web_address")
+            or source.get("firm_main_web_address")
+            or source.get("firm_web_address")
+            or source.get("firm_website")
+            or source.get("firm_bc_scope_url")
+        )
         if website:
             record.website = website
+            record.website_source = "finra"
 
         # Types of Business - stored as JSON string in the detail payload
         business_types = self._parse_business_types(source)
