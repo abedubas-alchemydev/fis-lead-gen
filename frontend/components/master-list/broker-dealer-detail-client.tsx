@@ -39,6 +39,7 @@ import {
 import { SectionPanel } from "@/components/ui/section-panel";
 import { ListPicker } from "@/components/list-picker/list-picker";
 import { Pill } from "@/components/ui/pill";
+import { UnknownCell } from "@/components/master-list/unknown-cell";
 import { apiRequest, buildApiPath } from "@/lib/api";
 import { parseArrangementBlob } from "@/lib/arrangements";
 import {
@@ -516,9 +517,19 @@ export function BrokerDealerDetailClient({ brokerDealerId }: { brokerDealerId: s
       {/* ── Status pills row + health-check inline message ── */}
       <div className="mb-5 flex flex-wrap items-center gap-2">
         <Pill variant={healthVariant(bd.health_status)}>{healthLabel(bd.health_status)}</Pill>
-        <Pill variant={clearingTypeVariant(bd.current_clearing_type)}>
-          {clearingTypeLabel(bd.current_clearing_type)}
-        </Pill>
+        <span className="inline-flex items-center gap-1">
+          <Pill variant={clearingTypeVariant(bd.current_clearing_type)}>
+            {clearingTypeLabel(bd.current_clearing_type)}
+          </Pill>
+          {bd.current_clearing_type === null &&
+          bd.current_clearing_unknown_reason ? (
+            <UnknownCell
+              reason={bd.current_clearing_unknown_reason}
+              fallback={null}
+              compact
+            />
+          ) : null}
+        </span>
         {bd.current_clearing_is_competitor ? <Pill variant="competitor">COMPETITOR</Pill> : null}
         {classification ? (
           <Pill variant={classification.variant}>{classification.label}</Pill>
@@ -568,11 +579,44 @@ export function BrokerDealerDetailClient({ brokerDealerId }: { brokerDealerId: s
         {/* Financials */}
         <SectionPanel eyebrow="Financials" title="Net capital and trend">
           <div className="mb-4 grid gap-3 md:grid-cols-3">
-            <MiniStat label="Net Capital" value={formatCurrency(bd.latest_net_capital)} />
-            <MiniStat label="Excess Capital" value={formatCurrency(bd.latest_excess_net_capital)} />
+            <MiniStat
+              label="Net Capital"
+              value={
+                bd.latest_net_capital !== null ? (
+                  formatCurrency(bd.latest_net_capital)
+                ) : (
+                  <UnknownCell
+                    reason={bd.financial_unknown_reason}
+                    fallback="N/A"
+                  />
+                )
+              }
+            />
+            <MiniStat
+              label="Excess Capital"
+              value={
+                bd.latest_excess_net_capital !== null ? (
+                  formatCurrency(bd.latest_excess_net_capital)
+                ) : (
+                  <UnknownCell
+                    reason={bd.financial_unknown_reason}
+                    fallback="N/A"
+                  />
+                )
+              }
+            />
             <MiniStat
               label="YoY Growth"
-              value={bd.yoy_growth !== null ? formatPercent(bd.yoy_growth) : "N/A"}
+              value={
+                bd.yoy_growth !== null ? (
+                  formatPercent(bd.yoy_growth)
+                ) : (
+                  <UnknownCell
+                    reason={bd.financial_unknown_reason}
+                    fallback="N/A"
+                  />
+                )
+              }
               valueClassName={
                 bd.yoy_growth === null
                   ? "text-[var(--text-muted,#94a3b8)]"
@@ -580,7 +624,11 @@ export function BrokerDealerDetailClient({ brokerDealerId }: { brokerDealerId: s
                   ? "text-[#16a34a]"
                   : "text-[var(--pill-red-text,#b91c1c)]"
               }
-              helper={bd.yoy_growth === null ? "Requires 2+ years of data" : undefined}
+              helper={
+                bd.yoy_growth === null && !bd.financial_unknown_reason
+                  ? "Requires 2+ years of data"
+                  : undefined
+              }
             />
           </div>
           <FinancialTrendChart points={chartPoints} />
@@ -905,16 +953,28 @@ export function BrokerDealerDetailClient({ brokerDealerId }: { brokerDealerId: s
                   <div className="flex flex-wrap items-center justify-between gap-3">
                     <div>
                       <p className="text-sm font-semibold text-[var(--text,#0f172a)]">
-                        {item.clearing_partner ?? "Unknown partner"}
+                        {item.clearing_partner ?? (
+                          <UnknownCell
+                            reason={item.unknown_reason}
+                            fallback="Unknown partner"
+                          />
+                        )}
                       </p>
                       <p className="mt-1 text-xs text-[var(--text-muted,#94a3b8)]">
                         Year {item.filing_year}
                       </p>
                     </div>
-                    <div className="flex flex-wrap gap-2">
+                    <div className="flex flex-wrap items-center gap-2">
                       <Pill variant={clearingTypeVariant(item.clearing_type)}>
                         {clearingTypeLabel(item.clearing_type)}
                       </Pill>
+                      {item.clearing_type === null && item.unknown_reason ? (
+                        <UnknownCell
+                          reason={item.unknown_reason}
+                          fallback={null}
+                          compact
+                        />
+                      ) : null}
                       {item.is_competitor ? <Pill variant="competitor">COMPETITOR</Pill> : null}
                     </div>
                   </div>
@@ -981,7 +1041,10 @@ function MiniStat({
   compact,
 }: {
   label: string;
-  value: string;
+  // Widened from `string` so callers can render a custom node (e.g. an
+  // UnknownCell with hover-explained reason) when the underlying value
+  // is null.
+  value: React.ReactNode;
   helper?: string;
   valueClassName?: string;
   compact?: boolean;

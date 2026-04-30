@@ -22,6 +22,7 @@ import { Combo } from "@/components/ui/combo";
 import { ListPicker } from "@/components/list-picker/list-picker";
 import { NetCapitalRangeFilter } from "@/components/master-list/filters/net-capital-range-filter";
 import { RegistrationDateRangeFilter } from "@/components/master-list/filters/registration-date-range-filter";
+import { UnknownCell } from "@/components/master-list/unknown-cell";
 import {
   MultiSelectFilter,
   type MultiSelectFilterOption,
@@ -1075,21 +1076,37 @@ export function MasterListWorkspaceClient() {
                       </td>
                       <td className="px-5 py-3.5">
                         <div className="flex flex-wrap items-center gap-2">
-                          <span
-                            className="max-w-[200px] truncate text-[var(--text-dim,#475569)]"
-                            title={item.current_clearing_partner ?? "Unknown"}
-                          >
-                            {item.current_clearing_partner ?? "Unknown"}
-                          </span>
+                          {item.current_clearing_partner ? (
+                            <span
+                              className="max-w-[200px] truncate text-[var(--text-dim,#475569)]"
+                              title={item.current_clearing_partner}
+                            >
+                              {item.current_clearing_partner}
+                            </span>
+                          ) : (
+                            <UnknownCell
+                              reason={item.current_clearing_unknown_reason}
+                            />
+                          )}
                           {item.current_clearing_is_competitor ? (
                             <Pill variant="competitor">COMPETITOR</Pill>
                           ) : null}
                         </div>
                       </td>
                       <td className="px-5 py-3.5">
-                        <Pill variant={clearingTypeVariant(item.current_clearing_type)}>
-                          {clearingTypeLabel(item.current_clearing_type)}
-                        </Pill>
+                        <span className="inline-flex items-center gap-1">
+                          <Pill variant={clearingTypeVariant(item.current_clearing_type)}>
+                            {clearingTypeLabel(item.current_clearing_type)}
+                          </Pill>
+                          {item.current_clearing_type === null &&
+                          item.current_clearing_unknown_reason ? (
+                            <UnknownCell
+                              reason={item.current_clearing_unknown_reason}
+                              fallback={null}
+                              compact
+                            />
+                          ) : null}
+                        </span>
                       </td>
                       <td className="px-5 py-3.5">
                         <Pill variant={healthVariant(item.health_status)}>
@@ -1120,12 +1137,10 @@ export function MasterListWorkspaceClient() {
                         {item.latest_net_capital !== null ? (
                           formatCurrency(item.latest_net_capital)
                         ) : (
-                          <span
-                            className="text-[var(--text-muted,#94a3b8)]"
-                            title="No FOCUS report on file"
-                          >
-                            —
-                          </span>
+                          <UnknownCell
+                            reason={item.financial_unknown_reason}
+                            fallback="—"
+                          />
                         )}
                       </td>
                       <td className="whitespace-nowrap px-5 py-3.5">
@@ -1144,12 +1159,10 @@ export function MasterListWorkspaceClient() {
                             {item.yoy_growth.toFixed(1)}%
                           </span>
                         ) : (
-                          <span
-                            className="text-[var(--text-muted,#94a3b8)]"
-                            title="Needs ≥2 historical FOCUS filings"
-                          >
-                            —
-                          </span>
+                          <UnknownCell
+                            reason={item.financial_unknown_reason}
+                            fallback="—"
+                          />
                         )}
                       </td>
                       <td className="whitespace-nowrap px-5 py-3.5 text-[var(--text-muted,#94a3b8)]">
