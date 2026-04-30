@@ -27,6 +27,11 @@ requests>=2.32.0
 # blast radius of the runtime SA's roles/run.developer grant stays
 # narrow.
 google-cloud-run>=0.10.0
+# google-cloud-vision powers the OCR pre-pass for scanned-image PDFs in
+# app.services.ocr.VisionOCR. Routed in pdf_processor.py only when
+# pdfplumber returns < 50 chars from a filing — same-process LRU keyed by
+# the filing's SHA-256 prevents redundant Vision calls inside one regen.
+google-cloud-vision==3.7.4
 # py3-validate-email — SMTP RCPT TO probe for email_extractor. Package name on
 # PyPI is `py3-validate-email` but imports as `validate_email`. Pinned because
 # SMTP handshake semantics have drifted across minor versions.
