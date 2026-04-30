@@ -203,7 +203,12 @@ def test_migration_round_trip_on_postgres() -> None:
     from app.core.config import settings
 
     cfg = Config("alembic.ini")
-    sync_url = settings.database_url.replace("+asyncpg", "").replace("+psycopg", "")
+    # psycopg3's SQLAlchemy dialect supports both sync and async; psycopg2 isn't
+    # installed. Force the +psycopg prefix so create_engine doesn't fall back to
+    # psycopg2 on a bare postgresql:// URL.
+    sync_url = settings.database_url.replace("+asyncpg", "+psycopg")
+    if sync_url.startswith("postgresql://"):
+        sync_url = "postgresql+psycopg://" + sync_url[len("postgresql://") :]
     cfg.set_main_option("sqlalchemy.url", sync_url)
 
     def _constraint_present() -> bool:

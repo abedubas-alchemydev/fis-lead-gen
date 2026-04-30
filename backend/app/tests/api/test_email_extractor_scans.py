@@ -12,13 +12,42 @@ in the dedicated VPS-deploy follow-up prompt. The non-integration test suite
 from __future__ import annotations
 
 import asyncio
+import secrets
+from datetime import datetime
 
 import httpx
 import pytest
 
 from app.main import app
+from app.schemas.auth import AuthenticatedUser
+from app.services.auth import get_current_user
 
 pytestmark = pytest.mark.integration
+
+
+def _override_user() -> AuthenticatedUser:
+    return AuthenticatedUser(
+        id=f"test-user-{secrets.token_hex(6)}",
+        name="Test User",
+        email="email-extractor-scan-test@example.com",
+        role="viewer",
+        session_expires_at=datetime(2099, 1, 1),
+    )
+
+
+@pytest.fixture(autouse=True)
+def _bypass_auth() -> object:
+    """Bypass the BetterAuth session probe for every test in this module.
+
+    The endpoints under test depend on ``get_current_user``; the focus here
+    is the scan POST/GET round-trip, not session validation. Same pattern
+    as ``test_email_extractor_enrich_all.py``.
+    """
+    app.dependency_overrides[get_current_user] = _override_user
+    try:
+        yield
+    finally:
+        app.dependency_overrides.clear()
 
 
 async def test_post_then_get_scan_round_trip() -> None:
