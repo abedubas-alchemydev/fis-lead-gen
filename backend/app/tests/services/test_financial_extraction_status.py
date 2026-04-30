@@ -566,14 +566,28 @@ def test_migration_round_trip_on_postgres() -> None:
         finally:
             engine.dispose()
 
-    command.upgrade(cfg, "head")
-    assert _column_present(), "column missing after initial upgrade"
-    assert _index_present(), "index missing after initial upgrade"
+    # Target the specific migration this test exercises, not "-1"/"head".
+    # The relative form was brittle: when later migrations land, "head" advances
+    # past 20260424_0014 and "downgrade -1" undoes the wrong migration.
+    target_revision = "20260424_0014"
+    prior_revision = "2cc4af2a4ef5"  # down_revision of target
 
-    command.downgrade(cfg, "-1")
+    # CI's pre-test step has already applied head. Walk back to the revision
+    # immediately before our target so the column/index start absent.
+    command.downgrade(cfg, prior_revision)
+    assert not _column_present(), "column should be absent before target migration"
+    assert not _index_present(), "index should be absent before target migration"
+
+    command.upgrade(cfg, target_revision)
+    assert _column_present(), "column missing after upgrade to target"
+    assert _index_present(), "index missing after upgrade to target"
+
+    command.downgrade(cfg, prior_revision)
     assert not _column_present(), "column still present after downgrade"
     assert not _index_present(), "index still present after downgrade"
 
+    # Restore DB to head so subsequent tests in the same run see the expected
+    # schema state.
     command.upgrade(cfg, "head")
-    assert _column_present(), "column missing after re-upgrade"
-    assert _index_present(), "index missing after re-upgrade"
+    assert _column_present(), "column missing after restoring to head"
+    assert _index_present(), "index missing after restoring to head"

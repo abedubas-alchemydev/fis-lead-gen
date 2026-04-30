@@ -223,11 +223,24 @@ def test_migration_round_trip_on_postgres() -> None:
         finally:
             engine.dispose()
 
-    command.upgrade(cfg, "head")
-    assert _constraint_present(), "constraint missing after initial upgrade"
+    # Target the specific migration this test exercises, not "-1"/"head".
+    # The relative form was brittle: when later migrations land, "head" advances
+    # past 2cc4af2a4ef5 and "downgrade -1" undoes the wrong migration.
+    target_revision = "2cc4af2a4ef5"
+    prior_revision = "20260423_0013"  # down_revision of target
 
-    command.downgrade(cfg, "-1")
+    # CI's pre-test step has already applied head. Walk back to the revision
+    # immediately before our target so the constraint starts absent.
+    command.downgrade(cfg, prior_revision)
+    assert not _constraint_present(), "constraint should be absent before target migration"
+
+    command.upgrade(cfg, target_revision)
+    assert _constraint_present(), "constraint missing after upgrade to target"
+
+    command.downgrade(cfg, prior_revision)
     assert not _constraint_present(), "constraint still present after downgrade"
 
+    # Restore DB to head so subsequent tests in the same run see the expected
+    # schema state.
     command.upgrade(cfg, "head")
-    assert _constraint_present(), "constraint missing after re-upgrade"
+    assert _constraint_present(), "constraint missing after restoring to head"
