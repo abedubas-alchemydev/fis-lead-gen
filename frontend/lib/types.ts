@@ -216,6 +216,15 @@ export type FilingHistoryItem = {
   priority: string | null;
 };
 
+// Where the executive_contact record was sourced from. Mirrors the cli01 BE
+// contract for `feature/be-apollo-executive-enrichment`:
+//   - "sec"    — name pulled directly from the firm's FOCUS / SEC filing
+//                (most authoritative; no badge in the UI)
+//   - "apollo" — name inferred via Apollo enrichment when FOCUS extraction
+//                returned no officers (third-party, less authoritative)
+//   - "finra"  — name fell back to the FINRA executive-officers list
+export type ExecutiveSource = "sec" | "apollo" | "finra";
+
 export type ExecutiveContactItem = {
   id: number;
   bd_id: number;
@@ -224,7 +233,7 @@ export type ExecutiveContactItem = {
   email: string | null;
   phone: string | null;
   linkedin_url: string | null;
-  source: string;
+  source: ExecutiveSource;
   enriched_at: string;
 };
 
