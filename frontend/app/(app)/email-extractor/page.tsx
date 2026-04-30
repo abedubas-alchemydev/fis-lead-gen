@@ -6,6 +6,8 @@ import type { Route } from "next";
 import { useRouter } from "next/navigation";
 import { useCallback, useEffect, useMemo, useState } from "react";
 
+import { EmailExtractorErrorCard } from "@/components/email-extractor/email-extractor-error-card";
+import { EmptyScansState } from "@/components/email-extractor/empty-scans-state";
 import { TopActions } from "@/components/layout/top-actions";
 import { Pill, type PillVariant } from "@/components/ui/pill";
 import { SectionPanel } from "@/components/ui/section-panel";
@@ -228,8 +230,12 @@ export default function EmailExtractorHomePage(): React.ReactElement {
       </div>
 
       {historyError ? (
-        <div className="mb-4 rounded-2xl border border-red-100 bg-red-50 px-4 py-3 text-sm text-red-700">
-          {historyError}
+        <div className="mb-4">
+          <EmailExtractorErrorCard
+            title="Couldn't load recent scans"
+            message={historyError}
+            onRetry={() => void loadRecent()}
+          />
         </div>
       ) : null}
 
@@ -266,9 +272,7 @@ export default function EmailExtractorHomePage(): React.ReactElement {
             ))}
           </div>
         ) : recentScans.length === 0 ? (
-          <div className="my-2 rounded-lg border border-dashed border-[var(--border,rgba(30,64,175,0.1))] px-4 py-10 text-center text-sm text-[var(--text-muted,#94a3b8)]">
-            No scans yet. Submit a domain above to start.
-          </div>
+          <EmptyScansState />
         ) : (
           <div>
             {recentScans.map((scan) => (
