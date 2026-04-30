@@ -7,23 +7,29 @@ import {
   findPipelineRun,
   runInitialLoad,
   runPopulateAll,
-  wipeBdData
+  setFilesApiFlag,
+  wipeBdData,
+  type SetFilesApiFlagResponse
 } from "@/lib/api";
 import type { PipelineRunItem, WipeBdDataResponse } from "@/lib/types";
 
 import { RegenProgress, type PhaseSnapshot } from "./regen-progress";
 
-// Modal that owns the entire Fresh Regen state machine. Three phases
-// chain server-side:
+// Modal that owns the entire Fresh Regen state machine. With the Files
+// API toggle ON (default), four phases chain server-side:
+//   0. files_api  → POST /api/v1/pipeline/set-files-api-flag (~60-90s
+//                   for the BE Cloud Run revision rollout)
 //   1. wipe        → POST /api/v1/pipeline/wipe-bd-data
 //   2. initial_load → POST /api/v1/pipeline/run/initial-load + poll
 //   3. populate_all → POST /api/v1/pipeline/run/populate-all + poll
 //
-// Polling reuses the existing /api/v1/pipeline/clearing endpoint and
-// looks up our run in `recent_runs` by id; we don't introduce a new
-// per-run-status endpoint to keep the BE surface unchanged from cli01's
-// scope. 30s cadence is comfortable for runs that take 15-90 minutes
-// and well under any practical rate limit.
+// When the admin unchecks the toggle, Phase 0 is skipped and we run the
+// legacy three-phase flow against the BE's existing local-PDF-cache
+// path. Polling reuses the existing /api/v1/pipeline/clearing endpoint
+// and looks up our run in `recent_runs` by id; we don't introduce a new
+// per-run-status endpoint to keep the BE surface unchanged. 30s cadence
+// is comfortable for runs that take 15-90 minutes and well under any
+// practical rate limit.
 
 interface FreshRegenConfirmModalProps {
   onClose: () => void;
@@ -32,6 +38,7 @@ interface FreshRegenConfirmModalProps {
 
 type Stage =
   | "typing"
+  | "files_api_flipping"
   | "wiping"
   | "initial_load_pending"
   | "initial_load_running"
@@ -64,6 +71,16 @@ export function FreshRegenConfirmModal({
   const [stage, setStage] = useState<Stage>("typing");
   const [typed, setTyped] = useState("");
   const [error, setError] = useState<string | null>(null);
+  // Streaming Files API path defaults ON: it eliminates the manual
+  // `gcloud run services update` flag flip Arvin previously had to run
+  // before the regen, and it streams PDFs straight to Gemini's Files
+  // API instead of rebuilding the local cache. Admins can opt out by
+  // unchecking the toggle in the typing stage if Cloud Run rollout
+  // keeps timing out (Phase 0 503), or to keep the legacy ingestion
+  // path for any other reason.
+  const [useFilesApi, setUseFilesApi] = useState(true);
+  const [filesApiResult, setFilesApiResult] =
+    useState<SetFilesApiFlagResponse | null>(null);
   const [wipeResult, setWipeResult] = useState<WipeBdDataResponse | null>(null);
   const [initialLoadRunId, setInitialLoadRunId] = useState<number | null>(null);
   const [populateRunId, setPopulateRunId] = useState<number | null>(null);
@@ -98,6 +115,7 @@ export function FreshRegenConfirmModal({
   }, [stage]);
 
   const inFlight =
+    stage === "files_api_flipping" ||
     stage === "wiping" ||
     stage === "initial_load_pending" ||
     stage === "initial_load_running" ||
@@ -244,6 +262,24 @@ export function FreshRegenConfirmModal({
     if (typed !== expected || stage !== "typing") return;
 
     setError(null);
+
+    // Phase 0 — flip LLM_USE_FILES_API and wait for the BE Cloud Run
+    // revision to roll out. Skipped when the admin opted out via the
+    // toggle, keeping today's three-phase legacy flow intact.
+    if (useFilesApi) {
+      setStage("files_api_flipping");
+      try {
+        const flagResponse = await setFilesApiFlag(true);
+        if (!isMountedRef.current) return;
+        setFilesApiResult(flagResponse);
+      } catch (flagError) {
+        if (!isMountedRef.current) return;
+        setStage("typing");
+        setError(buildFilesApiErrorMessage(flagError));
+        return;
+      }
+    }
+
     setStage("wiping");
 
     try {
@@ -264,6 +300,8 @@ export function FreshRegenConfirmModal({
   const phases = buildPhases({
     stage,
     expected,
+    useFilesApi,
+    filesApiResult,
     wipeResult,
     initialLoadRunId,
     initialLoadProgress,
@@ -301,6 +339,8 @@ export function FreshRegenConfirmModal({
             inputRef={inputRef}
             error={error}
             stage={stage}
+            useFilesApi={useFilesApi}
+            onUseFilesApiChange={setUseFilesApi}
           />
         ) : null}
 
@@ -334,7 +374,9 @@ function TypingBody({
   onTypedChange,
   inputRef,
   error,
-  stage
+  stage,
+  useFilesApi,
+  onUseFilesApiChange
 }: {
   expected: string;
   typed: string;
@@ -342,6 +384,8 @@ function TypingBody({
   inputRef: React.MutableRefObject<HTMLInputElement | null>;
   error: string | null;
   stage: Stage;
+  useFilesApi: boolean;
+  onUseFilesApiChange: (value: boolean) => void;
 }) {
   return (
     <div className="mt-3 space-y-4">
@@ -367,6 +411,30 @@ function TypingBody({
           spellCheck={false}
           className="block w-full rounded-xl border border-slate-200 bg-white px-3 py-2 font-mono text-sm text-navy outline-none transition focus:border-blue focus:ring-2 focus:ring-blue/20"
         />
+      </div>
+      <div className="rounded-xl border border-slate-200 bg-slate-50/60 px-3 py-3">
+        <label className="flex cursor-pointer items-start gap-3">
+          <input
+            type="checkbox"
+            checked={useFilesApi}
+            onChange={(event) => onUseFilesApiChange(event.target.checked)}
+            className="mt-0.5 h-4 w-4 shrink-0 rounded border-slate-300 text-blue focus:ring-blue/30"
+          />
+          <span className="space-y-1">
+            <span className="block text-sm font-medium text-navy">
+              Use streaming Files API (recommended)
+            </span>
+            <span className="block text-xs leading-5 text-slate-600">
+              When enabled, the regen flips{" "}
+              <code className="font-mono text-[11px] text-slate-700">
+                LLM_USE_FILES_API=true
+              </code>{" "}
+              and rolls out a new backend revision (~60–90s) before
+              wiping. PDFs stream to Gemini&apos;s Files API instead of
+              rebuilding the local cache.
+            </span>
+          </span>
+        </label>
       </div>
       {error ? (
         <div className="rounded-xl border border-red-200 bg-red-50 px-3 py-2 text-xs text-danger">
@@ -501,6 +569,8 @@ function ModalActions({
 function buildPhases(args: {
   stage: Stage;
   expected: string;
+  useFilesApi: boolean;
+  filesApiResult: SetFilesApiFlagResponse | null;
   wipeResult: WipeBdDataResponse | null;
   initialLoadRunId: number | null;
   initialLoadProgress: PipelineRunItem | null;
@@ -510,12 +580,25 @@ function buildPhases(args: {
   const {
     stage,
     expected,
+    useFilesApi,
+    filesApiResult,
     wipeResult,
     initialLoadRunId,
     initialLoadProgress,
     populateRunId,
     populateProgress
   } = args;
+
+  const filesApiPhase: PhaseSnapshot = {
+    id: "files_api",
+    label: "Phase 0 — Enable Files API path (~60–90s)",
+    status: phaseStatusFor("files_api", stage),
+    detail: filesApiResult
+      ? `Revision ${filesApiResult.revision_name} ready (LLM_USE_FILES_API ${filesApiResult.previous_state} → ${filesApiResult.new_state})`
+      : stage === "files_api_flipping"
+        ? "Rolling out new backend revision — please wait, this is not hung."
+        : undefined
+  };
 
   const wipePhase: PhaseSnapshot = {
     id: "wipe",
@@ -542,21 +625,35 @@ function buildPhases(args: {
     detail: detailForRun(populateRunId, populateProgress)
   };
 
-  return [wipePhase, initialPhase, populatePhase];
+  return useFilesApi
+    ? [filesApiPhase, wipePhase, initialPhase, populatePhase]
+    : [wipePhase, initialPhase, populatePhase];
 }
 
 function phaseStatusFor(
-  phase: "wipe" | "initial_load" | "populate_all",
+  phase: "files_api" | "wipe" | "initial_load" | "populate_all",
   stage: Stage
 ): PhaseSnapshot["status"] {
-  if (phase === "wipe") {
-    if (stage === "wiping") return "running";
+  if (phase === "files_api") {
     if (stage === "typing") return "pending";
+    if (stage === "files_api_flipping") return "running";
+    // Phase 0 only fails by snapping the modal back to "typing" with an
+    // inline error, so any later stage means Phase 0 succeeded.
+    return "done";
+  }
+  if (phase === "wipe") {
+    if (stage === "typing" || stage === "files_api_flipping") return "pending";
+    if (stage === "wiping") return "running";
     if (stage === "failed") return "failed";
     return "done";
   }
   if (phase === "initial_load") {
-    if (stage === "typing" || stage === "wiping") return "pending";
+    if (
+      stage === "typing" ||
+      stage === "files_api_flipping" ||
+      stage === "wiping"
+    )
+      return "pending";
     if (stage === "initial_load_pending" || stage === "initial_load_running")
       return "running";
     if (stage === "failed") {
@@ -598,6 +695,19 @@ function buildWipeErrorMessage(error: unknown, expected: string): string {
   }
   if (error instanceof ApiError && error.status === 403) {
     return "You don't have permission to run a fresh regen.";
+  }
+  return errorMessage(error);
+}
+
+function buildFilesApiErrorMessage(error: unknown): string {
+  if (error instanceof ApiError && error.status === 503) {
+    return "Could not enable Files API (Cloud Run rollout timed out). Try again, or proceed without streaming by unchecking the toggle.";
+  }
+  if (error instanceof ApiError && error.status === 403) {
+    return "Admin access required.";
+  }
+  if (error instanceof ApiError) {
+    return `Failed to enable Files API: ${error.detail}`;
   }
   return errorMessage(error);
 }

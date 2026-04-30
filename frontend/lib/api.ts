@@ -242,3 +242,28 @@ export async function findPipelineRun(
   );
   return status.recent_runs.find((run) => run.id === runId) ?? null;
 }
+
+// ── Fresh Regen Phase 0 — Files API flag flip (cli02 FE-1 follow-up) ─────
+// Pairs with cli01 BE PR feature/be-pipeline-set-files-api-flag. POST
+// flips LLM_USE_FILES_API at the BE Cloud Run service level and waits
+// for the new revision to roll out (~60-90s). 503 means the rollout
+// timed out and the FE should let the admin retry or opt out by
+// unchecking the toggle. 403 means non-admin caller.
+export type SetFilesApiFlagResponse = {
+  previous_state: boolean;
+  new_state: boolean;
+  revision_name: string;
+  ready_at: string;
+};
+
+export async function setFilesApiFlag(
+  enabled: boolean
+): Promise<SetFilesApiFlagResponse> {
+  return apiRequest<SetFilesApiFlagResponse>(
+    "/api/v1/pipeline/set-files-api-flag",
+    {
+      method: "POST",
+      body: JSON.stringify({ enabled })
+    }
+  );
+}
