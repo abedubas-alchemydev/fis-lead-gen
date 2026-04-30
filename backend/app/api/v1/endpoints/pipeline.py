@@ -1,15 +1,24 @@
 from __future__ import annotations
 
+import json
 import logging
 from datetime import datetime, timezone
 
 from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, status
+from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.db.session import SessionLocal, get_db_session
+from app.models.audit_log import AuditLog
 from app.models.pipeline_run import PipelineRun
 from app.schemas.auth import AuthenticatedUser
-from app.schemas.pipeline import CompetitorProvidersResponse, PipelineStatusResponse, PipelineTriggerResponse
+from app.schemas.pipeline import (
+    CompetitorProvidersResponse,
+    PipelineStatusResponse,
+    PipelineTriggerResponse,
+    WipeBdDataRequest,
+    WipeBdDataResponse,
+)
 from app.services.auth import _ensure_admin_or_scheduler_sa, get_current_user
 from app.services.broker_dealers import BrokerDealerRepository
 from app.services.filing_monitor import FilingMonitorService
@@ -19,6 +28,7 @@ logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/pipeline/clearing")
 scheduled_router = APIRouter(prefix="/pipeline/run")
+admin_destructive_router = APIRouter(prefix="/pipeline")
 repository = BrokerDealerRepository()
 pipeline_service = ClearingPipelineService()
 filing_monitor_service = FilingMonitorService()
@@ -318,3 +328,103 @@ async def run_initial_load(
     )
     background_tasks.add_task(_run_initial_load_background, run.id, caller)
     return _trigger_response(run)
+
+
+# ───────────────────────────────────────────────────────────────────────────
+# Destructive admin-only endpoint (cookie auth ONLY — no SA OIDC fallback)
+# ───────────────────────────────────────────────────────────────────────────
+
+
+WIPE_BD_DATA_TABLES: list[str] = [
+    "filing_alerts",
+    "financial_metrics",
+    "clearing_arrangements",
+    "executive_contacts",
+    "favorite_list_item",
+    "broker_dealers",
+]
+
+
+@admin_destructive_router.post(
+    "/wipe-bd-data",
+    response_model=WipeBdDataResponse,
+    status_code=200,
+)
+async def wipe_bd_data(
+    request: WipeBdDataRequest,
+    current_user: AuthenticatedUser = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db_session),
+) -> WipeBdDataResponse:
+    """TRUNCATE the broker-dealer data tables for a Fresh Regen.
+
+    Wipes ``filing_alerts``, ``financial_metrics``, ``clearing_arrangements``,
+    ``executive_contacts``, ``favorite_list_item``, ``broker_dealers``. Users,
+    sessions, audit logs, and ``favorite_list`` parents are preserved.
+
+    Strict guards:
+
+    * Only admin role on a BetterAuth session cookie may call this. The
+      Cloud Scheduler SA OIDC dual path used by the ``/run/*`` endpoints is
+      explicitly **not** wired up here — wipes are too destructive to let
+      a service-account bearer trigger them.
+    * The request body's ``confirmation`` must equal
+      ``WIPE-BD-DATA-YYYY-MM-DD`` where ``YYYY-MM-DD`` is today's UTC date.
+      Yesterday's confirmation strings are rejected so a copy-pasted curl or
+      a replayed request can't accidentally wipe.
+    * The ``audit_log`` row is INSERTed (via ``flush``) **before** the
+      TRUNCATE statements run. Both happen in the same transaction — if any
+      TRUNCATE fails, the audit row rolls back too, so there is no
+      "wipe without an audit trail" state.
+    """
+    if current_user.role != "admin":
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Admin access required.",
+        )
+
+    today_utc = datetime.now(timezone.utc).date().isoformat()
+    expected = f"WIPE-BD-DATA-{today_utc}"
+    if request.confirmation != expected:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=(
+                f"Confirmation must be exactly '{expected}'. "
+                f"Got: '{request.confirmation}'."
+            ),
+        )
+
+    audit = AuditLog(
+        user_id=current_user.id,
+        action="bd_data_wiped",
+        details=json.dumps(
+            {
+                "confirmation": request.confirmation,
+                "tables": list(WIPE_BD_DATA_TABLES),
+            }
+        ),
+    )
+    db.add(audit)
+    await db.flush()
+    audit_log_id = str(audit.id)
+
+    rows_before_result = await db.execute(text("SELECT COUNT(*) FROM broker_dealers"))
+    rows_before = rows_before_result.scalar() or 0
+
+    for tbl in WIPE_BD_DATA_TABLES:
+        await db.execute(text(f"TRUNCATE TABLE {tbl} CASCADE"))
+
+    await db.commit()
+
+    logger.warning(
+        "BD data wiped by admin %s (audit_log_id=%s, rows_before=%d)",
+        current_user.email,
+        audit_log_id,
+        rows_before,
+    )
+
+    return WipeBdDataResponse(
+        affected_tables=list(WIPE_BD_DATA_TABLES),
+        rows_deleted=rows_before,
+        audit_log_id=audit_log_id,
+        wiped_at=datetime.now(timezone.utc),
+    )

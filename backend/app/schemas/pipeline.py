@@ -86,3 +86,14 @@ class ClearingProviderShare(BaseModel):
 
 class ClearingDistributionResponse(BaseModel):
     items: list[ClearingProviderShare]
+
+
+class WipeBdDataRequest(BaseModel):
+    confirmation: str
+
+
+class WipeBdDataResponse(BaseModel):
+    affected_tables: list[str]
+    rows_deleted: int
+    audit_log_id: str
+    wiped_at: datetime
