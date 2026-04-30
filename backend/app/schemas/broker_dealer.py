@@ -6,6 +6,7 @@ from pydantic import BaseModel, ConfigDict
 
 from app.schemas.alerts import AlertListItem
 from app.schemas.pipeline import ClearingArrangementItem
+from app.schemas.unknown_reason import UnknownReason
 
 class BrokerDealerListItem(BaseModel):
     model_config = ConfigDict(from_attributes=True)
@@ -58,6 +59,15 @@ class BrokerDealerListItem(BaseModel):
     # follow-up FE PR can use it to gate the detail-page enrich call.
     last_enrich_attempt_at: datetime | None = None
     created_at: datetime
+    # Populated when ``current_clearing_partner`` is None — derived from the
+    # latest ``ClearingArrangement`` row's extraction_status / extraction_notes
+    # by ``app.services.unknown_reasons.derive_clearing_unknown_reason``. The
+    # FE keys off the presence of this object to render the info-icon tooltip.
+    current_clearing_unknown_reason: UnknownReason | None = None
+    # Populated when the rolled-up financial summary (``latest_net_capital``,
+    # ``yoy_growth``) is missing — derived from the latest ``FinancialMetric``
+    # row's extraction_status. None when the firm has parsed financials.
+    financial_unknown_reason: UnknownReason | None = None
 
 
 class BrokerDealerDetail(BrokerDealerListItem):
@@ -96,6 +106,11 @@ class FinancialMetricItem(BaseModel):
     # this field; the backend has no write path for it.
     extraction_status: str = "parsed"
     created_at: datetime
+    # Populated when the row's ``extraction_status`` !=  "parsed". For
+    # financials a row exists ⇒ ``net_capital`` and ``report_date`` are
+    # NOT NULL, so this only fires for needs_review / provider_error /
+    # pipeline_error / missing_pdf rows. None on parsed rows.
+    unknown_reason: UnknownReason | None = None
 
 
 class FinancialMetricsResponse(BaseModel):
@@ -124,6 +139,11 @@ class ExecutiveContactItem(BaseModel):
     discovery_source: str | None = None
     discovery_confidence: float | None = None
     enriched_at: datetime
+    # Per-row ``unknown_reason`` is always None on a populated contact —
+    # the field exists so consumers can read every nullable surface through
+    # the same shape. The list-level "no contacts at all" reason ships as
+    # ``BrokerDealerProfileResponse.executive_contacts_unknown_reason``.
+    unknown_reason: UnknownReason | None = None
 
 
 class RegistrationComplianceSummary(BaseModel):
@@ -230,3 +250,9 @@ class BrokerDealerProfileResponse(BaseModel):
     # (and again, idempotently, in 20260429_0022).
     is_favorited: bool = False
     favorited_at: datetime | None = None
+    # List-level reason for an empty ``executive_contacts``. The contact
+    # table has no extraction_status column (Apollo/Hunter/Snov-driven), so
+    # the only signal is "row exists or doesn't" — when the list is empty
+    # this gets populated with ``not_yet_extracted`` so the FE can render
+    # an info icon next to the "No contacts" empty state.
+    executive_contacts_unknown_reason: UnknownReason | None = None

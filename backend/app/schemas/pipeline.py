@@ -4,6 +4,8 @@ from datetime import date, datetime
 
 from pydantic import BaseModel, ConfigDict
 
+from app.schemas.unknown_reason import UnknownReason
+
 
 class ClearingArrangementItem(BaseModel):
     model_config = ConfigDict(from_attributes=True)
@@ -24,6 +26,10 @@ class ClearingArrangementItem(BaseModel):
     is_verified: bool
     extracted_at: datetime | None
     created_at: datetime
+    # Populated when ``clearing_partner`` is None — explains *why* the cell
+    # shows Unknown so the FE can render an info-icon tooltip without a
+    # separate round-trip. Always None when a partner is named.
+    unknown_reason: UnknownReason | None = None
 
 
 class ClearingArrangementsResponse(BaseModel):
