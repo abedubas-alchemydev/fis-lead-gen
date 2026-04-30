@@ -9,11 +9,14 @@ import {
   XCircle,
 } from "lucide-react";
 import Link from "next/link";
-import { useParams, useSearchParams } from "next/navigation";
+import { useParams, useRouter, useSearchParams } from "next/navigation";
 import type { Route } from "next";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 
+import { EmailExtractorErrorCard } from "@/components/email-extractor/email-extractor-error-card";
+import { EmptyScanResultsState } from "@/components/email-extractor/empty-scan-results-state";
 import { EnrichAllButton } from "@/components/email-extractor/enrich-all-button";
+import { ScanResultsLoading } from "@/components/email-extractor/scan-results-loading";
 import { Pill, type PillVariant } from "@/components/ui/pill";
 import { SectionPanel } from "@/components/ui/section-panel";
 import { useToast } from "@/components/ui/use-toast";
@@ -169,6 +172,26 @@ function latestVerification(
 
 function errorMessage(err: unknown, fallback: string): string {
   return err instanceof Error ? err.message : fallback;
+}
+
+// Map raw BE error strings into per-cause copy so the user gets an
+// actionable subtext rather than a stack-trace-style message. Falls
+// back to the raw message if the BE didn't tag the cause.
+function dynamicScanErrorSubtext(rawMessage: string | null): string {
+  if (rawMessage === null) {
+    return "Something went wrong while running this scan.";
+  }
+  const lower = rawMessage.toLowerCase();
+  if (lower.includes("no domain")) {
+    return "No domain on file for this firm — try the hub with a domain entered manually.";
+  }
+  if (lower.includes("rate") && lower.includes("limit")) {
+    return "Rate limited — wait a minute and retry.";
+  }
+  if (lower.includes("apollo")) {
+    return "Apollo enrichment is unavailable right now — emails were discovered but couldn't be enriched.";
+  }
+  return rawMessage;
 }
 
 // --- Sub-components --------------------------------------------------------
@@ -349,14 +372,6 @@ function ResultsTable({
   enrichInFlight: Set<number>;
   onEnrich: (emailId: number) => void;
 }): React.ReactElement {
-  if (rows.length === 0) {
-    return (
-      <div className="rounded-lg border border-dashed border-[var(--border,rgba(30,64,175,0.1))] px-4 py-10 text-center text-[13px] text-[var(--text-muted,#94a3b8)]">
-        No emails discovered yet. The scan is either still running or no
-        provider returned results for this domain.
-      </div>
-    );
-  }
   return (
     <div className="overflow-hidden rounded-xl border border-[var(--border,rgba(30,64,175,0.1))] bg-[var(--surface,#ffffff)]">
       <table className="w-full text-[13px]">
@@ -448,6 +463,7 @@ function MiniStat({
 
 export default function ScanDetailPage(): React.ReactElement {
   const params = useParams<{ scanId: string }>();
+  const router = useRouter();
   const scanId = Number(params?.scanId);
 
   // When a `return` envelope is present (the user reached this scan
@@ -725,12 +741,11 @@ export default function ScanDetailPage(): React.ReactElement {
             Scan #{scanId}
           </h1>
         </div>
-        <div className="rounded-md border border-red-100 bg-red-50 px-4 py-3 text-[13px] text-[var(--pill-red-text,#b91c1c)]">
-          <span className="inline-flex items-start gap-2">
-            <AlertCircle className="mt-0.5 h-4 w-4 flex-shrink-0" strokeWidth={2} />
-            <span>{loadError}</span>
-          </span>
-        </div>
+        <EmailExtractorErrorCard
+          title="Couldn't load scan"
+          message={loadError ?? "Unknown error."}
+          onRetry={() => window.location.reload()}
+        />
       </div>
     );
   }
@@ -887,15 +902,32 @@ export default function ScanDetailPage(): React.ReactElement {
           />
         }
       >
-        <ResultsTable
-          rows={scan.discovered_emails}
-          localVerifications={localVerifications}
-          verifyInFlight={verifyInFlight}
-          verifyErrors={verifyErrors}
-          onVerify={handleVerify}
-          enrichInFlight={enrichInFlight}
-          onEnrich={handleEnrich}
-        />
+        {scan.status === "failed" ? (
+          <EmailExtractorErrorCard
+            title="Scan failed"
+            message={dynamicScanErrorSubtext(scan.error_message)}
+            onRetry={() => router.push("/email-extractor" as Route)}
+            retryLabel="Back to Email Extractor"
+          />
+        ) : scan.discovered_emails.length === 0 &&
+          (scan.status === "queued" || scan.status === "running") ? (
+          <ScanResultsLoading
+            processed={scan.processed_items}
+            total={scan.total_items}
+          />
+        ) : scan.discovered_emails.length === 0 ? (
+          <EmptyScanResultsState />
+        ) : (
+          <ResultsTable
+            rows={scan.discovered_emails}
+            localVerifications={localVerifications}
+            verifyInFlight={verifyInFlight}
+            verifyErrors={verifyErrors}
+            onVerify={handleVerify}
+            enrichInFlight={enrichInFlight}
+            onEnrich={handleEnrich}
+          />
+        )}
       </SectionPanel>
     </div>
   );
