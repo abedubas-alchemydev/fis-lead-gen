@@ -53,6 +53,41 @@ export const SOURCE_BADGE: Record<
   },
 };
 
+// Source pill for the firm-detail website link, fed by the lazy resolver
+// in cli01 BE PR feature/be-firm-website-resolver. Tones are deliberately
+// scaled by authority:
+//   - finra  → blue (FINRA Form BD is the authoritative open-record)
+//   - apollo → amber (third-party enrichment, same tone as the executive
+//              "Enriched" pill so users learn one signal across surfaces)
+//   - hunter → teal (less authoritative than FINRA, higher confidence
+//              than open-web search; cyan/teal sits between blue and the
+//              warning amber visually)
+//
+// Kept independent of `SOURCE_BADGE` so the two can evolve independently
+// (executive sources include "sec" with no badge; website sources don't).
+export type WebsiteSourceTone = "amber" | "blue" | "teal";
+
+export const WEBSITE_SOURCE_BADGE: Record<
+  "finra" | "apollo" | "hunter",
+  { label: string; tone: WebsiteSourceTone; tooltip: string }
+> = {
+  finra: {
+    label: "FINRA",
+    tone: "blue",
+    tooltip: "Pulled from FINRA Form BD",
+  },
+  apollo: {
+    label: "Enriched",
+    tone: "amber",
+    tooltip: "Resolved via Apollo organization data",
+  },
+  hunter: {
+    label: "Hunter",
+    tone: "teal",
+    tooltip: "Resolved via Hunter company lookup",
+  },
+};
+
 export function formatCurrency(value: number | null) {
   if (value === null) {
     return "N/A";

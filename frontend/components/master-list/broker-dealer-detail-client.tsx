@@ -482,7 +482,7 @@ export function BrokerDealerDetailClient({ brokerDealerId }: { brokerDealerId: s
               initialDefaultMember={profile.is_favorited}
             />
           </div>
-          <FirmWebsiteLink firmName={bd.name} website={bd.website} />
+          <FirmWebsiteLink firmId={bd.id} firmName={bd.name} website={bd.website} />
           <div className="mt-2 flex flex-wrap items-center gap-x-3 gap-y-1 text-[12px] text-[var(--text-muted,#94a3b8)]">
             <span>
               CIK <span className="font-mono text-[var(--text-dim,#475569)]">{bd.cik ?? "N/A"}</span>
