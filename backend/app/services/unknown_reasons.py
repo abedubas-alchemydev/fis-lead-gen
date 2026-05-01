@@ -22,9 +22,14 @@ cell in the cluster is null:
   - financial cluster: ``latest_net_capital`` OR ``latest_excess_net_capital``
                        OR ``yoy_growth`` OR ``health_status``
 
-Use :func:`with_trigger_field` to annotate which sub-field actually
-fired the reason — handy for the FE tooltip when the reason fired on a
-secondary field while the primary was populated.
+Use :func:`clearing_trigger_fields` / :func:`financial_trigger_fields`
+to inspect which cluster fields are null on a given ``BrokerDealer``,
+then :func:`with_trigger_fields` to annotate the reason with a
+``[Triggered by missing: <a>, <b>, ...]`` prefix listing every null
+cluster field. ``with_trigger_fields`` synthesizes a
+``data_not_present`` category when the underlying metric was parsed but
+the cluster still has missing fields, so partial-null rows always get a
+specific FE tooltip.
 
 Review-queue semantics are preserved: low-confidence / missing-partner /
 provider-error rows still land in the failures panel via
@@ -82,29 +87,31 @@ FINANCIAL_CLUSTER_FIELDS: tuple[str, ...] = (
 )
 
 
-def _first_null_field(item: BrokerDealer, fields: tuple[str, ...]) -> str | None:
-    for field in fields:
-        if getattr(item, field, None) is None:
-            return field
-    return None
+def _null_fields(item: BrokerDealer, fields: tuple[str, ...]) -> tuple[str, ...]:
+    """Return every cluster field on ``item`` whose value is ``None``.
 
-
-def clearing_trigger_field(item: BrokerDealer) -> str | None:
-    """Return the first null clearing-cluster field on ``item`` (or None).
-
-    None ⇒ every clearing-cluster field has a value, so the FE renders the
-    block normally and no unknown_reason is needed.
+    Order is preserved from ``fields`` so the rendered marker is stable
+    and predictable for the FE tooltip.
     """
-    return _first_null_field(item, CLEARING_CLUSTER_FIELDS)
+    return tuple(field for field in fields if getattr(item, field, None) is None)
 
 
-def financial_trigger_field(item: BrokerDealer) -> str | None:
-    """Return the first null financial-cluster field on ``item`` (or None).
+def clearing_trigger_fields(item: BrokerDealer) -> tuple[str, ...]:
+    """Return every null clearing-cluster field on ``item`` (in declared order).
 
-    None ⇒ every financial-cluster field has a value, so the FE renders
-    the block normally and no unknown_reason is needed.
+    Empty tuple ⇒ every clearing-cluster field has a value, so the FE
+    renders the block normally and no unknown_reason is needed.
     """
-    return _first_null_field(item, FINANCIAL_CLUSTER_FIELDS)
+    return _null_fields(item, CLEARING_CLUSTER_FIELDS)
+
+
+def financial_trigger_fields(item: BrokerDealer) -> tuple[str, ...]:
+    """Return every null financial-cluster field on ``item`` (in declared order).
+
+    Empty tuple ⇒ every financial-cluster field has a value, so the FE
+    renders the block normally and no unknown_reason is needed.
+    """
+    return _null_fields(item, FINANCIAL_CLUSTER_FIELDS)
 
 
 @dataclass(frozen=True)
@@ -293,31 +300,40 @@ def to_unknown_reason(result: UnknownReasonResult | None) -> UnknownReason | Non
     )
 
 
-def with_trigger_field(
+def with_trigger_fields(
     result: UnknownReasonResult | None,
-    field_name: str,
+    field_names: tuple[str, ...],
 ) -> UnknownReasonResult | None:
-    """Annotate ``result.note`` with which BD-level field fired the reason.
+    """Annotate ``result.note`` with the cluster fields that are null.
 
-    The clearing and financial reason objects cover clusters of fields
-    (partner+type for clearing; net_capital+excess+yoy+health for
-    financial). When the reason fires on a secondary field while the
-    primary is populated, prepending ``[Triggered by missing: <field>]``
-    lets the FE tooltip stay specific without expanding the typed schema.
+    The clearing and financial reasons cover clusters of fields. The
+    ``[Triggered by missing: <a>, <b>, ...]`` prefix names each null
+    cluster field so the FE tooltip can be specific without expanding
+    the typed schema.
 
-    Pass-through on ``None`` so callers can chain
-    ``to_unknown_reason(with_trigger_field(derive_*(...), "field"))``.
+    Three-state contract:
+
+    1. ``field_names`` empty ⇒ cluster is fully populated. Returns
+       ``None`` (no tooltip).
+    2. ``field_names`` non-empty AND ``result`` is a derive_* output ⇒
+       prepend the marker to the existing reason's note, preserving
+       category / extracted_at / confidence.
+    3. ``field_names`` non-empty AND ``result`` is ``None`` ⇒ the
+       underlying metric was parsed (``derive_*_unknown_reason`` returned
+       ``None``), but the cluster still has missing fields. Synthesize a
+       ``data_not_present`` reason so the FE tooltip still names the
+       missing column. Without this branch, partial-null cluster rows
+       silently lose their tooltip.
     """
-    if result is None:
+    if not field_names:
         return None
-    prefix = f"[Triggered by missing: {field_name}]"
-    if result.note:
-        new_note = f"{prefix} {result.note}"
-    else:
-        new_note = prefix
+
+    base = result if result is not None else UnknownReasonResult(category="data_not_present")
+    prefix = f"[Triggered by missing: {', '.join(field_names)}]"
+    new_note = f"{prefix} {base.note}" if base.note else prefix
     return UnknownReasonResult(
-        category=result.category,
+        category=base.category,
         note=new_note,
-        extracted_at=result.extracted_at,
-        confidence=result.confidence,
+        extracted_at=base.extracted_at,
+        confidence=base.confidence,
     )

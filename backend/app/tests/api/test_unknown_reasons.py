@@ -32,13 +32,13 @@ from app.services.unknown_reasons import (
     CLEARING_CLUSTER_FIELDS,
     FINANCIAL_CLUSTER_FIELDS,
     UnknownReasonResult,
-    clearing_trigger_field,
+    clearing_trigger_fields,
     derive_clearing_unknown_reason,
     derive_executive_contact_unknown_reason,
     derive_financial_unknown_reason,
-    financial_trigger_field,
+    financial_trigger_fields,
     to_unknown_reason,
-    with_trigger_field,
+    with_trigger_fields,
 )
 
 
@@ -296,42 +296,57 @@ def test_financial_cluster_fields_contract() -> None:
     )
 
 
-def test_clearing_trigger_field_returns_partner_when_partner_null() -> None:
+def test_clearing_trigger_fields_returns_partner_when_partner_null() -> None:
     item = SimpleNamespace(
         current_clearing_partner=None,
         current_clearing_type="introducing",
     )
-    assert clearing_trigger_field(item) == "current_clearing_partner"
+    assert clearing_trigger_fields(item) == ("current_clearing_partner",)
 
 
-def test_clearing_trigger_field_returns_type_when_only_type_null() -> None:
+def test_clearing_trigger_fields_returns_type_when_only_type_null() -> None:
     """Partner present but type missing must still surface a reason."""
     item = SimpleNamespace(
         current_clearing_partner="Pershing LLC",
         current_clearing_type=None,
     )
-    assert clearing_trigger_field(item) == "current_clearing_type"
+    assert clearing_trigger_fields(item) == ("current_clearing_type",)
 
 
-def test_clearing_trigger_field_returns_none_when_cluster_populated() -> None:
+def test_clearing_trigger_fields_lists_both_when_both_null() -> None:
+    item = SimpleNamespace(
+        current_clearing_partner=None,
+        current_clearing_type=None,
+    )
+    assert clearing_trigger_fields(item) == (
+        "current_clearing_partner",
+        "current_clearing_type",
+    )
+
+
+def test_clearing_trigger_fields_returns_empty_when_cluster_populated() -> None:
     item = SimpleNamespace(
         current_clearing_partner="Pershing LLC",
         current_clearing_type="introducing",
     )
-    assert clearing_trigger_field(item) is None
+    assert clearing_trigger_fields(item) == ()
 
 
-def test_financial_trigger_field_returns_first_null_field_in_order() -> None:
+def test_financial_trigger_fields_lists_every_null_in_declared_order() -> None:
     item = SimpleNamespace(
         latest_net_capital=1000.0,
         latest_excess_net_capital=None,
         yoy_growth=None,
         health_status=None,
     )
-    assert financial_trigger_field(item) == "latest_excess_net_capital"
+    assert financial_trigger_fields(item) == (
+        "latest_excess_net_capital",
+        "yoy_growth",
+        "health_status",
+    )
 
 
-def test_financial_trigger_field_fires_on_health_status_only() -> None:
+def test_financial_trigger_fields_fires_on_health_status_only() -> None:
     """A firm with all numeric financials but a null health_status still
     needs an unknown_reason — the FE Financial Health column relies on it."""
     item = SimpleNamespace(
@@ -340,46 +355,80 @@ def test_financial_trigger_field_fires_on_health_status_only() -> None:
         yoy_growth=0.12,
         health_status=None,
     )
-    assert financial_trigger_field(item) == "health_status"
+    assert financial_trigger_fields(item) == ("health_status",)
 
 
-def test_financial_trigger_field_returns_none_when_cluster_populated() -> None:
+def test_financial_trigger_fields_fires_on_yoy_growth_only() -> None:
+    """Regression: prod row id=18793 (Robert W. Baird) had only yoy_growth
+    null; the BE was previously dropping the tooltip entirely."""
+    item = SimpleNamespace(
+        latest_net_capital=1000.0,
+        latest_excess_net_capital=500.0,
+        yoy_growth=None,
+        health_status="healthy",
+    )
+    assert financial_trigger_fields(item) == ("yoy_growth",)
+
+
+def test_financial_trigger_fields_returns_empty_when_cluster_populated() -> None:
     item = SimpleNamespace(
         latest_net_capital=1000.0,
         latest_excess_net_capital=500.0,
         yoy_growth=0.12,
         health_status="healthy",
     )
-    assert financial_trigger_field(item) is None
+    assert financial_trigger_fields(item) == ()
 
 
-# ── with_trigger_field ──────────────────────────────────────────────────
+# ── with_trigger_fields ─────────────────────────────────────────────────
 
 
-def test_with_trigger_field_passes_through_none() -> None:
-    """``None`` in => ``None`` out so callers can chain through derive_*."""
-    assert with_trigger_field(None, "any_field") is None
+def test_with_trigger_fields_returns_none_for_empty_fields() -> None:
+    """Empty fields ⇒ cluster fully populated ⇒ no tooltip needed."""
+    assert with_trigger_fields(None, ()) is None
+    assert (
+        with_trigger_fields(UnknownReasonResult(category="not_yet_extracted"), ()) is None
+    )
 
 
-def test_with_trigger_field_prepends_marker_to_existing_note() -> None:
+def test_with_trigger_fields_prepends_marker_to_existing_note() -> None:
     base = UnknownReasonResult(
         category="low_confidence_extraction",
         note="LLM uncertain about the partner.",
         confidence=0.3,
     )
-    annotated = with_trigger_field(base, "current_clearing_partner")
+    annotated = with_trigger_fields(base, ("current_clearing_partner",))
     assert annotated is not None
     assert annotated.note == (
         "[Triggered by missing: current_clearing_partner] "
         "LLM uncertain about the partner."
     )
-    # Other fields untouched.
     assert annotated.category == base.category
     assert annotated.confidence == base.confidence
 
 
-def test_with_trigger_field_writes_marker_when_note_was_none() -> None:
+def test_with_trigger_fields_writes_marker_when_note_was_none() -> None:
     base = UnknownReasonResult(category="not_yet_extracted")
-    annotated = with_trigger_field(base, "health_status")
+    annotated = with_trigger_fields(base, ("health_status",))
     assert annotated is not None
     assert annotated.note == "[Triggered by missing: health_status]"
+
+
+def test_with_trigger_fields_joins_multiple_fields_with_comma() -> None:
+    base = UnknownReasonResult(category="not_yet_extracted")
+    annotated = with_trigger_fields(base, ("yoy_growth", "health_status"))
+    assert annotated is not None
+    assert annotated.note == "[Triggered by missing: yoy_growth, health_status]"
+
+
+def test_with_trigger_fields_synthesizes_data_not_present_when_result_is_none() -> None:
+    """Regression: when ``derive_*_unknown_reason`` returns ``None`` (parsed
+    metric / arrangement) but the cluster still has missing fields, the FE
+    must still get a tooltip naming the missing column. Previously the
+    None-passthrough silently dropped the tooltip on partial-null rows."""
+    annotated = with_trigger_fields(None, ("yoy_growth",))
+    assert annotated is not None
+    assert annotated.category == "data_not_present"
+    assert annotated.note == "[Triggered by missing: yoy_growth]"
+    assert annotated.extracted_at is None
+    assert annotated.confidence is None
