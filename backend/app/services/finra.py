@@ -28,6 +28,12 @@ _FINRA_DETAIL_BASE_URL = "https://api.brokercheck.finra.org/search/firm"
 # sent together — partial fingerprints (e.g. UA only) still return 403.
 BROKERCHECK_HEADERS = {
     "Accept": "application/json, text/plain, */*",
+    # httpx auto-negotiates Accept-Encoding: gzip, deflate, br, zstd by default.
+    # FINRA's Cloudflare gateway responds with malformed compressed bodies that
+    # raise "Data-loss while decompressing corrupted data" on every request.
+    # Forcing identity bypasses compression entirely (browser cURL captures
+    # also omit Accept-Encoding, which is why DevTools traffic worked).
+    "Accept-Encoding": "identity",
     "Accept-Language": "en-US,en;q=0.9",
     "Origin": "https://brokercheck.finra.org",
     "Priority": "u=1, i",
