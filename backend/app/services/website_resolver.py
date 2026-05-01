@@ -1,4 +1,4 @@
-"""On-demand firm-website resolver chain (Apollo -> Hunter).
+"""On-demand firm-website resolver chain (Apollo -> Hunter -> SerpAPI).
 
 Powers the lazy resolution flow that fires from the master-list firm
 detail page when ``broker_dealer.website`` is null. The mass backfill
@@ -9,11 +9,10 @@ the answer is cached on the row so the chain runs at most once per firm.
 Chain
 -----
   1. Apollo ``/v1/organizations/search`` (existing client; reused as-is)
-  2. Hunter ``/v2/companies/find`` (new client; firm-name -> domain)
-
-  SerpAPI tier intentionally omitted — ``SERPAPI_API_KEY`` isn't
-  provisioned. Apollo + Hunter together cover ~70-80% of firms; SerpAPI
-  can be layered in as a follow-up if the resolution rate is too low.
+  2. Hunter ``/v2/companies/find`` (firm-name -> domain)
+  3. SerpAPI ``/search.json`` (last-resort Google search; takes the
+     first organic result that clears the same _validate() gate the
+     other tiers go through)
 
 Validation
 ----------
@@ -23,16 +22,17 @@ Each candidate URL must clear three gates before it's accepted:
   b. Domain not on the blocklist (linkedin/sec.gov/finra.org/news/social)
   c. Page ``<title>`` contains a normalized firm-name token
 
-Stops at the first valid candidate; never falls past Hunter.
+Stops at the first valid candidate; never falls past SerpAPI.
 
 Provider-error semantics
 ------------------------
-Mirrors the review-queue rule from CLAUDE.md: when both providers error
-out (5xx/429-after-retries), the caller should NOT overwrite ``website``
-with NULL. The function returns ``(None, None, 'all_providers_errored')``
-so the endpoint can leave the column unchanged + return the reason. A
-clean miss (chain ran, zero valid candidates) returns
-``(None, None, 'no_valid_candidate')`` and the endpoint persists NULL.
+Mirrors the review-queue rule from CLAUDE.md: when every attempted
+provider errors out (5xx/429-after-retries / SerpAPI non-2xx), the
+caller should NOT overwrite ``website`` with NULL. The function returns
+``(None, None, 'all_providers_errored')`` so the endpoint can leave the
+column unchanged + return the reason. A clean miss (chain ran, zero
+valid candidates) returns ``(None, None, 'no_valid_candidate')`` and
+the endpoint persists NULL.
 """
 
 from __future__ import annotations
@@ -46,6 +46,7 @@ import httpx
 
 from app.services.apollo import ApolloClient, ApolloError
 from app.services.hunter import HunterClient, HunterError
+from app.services.serpapi import SerpAPIClient, SerpAPIError
 
 logger = logging.getLogger(__name__)
 
@@ -95,19 +96,20 @@ async def resolve_website(
     crd: str | None,
     apollo: ApolloClient,
     hunter: HunterClient | None,
+    serpapi: SerpAPIClient | None = None,
 ) -> tuple[str | None, str | None, str | None]:
     """Run the resolver chain for ``firm_name``.
 
     Returns
     -------
     (website, source, reason)
-      - On success: ``(url, 'apollo'|'hunter', None)``
+      - On success: ``(url, 'apollo'|'hunter'|'serpapi', None)``
       - On clean miss (chain ran, no valid candidate): ``(None, None, 'no_valid_candidate')``
       - On total provider failure: ``(None, None, 'all_providers_errored: ...')``
 
-    ``hunter`` may be ``None`` when ``HUNTER_API_KEY`` isn't configured;
-    the chain skips that tier and falls through to a clean miss / Apollo-
-    only error case.
+    ``hunter`` and ``serpapi`` may be ``None`` when their respective API
+    keys aren't configured; the chain skips that tier and falls through
+    to a clean miss / partial-error case.
     """
     firm_token = _firm_token(firm_name)
     errors: list[str] = []
@@ -139,6 +141,22 @@ async def resolve_website(
             errors.append(f"hunter: {exc}")
         except Exception as exc:  # pragma: no cover - belt + braces
             errors.append(f"hunter: {exc}")
+
+    # Tier 3 — SerpAPI Google search (last resort)
+    # Walks the top-5 organic results so a strong-but-not-first hit can
+    # still win once the first few get rejected by blocklist/title checks
+    # (e.g. LinkedIn or a news article ranking above the firm's own site).
+    if serpapi is not None:
+        providers_attempted += 1
+        try:
+            results = await serpapi.search_firm(firm_name)
+            for result in results[:5]:
+                if await _validate(result.url, firm_token):
+                    return (result.url, "serpapi", None)
+        except SerpAPIError as exc:
+            errors.append(f"serpapi: {exc}")
+        except Exception as exc:  # pragma: no cover - belt + braces
+            errors.append(f"serpapi: {exc}")
 
     if errors and len(errors) == providers_attempted:
         return (
