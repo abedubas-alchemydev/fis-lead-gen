@@ -48,7 +48,7 @@ import {
   type FavoriteListResponse,
   type VisitListResponse,
 } from "@/lib/favorites";
-import { formatCurrency, formatDate, formatPercent } from "@/lib/format";
+import { formatCurrency, formatDate, formatPercent, viewableFilingUrl } from "@/lib/format";
 import {
   buildSourceListUrl,
   encodeReturnParam,
@@ -1011,7 +1011,7 @@ export function BrokerDealerDetailClient({ brokerDealerId }: { brokerDealerId: s
                     <span>{formatDate(item.filed_at)}</span>
                     {item.source_filing_url ? (
                       <a
-                        href={item.source_filing_url}
+                        href={viewableFilingUrl(item.source_filing_url) ?? item.source_filing_url}
                         target="_blank"
                         rel="noreferrer"
                         className="inline-flex items-center gap-1 text-[var(--accent,#6366f1)] hover:underline"
