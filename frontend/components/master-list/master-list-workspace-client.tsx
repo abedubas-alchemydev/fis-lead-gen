@@ -1109,9 +1109,19 @@ export function MasterListWorkspaceClient() {
                         </span>
                       </td>
                       <td className="px-5 py-3.5">
-                        <Pill variant={healthVariant(item.health_status)}>
-                          {healthLabel(item.health_status)}
-                        </Pill>
+                        <span className="inline-flex items-center gap-1">
+                          <Pill variant={healthVariant(item.health_status)}>
+                            {healthLabel(item.health_status)}
+                          </Pill>
+                          {item.health_status === null &&
+                          item.financial_unknown_reason ? (
+                            <UnknownCell
+                              reason={item.financial_unknown_reason}
+                              fallback={null}
+                              compact
+                            />
+                          ) : null}
+                        </span>
                       </td>
                       <td className="px-5 py-3.5">
                         {item.lead_priority ? (

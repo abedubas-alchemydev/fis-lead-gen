@@ -55,12 +55,17 @@ export type BrokerDealerListItem = {
   current_clearing_source_filing_url: string | null;
   current_clearing_extraction_confidence: number | null;
   last_audit_report_date: string | null;
-  // BE-derived: populated when current_clearing_partner is None. One reason
-  // covers both the partner and the clearing-type cells in the FE.
+  // BE-derived: populated when ANY field in the clearing cluster
+  // (current_clearing_partner, current_clearing_type) is None. One reason
+  // covers both the partner and the clearing-type cells in the FE; `note`
+  // is prefixed with `[Triggered by missing: <field>]` so the tooltip can
+  // name the specific column.
   current_clearing_unknown_reason?: UnknownReason | null;
-  // BE-derived: populated when the rolled-up financial summary is missing
-  // (latest_net_capital / yoy_growth). One reason covers all three financial
-  // tiles (Net Capital / Excess Capital / YoY) in the FE.
+  // BE-derived: populated when ANY field in the financial-health cluster
+  // (latest_net_capital, latest_excess_net_capital, yoy_growth, health_status)
+  // is None. One reason covers all four financial tiles (Net Capital /
+  // Excess Capital / YoY / Financial Health) in the FE; `note` carries the
+  // trigger-field annotation.
   financial_unknown_reason?: UnknownReason | null;
   // Tri-Stream fields (Revision 1)
   website: string | null;
