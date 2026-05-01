@@ -260,3 +260,20 @@ class BrokerDealerProfileResponse(BaseModel):
     # this gets populated with ``not_yet_extracted`` so the FE can render
     # an info icon next to the "No contacts" empty state.
     executive_contacts_unknown_reason: UnknownReason | None = None
+
+
+class ResolveWebsiteResponse(BaseModel):
+    """Response shape for ``POST /broker-dealers/{id}/resolve-website``.
+
+    On a hit (newly resolved or already cached): ``website`` and
+    ``website_source`` are populated and ``reason`` is ``None``. On a
+    clean miss the chain ran but produced no valid candidate; both
+    fields are ``None`` and ``reason`` is ``no_valid_candidate``. On
+    total provider failure both fields stay ``None`` and ``reason`` is
+    ``all_providers_errored: ...`` — the FE keys off ``reason`` to know
+    whether to retry on a later visit.
+    """
+
+    website: str | None = None
+    website_source: str | None = None
+    reason: str | None = None
