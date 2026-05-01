@@ -11,9 +11,10 @@ info-icon, not one reason per column. The two clusters today:
     (surfaced as ``financial_unknown_reason``)
 
 The reason is populated whenever **any** field in the cluster is null;
-``note`` is prepended with ``[Triggered by missing: <field>]`` so the FE
-tooltip can name the specific column. ``None`` ⇒ every field in the
-cluster is populated and the FE renders the block normally.
+``note`` is prepended with ``[Triggered by missing: <a>, <b>, ...]``
+listing every null cluster field in declared order so the FE tooltip
+can name the specific column(s). ``None`` ⇒ every field in the cluster
+is populated and the FE renders the block normally.
 
 Keep this schema and ``app.services.unknown_reasons.UnknownReasonResult``
 in sync — the service emits the dataclass; the endpoint maps it to this

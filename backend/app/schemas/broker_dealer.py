@@ -70,16 +70,18 @@ class BrokerDealerListItem(BaseModel):
     # derived from the latest ``ClearingArrangement`` row's extraction_status
     # / extraction_notes by
     # ``app.services.unknown_reasons.derive_clearing_unknown_reason``. The
-    # ``note`` is prepended with ``[Triggered by missing: <field>]`` so the
-    # FE tooltip can name the specific column. None ⇒ the entire cluster
-    # is populated and the FE renders the block normally.
+    # ``note`` is prepended with ``[Triggered by missing: <a>, <b>, ...]``
+    # listing every null cluster field in declared order so the FE tooltip
+    # can name the specific column(s). None ⇒ the entire cluster is
+    # populated and the FE renders the block normally.
     current_clearing_unknown_reason: UnknownReason | None = None
     # Populated when any field in the financial-health cluster
     # (``latest_net_capital``, ``latest_excess_net_capital``, ``yoy_growth``,
     # ``health_status``) is None — derived from the latest
-    # ``FinancialMetric`` row's extraction_status. ``note`` carries the
-    # trigger-field annotation. None ⇒ all four cluster fields are
-    # populated.
+    # ``FinancialMetric`` row's extraction_status, or synthesized as
+    # ``data_not_present`` when the metric was parsed but the cluster still
+    # has missing fields. ``note`` carries the comma-joined trigger-field
+    # marker. None ⇒ all four cluster fields are populated.
     financial_unknown_reason: UnknownReason | None = None
 
 
