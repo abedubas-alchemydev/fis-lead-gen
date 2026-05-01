@@ -42,6 +42,7 @@ from app.services.service_models import FinraBrokerDealerRecord
 
 REQUIRED_BROWSER_HEADERS = {
     "Accept",
+    "Accept-Encoding",
     "Accept-Language",
     "Origin",
     "Priority",
@@ -151,6 +152,42 @@ async def test_search_request_sends_full_browser_fingerprint() -> None:
     headers = captured["headers"]
     missing = [h for h in REQUIRED_BROWSER_HEADERS if h.lower() not in headers]
     assert not missing, f"search request missing required headers: {missing}"
+
+
+def test_constants_force_accept_encoding_identity() -> None:
+    """Lock the Accept-Encoding override at the constant level. httpx
+    auto-negotiates ``gzip, deflate, br, zstd`` by default, but FINRA's
+    Cloudflare gateway returns malformed compressed bodies that raise
+    ``Data-loss while decompressing corrupted data`` on every request.
+    A future "header cleanup" PR that drops this entry will revive the
+    bug — this test fails before it can ship."""
+    assert BROKERCHECK_HEADERS.get("Accept-Encoding") == "identity"
+
+
+@respx.mock
+async def test_search_request_sends_accept_encoding_identity_on_the_wire() -> None:
+    """Defence-in-depth: verify the header survives all the way to the
+    outgoing httpx request. A constant-level test alone wouldn't catch a
+    regression where the client overrides headers per-call."""
+    captured: dict[str, Any] = {}
+
+    def _capture(request: httpx.Request) -> httpx.Response:
+        if "headers" not in captured:
+            captured["headers"] = dict(request.headers)
+        return httpx.Response(200, json={"hits": {"hits": [], "total": 0}})
+
+    respx.get(url__startswith="https://api.brokercheck.finra.org/search/firm").mock(
+        side_effect=_capture,
+    )
+
+    await FinraService().fetch_broker_dealers(limit=1)
+
+    headers = captured["headers"]
+    assert headers.get("accept-encoding") == "identity", (
+        f"search request must send Accept-Encoding: identity to bypass "
+        f"FINRA Cloudflare's broken compression; got "
+        f"{headers.get('accept-encoding')!r}"
+    )
 
 
 # ----- enrich_with_detail delegates to the PDF adapter -----
