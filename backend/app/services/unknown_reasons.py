@@ -14,6 +14,18 @@ storage shape into the seven typed categories the FE keys off:
   - ``not_yet_extracted``         — pipeline hasn't reached this firm yet
   - ``data_not_present``          — source was parsed but explicitly omits the field
 
+Reasons cover *clusters* of related fields, not single columns. Callers
+broaden the trigger so the FE info-icon always has a tooltip when any
+cell in the cluster is null:
+
+  - clearing cluster: ``current_clearing_partner`` OR ``current_clearing_type``
+  - financial cluster: ``latest_net_capital`` OR ``latest_excess_net_capital``
+                       OR ``yoy_growth`` OR ``health_status``
+
+Use :func:`with_trigger_field` to annotate which sub-field actually
+fired the reason — handy for the FE tooltip when the reason fired on a
+secondary field while the primary was populated.
+
 Review-queue semantics are preserved: low-confidence / missing-partner /
 provider-error rows still land in the failures panel via
 ``BrokerDealerRepository.list_recent_clearing_failures`` — this helper only
@@ -27,6 +39,7 @@ from dataclasses import dataclass
 from datetime import datetime
 from typing import Literal
 
+from app.models.broker_dealer import BrokerDealer
 from app.models.clearing_arrangement import ClearingArrangement
 from app.models.executive_contact import ExecutiveContact
 from app.models.financial_metric import FinancialMetric
@@ -49,6 +62,49 @@ UnknownReasonCategory = Literal[
     "not_yet_extracted",
     "data_not_present",
 ]
+
+
+# Cluster definitions for the typed UnknownReason coverage on the master
+# list and firm-detail responses. The FE renders one info-icon tooltip per
+# cluster (clearing block, financial-health block); we surface a reason
+# whenever any cluster member is null so the tooltip stays accurate. Order
+# matters — the first null field is the trigger we annotate into the note
+# via :func:`with_trigger_field`.
+CLEARING_CLUSTER_FIELDS: tuple[str, ...] = (
+    "current_clearing_partner",
+    "current_clearing_type",
+)
+FINANCIAL_CLUSTER_FIELDS: tuple[str, ...] = (
+    "latest_net_capital",
+    "latest_excess_net_capital",
+    "yoy_growth",
+    "health_status",
+)
+
+
+def _first_null_field(item: BrokerDealer, fields: tuple[str, ...]) -> str | None:
+    for field in fields:
+        if getattr(item, field, None) is None:
+            return field
+    return None
+
+
+def clearing_trigger_field(item: BrokerDealer) -> str | None:
+    """Return the first null clearing-cluster field on ``item`` (or None).
+
+    None ⇒ every clearing-cluster field has a value, so the FE renders the
+    block normally and no unknown_reason is needed.
+    """
+    return _first_null_field(item, CLEARING_CLUSTER_FIELDS)
+
+
+def financial_trigger_field(item: BrokerDealer) -> str | None:
+    """Return the first null financial-cluster field on ``item`` (or None).
+
+    None ⇒ every financial-cluster field has a value, so the FE renders
+    the block normally and no unknown_reason is needed.
+    """
+    return _first_null_field(item, FINANCIAL_CLUSTER_FIELDS)
 
 
 @dataclass(frozen=True)
@@ -232,6 +288,36 @@ def to_unknown_reason(result: UnknownReasonResult | None) -> UnknownReason | Non
     return UnknownReason(
         category=result.category,
         note=result.note,
+        extracted_at=result.extracted_at,
+        confidence=result.confidence,
+    )
+
+
+def with_trigger_field(
+    result: UnknownReasonResult | None,
+    field_name: str,
+) -> UnknownReasonResult | None:
+    """Annotate ``result.note`` with which BD-level field fired the reason.
+
+    The clearing and financial reason objects cover clusters of fields
+    (partner+type for clearing; net_capital+excess+yoy+health for
+    financial). When the reason fires on a secondary field while the
+    primary is populated, prepending ``[Triggered by missing: <field>]``
+    lets the FE tooltip stay specific without expanding the typed schema.
+
+    Pass-through on ``None`` so callers can chain
+    ``to_unknown_reason(with_trigger_field(derive_*(...), "field"))``.
+    """
+    if result is None:
+        return None
+    prefix = f"[Triggered by missing: {field_name}]"
+    if result.note:
+        new_note = f"{prefix} {result.note}"
+    else:
+        new_note = prefix
+    return UnknownReasonResult(
+        category=result.category,
+        note=new_note,
         extracted_at=result.extracted_at,
         confidence=result.confidence,
     )
