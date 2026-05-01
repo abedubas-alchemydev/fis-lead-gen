@@ -62,13 +62,16 @@ export const SOURCE_BADGE: Record<
 //   - hunter → teal (less authoritative than FINRA, higher confidence
 //              than open-web search; cyan/teal sits between blue and the
 //              warning amber visually)
+//   - serpapi → gray (loosest validation tier; web-search resolved with
+//              no structured provider behind it — muted styling signals
+//              "verify before trust")
 //
 // Kept independent of `SOURCE_BADGE` so the two can evolve independently
 // (executive sources include "sec" with no badge; website sources don't).
-export type WebsiteSourceTone = "amber" | "blue" | "teal";
+export type WebsiteSourceTone = "amber" | "blue" | "teal" | "gray";
 
 export const WEBSITE_SOURCE_BADGE: Record<
-  "finra" | "apollo" | "hunter",
+  "finra" | "apollo" | "hunter" | "serpapi",
   { label: string; tone: WebsiteSourceTone; tooltip: string }
 > = {
   finra: {
@@ -85,6 +88,11 @@ export const WEBSITE_SOURCE_BADGE: Record<
     label: "Hunter",
     tone: "teal",
     tooltip: "Resolved via Hunter company lookup",
+  },
+  serpapi: {
+    label: "Search",
+    tone: "gray",
+    tooltip: "Found via web search; verify before trust",
   },
 };
 
