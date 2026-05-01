@@ -108,7 +108,7 @@ def test_empty_string_web_address_treated_as_missing() -> None:
 async def test_fetch_website_by_crd_returns_canonical_value() -> None:
     """Public single-firm helper used by the backfill script. Hits the
     BrokerCheck detail endpoint and returns the Web Address."""
-    respx.get("https://api.brokercheck.finra.org/firm/123456").mock(
+    respx.get("https://api.brokercheck.finra.org/search/firm/123456").mock(
         return_value=httpx.Response(
             200,
             json={
@@ -137,7 +137,7 @@ async def test_fetch_website_by_crd_returns_none_on_404() -> None:
     """A 404 from BrokerCheck means the CRD isn't on file. The backfill
     treats that as "FINRA has nothing" and falls through to Apollo —
     don't raise, return None."""
-    respx.get("https://api.brokercheck.finra.org/firm/999999").mock(
+    respx.get("https://api.brokercheck.finra.org/search/firm/999999").mock(
         return_value=httpx.Response(404)
     )
 
