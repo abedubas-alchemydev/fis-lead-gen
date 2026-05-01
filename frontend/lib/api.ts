@@ -273,7 +273,7 @@ export async function setFilesApiFlag(
 // fires this in the background when bd.website is null; the BE walks an
 // Apollo → Hunter waterfall and persists the winner. Failure surfaces as a
 // non-2xx; the caller swallows it so the Google fallback stays put.
-export type WebsiteSource = "finra" | "apollo" | "hunter";
+export type WebsiteSource = "finra" | "apollo" | "hunter" | "serpapi";
 
 export type ResolveWebsiteResponse = {
   website: string | null;
