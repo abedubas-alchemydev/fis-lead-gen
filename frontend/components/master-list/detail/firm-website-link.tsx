@@ -35,6 +35,9 @@ const TONE_TO_VARIANT: Record<WebsiteSourceTone, PillVariant> = {
   // hunter source occupies. Reusing it avoids a one-off variant addition
   // in components/ui/pill.tsx.
   teal: "omni",
+  // Pill `unknown` variant is muted slate — visually signals the
+  // "loosest validation tier" that serpapi (web search) occupies.
+  gray: "unknown",
 };
 
 function GoogleFallback({ firmName }: { firmName: string }) {
