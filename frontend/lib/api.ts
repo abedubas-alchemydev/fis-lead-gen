@@ -267,3 +267,26 @@ export async function setFilesApiFlag(
     }
   );
 }
+
+// ── Lazy firm-website resolver (cli02 FE-1) ──────────────────────────────
+// Pairs with cli01 BE PR feature/be-firm-website-resolver. The detail page
+// fires this in the background when bd.website is null; the BE walks an
+// Apollo → Hunter waterfall and persists the winner. Failure surfaces as a
+// non-2xx; the caller swallows it so the Google fallback stays put.
+export type WebsiteSource = "finra" | "apollo" | "hunter";
+
+export type ResolveWebsiteResponse = {
+  website: string | null;
+  website_source: WebsiteSource | null;
+  resolved_at: string | null;
+  reason?: string;
+};
+
+export async function resolveWebsite(
+  firmId: number
+): Promise<ResolveWebsiteResponse> {
+  return apiRequest<ResolveWebsiteResponse>(
+    `/api/v1/broker-dealers/${firmId}/resolve-website`,
+    { method: "POST" }
+  );
+}
