@@ -6,7 +6,7 @@ from datetime import date, datetime, time, timezone
 from fastapi import APIRouter, Body, Depends, HTTPException, Query, status
 from fastapi.responses import Response
 from pydantic import BaseModel, Field
-from sqlalchemy import exists, func, select
+from sqlalchemy import exists, func, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.config import settings
@@ -26,6 +26,7 @@ from app.schemas.broker_dealer import (
     FinancialMetricItem,
     FinancialMetricsResponse,
     RegistrationComplianceSummary,
+    ResolveWebsiteResponse,
 )
 from app.schemas.favorite_list import FavoriteListWithMembership
 from app.schemas.favorites import FavoriteResponse
@@ -55,8 +56,11 @@ from app.services.finra_pdf_service import (
     FinraPdfNotFound,
     fetch_brokercheck_pdf,
 )
+from app.services.apollo import ApolloClient
 from app.services.focus_ceo_extraction import FocusCeoExtractionService
+from app.services.hunter import HunterClient
 from app.services.service_models import FinraBrokerDealerRecord
+from app.services.website_resolver import resolve_website
 
 router = APIRouter(prefix="/broker-dealers")
 repository = BrokerDealerRepository()
@@ -843,3 +847,94 @@ async def trigger_health_check(
         "fields_refreshed": changes,
         "total_changes": len(changes),
     }
+
+
+@router.post(
+    "/{broker_dealer_id}/resolve-website",
+    response_model=ResolveWebsiteResponse,
+)
+async def resolve_broker_dealer_website(
+    broker_dealer_id: int,
+    current_user: AuthenticatedUser = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db_session),
+) -> ResolveWebsiteResponse:
+    """On-demand firm-website resolver — Apollo -> Hunter chain.
+
+    Fires from the master-list firm-detail page when ``bd.website`` is
+    null. Idempotent: returns the cached value without re-running the
+    chain when ``website`` is already set. Race-safe: persists via
+    ``UPDATE ... WHERE website IS NULL`` so two concurrent calls can't
+    overwrite a winner. Provider-error path leaves the column unchanged
+    so a transient outage doesn't poison the cache; only ``no_valid_candidate``
+    persists a NULL website (and even then we keep the existing row).
+    """
+    if current_user.role != "admin":
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Admin access required.",
+        )
+
+    broker_dealer = await repository.get_broker_dealer(db, broker_dealer_id)
+    if broker_dealer is None:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Broker-dealer not found.",
+        )
+
+    # Idempotent — already resolved for this firm.
+    if broker_dealer.website:
+        return ResolveWebsiteResponse(
+            website=broker_dealer.website,
+            website_source=broker_dealer.website_source,
+            reason=None,
+        )
+
+    apollo_key = settings.apollo_api_key
+    if not apollo_key:
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="Apollo API key is not configured.",
+        )
+    apollo = ApolloClient(apollo_key)
+    hunter = (
+        HunterClient(settings.hunter_api_key)
+        if settings.hunter_api_key
+        else None
+    )
+
+    website, source, reason = await resolve_website(
+        broker_dealer.name,
+        broker_dealer.crd_number,
+        apollo,
+        hunter,
+    )
+
+    if website and source:
+        # Race-safe persistence: only stamp the row if it's still NULL.
+        # The second concurrent caller's UPDATE finds nothing to change
+        # and falls through to the re-fetch below.
+        stmt = (
+            update(BrokerDealer)
+            .where(BrokerDealer.id == broker_dealer_id)
+            .where(BrokerDealer.website.is_(None))
+            .values(website=website, website_source=source)
+        )
+        await db.execute(stmt)
+        await db.commit()
+        await db.refresh(broker_dealer)
+
+        return ResolveWebsiteResponse(
+            website=broker_dealer.website or website,
+            website_source=broker_dealer.website_source or source,
+            reason=None,
+        )
+
+    # No website resolved — return reason without persisting (provider-
+    # error) or with the column left NULL (clean miss). The chain
+    # already left the field NULL by not running an UPDATE; nothing
+    # else to write.
+    return ResolveWebsiteResponse(
+        website=None,
+        website_source=None,
+        reason=reason,
+    )
