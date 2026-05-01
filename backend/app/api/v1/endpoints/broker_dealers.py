@@ -36,10 +36,13 @@ from app.services.alerts import AlertRepository
 from app.services.auth import get_current_user
 from app.services.broker_dealers import BrokerDealerRepository
 from app.services.unknown_reasons import (
+    clearing_trigger_field,
     derive_clearing_unknown_reason,
     derive_executive_contact_unknown_reason,
     derive_financial_unknown_reason,
+    financial_trigger_field,
     to_unknown_reason,
+    with_trigger_field,
 )
 from app.services.user_lists import (
     add_favorite,
@@ -282,14 +285,26 @@ async def get_broker_dealer(
     detail = BrokerDealerDetail.model_validate(broker_dealer)
     arrangements = await repository.list_clearing_arrangements(db, broker_dealer_id)
     financials = await repository.get_financial_metrics(db, broker_dealer_id)
+    clearing_trigger = clearing_trigger_field(broker_dealer)
     detail.current_clearing_unknown_reason = (
-        to_unknown_reason(derive_clearing_unknown_reason(arrangements[0] if arrangements else None))
-        if broker_dealer.current_clearing_partner is None
+        to_unknown_reason(
+            with_trigger_field(
+                derive_clearing_unknown_reason(arrangements[0] if arrangements else None),
+                clearing_trigger,
+            )
+        )
+        if clearing_trigger is not None
         else None
     )
+    financial_trigger = financial_trigger_field(broker_dealer)
     detail.financial_unknown_reason = (
-        to_unknown_reason(derive_financial_unknown_reason(financials[0] if financials else None))
-        if broker_dealer.latest_net_capital is None
+        to_unknown_reason(
+            with_trigger_field(
+                derive_financial_unknown_reason(financials[0] if financials else None),
+                financial_trigger,
+            )
+        )
+        if financial_trigger is not None
         else None
     )
     return detail
@@ -716,16 +731,28 @@ async def get_broker_dealer_profile(
     favorited, favorited_at = await is_favorited(db, current_user.id, broker_dealer_id)
 
     detail = BrokerDealerDetail.model_validate(broker_dealer)
+    clearing_trigger = clearing_trigger_field(broker_dealer)
     detail.current_clearing_unknown_reason = (
         to_unknown_reason(
-            derive_clearing_unknown_reason(clearing_arrangements[0] if clearing_arrangements else None)
+            with_trigger_field(
+                derive_clearing_unknown_reason(
+                    clearing_arrangements[0] if clearing_arrangements else None
+                ),
+                clearing_trigger,
+            )
         )
-        if broker_dealer.current_clearing_partner is None
+        if clearing_trigger is not None
         else None
     )
+    financial_trigger = financial_trigger_field(broker_dealer)
     detail.financial_unknown_reason = (
-        to_unknown_reason(derive_financial_unknown_reason(financials[0] if financials else None))
-        if broker_dealer.latest_net_capital is None
+        to_unknown_reason(
+            with_trigger_field(
+                derive_financial_unknown_reason(financials[0] if financials else None),
+                financial_trigger,
+            )
+        )
+        if financial_trigger is not None
         else None
     )
 

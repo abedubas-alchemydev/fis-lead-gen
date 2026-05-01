@@ -65,14 +65,21 @@ class BrokerDealerListItem(BaseModel):
     # follow-up FE PR can use it to gate the detail-page enrich call.
     last_enrich_attempt_at: datetime | None = None
     created_at: datetime
-    # Populated when ``current_clearing_partner`` is None — derived from the
-    # latest ``ClearingArrangement`` row's extraction_status / extraction_notes
-    # by ``app.services.unknown_reasons.derive_clearing_unknown_reason``. The
-    # FE keys off the presence of this object to render the info-icon tooltip.
+    # Populated when any field in the clearing cluster
+    # (``current_clearing_partner``, ``current_clearing_type``) is None —
+    # derived from the latest ``ClearingArrangement`` row's extraction_status
+    # / extraction_notes by
+    # ``app.services.unknown_reasons.derive_clearing_unknown_reason``. The
+    # ``note`` is prepended with ``[Triggered by missing: <field>]`` so the
+    # FE tooltip can name the specific column. None ⇒ the entire cluster
+    # is populated and the FE renders the block normally.
     current_clearing_unknown_reason: UnknownReason | None = None
-    # Populated when the rolled-up financial summary (``latest_net_capital``,
-    # ``yoy_growth``) is missing — derived from the latest ``FinancialMetric``
-    # row's extraction_status. None when the firm has parsed financials.
+    # Populated when any field in the financial-health cluster
+    # (``latest_net_capital``, ``latest_excess_net_capital``, ``yoy_growth``,
+    # ``health_status``) is None — derived from the latest
+    # ``FinancialMetric`` row's extraction_status. ``note`` carries the
+    # trigger-field annotation. None ⇒ all four cluster fields are
+    # populated.
     financial_unknown_reason: UnknownReason | None = None
 
 

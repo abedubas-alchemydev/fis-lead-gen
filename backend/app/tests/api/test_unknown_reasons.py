@@ -29,11 +29,16 @@ from app.services.extraction_status import (
     STATUS_PROVIDER_ERROR,
 )
 from app.services.unknown_reasons import (
+    CLEARING_CLUSTER_FIELDS,
+    FINANCIAL_CLUSTER_FIELDS,
     UnknownReasonResult,
+    clearing_trigger_field,
     derive_clearing_unknown_reason,
     derive_executive_contact_unknown_reason,
     derive_financial_unknown_reason,
+    financial_trigger_field,
     to_unknown_reason,
+    with_trigger_field,
 )
 
 
@@ -268,3 +273,113 @@ def test_unknown_reason_rejects_invalid_category() -> None:
 
     with pytest.raises(ValidationError):
         UnknownReason.model_validate({"category": "totally_made_up"})
+
+
+# ── Cluster trigger fields ──────────────────────────────────────────────
+
+
+def test_clearing_cluster_fields_contract() -> None:
+    """The clearing cluster covers partner + type, in trigger-priority order."""
+    assert CLEARING_CLUSTER_FIELDS == (
+        "current_clearing_partner",
+        "current_clearing_type",
+    )
+
+
+def test_financial_cluster_fields_contract() -> None:
+    """The financial cluster covers all four FE financial-health tiles."""
+    assert FINANCIAL_CLUSTER_FIELDS == (
+        "latest_net_capital",
+        "latest_excess_net_capital",
+        "yoy_growth",
+        "health_status",
+    )
+
+
+def test_clearing_trigger_field_returns_partner_when_partner_null() -> None:
+    item = SimpleNamespace(
+        current_clearing_partner=None,
+        current_clearing_type="introducing",
+    )
+    assert clearing_trigger_field(item) == "current_clearing_partner"
+
+
+def test_clearing_trigger_field_returns_type_when_only_type_null() -> None:
+    """Partner present but type missing must still surface a reason."""
+    item = SimpleNamespace(
+        current_clearing_partner="Pershing LLC",
+        current_clearing_type=None,
+    )
+    assert clearing_trigger_field(item) == "current_clearing_type"
+
+
+def test_clearing_trigger_field_returns_none_when_cluster_populated() -> None:
+    item = SimpleNamespace(
+        current_clearing_partner="Pershing LLC",
+        current_clearing_type="introducing",
+    )
+    assert clearing_trigger_field(item) is None
+
+
+def test_financial_trigger_field_returns_first_null_field_in_order() -> None:
+    item = SimpleNamespace(
+        latest_net_capital=1000.0,
+        latest_excess_net_capital=None,
+        yoy_growth=None,
+        health_status=None,
+    )
+    assert financial_trigger_field(item) == "latest_excess_net_capital"
+
+
+def test_financial_trigger_field_fires_on_health_status_only() -> None:
+    """A firm with all numeric financials but a null health_status still
+    needs an unknown_reason — the FE Financial Health column relies on it."""
+    item = SimpleNamespace(
+        latest_net_capital=1000.0,
+        latest_excess_net_capital=500.0,
+        yoy_growth=0.12,
+        health_status=None,
+    )
+    assert financial_trigger_field(item) == "health_status"
+
+
+def test_financial_trigger_field_returns_none_when_cluster_populated() -> None:
+    item = SimpleNamespace(
+        latest_net_capital=1000.0,
+        latest_excess_net_capital=500.0,
+        yoy_growth=0.12,
+        health_status="healthy",
+    )
+    assert financial_trigger_field(item) is None
+
+
+# ── with_trigger_field ──────────────────────────────────────────────────
+
+
+def test_with_trigger_field_passes_through_none() -> None:
+    """``None`` in => ``None`` out so callers can chain through derive_*."""
+    assert with_trigger_field(None, "any_field") is None
+
+
+def test_with_trigger_field_prepends_marker_to_existing_note() -> None:
+    base = UnknownReasonResult(
+        category="low_confidence_extraction",
+        note="LLM uncertain about the partner.",
+        confidence=0.3,
+    )
+    annotated = with_trigger_field(base, "current_clearing_partner")
+    assert annotated is not None
+    assert annotated.note == (
+        "[Triggered by missing: current_clearing_partner] "
+        "LLM uncertain about the partner."
+    )
+    # Other fields untouched.
+    assert annotated.category == base.category
+    assert annotated.confidence == base.confidence
+
+
+def test_with_trigger_field_writes_marker_when_note_was_none() -> None:
+    base = UnknownReasonResult(category="not_yet_extracted")
+    annotated = with_trigger_field(base, "health_status")
+    assert annotated is not None
+    assert annotated.note == "[Triggered by missing: health_status]"
