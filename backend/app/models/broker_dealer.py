@@ -47,11 +47,18 @@ class BrokerDealer(Base):
     # | None when the firm has no website on either source. NULL is the legacy
     # default for rows that predate the firm-website backfill.
     website_source: Mapped[str | None] = mapped_column(String(16), nullable=True)
-    types_of_business: Mapped[list | None] = mapped_column(JSONB, nullable=True)
+    # ``none_as_null=True`` makes Python ``None`` writes land as SQL NULL
+    # instead of the JSONB scalar ``'null'`` (the default). Without this,
+    # ``WHERE col IS NOT NULL`` lets JSONB-null rows through to set-returning
+    # functions like ``jsonb_array_elements_text``, which then crash with
+    # "cannot extract elements from a scalar". Sibling-list columns get the
+    # same treatment for consistency, even though ``list_types_of_business``
+    # is the only aggregator today.
+    types_of_business: Mapped[list | None] = mapped_column(JSONB(none_as_null=True), nullable=True)
     types_of_business_total: Mapped[int | None] = mapped_column(Integer, nullable=True)
     types_of_business_other: Mapped[str | None] = mapped_column(Text, nullable=True)
-    direct_owners: Mapped[list | None] = mapped_column(JSONB, nullable=True)
-    executive_officers: Mapped[list | None] = mapped_column(JSONB, nullable=True)
+    direct_owners: Mapped[list | None] = mapped_column(JSONB(none_as_null=True), nullable=True)
+    executive_officers: Mapped[list | None] = mapped_column(JSONB(none_as_null=True), nullable=True)
     firm_operations_text: Mapped[str | None] = mapped_column(Text, nullable=True)
     clearing_classification: Mapped[str | None] = mapped_column(String(32), nullable=True, index=True)
     clearing_raw_text: Mapped[str | None] = mapped_column(Text, nullable=True)
