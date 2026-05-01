@@ -40,10 +40,19 @@ export function UnknownCell({
   }
 
   const shortLabel = unknownReasonShort(reason);
+  // BE prepends `[Triggered by missing: <field>]` to `note` so the tooltip
+  // can lead with the specific column that triggered the cluster-level
+  // reason. Strip it from the note body and surface it as a separate line.
+  const triggerMatch =
+    reason.note?.match(/^\[Triggered by missing:\s*([^\]]+)\]\s*/) ?? null;
+  const triggerField = triggerMatch ? triggerMatch[1].trim() : null;
+  const rawNote = triggerMatch
+    ? reason.note!.slice(triggerMatch[0].length)
+    : reason.note;
   const note =
-    reason.note && reason.note.length > NOTE_TRUNCATE
-      ? reason.note.slice(0, NOTE_TRUNCATE) + "…"
-      : reason.note;
+    rawNote && rawNote.length > NOTE_TRUNCATE
+      ? rawNote.slice(0, NOTE_TRUNCATE) + "…"
+      : rawNote;
 
   const iconSize = compact ? "h-3 w-3" : "h-3.5 w-3.5";
 
@@ -68,6 +77,11 @@ export function UnknownCell({
         className="pointer-events-none absolute bottom-full left-1/2 z-50 mb-2 hidden w-max max-w-xs -translate-x-1/2 rounded-lg border border-[var(--border,rgba(30,64,175,0.1))] bg-[var(--surface,#ffffff)] px-3 py-2 text-left text-[12px] leading-5 text-[var(--text,#0f172a)] shadow-[0_10px_28px_rgba(15,23,42,0.18)] group-hover:block group-focus-within:block"
       >
         <span className="block font-semibold">{shortLabel}</span>
+        {triggerField ? (
+          <span className="mt-1 block text-[11px] font-medium text-[var(--text-dim,#475569)]">
+            Missing field: <span className="font-mono">{triggerField}</span>
+          </span>
+        ) : null}
         {note ? (
           <span className="mt-1 block text-[11px] text-[var(--text-dim,#475569)]">
             {note}

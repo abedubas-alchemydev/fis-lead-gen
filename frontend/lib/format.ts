@@ -131,6 +131,27 @@ export function formatDate(value: string | null) {
   }).format(new Date(value));
 }
 
+// Rewrites a SEC submissions JSON URL (e.g. data.sec.gov/submissions/CIK0001234567.json)
+// into the human-viewable EDGAR filings browser page so "Open filing" / "View
+// filing" links don't dump raw JSON in the user's browser. Non-SEC URLs (PDFs,
+// archive index HTML pages) pass through unchanged so per-filing links keep
+// their granularity.
+export function viewableFilingUrl(url: string | null): string | null {
+  if (!url) {
+    return url;
+  }
+
+  const submissionsMatch = url.match(
+    /^https?:\/\/data\.sec\.gov\/submissions\/CIK(\d+)\.json$/i,
+  );
+  if (submissionsMatch) {
+    const cik = submissionsMatch[1];
+    return `https://www.sec.gov/cgi-bin/browse-edgar?action=getcompany&CIK=${cik}&type=&dateb=&owner=include&count=40`;
+  }
+
+  return url;
+}
+
 export function formatRelativeTime(value: string) {
   const now = Date.now();
   const target = new Date(value).getTime();

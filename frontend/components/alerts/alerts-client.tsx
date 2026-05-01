@@ -11,7 +11,7 @@ import { TopActions } from "@/components/layout/top-actions";
 import { Pill, type PillVariant } from "@/components/ui/pill";
 import { Segmented, type SegmentedItem } from "@/components/ui/segmented";
 import { apiRequest, buildApiPath } from "@/lib/api";
-import { formatDate, formatRelativeTime } from "@/lib/format";
+import { formatDate, formatRelativeTime, viewableFilingUrl } from "@/lib/format";
 import type {
   AlertListItem,
   AlertListResponse,
@@ -595,7 +595,7 @@ export function AlertsClient({
                         )}
                         {alert.source_filing_url ? (
                           <a
-                            href={alert.source_filing_url}
+                            href={viewableFilingUrl(alert.source_filing_url) ?? alert.source_filing_url}
                             target="_blank"
                             rel="noreferrer"
                             className="inline-flex items-center gap-1 rounded-md border border-[var(--border-2,rgba(30,64,175,0.16))] bg-transparent px-2.5 py-1 text-[11px] font-semibold text-[var(--text-dim,#475569)] transition hover:bg-[var(--surface-2,#f1f6fd)] hover:text-[var(--text,#0f172a)]"
