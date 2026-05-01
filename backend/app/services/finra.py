@@ -8,13 +8,52 @@ import httpx
 import logging
 
 from app.core.config import settings
+from app.services.brokercheck_pdf import (
+    FinraPdfFetchError,
+    FormBdDetail,
+    fetch_form_bd_detail,
+)
 from app.services.normalization import normalize_sec_file_number
 from app.services.service_models import FinraBrokerDealerRecord
 
 logger = logging.getLogger(__name__)
 
-# FINRA BrokerCheck detail endpoint base URL.
-_FINRA_DETAIL_BASE_URL = "https://api.brokercheck.finra.org/firm"
+# FINRA BrokerCheck detail endpoint base URL. The legacy /firm/{crd}
+# path now 403s at Cloudflare even with realistic browser headers; the
+# /search/firm/{crd} path returns the same payload shape and still works.
+_FINRA_DETAIL_BASE_URL = "https://api.brokercheck.finra.org/search/firm"
+
+# Browser-fingerprint headers required by FINRA's Cloudflare gateway.
+# Captured from brokercheck.finra.org DevTools cURL. The full set must be
+# sent together — partial fingerprints (e.g. UA only) still return 403.
+BROKERCHECK_HEADERS = {
+    "Accept": "application/json, text/plain, */*",
+    "Accept-Language": "en-US,en;q=0.9",
+    "Origin": "https://brokercheck.finra.org",
+    "Priority": "u=1, i",
+    "Referer": "https://brokercheck.finra.org/",
+    "Sec-Ch-Ua": '"Google Chrome";v="147", "Not.A/Brand";v="8", "Chromium";v="147"',
+    "Sec-Ch-Ua-Mobile": "?0",
+    "Sec-Ch-Ua-Platform": '"Windows"',
+    "Sec-Fetch-Dest": "empty",
+    "Sec-Fetch-Mode": "cors",
+    "Sec-Fetch-Site": "same-site",
+    "User-Agent": (
+        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+        "AppleWebKit/537.36 (KHTML, like Gecko) "
+        "Chrome/147.0.0.0 Safari/537.36"
+    ),
+}
+
+# Solr query params required by /search/firm. ``query`` is overridden
+# per-request (empty for detail-by-CRD, search term for enumeration).
+BROKERCHECK_BASE_PARAMS = {
+    "hl": "true",
+    "nrows": "12",
+    "query": "",
+    "start": "0",
+    "wt": "json",
+}
 
 
 class FinraService:
@@ -28,10 +67,6 @@ class FinraService:
     async def _fetch_live_broker_dealers(self, limit: int | None = None) -> list[FinraBrokerDealerRecord]:
         records: list[FinraBrokerDealerRecord] = []
         seen_crd_numbers: set[str] = set()
-        headers = {
-            "Accept": "application/json",
-            "User-Agent": "Mozilla/5.0 (compatible; AlchemyDev/1.0; compliance@alchemy.dev)",
-        }
 
         # Phase 1: keyword queries (broad coverage of common firm name patterns)
         keyword_terms = [query.strip() for query in settings.finra_harvest_queries.split(",") if query.strip()]
@@ -43,7 +78,7 @@ class FinraService:
         async with httpx.AsyncClient(
             timeout=settings.finra_request_timeout_seconds,
             follow_redirects=True,
-            headers=headers,
+            headers=BROKERCHECK_HEADERS,
         ) as client:
             for query_index, query in enumerate(all_queries):
                 start = 0
@@ -90,39 +125,95 @@ class FinraService:
         *,
         batch_size: int = 50,
     ) -> list[FinraBrokerDealerRecord]:
-        """Fetch detailed FINRA reports for each record to populate Stream A fields.
+        """Fetch the Form BD Detailed Report PDF for each record and pull
+        ``types_of_business``, ``executive_officers``, and
+        ``firm_operations_text`` (the clearing-classifier gate text) onto the
+        record. Web Address is plucked opportunistically when the PDF
+        carries one — the Form BD PDF rarely does, so the Apollo
+        organizations fallback is what populates ``website`` for the bulk
+        of firms.
 
-        Hits ``/firm/{crd_number}`` for each record and extracts:
-        - Types of Business
-        - Direct Owners & Executive Officers
-        - Firm Operations text (for clearing classification logic gates)
-        - Website URL
+        Why PDF, not JSON. The legacy ``/firm/{crd}`` JSON detail endpoint
+        is gone behind Cloudflare, and the substitute (``/search/firm/{crd}``)
+        returns a payload that no longer carries the Form BD fields. The
+        deterministic Form BD PDF still does. See
+        ``services/brokercheck_pdf.py`` for the full rationale + parser
+        scope, and ``reports/finra-pdf-migration-blocker-2026-05-01.md``
+        for the build-context decision (we inline rather than import the
+        sibling ``brokercheck_extractor/`` package, which can't be reached
+        from the backend Docker image).
+
+        Per-firm budget: PDF download + 30-page extract + parse averages
+        2-3 seconds. ~3500 firms × ~3s = ~3 hours wall clock for a full
+        regen. Stays sequential for now (matches today's behavior + keeps
+        FINRA happy without a custom rate-limiter); concurrency can be
+        revisited if the wall clock starts to bite.
         """
         delay = max(1.0 / settings.finra_rate_limit_per_second, settings.finra_request_delay_seconds)
-        headers = {
-            "Accept": "application/json",
-            "User-Agent": "Mozilla/5.0 (compatible; AlchemyDev/1.0; compliance@alchemy.dev)",
-        }
         total = len(records)
 
-        async with httpx.AsyncClient(
-            timeout=settings.finra_request_timeout_seconds,
-            follow_redirects=True,
-            headers=headers,
-        ) as client:
-            for index, record in enumerate(records):
-                if (index + 1) % 100 == 0 or index == 0:
-                    logger.info(
-                        "FINRA detail enrichment: %d/%d processed.",
-                        index + 1, total,
-                    )
-                detail = await self._fetch_firm_detail(client, record.crd_number)
-                if detail is not None:
-                    self._apply_detail_to_record(record, detail)
-                if delay > 0 and index < total - 1:
-                    await asyncio.sleep(delay)
+        for index, record in enumerate(records):
+            if (index + 1) % 100 == 0 or index == 0:
+                logger.info(
+                    "FINRA detail enrichment: %d/%d processed.",
+                    index + 1, total,
+                )
+            await self._enrich_record_from_pdf(record)
+            if delay > 0 and index < total - 1:
+                await asyncio.sleep(delay)
 
         return records
+
+    async def _enrich_record_from_pdf(self, record: FinraBrokerDealerRecord) -> None:
+        """Apply Form BD PDF fields to a single record.
+
+        Failure semantics: a 404 from FINRA (no PDF on file for this CRD)
+        leaves the record untouched. Transient upstream errors and parse
+        exceptions log a warning and leave the record untouched — the
+        existing record from the search-page enumeration stays as our best
+        view of the firm, and the Apollo fallback still gets a chance at
+        the website. We deliberately do NOT null fields the search-page
+        gave us; that would silently throw away real data on a transient
+        FINRA outage.
+        """
+        try:
+            detail = await fetch_form_bd_detail(record.crd_number)
+        except FinraPdfFetchError as exc:
+            logger.warning(
+                "FINRA Form BD PDF fetch failed for CRD %s: %s",
+                record.crd_number, exc,
+            )
+            return
+        except Exception as exc:  # noqa: BLE001 — parse failures must not abort the loop
+            logger.warning(
+                "FINRA Form BD PDF parse failed for CRD %s: %s",
+                record.crd_number, exc,
+            )
+            return
+
+        if detail is None:
+            return
+
+        self._apply_form_bd_detail(record, detail)
+
+    @staticmethod
+    def _apply_form_bd_detail(
+        record: FinraBrokerDealerRecord,
+        detail: FormBdDetail,
+    ) -> None:
+        """Stamp Form BD fields onto a record without overwriting real values
+        with parser-empties. Each field guards on a truthy value from the
+        PDF — the search-page enumeration's data stays in place when the
+        PDF parser couldn't recover a section."""
+        if detail.types_of_business:
+            record.types_of_business = detail.types_of_business
+        if detail.executive_officers:
+            record.executive_officers = detail.executive_officers
+        if detail.firm_operations_text:
+            record.firm_operations_text = detail.firm_operations_text
+        if detail.web_address and not record.website:
+            record.website = detail.web_address
+            record.website_source = "finra"
 
     async def fetch_website_by_crd(
         self,
@@ -162,7 +253,7 @@ class FinraService:
         url = f"{_FINRA_DETAIL_BASE_URL}/{crd_number}"
         for attempt in range(1, settings.finra_request_max_retries + 1):
             try:
-                response = await client.get(url)
+                response = await client.get(url, params=BROKERCHECK_BASE_PARAMS)
                 if response.status_code == 429:
                     retry_after = response.headers.get("retry-after")
                     wait = float(retry_after) if retry_after else min(2**attempt, 30)
@@ -371,6 +462,7 @@ class FinraService:
             "nrows": rows,
             "start": start,
             "hl": "true",
+            "wt": "json",
         }
         max_attempts = settings.finra_request_max_retries
         last_error: Exception | None = None
