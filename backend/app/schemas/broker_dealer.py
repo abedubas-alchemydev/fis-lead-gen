@@ -43,9 +43,11 @@ class BrokerDealerListItem(BaseModel):
     last_audit_report_date: date | None
     # ── Tri-Stream fields (Revision 1) ──
     website: str | None = None
-    # 'finra' | 'apollo' | None. Lets the FE disclose source when needed and
-    # keeps the audit trail visible from the broker-dealer detail response
-    # without a separate trip to a discovery-history table.
+    # 'finra' | 'apollo' | 'hunter' | 'serpapi' | None. Lets the FE disclose
+    # the source when needed and keeps the audit trail visible from the
+    # broker-dealer detail response without a separate trip to a discovery-
+    # history table. The string column is bounded at VARCHAR(16) on the
+    # model side; widen there if a future provider's name exceeds that.
     website_source: str | None = None
     types_of_business: list[str] | None = None
     direct_owners: list[dict[str, str]] | None = None

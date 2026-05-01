@@ -59,6 +59,7 @@ from app.services.finra_pdf_service import (
 from app.services.apollo import ApolloClient
 from app.services.focus_ceo_extraction import FocusCeoExtractionService
 from app.services.hunter import HunterClient
+from app.services.serpapi import SerpAPIClient
 from app.services.service_models import FinraBrokerDealerRecord
 from app.services.website_resolver import resolve_website
 
@@ -901,12 +902,18 @@ async def resolve_broker_dealer_website(
         if settings.hunter_api_key
         else None
     )
+    serpapi = (
+        SerpAPIClient(settings.serpapi_api_key)
+        if settings.serpapi_api_key
+        else None
+    )
 
     website, source, reason = await resolve_website(
         broker_dealer.name,
         broker_dealer.crd_number,
         apollo,
         hunter,
+        serpapi,
     )
 
     if website and source:
