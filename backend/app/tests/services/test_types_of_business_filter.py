@@ -77,6 +77,29 @@ async def test_query_filters_null_and_empty_types(repository: BrokerDealerReposi
 
 
 @pytest.mark.asyncio
+async def test_query_guards_against_non_array_jsonb(repository: BrokerDealerRepository) -> None:
+    """The compiled SQL must guard the unnester with ``jsonb_typeof = 'array'``.
+
+    The column is declared as ``JSONB`` without ``none_as_null=True``, so a
+    Python ``None`` write lands as the JSONB scalar ``'null'`` (not SQL NULL)
+    and would pass an ``IS NOT NULL`` guard. ``jsonb_array_elements_text`` then
+    raises "cannot extract elements from a scalar" and the whole query 500s.
+    Filtering on ``jsonb_typeof = 'array'`` rejects SQL NULL, JSONB null,
+    strings, objects, and any other non-array shape before the unnester runs.
+    """
+    session = _StagedSession(rows=[])
+
+    await repository.list_types_of_business(session)
+
+    sql = _compile_sql(session.captured_statement)
+    assert "jsonb_typeof(broker_dealers.types_of_business) = 'array'" in sql, (
+        "expected jsonb_typeof = 'array' guard so non-array JSONB shapes "
+        "(JSONB null, scalars, objects) cannot crash jsonb_array_elements_text; "
+        "got SQL:\n" + sql
+    )
+
+
+@pytest.mark.asyncio
 async def test_query_excludes_one_off_types_via_having(repository: BrokerDealerRepository) -> None:
     """The compiled SQL uses ``HAVING COUNT(*) >= TYPES_OF_BUSINESS_MIN_COUNT``."""
     assert TYPES_OF_BUSINESS_MIN_COUNT == 2, "filter threshold contract"
