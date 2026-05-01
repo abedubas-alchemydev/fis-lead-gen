@@ -455,10 +455,16 @@ class BrokerDealerRepository:
         and returns `{type, count}` sorted by count desc then alphabetically.
         Fuels the multi-select filter on the master list.
         """
+        # Guard with ``jsonb_typeof = 'array'`` instead of ``IS NOT NULL``.
+        # The column is declared as ``JSONB`` without ``none_as_null=True``,
+        # so Python ``None`` writes land as the JSONB scalar ``'null'`` (not
+        # SQL NULL). That scalar passes ``IS NOT NULL`` and then crashes
+        # ``jsonb_array_elements_text`` with "cannot extract elements from a
+        # scalar", which surfaces as a 500 on the master-list filter.
         type_element = func.jsonb_array_elements_text(BrokerDealer.types_of_business).label("type")
         subq = (
             select(type_element)
-            .where(BrokerDealer.types_of_business.is_not(None))
+            .where(func.jsonb_typeof(BrokerDealer.types_of_business) == "array")
             .subquery()
         )
         trimmed = func.trim(subq.c.type)
