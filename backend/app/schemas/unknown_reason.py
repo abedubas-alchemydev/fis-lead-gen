@@ -1,14 +1,23 @@
 """Pydantic DTO for the typed ``unknown_reason`` envelope.
 
-Every nullable field on the master list and firm-detail responses ships
-with an optional ``unknown_reason`` object. ``None`` ⇒ value is present and
-the FE renders the cell normally. Non-None ⇒ value is missing and the FE
-renders an info icon whose tooltip uses ``category`` for the headline copy
-and ``note`` for the optional free-text narrative.
+Each nullable *cluster* on the master list and firm-detail responses
+ships with an optional ``unknown_reason`` object — one reason per FE
+info-icon, not one reason per column. The two clusters today:
 
-Keep this schema and ``app.services.unknown_reasons.UnknownReasonResult`` in
-sync — the service emits the dataclass; the endpoint maps it to this DTO
-just before serialization.
+  - clearing cluster: ``current_clearing_partner`` + ``current_clearing_type``
+    (surfaced as ``current_clearing_unknown_reason``)
+  - financial-health cluster: ``latest_net_capital`` +
+    ``latest_excess_net_capital`` + ``yoy_growth`` + ``health_status``
+    (surfaced as ``financial_unknown_reason``)
+
+The reason is populated whenever **any** field in the cluster is null;
+``note`` is prepended with ``[Triggered by missing: <field>]`` so the FE
+tooltip can name the specific column. ``None`` ⇒ every field in the
+cluster is populated and the FE renders the block normally.
+
+Keep this schema and ``app.services.unknown_reasons.UnknownReasonResult``
+in sync — the service emits the dataclass; the endpoint maps it to this
+DTO just before serialization.
 """
 
 from __future__ import annotations

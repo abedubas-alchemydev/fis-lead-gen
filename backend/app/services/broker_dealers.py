@@ -23,9 +23,12 @@ from app.services.scoring import CompetitorLookup, calculate_lead_score, classif
 from app.services.service_models import MergedBrokerDealerRecord, ProviderDistributionRecord
 from app.services.unknown_reasons import (
     UnknownReasonResult,
+    clearing_trigger_field,
     derive_clearing_unknown_reason,
     derive_financial_unknown_reason,
+    financial_trigger_field,
     to_unknown_reason,
+    with_trigger_field,
 )
 
 # Minimum adoption threshold for the master-list types-of-business filter.
@@ -330,14 +333,21 @@ class BrokerDealerRepository:
             # to drop them at request end, and the response model copy uses
             # ``model_validate`` which reads attributes by name. Avoids
             # rebuilding a parallel DTO list just to carry the two extras.
+            #
+            # Cluster-level coverage: one reason explains the whole cluster
+            # of related FE cells. Trigger field stamped into the note so
+            # the tooltip can name the specific column when the reason fires
+            # on a secondary field.
+            clearing_trigger = clearing_trigger_field(item)
             item.current_clearing_unknown_reason = (
-                to_unknown_reason(clearing_reason)
-                if item.current_clearing_partner is None
+                to_unknown_reason(with_trigger_field(clearing_reason, clearing_trigger))
+                if clearing_trigger is not None
                 else None
             )
+            financial_trigger = financial_trigger_field(item)
             item.financial_unknown_reason = (
-                to_unknown_reason(financial_reason)
-                if item.latest_net_capital is None
+                to_unknown_reason(with_trigger_field(financial_reason, financial_trigger))
+                if financial_trigger is not None
                 else None
             )
         return BrokerDealerListResponse(
