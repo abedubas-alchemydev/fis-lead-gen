@@ -392,6 +392,9 @@ class PdfDownloaderService:
         headers = {
             "User-Agent": settings.sec_user_agent,
             "Accept": "application/json",
+            # Defence in depth: SEC's Akamai POPs from GCP egress send bogus
+            # gzip headers; force identity to avoid decoder errors on JSON too.
+            "Accept-Encoding": "identity",
         }
         last_error: Exception | None = None
 
@@ -421,6 +424,13 @@ class PdfDownloaderService:
         headers = {
             "User-Agent": settings.sec_user_agent,
             "Accept": "application/pdf,application/octet-stream;q=0.9,*/*;q=0.8",
+            # SEC EDGAR's Akamai POPs serving GCP egress IPs reply with bogus
+            # Content-Encoding: gzip on PDF responses (PDFs are already
+            # application-layer compressed; the transport-layer wrapper is wrong).
+            # response.content auto-decompresses and surfaces "Data-loss while
+            # decompressing corrupted data" per chunk. Use streaming + aiter_raw
+            # to read bytes verbatim. Same root cause as #276.
+            "Accept-Encoding": "identity",
         }
         last_error: Exception | None = None
 
@@ -431,12 +441,17 @@ class PdfDownloaderService:
                     headers=headers,
                     follow_redirects=False,
                 ) as client:
-                    response = await client.get(url)
-                response.raise_for_status()
-                content_type = response.headers.get("content-type", "").lower()
-                if "pdf" not in content_type and not url.lower().endswith(".pdf"):
-                    raise RuntimeError("SEC filing did not resolve to a PDF document.")
-                return response.content
+                    async with client.stream("GET", url) as response:
+                        response.raise_for_status()
+                        content_type = response.headers.get("content-type", "").lower()
+                        if "pdf" not in content_type and not url.lower().endswith(".pdf"):
+                            raise RuntimeError("SEC filing did not resolve to a PDF document.")
+                        # aiter_raw, not aiter_bytes — bypass auto-decompression.
+                        chunks: list[bytes] = []
+                        async for chunk in response.aiter_raw():
+                            if chunk:
+                                chunks.append(chunk)
+                        return b"".join(chunks)
             except (httpx.HTTPError, RuntimeError) as exc:
                 last_error = exc
                 if attempt == settings.sec_request_max_retries:
@@ -465,6 +480,10 @@ class PdfDownloaderService:
         headers = {
             "User-Agent": settings.sec_user_agent,
             "Accept": "application/pdf,application/octet-stream;q=0.9,*/*;q=0.8",
+            # See _download_bytes_with_retries above for the rationale. SEC's
+            # Akamai POPs lie about compression; aiter_raw bypasses httpx's
+            # auto-decoder and writes the body bytes verbatim.
+            "Accept-Encoding": "identity",
         }
         last_error: Exception | None = None
 
@@ -483,7 +502,7 @@ class PdfDownloaderService:
 
                         byte_size = 0
                         with target_path.open("wb") as fh:
-                            async for chunk in response.aiter_bytes(chunk_size=64 * 1024):
+                            async for chunk in response.aiter_raw(chunk_size=64 * 1024):
                                 if not chunk:
                                     continue
                                 byte_size += len(chunk)
