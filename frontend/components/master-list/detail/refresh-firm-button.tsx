@@ -8,33 +8,39 @@ import { useToast } from "@/components/ui/use-toast";
 import {
   ApiError,
   getPipelineRunStatus,
-  refreshFinancials,
+  refreshFirm,
   type PipelineRunDetail,
   type PipelineRunStatus,
 } from "@/lib/api";
 
-// User-clickable button rendered next to an UnknownCell tooltip when the
-// reason category is `not_yet_extracted` for a financial-pipeline field.
+// User-clickable button that triggers the BE's selective per-firm
+// refresh-all orchestrator. Rendered exactly once per row (master-list
+// table leftmost column) or per page (firm-detail h1 region) when
+// isFirmIncomplete(firm) === true.
 //
 // Click flow:
-//   1. POST /broker-dealers/{id}/refresh-financials
-//        - 202: capture run_id, start polling
-//        - 409: api.ts normalizes the existing run_id into the success
-//          shape, so we just poll
-//        - 503: provider key missing on server — generic toast, no retry
-//        - 401: session expired — surface a toast; auth middleware will
-//          bounce on the next nav
-//        - 404 / other: silent-fail-on-error (mirrors firm-website-link)
-//   2. Poll /pipeline/run/{run_id} every 3s until terminal status. Soft
-//      cap at 120s — afterward drop to 10s cadence and keep polling so
-//      the UI eventually catches up if the BE finishes late.
-//   3. On `completed` / `completed_with_errors`: router.refresh() to
-//      pull the now-populated bd record. The button vanishes because
-//      the surrounding UnknownCell unmounts once unknown_reason clears.
-//   4. On `failed`: parse notes JSON, surface the error string verbatim.
+//   1. POST /broker-dealers/{id}/refresh-all
+//        - 200 + status="skipped" + run_id=null → BE found nothing to do.
+//          Show a confirmation toast and router.refresh(). Zero credit.
+//        - 202 + status="queued" + run_id=N → at least one sub-pipeline
+//          fired. Poll /pipeline/run/N until terminal.
+//        - 409 → api.ts normalizes to the same { run_id, status } shape.
+//          Caller polls the existing in-flight run.
+//        - 429 cooldown → "Slow down" toast.
+//        - 503 → "Pipeline temporarily unavailable" toast (BE message
+//          names the missing provider for ops).
+//        - 401 → session-expired toast.
+//        - 404 → "Firm not found" toast.
+//   2. Poll every 3s until terminal. Soft cap at 120s — drop to 10s
+//      cadence afterward and keep polling so the UI eventually catches
+//      up if the BE finishes late.
+//   3. On `completed` / `completed_with_errors`: parse parent run's
+//      notes.summary ("Refreshed: financials, website. Skipped:
+//      clearing, contacts.") and show it verbatim, then router.refresh()
+//      to pull the now-populated row.
+//   4. On `failed`: parse notes for an error string and surface verbatim.
 //
-// StrictMode-safe via firedRef (matches firm-website-link pattern); a
-// cancelledRef tracks unmount so timers can't setState on a dead tree.
+// StrictMode-safe via firedRef; unmount-safe via cancelledRef.
 
 const POLL_INTERVAL_MS = 3_000;
 const SLOW_POLL_INTERVAL_MS = 10_000;
@@ -49,8 +55,8 @@ const TERMINAL_STATUSES: ReadonlySet<PipelineRunStatus> = new Set([
 interface NotesPayload {
   summary?: string;
   error?: string;
-  stage?: string;
-  bd_id?: number;
+  ran?: string[];
+  skipped?: string[];
 }
 
 function parseNotes(notes: string | null): NotesPayload {
@@ -70,17 +76,17 @@ function nextDelayMs(elapsedMs: number): number {
   return elapsedMs >= SOFT_TIMEOUT_MS ? SLOW_POLL_INTERVAL_MS : POLL_INTERVAL_MS;
 }
 
-interface RefreshFinancialsButtonProps {
+interface RefreshFirmButtonProps {
   firmId: number;
-  // Smaller variant for inline placement next to a tooltip icon inside
-  // a stat tile or table cell.
+  // Smaller variant for inline placement inside a table row's leftmost
+  // cell. Defaults to the larger detail-page variant.
   compact?: boolean;
 }
 
-export function RefreshFinancialsButton({
+export function RefreshFirmButton({
   firmId,
   compact = false,
-}: RefreshFinancialsButtonProps) {
+}: RefreshFirmButtonProps) {
   const router = useRouter();
   const toast = useToast();
   const [isRefreshing, setIsRefreshing] = useState(false);
@@ -108,8 +114,14 @@ export function RefreshFinancialsButton({
       firedRef.current = false;
       return;
     }
-    if (run.status === "completed_with_errors" && notes.error) {
-      toast.info(`Refresh finished with warnings: ${notes.error}`);
+    // completed or completed_with_errors. Surface notes.summary verbatim
+    // so the user knows which sub-pipelines actually ran vs. were
+    // skipped. The BE caps summary at ~180 chars per the prompt.
+    const summary = notes.summary ?? "Refreshed.";
+    if (run.status === "completed_with_errors") {
+      toast.info(`Finished with warnings — ${summary}`);
+    } else {
+      toast.success(summary);
     }
     router.refresh();
     setIsRefreshing(false);
@@ -140,8 +152,8 @@ export function RefreshFinancialsButton({
       scheduleNextPoll(runId, startedAt);
     } catch (err) {
       if (cancelledRef.current) return;
-      // 404 means the run vanished — surface and stop. Other errors
-      // are treated as transient; keep polling under the soft cap.
+      // 404 means the run vanished — surface and stop. Other errors are
+      // transient; keep polling under the soft cap.
       if (err instanceof ApiError && err.status === 404) {
         toast.error("Refresh run not found on server.");
         setIsRefreshing(false);
@@ -159,17 +171,30 @@ export function RefreshFinancialsButton({
     slowToastFiredRef.current = false;
 
     try {
-      const { run_id } = await refreshFinancials(firmId);
+      const result = await refreshFirm(firmId);
       if (cancelledRef.current) return;
+
+      if (result.status === "skipped" || result.run_id === null) {
+        // BE found nothing to do — already complete. No polling needed.
+        toast.success(result.reason ?? "Already complete.");
+        router.refresh();
+        setIsRefreshing(false);
+        firedRef.current = false;
+        return;
+      }
+
       const startedAt = Date.now();
+      const runId = result.run_id;
       timerRef.current = setTimeout(() => {
-        void pollOnce(run_id, startedAt);
+        void pollOnce(runId, startedAt);
       }, POLL_INTERVAL_MS);
     } catch (err) {
       if (cancelledRef.current) return;
       if (err instanceof ApiError) {
         if (err.status === 503) {
           toast.error("Pipeline temporarily unavailable. Try again later.");
+        } else if (err.status === 429) {
+          toast.error("Slow down — try again in a few seconds.");
         } else if (err.status === 401) {
           toast.error("Your session has expired. Please sign in again.");
         } else if (err.status === 404) {
@@ -184,10 +209,10 @@ export function RefreshFinancialsButton({
   }
 
   const baseClass = compact
-    ? "inline-flex items-center gap-1 rounded-md border border-[var(--border-2,rgba(30,64,175,0.16))] bg-[var(--surface,#ffffff)] px-1.5 py-0.5 text-[11px] font-medium text-[var(--text-dim,#475569)] transition hover:bg-[var(--surface-2,#f1f6fd)] hover:text-[var(--text,#0f172a)] disabled:cursor-not-allowed disabled:opacity-50"
-    : "inline-flex items-center gap-1.5 rounded-md border border-[var(--border-2,rgba(30,64,175,0.16))] bg-[var(--surface,#ffffff)] px-2 py-1 text-[12px] font-medium text-[var(--text-dim,#475569)] transition hover:bg-[var(--surface-2,#f1f6fd)] hover:text-[var(--text,#0f172a)] disabled:cursor-not-allowed disabled:opacity-50";
+    ? "inline-flex items-center justify-center rounded-md border border-[var(--border-2,rgba(30,64,175,0.16))] bg-[var(--surface,#ffffff)] p-1.5 text-[var(--text-dim,#475569)] transition hover:bg-[var(--surface-2,#f1f6fd)] hover:text-[var(--text,#0f172a)] disabled:cursor-not-allowed disabled:opacity-50"
+    : "inline-flex items-center gap-1.5 rounded-md border border-[var(--border-2,rgba(30,64,175,0.16))] bg-[var(--surface,#ffffff)] px-2.5 py-1.5 text-[12px] font-medium text-[var(--text-dim,#475569)] transition hover:bg-[var(--surface-2,#f1f6fd)] hover:text-[var(--text,#0f172a)] disabled:cursor-not-allowed disabled:opacity-50";
 
-  const iconClass = compact ? "h-3 w-3" : "h-3.5 w-3.5";
+  const iconClass = "h-3.5 w-3.5";
 
   return (
     <button
@@ -196,23 +221,24 @@ export function RefreshFinancialsButton({
       disabled={isRefreshing}
       title={
         isRefreshing
-          ? "Running financial extraction (~30-90s)"
-          : "Run the financial extraction pipeline for this firm"
+          ? "Refreshing missing fields (~30-90s)"
+          : "Fetch missing data for this firm"
       }
-      aria-label="Refresh financials"
-      data-testid="refresh-financials-button"
+      aria-label="Refresh firm data"
+      data-testid="refresh-firm-button"
       className={baseClass}
     >
       {isRefreshing ? (
-        <>
-          <Loader2 className={`${iconClass} animate-spin`} strokeWidth={2} aria-hidden />
-          <span>Running…</span>
-        </>
+        <Loader2
+          className={`${iconClass} animate-spin`}
+          strokeWidth={2}
+          aria-hidden
+        />
       ) : (
-        <>
-          <RefreshCw className={iconClass} strokeWidth={2} aria-hidden />
-          <span>Refresh financials</span>
-        </>
+        <RefreshCw className={iconClass} strokeWidth={2} aria-hidden />
+      )}
+      {compact ? null : (
+        <span>{isRefreshing ? "Refreshing…" : "Refresh firm"}</span>
       )}
     </button>
   );

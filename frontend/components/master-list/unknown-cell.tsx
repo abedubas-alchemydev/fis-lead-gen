@@ -11,7 +11,6 @@ import {
 import { createPortal } from "react-dom";
 import { Info } from "lucide-react";
 
-import { RefreshFinancialsButton } from "@/components/master-list/detail/refresh-financials-button";
 import { unknownReasonShort } from "@/lib/format";
 import type { UnknownReason } from "@/lib/types";
 
@@ -38,14 +37,6 @@ interface UnknownCellProps {
   // Shrinks the icon + tooltip a touch for inline use inside pill rows
   // or stat cards where the standard size feels heavy.
   compact?: boolean;
-  // Opt-in: when set and the reason category is `not_yet_extracted`,
-  // render a "Refresh financials" button next to the info icon. Callers
-  // pass this only for cells anchored to financial-pipeline fields
-  // (latest_net_capital, latest_excess_net_capital, yoy_growth,
-  // health_status). Other UnknownCell instances (clearing arrangements,
-  // executive contacts, etc.) leave it undefined so the button stays
-  // off — those failure modes have their own remediation paths.
-  refreshFinancials?: { firmId: number };
 }
 
 interface TooltipCoords {
@@ -65,7 +56,6 @@ export function UnknownCell({
   reason,
   fallback = "Unknown",
   compact = false,
-  refreshFinancials,
 }: UnknownCellProps) {
   const buttonRef = useRef<HTMLButtonElement | null>(null);
   const tooltipRef = useRef<HTMLDivElement | null>(null);
@@ -159,8 +149,6 @@ export function UnknownCell({
   // tell there was anything clickable. Keep full opacity in compact;
   // larger contexts already have room to breathe and stay at 70%.
   const iconOpacity = compact ? "opacity-100" : "opacity-70";
-  const showRefreshButton =
-    refreshFinancials !== undefined && reason.category === "not_yet_extracted";
 
   const tooltipNode =
     open && mounted && coords
@@ -208,12 +196,6 @@ export function UnknownCell({
       >
         <Info className={`${iconSize} ${iconOpacity}`} strokeWidth={2} aria-hidden />
       </button>
-      {showRefreshButton ? (
-        <RefreshFinancialsButton
-          firmId={refreshFinancials.firmId}
-          compact={compact}
-        />
-      ) : null}
       {tooltipNode}
     </span>
   );

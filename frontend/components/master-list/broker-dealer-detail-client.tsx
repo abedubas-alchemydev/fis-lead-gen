@@ -21,6 +21,7 @@ import { ContactRow } from "@/components/master-list/detail/contact-row";
 import { FinancialTrendChart } from "@/components/master-list/detail/financial-trend-chart";
 import { FindEmailsButton } from "@/components/master-list/detail/find-emails-button";
 import { FirmWebsiteLink } from "@/components/master-list/detail/firm-website-link";
+import { RefreshFirmButton } from "@/components/master-list/detail/refresh-firm-button";
 import { FocusReportSection } from "@/components/master-list/detail/focus-report-section";
 import {
   classificationDisplay,
@@ -42,6 +43,7 @@ import { Pill } from "@/components/ui/pill";
 import { SourceBadge } from "@/components/master-list/source-badge";
 import { UnknownCell } from "@/components/master-list/unknown-cell";
 import { apiRequest, buildApiPath } from "@/lib/api";
+import { isFirmIncomplete } from "@/lib/firm-completeness";
 import { parseArrangementBlob } from "@/lib/arrangements";
 import {
   recordVisit,
@@ -481,6 +483,9 @@ export function BrokerDealerDetailClient({ brokerDealerId }: { brokerDealerId: s
               variant="detail"
               initialDefaultMember={profile.is_favorited}
             />
+            {isFirmIncomplete(bd) ? (
+              <RefreshFirmButton firmId={bd.id} />
+            ) : null}
           </div>
           <FirmWebsiteLink firmId={bd.id} firmName={bd.name} website={bd.website} />
           <div className="mt-2 flex flex-wrap items-center gap-x-3 gap-y-1 text-[12px] text-[var(--text-muted,#94a3b8)]">
@@ -589,7 +594,6 @@ export function BrokerDealerDetailClient({ brokerDealerId }: { brokerDealerId: s
                   <UnknownCell
                     reason={bd.financial_unknown_reason}
                     fallback="N/A"
-                    refreshFinancials={{ firmId: bd.id }}
                   />
                 )
               }
@@ -603,7 +607,6 @@ export function BrokerDealerDetailClient({ brokerDealerId }: { brokerDealerId: s
                   <UnknownCell
                     reason={bd.financial_unknown_reason}
                     fallback="N/A"
-                    refreshFinancials={{ firmId: bd.id }}
                   />
                 )
               }
@@ -617,7 +620,6 @@ export function BrokerDealerDetailClient({ brokerDealerId }: { brokerDealerId: s
                   <UnknownCell
                     reason={bd.financial_unknown_reason}
                     fallback="N/A"
-                    refreshFinancials={{ firmId: bd.id }}
                   />
                 )
               }

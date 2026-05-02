@@ -291,16 +291,33 @@ export async function resolveWebsite(
   );
 }
 
-// ── Per-firm refresh-financials trigger + run polling ───────────────────
-// Pairs with the BE's per-firm on-demand financial pipeline trigger.
-// `refreshFinancials` returns 202 with { run_id, status, broker_dealer_id }
-// on first kick-off and 409 when a run is already in flight (the BE encodes
-// the existing run_id under `detail.run_id`). 409 is normalized into the
-// same success shape so callers always get a run_id to poll against.
-export type RefreshFinancialsResponse = {
-  run_id: number;
+// ── Per-firm refresh-all trigger + run polling ──────────────────────────
+// Pairs with the BE's per-firm orchestrator endpoint that fans out to the
+// four per-firm sub-pipelines (financials / health-check / resolve-website
+// / enrich) but only runs the ones whose target fields are missing on the
+// BD record. Cost matches the gap.
+//
+// Three response shapes:
+//   1. 200 + status="skipped" + run_id=null — already complete, no work
+//      done, no polling needed. Caller can immediately router.refresh().
+//   2. 202 + status="queued" + run_id=<parent> — at least one child
+//      sub-pipeline ran. Caller polls /pipeline/run/{run_id} until
+//      terminal status.
+//   3. 409 + detail.run_id — refresh-all already in flight. We normalize
+//      this into the same success shape so callers always get a run_id
+//      to poll against (or null + skipped, never an exception).
+//
+// 429 cooldown / 503 missing-key / 401 / 404 are surfaced as ApiError so
+// the caller can render appropriate toasts.
+export type RefreshFirmResponse = {
+  // null when status === "skipped" (already complete, no run created).
+  run_id: number | null;
+  // "queued" | "skipped" | "running" (the last from 409 normalization).
   status: string;
   broker_dealer_id: number;
+  // Only present on the 200 skipped path; surfaces "Already complete." or
+  // similar so the caller can show a confirmation toast.
+  reason?: string;
 };
 
 export type PipelineRunStatus =
@@ -373,12 +390,12 @@ function parseConflictDetail(detail: string): ConflictDetail | null {
   return null;
 }
 
-export async function refreshFinancials(
+export async function refreshFirm(
   firmId: number
-): Promise<RefreshFinancialsResponse> {
+): Promise<RefreshFirmResponse> {
   try {
-    return await apiRequest<RefreshFinancialsResponse>(
-      `/api/v1/broker-dealers/${firmId}/refresh-financials`,
+    return await apiRequest<RefreshFirmResponse>(
+      `/api/v1/broker-dealers/${firmId}/refresh-all`,
       { method: "POST" }
     );
   } catch (err) {
