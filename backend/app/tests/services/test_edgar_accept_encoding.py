@@ -82,6 +82,7 @@ async def test_fetch_records_for_sec_numbers_sends_accept_encoding_identity() ->
     with patch("app.services.edgar.settings") as mock_settings:
         mock_settings.sec_user_agent = "test-agent contact@example.com"
         mock_settings.sec_request_timeout_seconds = 30
+        mock_settings.sec_request_max_retries = 1
         mock_settings.edgar_rate_limit_per_second = 0
         with patch.object(
             EdgarService, "fetch_all_broker_dealers", new=AsyncMock(return_value=[])
