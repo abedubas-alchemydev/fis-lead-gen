@@ -1,7 +1,7 @@
 "use client";
 
 import { useEffect, useRef, useState } from "react";
-import { Globe, Search } from "lucide-react";
+import { Globe, Loader2, Search } from "lucide-react";
 
 import { Pill, type PillVariant } from "@/components/ui/pill";
 import {
@@ -93,6 +93,15 @@ function ResolvedLink({
   );
 }
 
+function ResolvingSpinner() {
+  return (
+    <span className="inline-flex items-center gap-1.5 text-[13px] text-[var(--text-dim,#475569)]">
+      <Loader2 className="h-3.5 w-3.5 animate-spin" strokeWidth={2} />
+      Resolving website…
+    </span>
+  );
+}
+
 export function FirmWebsiteLink({
   firmId,
   firmName,
@@ -104,6 +113,7 @@ export function FirmWebsiteLink({
 }) {
   const persisted = (website ?? "").trim();
   const [resolved, setResolved] = useState<ResolveWebsiteResponse | null>(null);
+  const [isResolving, setIsResolving] = useState(false);
   const firedRef = useRef(false);
 
   useEffect(() => {
@@ -111,6 +121,7 @@ export function FirmWebsiteLink({
       return;
     }
     firedRef.current = true;
+    setIsResolving(true);
 
     resolveWebsite(firmId)
       .then((r) => {
@@ -121,27 +132,29 @@ export function FirmWebsiteLink({
       .catch(() => {
         // Swallow — Google fallback stays. One call per page mount; the
         // user's only retry path is a manual refresh.
+      })
+      .finally(() => {
+        setIsResolving(false);
       });
   }, [firmId, persisted]);
 
+  // Domain side: persisted → ResolvedLink; otherwise resolved → ResolvedLink;
+  // otherwise resolving → spinner; otherwise nothing (just the Google link).
+  let domainSide: JSX.Element | null = null;
   if (persisted) {
-    return (
-      <div className="mt-1.5">
-        <ResolvedLink website={persisted} source={null} />
-      </div>
-    );
+    domainSide = <ResolvedLink website={persisted} source={null} />;
+  } else if (resolved?.website) {
+    domainSide = <ResolvedLink website={resolved.website} source={resolved.website_source} />;
+  } else if (isResolving) {
+    domainSide = <ResolvingSpinner />;
   }
 
-  if (resolved?.website) {
-    return (
-      <div className="mt-1.5 transition-opacity duration-200">
-        <ResolvedLink website={resolved.website} source={resolved.website_source} />
-      </div>
-    );
-  }
-
+  // Always render the Google search link alongside (or as fallback when
+  // domainSide is null). Layout flexes so the two sit side-by-side on wide
+  // screens and stack on narrow ones.
   return (
-    <div className="mt-1.5">
+    <div className="mt-1.5 flex flex-wrap items-center gap-x-4 gap-y-1.5 transition-opacity duration-200">
+      {domainSide}
       <GoogleFallback firmName={firmName} />
     </div>
   );
