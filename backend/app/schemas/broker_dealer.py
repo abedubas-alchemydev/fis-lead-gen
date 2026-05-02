@@ -305,3 +305,26 @@ class RefreshFinancialsResponse(BaseModel):
     run_id: int
     status: str
     broker_dealer_id: int
+
+
+class RefreshAllResponse(BaseModel):
+    """Response shape for ``POST /broker-dealers/{id}/refresh-all``.
+
+    Two terminal shapes:
+
+    - ``run_id=int, status="queued"`` — at least one sub-pipeline's gate
+      passed; FE polls ``GET /pipeline/run/{run_id}`` for the parent
+      run's terminal state and ``notes.summary`` toast string.
+    - ``run_id=None, status="skipped", reason="Already complete."`` —
+      every gate failed. No PipelineRun row, no provider calls, no
+      cost. FE shows the success toast and refreshes the firm.
+
+    On 409 conflict (a parent run is already in flight for this firm),
+    the FE will read ``detail.run_id`` from the error envelope and
+    start polling that run instead.
+    """
+
+    run_id: int | None = None
+    status: str
+    broker_dealer_id: int
+    reason: str | None = None
