@@ -1098,10 +1098,16 @@ export function MasterListWorkspaceClient() {
                           <Pill variant={clearingTypeVariant(item.current_clearing_type)}>
                             {clearingTypeLabel(item.current_clearing_type)}
                           </Pill>
-                          {item.current_clearing_type === null &&
-                          item.current_clearing_unknown_reason ? (
+                          {item.current_clearing_type === null ? (
                             <UnknownCell
-                              reason={item.current_clearing_unknown_reason}
+                              reason={
+                                item.current_clearing_unknown_reason ?? {
+                                  category: "data_not_present",
+                                  note: "[Triggered by missing: current_clearing_type]",
+                                  extracted_at: null,
+                                  confidence: null,
+                                }
+                              }
                               fallback={null}
                               compact
                             />
