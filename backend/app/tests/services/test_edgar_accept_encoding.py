@@ -38,3 +38,37 @@ def test_edgar_service_module_pins_accept_encoding_identity_in_three_places() ->
         "while decompressing corrupted data' on every default-encoding "
         "request. Same fix as services/finra.py — see commit history."
     )
+
+
+def test_bulk_zip_streaming_uses_aiter_raw_not_aiter_bytes() -> None:
+    """The bulk submissions ZIP must be streamed via ``aiter_raw``, not
+    ``aiter_bytes``.
+
+    Identity-encoding is the right hint to send (above test), but Akamai POPs
+    that serve GCP egress IPs ignore it and reply with ``Content-Encoding:
+    gzip`` anyway. ``aiter_bytes`` auto-decompresses based on the Content-
+    Encoding header and surfaces ~1500 "Data-loss while decompressing
+    corrupted data" errors per 1.5 GB download (one per chunk).
+
+    ``aiter_raw`` yields the bytes off the wire verbatim. Since the body is
+    a ``.zip`` file (already application-layer compressed), the bytes are
+    valid for ``zipfile.ZipFile`` regardless of any bogus transport-layer
+    Content-Encoding header.
+
+    A future "let's modernize the streaming code" PR that swaps back to
+    ``aiter_bytes`` will fail this test before it can ship.
+    """
+    source = inspect.getsource(edgar_module)
+    assert "aiter_raw" in source, (
+        "Bulk ZIP download must use response.aiter_raw to bypass httpx's "
+        "auto-decompression. Akamai-from-GCP-egress sets Content-Encoding: "
+        "gzip on the .zip body which causes aiter_bytes to fail per-chunk."
+    )
+    # Defence-in-depth: assert aiter_bytes is NOT in the file (would mean a
+    # regression). If a legitimate use of aiter_bytes is added later for a
+    # different code path, update this test to assert per-block.
+    assert "aiter_bytes" not in source, (
+        "edgar.py uses aiter_bytes somewhere — that auto-decompresses based "
+        "on Content-Encoding. SEC EDGAR via GCP egress sends bogus gzip "
+        "headers; use aiter_raw instead."
+    )
