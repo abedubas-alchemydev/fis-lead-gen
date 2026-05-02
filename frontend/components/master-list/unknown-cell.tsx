@@ -153,7 +153,12 @@ export function UnknownCell({
       ? rawNote.slice(0, NOTE_TRUNCATE) + "…"
       : rawNote;
 
-  const iconSize = compact ? "h-3 w-3" : "h-3.5 w-3.5";
+  const iconSize = compact ? "h-3.5 w-3.5" : "h-3.5 w-3.5";
+  // Compact mode used to dim to 70% but the icon then disappears next to
+  // the dark "Unknown" pill in the master-list table — users couldn't
+  // tell there was anything clickable. Keep full opacity in compact;
+  // larger contexts already have room to breathe and stay at 70%.
+  const iconOpacity = compact ? "opacity-100" : "opacity-70";
   const showRefreshButton =
     refreshFinancials !== undefined && reason.category === "not_yet_extracted";
 
@@ -201,7 +206,7 @@ export function UnknownCell({
         onBlur={() => setOpen(false)}
         className="inline-flex cursor-help items-center rounded-full p-0.5 text-[var(--text-muted,#94a3b8)] outline-none transition hover:text-[var(--text-dim,#475569)] focus-visible:ring-2 focus-visible:ring-[var(--accent,#6366f1)]"
       >
-        <Info className={`${iconSize} opacity-70`} strokeWidth={2} aria-hidden />
+        <Info className={`${iconSize} ${iconOpacity}`} strokeWidth={2} aria-hidden />
       </button>
       {showRefreshButton ? (
         <RefreshFinancialsButton
