@@ -8,12 +8,8 @@ const inter = Inter({ subsets: ["latin"], variable: "--font-sans" });
 const mono = JetBrains_Mono({ subsets: ["latin"], variable: "--font-mono" });
 
 export const metadata: Metadata = {
-  title: "Client Clearing Lead Gen Engine",
-  description: "Broker-dealer intelligence platform for clearing lead generation.",
-  icons: {
-    icon: "/icon.svg",
-    apple: "/apple-icon.svg"
-  }
+  title: "DOX — Institutional Finance Intelligence",
+  description: "Broker-dealer intelligence platform for clearing-services workflows."
 };
 
 export default function RootLayout({ children }: { children: ReactNode }) {

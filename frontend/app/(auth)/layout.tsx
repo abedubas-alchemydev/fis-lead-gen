@@ -1,5 +1,8 @@
 import type { ReactNode } from "react";
-import { BarChart3, Shield, Target, Zap } from "lucide-react";
+import Image from "next/image";
+import { BarChart3, Shield, Zap } from "lucide-react";
+
+import { BrandMark } from "@/components/brand/brand-mark";
 
 export default function AuthLayout({ children }: { children: ReactNode }) {
   return (
@@ -13,22 +16,26 @@ export default function AuthLayout({ children }: { children: ReactNode }) {
 
           <div className="relative">
             <div className="animate-fade-in flex items-center gap-3">
-              <div className="flex h-10 w-10 items-center justify-center rounded-2xl bg-white/10 backdrop-blur">
-                <Target className="h-5 w-5" />
-              </div>
-              <span className="text-xs font-semibold uppercase tracking-[0.3em] text-white/60">Lead Gen Engine</span>
+              <Image
+                src="/logo.png"
+                alt="DOX"
+                width={140}
+                height={44}
+                priority
+                className="h-11 w-auto"
+              />
             </div>
 
             <h1 className="animate-fade-in delay-150 mt-10 text-[2rem] font-bold leading-tight">
-              Client Clearing
+              Institutional Finance
               <br />
               <span className="bg-gradient-to-r from-white to-white/70 bg-clip-text text-transparent">
-                Lead Gen Engine
+                Intelligence
               </span>
             </h1>
             <p className="animate-fade-in delay-300 mt-5 max-w-sm text-sm leading-relaxed text-white/65">
               Enterprise broker-dealer intelligence for surfacing clearing opportunities,
-              tracking risk signals, and managing qualified leads in one system.
+              tracking risk signals, and managing qualified prospects in one system.
             </p>
           </div>
 
@@ -60,10 +67,8 @@ export default function AuthLayout({ children }: { children: ReactNode }) {
           <div className="w-full max-w-[380px]">
             {/* Mobile logo (shown only on small screens) */}
             <div className="mb-8 flex items-center gap-3 lg:hidden">
-              <div className="flex h-9 w-9 items-center justify-center rounded-xl bg-navy text-white">
-                <Target className="h-4.5 w-4.5" />
-              </div>
-              <span className="text-sm font-semibold text-navy">Lead Gen Engine</span>
+              <BrandMark size={36} />
+              <span className="text-sm font-semibold text-navy">DOX</span>
             </div>
             {children}
           </div>
