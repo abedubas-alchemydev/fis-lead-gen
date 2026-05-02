@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from datetime import datetime
 
-from sqlalchemy import DateTime, Integer, String, Text, func
+from sqlalchemy import DateTime, ForeignKey, Integer, String, Text, func
 from sqlalchemy.orm import Mapped, mapped_column
 
 from app.db.base import Base
@@ -22,3 +22,13 @@ class PipelineRun(Base):
     notes: Mapped[str | None] = mapped_column(Text, nullable=True)
     started_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now(), nullable=False)
     completed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    # Self-FK so the per-firm refresh-all orchestrator can mark each child
+    # run (refresh-financials, resolve-website, health-check, enrich) as
+    # belonging to a single parent. NULL for top-level runs (the existing
+    # batch + scheduled pipelines never set this).
+    parent_run_id: Mapped[int | None] = mapped_column(
+        Integer,
+        ForeignKey("pipeline_runs.id", ondelete="CASCADE"),
+        nullable=True,
+        index=True,
+    )
