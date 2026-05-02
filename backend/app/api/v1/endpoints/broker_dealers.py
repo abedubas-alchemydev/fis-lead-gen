@@ -1,18 +1,21 @@
 from __future__ import annotations
 
 import base64
+import json
+import logging
 from datetime import date, datetime, time, timezone
 
-from fastapi import APIRouter, Body, Depends, HTTPException, Query, status
+from fastapi import APIRouter, BackgroundTasks, Body, Depends, HTTPException, Query, status
 from fastapi.responses import Response
 from pydantic import BaseModel, Field
-from sqlalchemy import exists, func, select, update
+from sqlalchemy import exists, func, or_, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.config import settings
-from app.db.session import get_db_session
+from app.db.session import SessionLocal, get_db_session
 from app.models.broker_dealer import BrokerDealer
 from app.models.favorite_list import FavoriteList, FavoriteListItem
+from app.models.pipeline_run import PipelineRun
 from app.schemas.auth import AuthenticatedUser
 from app.schemas.broker_dealer import (
     BrokerDealerDetail,
@@ -25,6 +28,7 @@ from app.schemas.broker_dealer import (
     FilingHistoryItem,
     FinancialMetricItem,
     FinancialMetricsResponse,
+    RefreshFinancialsResponse,
     RegistrationComplianceSummary,
     ResolveWebsiteResponse,
 )
@@ -58,10 +62,13 @@ from app.services.finra_pdf_service import (
 )
 from app.services.apollo import ApolloClient
 from app.services.focus_ceo_extraction import FocusCeoExtractionService
+from app.services.focus_reports import FocusReportService
 from app.services.hunter import HunterClient
 from app.services.serpapi import SerpAPIClient
 from app.services.service_models import FinraBrokerDealerRecord
 from app.services.website_resolver import resolve_website
+
+logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/broker-dealers")
 repository = BrokerDealerRepository()
@@ -944,4 +951,144 @@ async def resolve_broker_dealer_website(
         website=None,
         website_source=None,
         reason=reason,
+    )
+
+
+# ───────────────────────────────────────────────────────────────────────────
+# Per-firm on-demand financial pipeline trigger
+# ───────────────────────────────────────────────────────────────────────────
+
+REFRESH_FINANCIALS_PIPELINE_NAME = "financial_pdf_pipeline_single"
+
+
+async def _run_refresh_financials_background(
+    run_id: int, bd_id: int, trigger_source: str
+) -> None:
+    """Background task: drive the queued PipelineRow through the per-firm
+    extraction. ``FocusReportService.load_financial_metrics_for_broker_dealer``
+    transitions the run row through ``running → completed`` (or ``→ failed``)
+    via :meth:`_finalize_pipeline_run` / :meth:`_mark_pipeline_run_failed`,
+    so this wrapper just defends against unexpected exceptions and logs the
+    outcome."""
+
+    service = FocusReportService()
+    try:
+        await service.load_financial_metrics_for_broker_dealer(
+            bd_id,
+            trigger_source=trigger_source,
+            pipeline_run_id=run_id,
+        )
+    except Exception:
+        logger.exception(
+            "refresh-financials background task failed (run_id=%s bd_id=%s)",
+            run_id,
+            bd_id,
+        )
+
+
+@router.post(
+    "/{broker_dealer_id}/refresh-financials",
+    response_model=RefreshFinancialsResponse,
+    status_code=status.HTTP_202_ACCEPTED,
+)
+async def refresh_broker_dealer_financials(
+    broker_dealer_id: int,
+    background_tasks: BackgroundTasks,
+    current_user: AuthenticatedUser = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db_session),
+) -> RefreshFinancialsResponse:
+    """On-demand X-17A-5 → Gemini extraction for a single firm.
+
+    Async: extraction is 30-90s (PDF download + multi-year LLM
+    extraction), so the handler creates a ``status="queued"``
+    PipelineRun row, schedules the work as a FastAPI BackgroundTask,
+    and returns 202 immediately. The FE polls
+    ``GET /api/v1/pipeline/run/{run_id}`` for status.
+
+    Auth: any authenticated user — Gemini cost is accepted as a product
+    decision, mirroring the user-triggered Apollo / Hunter spend on the
+    contact-discovery and resolve-website surfaces.
+
+    Concurrency-guarded: a second POST while a queued/running run
+    already exists for the same firm returns 409 with the in-flight
+    ``run_id`` so the FE can pick up polling instead of erroring.
+    Re-runs on already-populated firms ARE allowed once the prior run
+    finishes — the rollup re-derives ``latest_net_capital``,
+    ``yoy_growth``, ``health_status`` from the freshest
+    ``FinancialMetric`` rows, which is the right behavior when a new
+    annual filing lands.
+    """
+    broker_dealer = await repository.get_broker_dealer(db, broker_dealer_id)
+    if broker_dealer is None:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Broker-dealer not found.",
+        )
+
+    # Provider key gate. The extraction defaults to Gemini; OpenAI is the
+    # alternate provider when ``llm_provider="openai"``. Refuse early so
+    # the run never gets queued with no chance of completing.
+    if settings.llm_provider == "openai":
+        provider_key = settings.openai_api_key
+        provider_label = "OpenAI"
+    else:
+        provider_key = settings.gemini_api_key
+        provider_label = "Gemini"
+    if not provider_key:
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail=f"{provider_label} API key is not configured.",
+        )
+
+    # 409 concurrency guard. Match the run row by pipeline_name + status
+    # window + a JSON substring on ``notes`` containing this bd_id. The
+    # ``notes`` payload writes ``"bd_id": <int>`` so the substring match
+    # is bd-specific and not a sibling-id false positive.
+    bd_id_marker = f'"bd_id": {broker_dealer_id}'
+    in_flight_stmt = (
+        select(PipelineRun)
+        .where(PipelineRun.pipeline_name == REFRESH_FINANCIALS_PIPELINE_NAME)
+        .where(PipelineRun.status.in_(("queued", "running")))
+        .where(PipelineRun.notes.ilike(f"%{bd_id_marker}%"))
+        .order_by(PipelineRun.id.desc())
+        .limit(1)
+    )
+    in_flight = (await db.execute(in_flight_stmt)).scalar_one_or_none()
+    if in_flight is not None:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail={
+                "message": "A refresh-financials run is already in flight for this firm.",
+                "run_id": in_flight.id,
+                "status": in_flight.status,
+                "broker_dealer_id": broker_dealer_id,
+            },
+        )
+
+    trigger_source = f"manual_single:{current_user.email}"
+    pipeline_run = PipelineRun(
+        pipeline_name=REFRESH_FINANCIALS_PIPELINE_NAME,
+        trigger_source=trigger_source,
+        status="queued",
+        total_items=1,
+        processed_items=0,
+        success_count=0,
+        failure_count=0,
+        notes=json.dumps({"bd_id": broker_dealer_id, "stage": "queued"}),
+    )
+    db.add(pipeline_run)
+    await db.commit()
+    await db.refresh(pipeline_run)
+
+    background_tasks.add_task(
+        _run_refresh_financials_background,
+        pipeline_run.id,
+        broker_dealer_id,
+        trigger_source,
+    )
+
+    return RefreshFinancialsResponse(
+        run_id=pipeline_run.id,
+        status=pipeline_run.status,
+        broker_dealer_id=broker_dealer_id,
     )

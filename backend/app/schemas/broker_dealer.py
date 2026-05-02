@@ -279,3 +279,20 @@ class ResolveWebsiteResponse(BaseModel):
     website: str | None = None
     website_source: str | None = None
     reason: str | None = None
+
+
+class RefreshFinancialsResponse(BaseModel):
+    """Response shape for ``POST /broker-dealers/{id}/refresh-financials``.
+
+    The handler returns 202 Accepted and kicks off the X-17A-5 → Gemini
+    extraction in a FastAPI BackgroundTask. ``run_id`` points at the
+    PipelineRun row the FE polls via ``GET /pipeline/run/{run_id}`` to
+    learn when the extraction finishes. ``status`` is ``"queued"`` on a
+    fresh trigger; on a 409 conflict the handler returns the in-flight
+    run's current status (``"queued"`` or ``"running"``) so the FE can
+    pick up polling without erroring.
+    """
+
+    run_id: int
+    status: str
+    broker_dealer_id: int
