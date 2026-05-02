@@ -484,7 +484,13 @@ export function BrokerDealerDetailClient({ brokerDealerId }: { brokerDealerId: s
               initialDefaultMember={profile.is_favorited}
             />
             {isFirmIncomplete(bd) ? (
-              <RefreshFirmButton firmId={bd.id} />
+              // autoFire: the firm-detail page kicks off the refresh-all
+              // orchestrator immediately on mount when the firm is
+              // incomplete. The orchestrator self-gates to only the
+              // sub-pipelines whose target fields are still missing, so
+              // existing data is preserved. Per-(user, BD) cooldown on the
+              // BE prevents rapid revisits from re-firing.
+              <RefreshFirmButton firmId={bd.id} autoFire />
             ) : null}
           </div>
           <FirmWebsiteLink firmId={bd.id} firmName={bd.name} website={bd.website} />
