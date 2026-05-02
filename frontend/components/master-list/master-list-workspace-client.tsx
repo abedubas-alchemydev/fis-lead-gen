@@ -1156,6 +1156,7 @@ export function MasterListWorkspaceClient() {
                           <UnknownCell
                             reason={item.financial_unknown_reason}
                             fallback="—"
+                            refreshFinancials={{ firmId: item.id }}
                           />
                         )}
                       </td>
@@ -1178,6 +1179,7 @@ export function MasterListWorkspaceClient() {
                           <UnknownCell
                             reason={item.financial_unknown_reason}
                             fallback="—"
+                            refreshFinancials={{ firmId: item.id }}
                           />
                         )}
                       </td>
