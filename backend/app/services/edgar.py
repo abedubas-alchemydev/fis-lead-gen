@@ -281,20 +281,24 @@ class EdgarService:
         headers = {
             "User-Agent": settings.sec_user_agent,
             "Accept": "application/zip,application/octet-stream;q=0.9,*/*;q=0.8",
-            # httpx auto-negotiates Accept-Encoding: gzip, deflate, br, zstd by default.
-            # SEC EDGAR's Cloudflare gateway responds with malformed compressed bodies
-            # that raise "Data-loss while decompressing corrupted data" on every request.
-            # Forcing identity bypasses compression entirely (same fix as services/finra.py).
-            # Critical for the bulk ZIP path because client.stream + aiter_bytes hits the
-            # decompression error per chunk, generating thousands of log lines.
+            # Identity is the right hint to send, but SEC EDGAR's Akamai POPs that
+            # serve GCP egress IPs ignore it and reply with Content-Encoding: gzip
+            # anyway (consumer-ISP IPs see no Content-Encoding — verified via curl).
+            # Keep the header for cases where Akamai does respect it.
             "Accept-Encoding": "identity",
         }
 
         async with httpx.AsyncClient(timeout=None, headers=headers, follow_redirects=True) as client:
             async with client.stream("GET", settings.sec_bulk_submissions_url) as response:
                 response.raise_for_status()
+                # aiter_raw, NOT aiter_bytes. The body is a .zip file (already
+                # application-layer compressed); whatever Content-Encoding header
+                # Akamai sets, we write the bytes verbatim and zipfile parses them
+                # correctly. aiter_bytes auto-decompresses based on Content-Encoding
+                # and surfaces ~1500 "Data-loss while decompressing corrupted data"
+                # errors per 1.5 GB download from GCP egress IPs (one per chunk).
                 with temp_path.open("wb") as handle:
-                    async for chunk in response.aiter_bytes(chunk_size=1024 * 1024):
+                    async for chunk in response.aiter_raw(chunk_size=1024 * 1024):
                         if chunk:
                             handle.write(chunk)
 
