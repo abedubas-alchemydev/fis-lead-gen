@@ -59,16 +59,18 @@ def test_bulk_zip_streaming_uses_aiter_raw_not_aiter_bytes() -> None:
     ``aiter_bytes`` will fail this test before it can ship.
     """
     source = inspect.getsource(edgar_module)
-    assert "aiter_raw" in source, (
-        "Bulk ZIP download must use response.aiter_raw to bypass httpx's "
+    # Match the actual call site (the `response.aiter_*(...)` line), not bare
+    # mentions in comments.
+    assert "response.aiter_raw(" in source, (
+        "Bulk ZIP download must use response.aiter_raw(...) to bypass httpx's "
         "auto-decompression. Akamai-from-GCP-egress sets Content-Encoding: "
         "gzip on the .zip body which causes aiter_bytes to fail per-chunk."
     )
-    # Defence-in-depth: assert aiter_bytes is NOT in the file (would mean a
-    # regression). If a legitimate use of aiter_bytes is added later for a
-    # different code path, update this test to assert per-block.
-    assert "aiter_bytes" not in source, (
-        "edgar.py uses aiter_bytes somewhere — that auto-decompresses based "
-        "on Content-Encoding. SEC EDGAR via GCP egress sends bogus gzip "
-        "headers; use aiter_raw instead."
+    # Defence-in-depth: assert no actual response.aiter_bytes(...) call exists
+    # (comments mentioning aiter_bytes for documentation are fine). A future
+    # PR that swaps the call back to aiter_bytes fails this test.
+    assert "response.aiter_bytes(" not in source, (
+        "edgar.py invokes response.aiter_bytes(...) somewhere — that auto-"
+        "decompresses based on Content-Encoding. SEC EDGAR via GCP egress "
+        "sends bogus gzip headers; use response.aiter_raw(...) instead."
     )
