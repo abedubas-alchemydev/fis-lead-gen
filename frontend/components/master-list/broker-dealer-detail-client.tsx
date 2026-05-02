@@ -162,6 +162,11 @@ export function BrokerDealerDetailClient({ brokerDealerId }: { brokerDealerId: s
   const [isEnriching, setIsEnriching] = useState(false);
   const [attemptedAutoEnrich, setAttemptedAutoEnrich] = useState(false);
   const [isHealthChecking, setIsHealthChecking] = useState(false);
+  // Bumped by RefreshFirmButton's onRefreshComplete to re-fire the
+  // profile-fetch useEffect after a refresh-all run completes. The page
+  // owns profile state via useState — router.refresh() alone won't update
+  // it, so we drive a manual refetch via this dep on loadProfile below.
+  const [profileRefreshKey, setProfileRefreshKey] = useState(0);
   const [healthCheckResult, setHealthCheckResult] = useState<string | null>(null);
   const [prevId, setPrevId] = useState<number | null>(null);
   const [nextId, setNextId] = useState<number | null>(null);
@@ -338,7 +343,7 @@ export function BrokerDealerDetailClient({ brokerDealerId }: { brokerDealerId: s
     return () => {
       active = false;
     };
-  }, [brokerDealerId]);
+  }, [brokerDealerId, profileRefreshKey]);
 
   async function runHealthCheck() {
     setIsHealthChecking(true);
@@ -490,7 +495,16 @@ export function BrokerDealerDetailClient({ brokerDealerId }: { brokerDealerId: s
               // sub-pipelines whose target fields are still missing, so
               // existing data is preserved. Per-(user, BD) cooldown on the
               // BE prevents rapid revisits from re-firing.
-              <RefreshFirmButton firmId={bd.id} autoFire />
+              //
+              // onRefreshComplete bumps profileRefreshKey, which is in the
+              // loadProfile useEffect deps — this re-fetches the profile
+              // in place when the run completes, so values update without
+              // a full page reload.
+              <RefreshFirmButton
+                firmId={bd.id}
+                autoFire
+                onRefreshComplete={() => setProfileRefreshKey((k) => k + 1)}
+              />
             ) : null}
           </div>
           <FirmWebsiteLink firmId={bd.id} firmName={bd.name} website={bd.website} />

@@ -89,12 +89,20 @@ interface RefreshFirmButtonProps {
   // refresh-alls. The BE's 30-second per-(user, BD) cooldown already
   // protects against rapid revisits to the same firm.
   autoFire?: boolean;
+  // Called after the refresh-all run reaches a terminal state OR when the
+  // BE returned status="skipped" (already complete). The parent should
+  // re-fetch its locally-cached profile/list state so the UI updates
+  // in place without a full page reload. router.refresh() alone won't
+  // re-trigger the client-side useEffect that owns the profile state on
+  // /master-list/{id}.
+  onRefreshComplete?: () => void;
 }
 
 export function RefreshFirmButton({
   firmId,
   compact = false,
   autoFire = false,
+  onRefreshComplete,
 }: RefreshFirmButtonProps) {
   const router = useRouter();
   const toast = useToast();
@@ -145,7 +153,12 @@ export function RefreshFirmButton({
     } else {
       toast.success(summary);
     }
+    // router.refresh() invalidates Next.js server-component caches but does
+    // NOT re-trigger client-side useEffects that own the firm-detail page
+    // profile state. onRefreshComplete is the parent's hook to re-fetch
+    // its local state in place.
     router.refresh();
+    onRefreshComplete?.();
     setIsRefreshing(false);
     firedRef.current = false;
   }
@@ -199,6 +212,7 @@ export function RefreshFirmButton({
       if (result.status === "skipped" || result.run_id === null) {
         // BE found nothing to do — already complete. No polling needed.
         toast.success(result.reason ?? "Already complete.");
+        onRefreshComplete?.();
         router.refresh();
         setIsRefreshing(false);
         firedRef.current = false;
