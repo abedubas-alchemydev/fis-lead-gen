@@ -589,6 +589,7 @@ export function BrokerDealerDetailClient({ brokerDealerId }: { brokerDealerId: s
                   <UnknownCell
                     reason={bd.financial_unknown_reason}
                     fallback="N/A"
+                    refreshFinancials={{ firmId: bd.id }}
                   />
                 )
               }
@@ -602,6 +603,7 @@ export function BrokerDealerDetailClient({ brokerDealerId }: { brokerDealerId: s
                   <UnknownCell
                     reason={bd.financial_unknown_reason}
                     fallback="N/A"
+                    refreshFinancials={{ firmId: bd.id }}
                   />
                 )
               }
@@ -615,6 +617,7 @@ export function BrokerDealerDetailClient({ brokerDealerId }: { brokerDealerId: s
                   <UnknownCell
                     reason={bd.financial_unknown_reason}
                     fallback="N/A"
+                    refreshFinancials={{ firmId: bd.id }}
                   />
                 )
               }

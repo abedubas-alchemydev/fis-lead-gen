@@ -290,3 +290,116 @@ export async function resolveWebsite(
     { method: "POST" }
   );
 }
+
+// ── Per-firm refresh-financials trigger + run polling ───────────────────
+// Pairs with the BE's per-firm on-demand financial pipeline trigger.
+// `refreshFinancials` returns 202 with { run_id, status, broker_dealer_id }
+// on first kick-off and 409 when a run is already in flight (the BE encodes
+// the existing run_id under `detail.run_id`). 409 is normalized into the
+// same success shape so callers always get a run_id to poll against.
+export type RefreshFinancialsResponse = {
+  run_id: number;
+  status: string;
+  broker_dealer_id: number;
+};
+
+export type PipelineRunStatus =
+  | "queued"
+  | "running"
+  | "completed"
+  | "completed_with_errors"
+  | "failed";
+
+export type PipelineRunDetail = {
+  run_id: number;
+  pipeline_name: string;
+  status: PipelineRunStatus;
+  total_items: number;
+  processed_items: number;
+  success_count: number;
+  failure_count: number;
+  notes: string | null;
+  started_at: string | null;
+  completed_at: string | null;
+};
+
+type ConflictDetail = {
+  run_id: number;
+  status: string;
+  broker_dealer_id: number;
+};
+
+function parseConflictDetail(detail: string): ConflictDetail | null {
+  // apiRequest only unwraps `detail` when it's a string. FastAPI emits the
+  // 409 body as `{"detail": {...}}` with detail as an object, so the raw
+  // JSON body is what lands here. Try the nested .detail path first, then
+  // fall back to the bare object shape just in case the BE flattens it.
+  try {
+    const parsed = JSON.parse(detail) as unknown;
+    const candidates: unknown[] = [];
+    if (parsed && typeof parsed === "object") {
+      candidates.push(parsed);
+      if (
+        "detail" in parsed &&
+        parsed !== null &&
+        typeof (parsed as { detail: unknown }).detail === "object"
+      ) {
+        candidates.push((parsed as { detail: unknown }).detail);
+      }
+    }
+    for (const candidate of candidates) {
+      if (
+        candidate &&
+        typeof candidate === "object" &&
+        "run_id" in candidate &&
+        typeof (candidate as { run_id: unknown }).run_id === "number" &&
+        "status" in candidate &&
+        typeof (candidate as { status: unknown }).status === "string" &&
+        "broker_dealer_id" in candidate &&
+        typeof (candidate as { broker_dealer_id: unknown }).broker_dealer_id ===
+          "number"
+      ) {
+        const obj = candidate as ConflictDetail;
+        return {
+          run_id: obj.run_id,
+          status: obj.status,
+          broker_dealer_id: obj.broker_dealer_id,
+        };
+      }
+    }
+  } catch {
+    // Non-JSON detail — fall through.
+  }
+  return null;
+}
+
+export async function refreshFinancials(
+  firmId: number
+): Promise<RefreshFinancialsResponse> {
+  try {
+    return await apiRequest<RefreshFinancialsResponse>(
+      `/api/v1/broker-dealers/${firmId}/refresh-financials`,
+      { method: "POST" }
+    );
+  } catch (err) {
+    if (err instanceof ApiError && err.status === 409) {
+      const conflict = parseConflictDetail(err.detail);
+      if (conflict) {
+        return {
+          run_id: conflict.run_id,
+          status: conflict.status,
+          broker_dealer_id: conflict.broker_dealer_id,
+        };
+      }
+    }
+    throw err;
+  }
+}
+
+export async function getPipelineRunStatus(
+  runId: number
+): Promise<PipelineRunDetail> {
+  return apiRequest<PipelineRunDetail>(`/api/v1/pipeline/run/${runId}`, {
+    method: "GET",
+  });
+}
