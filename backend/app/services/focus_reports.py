@@ -160,6 +160,107 @@ class FocusReportService:
             await self._mark_pipeline_run_failed(run_id, exc, len(target_broker_dealers))
             raise
 
+    async def load_financial_metrics_for_broker_dealer(
+        self,
+        bd_id: int,
+        *,
+        trigger_source: str = "manual_single",
+        pipeline_run_id: int,
+    ) -> int:
+        """Run the X-17A-5 → Gemini extraction for a single broker-dealer.
+
+        Used by ``POST /broker-dealers/{id}/refresh-financials`` to fill
+        in missing financial fields (``latest_net_capital``,
+        ``latest_excess_net_capital``, ``yoy_growth``, ``health_status``)
+        for a specific firm without running the full batch window.
+
+        The caller (the endpoint's background-task wrapper) creates the
+        ``PipelineRun`` row in ``status="queued"`` and passes its id in;
+        this method moves the run through ``running → completed`` (or
+        ``→ failed``) by reusing :meth:`_finalize_pipeline_run` and
+        :meth:`_mark_pipeline_run_failed`.
+
+        DELETE narrowing (``tuple_(bd_id, report_date) IN target_pairs``)
+        keeps OTHER firms' fiscal-year history untouched. The bare
+        ``DELETE FROM financial_metrics`` fallback used by the batch
+        path when ``limit`` is unset is intentionally not reachable here
+        — this method is single-firm only.
+
+        Returns the count of FinancialMetric rows persisted.
+        """
+        async with SessionLocal() as load_db:
+            broker_dealer = await load_db.get(BrokerDealer, bd_id)
+
+        if broker_dealer is None:
+            error = ValueError(f"Broker-dealer {bd_id} not found.")
+            await self._mark_pipeline_run_failed(pipeline_run_id, error, target_count=0)
+            raise error
+
+        async with SessionLocal() as run_db:
+            persisted_run = await run_db.get(PipelineRun, pipeline_run_id)
+            if persisted_run is None:
+                raise RuntimeError(
+                    f"Pipeline run {pipeline_run_id} could not be reloaded for single-firm extraction."
+                )
+            persisted_run.status = "running"
+            persisted_run.total_items = 1
+            persisted_run.trigger_source = trigger_source
+            persisted_run.notes = json.dumps(
+                {
+                    "bd_id": bd_id,
+                    "stage": "running",
+                    "provider": self._provider_descriptor(),
+                }
+            )
+            await run_db.commit()
+
+        try:
+            extraction = await self._extract_live_records_from_pdfs([broker_dealer])
+            records = extraction.records
+
+            async with SessionLocal() as write_db:
+                target_pairs = sorted({(record.bd_id, record.report_date) for record in records})
+                if target_pairs:
+                    await write_db.execute(
+                        delete(FinancialMetric).where(
+                            tuple_(FinancialMetric.bd_id, FinancialMetric.report_date).in_(target_pairs)
+                        )
+                    )
+                write_db.add_all(
+                    [
+                        FinancialMetric(
+                            bd_id=record.bd_id,
+                            report_date=record.report_date,
+                            net_capital=record.net_capital,
+                            excess_net_capital=record.excess_net_capital,
+                            total_assets=record.total_assets,
+                            required_min_capital=record.required_min_capital,
+                            source_filing_url=record.source_filing_url,
+                            extraction_status=record.extraction_status,
+                        )
+                        for record in records
+                    ]
+                )
+                await write_db.flush()
+                # Reload the BD inside this session so the rollup
+                # mutations track on a managed instance and commit
+                # together with the FinancialMetric inserts.
+                managed_bd = await write_db.get(BrokerDealer, bd_id)
+                if managed_bd is not None:
+                    await self._refresh_broker_dealer_rollups(write_db, [managed_bd])
+                await write_db.commit()
+
+                await self._finalize_pipeline_run(write_db, pipeline_run_id, extraction)
+            return len(records)
+        except Exception as exc:
+            logger.exception(
+                "Single-firm financial extraction failed for run %s (bd_id=%s)",
+                pipeline_run_id,
+                bd_id,
+            )
+            await self._mark_pipeline_run_failed(pipeline_run_id, exc, target_count=1)
+            raise
+
     async def _finalize_pipeline_run(
         self,
         write_db: AsyncSession,

@@ -81,6 +81,28 @@ class PipelineTriggerResponse(BaseModel):
     failure_count: int
 
 
+class PipelineRunStatusResponse(BaseModel):
+    """Lightweight per-run status used by the FE to poll a queued
+    PipelineRun (e.g. the per-firm ``refresh-financials`` background
+    task). Mirrors ``PipelineRunItem`` but exposes a polling-shaped
+    contract — distinct so it can grow polling-only fields (progress
+    percentages, ETA) without churning the trigger surface.
+    """
+
+    model_config = ConfigDict(from_attributes=True)
+
+    run_id: int
+    pipeline_name: str
+    status: str
+    total_items: int
+    processed_items: int
+    success_count: int
+    failure_count: int
+    notes: str | None
+    started_at: datetime
+    completed_at: datetime | None
+
+
 class ClearingProviderShare(BaseModel):
     model_config = ConfigDict(from_attributes=True)
 

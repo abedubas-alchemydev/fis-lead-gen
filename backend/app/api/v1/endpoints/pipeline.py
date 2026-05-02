@@ -14,6 +14,7 @@ from app.models.pipeline_run import PipelineRun
 from app.schemas.auth import AuthenticatedUser
 from app.schemas.pipeline import (
     CompetitorProvidersResponse,
+    PipelineRunStatusResponse,
     PipelineStatusResponse,
     PipelineTriggerResponse,
     SetFilesApiFlagRequest,
@@ -313,6 +314,43 @@ async def run_populate_all(
     )
     background_tasks.add_task(_run_populate_all_background, run.id, caller)
     return _trigger_response(run)
+
+
+@scheduled_router.get("/{run_id}", response_model=PipelineRunStatusResponse)
+async def get_pipeline_run_status(
+    run_id: int,
+    current_user: AuthenticatedUser = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db_session),
+) -> PipelineRunStatusResponse:
+    """Per-run status used by FE polling.
+
+    Returns the current state of any PipelineRun by id. Powered by the
+    same row that ``POST /broker-dealers/{id}/refresh-financials``
+    queues, so the FE can poll until ``status`` flips to ``completed``,
+    ``completed_with_errors``, or ``failed`` and then refetch the firm
+    detail to render the now-populated financial fields.
+
+    Auth: any authenticated user — the run row only exposes status
+    counters and notes, no broker-dealer PII or filing payloads.
+    """
+    run = await db.get(PipelineRun, run_id)
+    if run is None:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Pipeline run not found.",
+        )
+    return PipelineRunStatusResponse(
+        run_id=run.id,
+        pipeline_name=run.pipeline_name,
+        status=run.status,
+        total_items=run.total_items,
+        processed_items=run.processed_items,
+        success_count=run.success_count,
+        failure_count=run.failure_count,
+        notes=run.notes,
+        started_at=run.started_at,
+        completed_at=run.completed_at,
+    )
 
 
 @scheduled_router.post("/initial-load", response_model=PipelineTriggerResponse)
