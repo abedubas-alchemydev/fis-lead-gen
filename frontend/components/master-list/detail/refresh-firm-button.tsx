@@ -81,11 +81,20 @@ interface RefreshFirmButtonProps {
   // Smaller variant for inline placement inside a table row's leftmost
   // cell. Defaults to the larger detail-page variant.
   compact?: boolean;
+  // When true, programmatically triggers handleClick once on mount —
+  // equivalent to the user clicking immediately on visit. Used by the
+  // firm-detail page so visiting an incomplete firm auto-fills missing
+  // data without requiring a manual click. Master-list grid rows leave
+  // this false (default) so a list view doesn't fire 25 simultaneous
+  // refresh-alls. The BE's 30-second per-(user, BD) cooldown already
+  // protects against rapid revisits to the same firm.
+  autoFire?: boolean;
 }
 
 export function RefreshFirmButton({
   firmId,
   compact = false,
+  autoFire = false,
 }: RefreshFirmButtonProps) {
   const router = useRouter();
   const toast = useToast();
@@ -94,6 +103,7 @@ export function RefreshFirmButton({
   const timerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const cancelledRef = useRef(false);
   const slowToastFiredRef = useRef(false);
+  const autoFireTriggeredRef = useRef(false);
 
   useEffect(() => {
     return () => {
@@ -104,6 +114,18 @@ export function RefreshFirmButton({
       }
     };
   }, []);
+
+  // Auto-fire on mount when requested. autoFireTriggeredRef guards against
+  // StrictMode's dev double-invoke. firedRef inside handleClick is the
+  // post-fire guard for the click path.
+  useEffect(() => {
+    if (!autoFire || autoFireTriggeredRef.current) return;
+    autoFireTriggeredRef.current = true;
+    void handleClick();
+    // handleClick is stable within this component instance; lint exhaustive-deps
+    // would otherwise force us to memoize it (no win, just churn).
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [autoFire]);
 
   function handleTerminal(run: PipelineRunDetail) {
     const notes = parseNotes(run.notes);
