@@ -17,7 +17,7 @@ from __future__ import annotations
 
 from pathlib import Path
 from typing import Any
-from unittest.mock import patch
+from unittest.mock import AsyncMock, patch
 
 import httpx
 import respx
@@ -26,7 +26,12 @@ from app.services.edgar import EdgarService
 
 
 @respx.mock
-async def test_fetch_browse_records_sends_accept_encoding_identity() -> None:
+async def test_company_search_sends_accept_encoding_identity() -> None:
+    """``_fetch_via_company_search`` builds the first headers block.
+
+    Call it directly so we don't have to mock pagination thresholds or the
+    bulk-ZIP fallback that ``fetch_all_broker_dealers`` would chain into.
+    """
     captured: dict[str, Any] = {}
 
     def _capture(request: httpx.Request) -> httpx.Response:
@@ -42,12 +47,13 @@ async def test_fetch_browse_records_sends_accept_encoding_identity() -> None:
         mock_settings.edgar_target_sic_codes = "6199"
         mock_settings.sec_user_agent = "test-agent contact@example.com"
         mock_settings.sec_request_timeout_seconds = 30
+        mock_settings.sec_request_max_retries = 1
         mock_settings.edgar_rate_limit_per_second = 0
-        await EdgarService().fetch_browse_records(limit=1)
+        await EdgarService()._fetch_via_company_search(limit=1)
 
     assert "headers" in captured, "no outbound request was captured"
     assert captured["headers"].get("accept-encoding") == "identity", (
-        "fetch_browse_records must send Accept-Encoding: identity to bypass "
+        "_fetch_via_company_search must send Accept-Encoding: identity to bypass "
         "SEC EDGAR Cloudflare's broken compression; got "
         f"{captured['headers'].get('accept-encoding')!r}"
     )
@@ -55,6 +61,13 @@ async def test_fetch_browse_records_sends_accept_encoding_identity() -> None:
 
 @respx.mock
 async def test_fetch_records_for_sec_numbers_sends_accept_encoding_identity() -> None:
+    """``fetch_records_for_sec_numbers`` builds the second headers block when
+    a requested SEC number is not in the bulk-list cache and falls through to
+    the per-firm browse-edgar path.
+
+    Mock ``fetch_all_broker_dealers`` to return an empty bulk list so the
+    requested SEC number is "missing" and the per-firm path fires.
+    """
     captured: dict[str, Any] = {}
 
     def _capture(request: httpx.Request) -> httpx.Response:
@@ -70,13 +83,15 @@ async def test_fetch_records_for_sec_numbers_sends_accept_encoding_identity() ->
         mock_settings.sec_user_agent = "test-agent contact@example.com"
         mock_settings.sec_request_timeout_seconds = 30
         mock_settings.edgar_rate_limit_per_second = 0
-        mock_settings.sec_bulk_submissions_zip_path = "/tmp/sec/submissions.zip"
-        with patch.object(EdgarService, "_load_records_from_bulk_zip", return_value=[]):
+        with patch.object(
+            EdgarService, "fetch_all_broker_dealers", new=AsyncMock(return_value=[])
+        ):
             await EdgarService().fetch_records_for_sec_numbers(["8-12345"])
 
     assert "headers" in captured, "no outbound request was captured"
     assert captured["headers"].get("accept-encoding") == "identity", (
-        "fetch_records_for_sec_numbers must send Accept-Encoding: identity; got "
+        "fetch_records_for_sec_numbers per-firm path must send "
+        "Accept-Encoding: identity; got "
         f"{captured['headers'].get('accept-encoding')!r}"
     )
 
@@ -100,7 +115,9 @@ async def test_bulk_submissions_zip_download_sends_accept_encoding_identity(
     with patch("app.services.edgar.settings") as mock_settings:
         mock_settings.sec_user_agent = "test-agent contact@example.com"
         mock_settings.sec_bulk_submissions_zip_path = str(zip_target)
-        mock_settings.sec_bulk_submissions_url = "https://www.sec.gov/Archives/edgar/daily-index/bulkdata/submissions.zip"
+        mock_settings.sec_bulk_submissions_url = (
+            "https://www.sec.gov/Archives/edgar/daily-index/bulkdata/submissions.zip"
+        )
         await EdgarService()._ensure_bulk_submissions_zip(force_refresh=True)
 
     assert "headers" in captured, "no outbound request was captured"
