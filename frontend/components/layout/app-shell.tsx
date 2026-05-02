@@ -214,17 +214,23 @@ export function AppShell({
           {/* Brand */}
           <div className="mb-5 flex items-center gap-3 border-b border-[var(--border,rgba(30,64,175,0.1))] px-2.5 pb-6 pt-2">
             <div
-              className="grid h-9 w-9 place-items-center rounded-[10px] text-[16px] font-extrabold text-white shadow-[0_6px_20px_rgba(99,102,241,0.35)]"
-              style={{ background: "linear-gradient(135deg, #6366f1, #8b5cf6)" }}
+              className="grid h-9 w-9 place-items-center rounded-[10px] text-[18px] font-extrabold text-white shadow-[0_6px_20px_rgba(10,31,63,0.35)]"
+              style={{
+                background: "linear-gradient(135deg, #0A1F3F, #1B5E9E)",
+                fontFamily: "system-ui, -apple-system, BlinkMacSystemFont, 'Segoe UI', Inter, sans-serif",
+                letterSpacing: "-0.04em",
+                lineHeight: 1
+              }}
+              aria-hidden
             >
-              B
+              d
             </div>
             <div className="min-w-0">
               <div className="truncate text-[15px] font-bold tracking-[-0.01em] text-[var(--text,#0f172a)]">
-                Lead Engine
+                DOX
               </div>
               <div className="truncate text-[11px] uppercase tracking-[0.04em] text-[var(--text-muted,#94a3b8)]">
-                Client Clearing
+                Institutional Finance Intelligence
               </div>
             </div>
           </div>
@@ -269,7 +275,7 @@ export function AppShell({
                 {session.user.name ?? "Authenticated User"}
               </div>
               <div className="truncate text-[11px] text-[var(--text-muted,#94a3b8)]">
-                {displayRole} · FIS Clearing
+                {displayRole} · DOX Clearing
               </div>
             </div>
           </div>

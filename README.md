@@ -1,4 +1,4 @@
-# Client Clearing Lead Gen Engine
+# DOX — Institutional Finance Intelligence
 
 Broker-dealer intelligence platform for the clearing-services workflow described in the PRD and sprint plan.
 
