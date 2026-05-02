@@ -1,6 +1,14 @@
 "use client";
 
-import type { ReactNode } from "react";
+import {
+  useCallback,
+  useEffect,
+  useLayoutEffect,
+  useRef,
+  useState,
+  type ReactNode,
+} from "react";
+import { createPortal } from "react-dom";
 import { Info } from "lucide-react";
 
 import { unknownReasonShort } from "@/lib/format";
@@ -10,6 +18,15 @@ import type { UnknownReason } from "@/lib/types";
 // 240 chars keeps the tooltip readable inside a table cell without
 // pushing the layout. Anything longer is clipped with an ellipsis.
 const NOTE_TRUNCATE = 240;
+
+// Visual gap between the icon and the floating tooltip.
+const TOOLTIP_GAP = 8;
+// Minimum breathing room from the viewport edge so the tooltip never
+// kisses the browser chrome on small screens.
+const VIEWPORT_PADDING = 8;
+// Tooltip max width has to match the rendered class (max-w-xs ≈ 320px)
+// so the JS positioner clamps to the same box.
+const TOOLTIP_MAX_WIDTH = 320;
 
 interface UnknownCellProps {
   reason?: UnknownReason | null;
@@ -22,17 +39,89 @@ interface UnknownCellProps {
   compact?: boolean;
 }
 
+interface TooltipCoords {
+  top: number;
+  left: number;
+  placement: "top" | "bottom";
+}
+
 // Inline cell that explains why a master-list / firm-detail field is
-// "Unknown". When the BE supplies an `unknown_reason`, the cell renders
-// the fallback text plus a small ⓘ icon; on hover or keyboard focus the
-// categorized reason + (optionally) the BE's free-text note pops above
-// the icon. When `reason` is null/undefined the cell falls back to plain
-// text so the FE keeps working before cli01's BE contract ships.
+// "Unknown". The tooltip used to be a CSS-only group-hover sibling, but
+// the master-list table is wrapped in `overflow-hidden` + `overflow-x-auto`
+// containers that clipped the tooltip on rows near the top edge of the
+// table card. The portal-based approach renders the tooltip into
+// document.body, escapes every overflow context, and auto-flips below
+// the icon when there isn't room above.
 export function UnknownCell({
   reason,
   fallback = "Unknown",
   compact = false,
 }: UnknownCellProps) {
+  const buttonRef = useRef<HTMLButtonElement | null>(null);
+  const tooltipRef = useRef<HTMLDivElement | null>(null);
+  const [open, setOpen] = useState(false);
+  const [coords, setCoords] = useState<TooltipCoords | null>(null);
+  const [mounted, setMounted] = useState(false);
+
+  // createPortal needs document.body, which is undefined during SSR.
+  useEffect(() => {
+    setMounted(true);
+  }, []);
+
+  const updatePosition = useCallback(() => {
+    const button = buttonRef.current;
+    if (!button) return;
+    const buttonRect = button.getBoundingClientRect();
+    const tooltipRect = tooltipRef.current?.getBoundingClientRect();
+    const tooltipHeight = tooltipRect?.height ?? 80;
+    const tooltipWidth = Math.min(
+      tooltipRect?.width ?? TOOLTIP_MAX_WIDTH,
+      TOOLTIP_MAX_WIDTH,
+    );
+
+    const spaceAbove = buttonRect.top;
+    const spaceBelow = window.innerHeight - buttonRect.bottom;
+    const placement: "top" | "bottom" =
+      spaceAbove >= tooltipHeight + TOOLTIP_GAP + VIEWPORT_PADDING ||
+      spaceAbove >= spaceBelow
+        ? "top"
+        : "bottom";
+
+    const top =
+      placement === "top"
+        ? buttonRect.top - tooltipHeight - TOOLTIP_GAP
+        : buttonRect.bottom + TOOLTIP_GAP;
+
+    const idealLeft = buttonRect.left + buttonRect.width / 2 - tooltipWidth / 2;
+    const left = Math.max(
+      VIEWPORT_PADDING,
+      Math.min(idealLeft, window.innerWidth - tooltipWidth - VIEWPORT_PADDING),
+    );
+
+    setCoords({ top, left, placement });
+  }, []);
+
+  // Re-measure synchronously after the tooltip mounts so the first paint
+  // already reflects the correct placement (no flicker).
+  useLayoutEffect(() => {
+    if (!open) return;
+    updatePosition();
+  }, [open, updatePosition]);
+
+  // Keep the tooltip pinned to the icon while the user scrolls or resizes
+  // — the icon lives inside an overflow-x-auto table that frequently
+  // moves under the cursor.
+  useEffect(() => {
+    if (!open) return;
+    const handler = () => updatePosition();
+    window.addEventListener("scroll", handler, true);
+    window.addEventListener("resize", handler);
+    return () => {
+      window.removeEventListener("scroll", handler, true);
+      window.removeEventListener("resize", handler);
+    };
+  }, [open, updatePosition]);
+
   if (!reason) {
     return (
       <span className="text-[var(--text-muted,#94a3b8)]">{fallback}</span>
@@ -56,38 +145,53 @@ export function UnknownCell({
 
   const iconSize = compact ? "h-3 w-3" : "h-3.5 w-3.5";
 
+  const tooltipNode =
+    open && mounted && coords
+      ? createPortal(
+          <div
+            ref={tooltipRef}
+            role="tooltip"
+            style={{
+              position: "fixed",
+              top: coords.top,
+              left: coords.left,
+              maxWidth: TOOLTIP_MAX_WIDTH,
+              zIndex: 9999,
+            }}
+            className="pointer-events-none w-max rounded-lg border border-[var(--border,rgba(30,64,175,0.1))] bg-[var(--surface,#ffffff)] px-3 py-2 text-left text-[12px] leading-5 text-[var(--text,#0f172a)] shadow-[0_10px_28px_rgba(15,23,42,0.18)]"
+          >
+            <span className="block font-semibold">{shortLabel}</span>
+            {triggerField ? (
+              <span className="mt-1 block text-[11px] font-medium text-[var(--text-dim,#475569)]">
+                Missing field: <span className="font-mono">{triggerField}</span>
+              </span>
+            ) : null}
+            {note ? (
+              <span className="mt-1 block text-[11px] text-[var(--text-dim,#475569)]">
+                {note}
+              </span>
+            ) : null}
+          </div>,
+          document.body,
+        )
+      : null;
+
   return (
-    <span className="group relative inline-flex items-center gap-1 text-[var(--text-muted,#94a3b8)]">
+    <span className="relative inline-flex items-center gap-1 text-[var(--text-muted,#94a3b8)]">
       {fallback}
       <button
+        ref={buttonRef}
         type="button"
         aria-label={`Why is this Unknown? ${shortLabel}`}
+        onMouseEnter={() => setOpen(true)}
+        onMouseLeave={() => setOpen(false)}
+        onFocus={() => setOpen(true)}
+        onBlur={() => setOpen(false)}
         className="inline-flex cursor-help items-center rounded-full p-0.5 text-[var(--text-muted,#94a3b8)] outline-none transition hover:text-[var(--text-dim,#475569)] focus-visible:ring-2 focus-visible:ring-[var(--accent,#6366f1)]"
       >
         <Info className={`${iconSize} opacity-70`} strokeWidth={2} aria-hidden />
       </button>
-      {/*
-        Self-contained CSS-driven tooltip — no shadcn / radix in this
-        repo, and the spec forbids adding a new tooltip library or
-        touching components/ui. group-hover and group-focus-within
-        cover mouse + keyboard without React state.
-      */}
-      <span
-        role="tooltip"
-        className="pointer-events-none absolute bottom-full left-1/2 z-50 mb-2 hidden w-max max-w-xs -translate-x-1/2 rounded-lg border border-[var(--border,rgba(30,64,175,0.1))] bg-[var(--surface,#ffffff)] px-3 py-2 text-left text-[12px] leading-5 text-[var(--text,#0f172a)] shadow-[0_10px_28px_rgba(15,23,42,0.18)] group-hover:block group-focus-within:block"
-      >
-        <span className="block font-semibold">{shortLabel}</span>
-        {triggerField ? (
-          <span className="mt-1 block text-[11px] font-medium text-[var(--text-dim,#475569)]">
-            Missing field: <span className="font-mono">{triggerField}</span>
-          </span>
-        ) : null}
-        {note ? (
-          <span className="mt-1 block text-[11px] text-[var(--text-dim,#475569)]">
-            {note}
-          </span>
-        ) : null}
-      </span>
+      {tooltipNode}
     </span>
   );
 }
