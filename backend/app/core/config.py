@@ -23,7 +23,7 @@ load_dotenv(BACKEND_ENV_PATH, override=True)
 class Settings(BaseSettings):
     model_config = SettingsConfigDict(extra="ignore")
 
-    app_name: str = "Client Clearing Lead Gen Engine API"
+    app_name: str = "DOX API"
     environment: str = "development"
     api_v1_prefix: str = "/api/v1"
     database_url: str = "postgresql+asyncpg://postgres:postgres@localhost:5432/deshorn"

@@ -2,6 +2,7 @@ import Link from "next/link";
 import { redirect } from "next/navigation";
 import { Activity, BarChart3, Lock, Shield, Target, Zap } from "lucide-react";
 
+import { BrandMark } from "@/components/brand/brand-mark";
 import { getOptionalSession } from "@/lib/auth-server";
 
 export default async function HomePage() {
@@ -14,10 +15,8 @@ export default async function HomePage() {
       <nav className="animate-fade-in fixed inset-x-0 top-0 z-50 border-b border-white/60 bg-white/70 backdrop-blur-xl">
         <div className="mx-auto flex max-w-7xl items-center justify-between px-6 py-4">
           <div className="flex items-center gap-3">
-            <div className="flex h-9 w-9 items-center justify-center rounded-xl bg-navy text-white">
-              <Target className="h-4.5 w-4.5" />
-            </div>
-            <span className="text-sm font-semibold tracking-tight text-navy">Lead Gen Engine</span>
+            <BrandMark size={36} />
+            <span className="text-sm font-semibold tracking-tight text-navy">DOX</span>
           </div>
           <div className="flex items-center gap-3">
             <Link
@@ -105,7 +104,7 @@ export default async function HomePage() {
                   <div className="mb-6 flex items-center justify-between">
                     <div>
                       <p className="text-[10px] uppercase tracking-[0.3em] text-white/50">Live Platform</p>
-                      <p className="mt-1 text-sm font-semibold text-white">Lead Intelligence Workspace</p>
+                      <p className="mt-1 text-sm font-semibold text-white">DOX Intelligence Workspace</p>
                     </div>
                     <div className="h-2 w-2 rounded-full bg-success animate-pulse" />
                   </div>
@@ -235,7 +234,7 @@ export default async function HomePage() {
               </span>
             </h2>
             <p className="relative mx-auto mt-4 max-w-lg text-base text-white/70">
-              FIS closed a $22 million deal through similar intelligence.
+              DOX has surfaced eight-figure clearing opportunities through similar intelligence.
               Every clearing lead starts with a signal you can see first.
             </p>
             <div className="relative mt-10 flex flex-wrap items-center justify-center gap-4">
@@ -260,10 +259,8 @@ export default async function HomePage() {
       <footer className="border-t border-slate-200/60 py-10">
         <div className="mx-auto flex max-w-7xl flex-col items-center gap-4 px-6 sm:flex-row sm:justify-between">
           <div className="flex items-center gap-2">
-            <div className="flex h-7 w-7 items-center justify-center rounded-lg bg-navy text-white">
-              <Target className="h-3.5 w-3.5" />
-            </div>
-            <span className="text-xs font-semibold text-navy">Client Clearing Lead Gen Engine</span>
+            <BrandMark size={28} />
+            <span className="text-xs font-semibold text-navy">DOX — Institutional Finance Intelligence</span>
           </div>
           <p className="text-xs text-slate-400">&copy; {new Date().getFullYear()} Alchemy Dev. All rights reserved. Confidential.</p>
         </div>

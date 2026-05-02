@@ -27,7 +27,7 @@ function getTransporter(): Transporter {
 }
 
 const fromAddress = process.env.EMAIL_FROM ?? "noreply@alchemydev.io";
-const appName = "Client Clearing Lead Gen Engine";
+const appName = "DOX — Institutional Finance Intelligence";
 
 // ─── Shared enterprise email wrapper ────────────────────────────────
 function buildHtml({
@@ -99,7 +99,7 @@ export async function sendPasswordResetEmail({
   url: string;
 }) {
   const html = buildHtml({
-    preheader: "Reset your password for the Lead Gen Engine",
+    preheader: "Reset your password for DOX",
     heading: "Reset your password",
     body: `
       <p>Hi ${user.name || "there"},</p>
@@ -196,14 +196,14 @@ export async function sendAdminApprovalRequestEmail({
     ctaUrl: settingsUrl,
     ctaLabel: "Open admin panel",
     footer:
-      "You are receiving this because you hold the admin role in the Lead Gen Engine.",
+      "You are receiving this because you hold the admin role in DOX.",
   });
 
   try {
     await getTransporter().sendMail({
       from: fromAddress,
       to: adminEmails.join(", "),
-      subject: "New fis-lead-gen signup pending approval",
+      subject: "New DOX signup pending approval",
       html,
     });
   } catch (error: unknown) {
@@ -230,7 +230,7 @@ export async function sendApprovalNotificationEmail({
     heading: "You're approved",
     body: `
       <p>Hi ${user.name || "there"},</p>
-      <p>Good news — an admin has approved your account. You can now sign in to the Lead Gen Engine.</p>
+      <p>Good news — an admin has approved your account. You can now sign in to DOX.</p>
       <p>If you haven't already verified your email, please click the verification link from the earlier email we sent you.</p>
     `,
     ctaUrl: loginUrl,
@@ -243,7 +243,7 @@ export async function sendApprovalNotificationEmail({
     await getTransporter().sendMail({
       from: fromAddress,
       to: user.email,
-      subject: "Your fis-lead-gen account has been approved",
+      subject: "Your DOX account has been approved",
       html,
     });
   } catch (error: unknown) {
