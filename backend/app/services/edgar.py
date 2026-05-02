@@ -76,6 +76,11 @@ class EdgarService:
         headers = {
             "User-Agent": settings.sec_user_agent,
             "Accept": "text/html,application/xhtml+xml",
+            # httpx auto-negotiates Accept-Encoding: gzip, deflate, br, zstd by default.
+            # SEC EDGAR's Cloudflare gateway responds with malformed compressed bodies
+            # that raise "Data-loss while decompressing corrupted data" on every request.
+            # Forcing identity bypasses compression entirely (same fix as services/finra.py).
+            "Accept-Encoding": "identity",
         }
         all_records: list[EdgarBrokerDealerRecord] = []
         seen_ciks: set[str] = set()
@@ -241,6 +246,11 @@ class EdgarService:
         headers = {
             "User-Agent": settings.sec_user_agent,
             "Accept": "text/html,application/xhtml+xml",
+            # httpx auto-negotiates Accept-Encoding: gzip, deflate, br, zstd by default.
+            # SEC EDGAR's Cloudflare gateway responds with malformed compressed bodies
+            # that raise "Data-loss while decompressing corrupted data" on every request.
+            # Forcing identity bypasses compression entirely (same fix as services/finra.py).
+            "Accept-Encoding": "identity",
         }
         async with httpx.AsyncClient(
             timeout=settings.sec_request_timeout_seconds,
@@ -271,6 +281,13 @@ class EdgarService:
         headers = {
             "User-Agent": settings.sec_user_agent,
             "Accept": "application/zip,application/octet-stream;q=0.9,*/*;q=0.8",
+            # httpx auto-negotiates Accept-Encoding: gzip, deflate, br, zstd by default.
+            # SEC EDGAR's Cloudflare gateway responds with malformed compressed bodies
+            # that raise "Data-loss while decompressing corrupted data" on every request.
+            # Forcing identity bypasses compression entirely (same fix as services/finra.py).
+            # Critical for the bulk ZIP path because client.stream + aiter_bytes hits the
+            # decompression error per chunk, generating thousands of log lines.
+            "Accept-Encoding": "identity",
         }
 
         async with httpx.AsyncClient(timeout=None, headers=headers, follow_redirects=True) as client:
