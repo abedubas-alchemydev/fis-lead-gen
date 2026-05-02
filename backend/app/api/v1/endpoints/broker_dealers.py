@@ -3,7 +3,7 @@ from __future__ import annotations
 import base64
 import json
 import logging
-from datetime import date, datetime, time, timezone
+from datetime import date, datetime, time, timedelta, timezone
 
 from fastapi import APIRouter, BackgroundTasks, Body, Depends, HTTPException, Query, status
 from fastapi.responses import Response
@@ -28,6 +28,7 @@ from app.schemas.broker_dealer import (
     FilingHistoryItem,
     FinancialMetricItem,
     FinancialMetricsResponse,
+    RefreshAllResponse,
     RefreshFinancialsResponse,
     RegistrationComplianceSummary,
     ResolveWebsiteResponse,
@@ -67,6 +68,13 @@ from app.services.apollo import ApolloClient
 from app.services.focus_ceo_extraction import FocusCeoExtractionService
 from app.services.focus_reports import FocusReportService
 from app.services.hunter import HunterClient
+from app.services.refresh_all_orchestrator import (
+    REFRESH_ALL_PIPELINE_NAME,
+    decide_pipelines,
+    has_executive_contacts,
+    required_provider_keys,
+    run_refresh_all,
+)
 from app.services.serpapi import SerpAPIClient
 from app.services.service_models import FinraBrokerDealerRecord
 from app.services.website_resolver import resolve_website
@@ -1098,4 +1106,189 @@ async def refresh_broker_dealer_financials(
         run_id=pipeline_run.id,
         status=pipeline_run.status,
         broker_dealer_id=broker_dealer_id,
+    )
+
+
+# ───────────────────────────────────────────────────────────────────────────
+# Per-firm refresh-all orchestrator
+# ───────────────────────────────────────────────────────────────────────────
+
+_REFRESH_ALL_COOLDOWN_SECONDS = 30
+
+
+async def _run_refresh_all_background(
+    parent_run_id: int,
+    bd_id: int,
+    trigger_source: str,
+    pipelines_to_run: tuple[str, ...],
+    pipelines_to_skip: tuple[str, ...],
+) -> None:
+    """Background task: drive the parent PipelineRow through queued →
+    running → terminal by firing each child sub-pipeline in parallel.
+    Wraps :func:`run_refresh_all` in a defensive try so the BackgroundTask
+    never bubbles an exception (the orchestrator already marks the parent
+    failed on internal errors)."""
+
+    try:
+        await run_refresh_all(
+            parent_run_id,
+            bd_id,
+            trigger_source=trigger_source,
+            pipelines_to_run=pipelines_to_run,
+            pipelines_to_skip=pipelines_to_skip,
+        )
+    except Exception:
+        logger.exception(
+            "refresh-all background task failed (parent_run_id=%s bd_id=%s)",
+            parent_run_id,
+            bd_id,
+        )
+
+
+@router.post(
+    "/{broker_dealer_id}/refresh-all",
+    response_model=RefreshAllResponse,
+)
+async def refresh_broker_dealer_all(
+    broker_dealer_id: int,
+    background_tasks: BackgroundTasks,
+    response: Response,
+    current_user: AuthenticatedUser = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db_session),
+) -> RefreshAllResponse:
+    """One button per row → fan out to whatever sub-pipelines this firm
+    actually needs.
+
+    Inspects the BD record at request start and runs only the
+    sub-pipelines whose target fields are still missing. If every gate
+    fails, returns 200 + ``status="skipped"`` immediately with no
+    PipelineRun row and zero provider cost.
+
+    Auth: any authenticated user. Each click costs at most ~2 Gemini +
+    ~1 Apollo + ~1 Hunter calls (less when gates close); a 30-second
+    per-(user, BD) cooldown blocks rage-clicks.
+
+    Async: when at least one gate is open, returns 202 with the parent
+    ``run_id`` and schedules a FastAPI BackgroundTask that drives the
+    selected children in parallel. The FE polls
+    ``GET /api/v1/pipeline/run/{run_id}`` until the parent's status
+    flips to ``completed`` / ``completed_with_errors`` / ``failed``.
+    """
+    broker_dealer = await repository.get_broker_dealer(db, broker_dealer_id)
+    if broker_dealer is None:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Broker-dealer not found.",
+        )
+
+    has_contacts = await has_executive_contacts(db, broker_dealer_id)
+    decision = decide_pipelines(broker_dealer, has_contacts=has_contacts)
+
+    # Skipped short-circuit: every gate closed. No row, no cost.
+    if not decision.to_run:
+        return RefreshAllResponse(
+            run_id=None,
+            status="skipped",
+            broker_dealer_id=broker_dealer_id,
+            reason="Already complete.",
+        )
+
+    # 503 if any pipeline we're about to fire requires a provider key
+    # that isn't configured.
+    missing_keys = required_provider_keys(decision.to_run)
+    if missing_keys:
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail=f"Provider not configured: {', '.join(missing_keys)}.",
+        )
+
+    bd_marker = f'"bd_id": {broker_dealer_id}'
+
+    # 409 — an in-flight refresh-all already exists for this firm.
+    in_flight_stmt = (
+        select(PipelineRun)
+        .where(PipelineRun.pipeline_name == REFRESH_ALL_PIPELINE_NAME)
+        .where(PipelineRun.status.in_(("queued", "running")))
+        .where(PipelineRun.notes.ilike(f"%{bd_marker}%"))
+        .order_by(PipelineRun.id.desc())
+        .limit(1)
+    )
+    in_flight = (await db.execute(in_flight_stmt)).scalar_one_or_none()
+    if in_flight is not None:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail={
+                "message": "A refresh-all run is already in flight for this firm.",
+                "run_id": in_flight.id,
+                "status": in_flight.status,
+                "broker_dealer_id": broker_dealer_id,
+            },
+        )
+
+    # 429 — per-(user, BD) cooldown so rage-clicks don't burn provider
+    # credits twice. Window matches the typical short-pipeline runtime
+    # (~5-15s) plus margin; long financial extractions are protected by
+    # the in-flight 409 above.
+    cooldown_cutoff = datetime.now(timezone.utc) - timedelta(seconds=_REFRESH_ALL_COOLDOWN_SECONDS)
+    user_marker = f"manual_single:{current_user.email}"
+    cooldown_stmt = (
+        select(PipelineRun)
+        .where(PipelineRun.pipeline_name == REFRESH_ALL_PIPELINE_NAME)
+        .where(PipelineRun.trigger_source == user_marker)
+        .where(PipelineRun.notes.ilike(f"%{bd_marker}%"))
+        .where(PipelineRun.started_at >= cooldown_cutoff)
+        .order_by(PipelineRun.id.desc())
+        .limit(1)
+    )
+    recent = (await db.execute(cooldown_stmt)).scalar_one_or_none()
+    if recent is not None:
+        # Compute Retry-After from the row's started_at + 30s window.
+        # HTTPException's headers kwarg is what survives back to the
+        # client — mutating ``response.headers`` here gets discarded
+        # because FastAPI builds a fresh Response from the exception.
+        elapsed = (datetime.now(timezone.utc) - recent.started_at).total_seconds()
+        retry_after = max(1, int(_REFRESH_ALL_COOLDOWN_SECONDS - elapsed))
+        raise HTTPException(
+            status_code=status.HTTP_429_TOO_MANY_REQUESTS,
+            detail=f"Refresh-all cooldown active. Try again in {retry_after}s.",
+            headers={"Retry-After": str(retry_after)},
+        )
+
+    trigger_source = user_marker
+    parent_run = PipelineRun(
+        pipeline_name=REFRESH_ALL_PIPELINE_NAME,
+        trigger_source=trigger_source,
+        status="queued",
+        total_items=len(decision.to_run),
+        processed_items=0,
+        success_count=0,
+        failure_count=0,
+        notes=json.dumps(
+            {
+                "bd_id": broker_dealer_id,
+                "stage": "queued",
+                "ran": list(decision.to_run),
+                "skipped": list(decision.to_skip),
+            }
+        ),
+    )
+    db.add(parent_run)
+    await db.commit()
+    await db.refresh(parent_run)
+
+    background_tasks.add_task(
+        _run_refresh_all_background,
+        parent_run.id,
+        broker_dealer_id,
+        trigger_source,
+        decision.to_run,
+        decision.to_skip,
+    )
+
+    response.status_code = status.HTTP_202_ACCEPTED
+    return RefreshAllResponse(
+        run_id=parent_run.id,
+        status=parent_run.status,
+        broker_dealer_id=broker_dealer_id,
+        reason=None,
     )
