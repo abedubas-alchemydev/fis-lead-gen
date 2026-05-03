@@ -13,7 +13,7 @@ class PipelineRun(Base):
 
     id: Mapped[int] = mapped_column(primary_key=True, autoincrement=True)
     pipeline_name: Mapped[str] = mapped_column(String(120), nullable=False, index=True)
-    trigger_source: Mapped[str] = mapped_column(String(64), default="manual", nullable=False)
+    trigger_source: Mapped[str] = mapped_column(String(255), default="manual", nullable=False)
     status: Mapped[str] = mapped_column(String(32), default="pending", nullable=False, index=True)
     total_items: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
     processed_items: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
