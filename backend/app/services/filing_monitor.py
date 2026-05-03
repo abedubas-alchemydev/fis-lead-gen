@@ -138,7 +138,16 @@ class FilingMonitorService:
                     if not isinstance(form, str) or not isinstance(filing_date_raw, str):
                         continue
                     normalized_form = form.strip().upper().replace("FORM ", "")
-                    if normalized_form not in {"BD", "17A-11", "17A11", "17-A"}:
+                    # Broker-dealer EDGAR submissions carry X-17A-5 (annual
+                    # audited financial report). Form BD registrations and
+                    # 17a-11 deficiency notices live in FINRA Web CRD, not
+                    # EDGAR, so the previous BD/17A-11 filter never matched
+                    # any row across 100+ monitor runs (filing_alerts stayed
+                    # empty). X-17A-5 with a 30-day cutoff surfaces the
+                    # "annual audit just landed → fresh financial data
+                    # available for re-extraction" signal that IS in this
+                    # feed.
+                    if normalized_form != "X-17A-5":
                         continue
 
                     try:
@@ -146,15 +155,14 @@ class FilingMonitorService:
                     except ValueError:
                         continue
 
-                    if normalized_form == "BD" and filed_date < cutoff_30_days:
+                    if filed_date < cutoff_30_days:
                         continue
 
-                    priority = "critical" if "17" in normalized_form else "high"
-                    canonical_form = "Form 17a-11" if "17" in normalized_form else "Form BD"
+                    canonical_form = "Form X-17A-5"
+                    priority = "low"
                     summary = (
-                        "Capital deficiency notice detected; route firm to the Alternative List for review."
-                        if canonical_form == "Form 17a-11"
-                        else "New broker-dealer registration detected in the SEC filing monitor."
+                        "Annual audited financial report (X-17A-5) filed — "
+                        "fresh financial data available for re-extraction."
                     )
                     filed_at = datetime.combine(filed_date, time(hour=12), tzinfo=timezone.utc)
                     alerts.append(
@@ -169,11 +177,10 @@ class FilingMonitorService:
                         )
                     )
 
-        form_bd_count = sum(1 for a in alerts if a.form_type == "Form BD")
-        deficiency_count = sum(1 for a in alerts if a.form_type == "Form 17a-11")
+        x17a5_count = sum(1 for a in alerts if a.form_type == "Form X-17A-5")
         logger.info(
-            "Filing monitor complete: %d/%d scanned, %d alerts (%d Form BD, %d Form 17a-11), %d skipped, %d errors.",
-            total_bds - skipped, total_bds, len(alerts), form_bd_count, deficiency_count, skipped, errors,
+            "Filing monitor complete: %d/%d scanned, %d alerts (%d Form X-17A-5), %d skipped, %d errors.",
+            total_bds - skipped, total_bds, len(alerts), x17a5_count, skipped, errors,
         )
 
         alerts.sort(key=lambda item: item.filed_at, reverse=True)

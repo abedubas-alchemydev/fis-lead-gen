@@ -44,7 +44,11 @@ from app.services.gemini_responses import (
 )
 from app.services.pdf_downloader import PdfDownloaderService, pdf_tempdir
 from app.services.pdf_text_extractor import extract_from_pdf
-from app.services.scoring import calculate_yoy_growth, classify_health_status
+from app.services.scoring import (
+    calculate_total_assets_yoy,
+    calculate_yoy_growth,
+    classify_health_status,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -817,6 +821,7 @@ class FocusCeoExtractionService:
             float(latest.total_assets) if latest.total_assets is not None else None
         )
         broker_dealer.yoy_growth = yoy_growth
+        broker_dealer.total_assets_yoy = calculate_total_assets_yoy(metrics)
         broker_dealer.health_status = classify_health_status(
             latest_net_capital=float(latest.net_capital),
             required_min_capital=(

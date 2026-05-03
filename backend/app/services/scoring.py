@@ -92,6 +92,32 @@ def calculate_yoy_growth(metrics: Sequence[FinancialMetric]) -> float | None:
     return round(((latest - previous) / previous) * 100, 2)
 
 
+def calculate_total_assets_yoy(metrics: Sequence[FinancialMetric]) -> float | None:
+    """YoY growth percentage on total_assets between the two most recent
+    metrics that both have a non-NULL total_assets value.
+
+    Mirrors :func:`calculate_yoy_growth` (which uses net_capital) so the
+    BD-row rollups in services/focus_reports.py and
+    services/focus_ceo_extraction.py can populate both
+    ``broker_dealers.yoy_growth`` (net capital) and
+    ``broker_dealers.total_assets_yoy`` (total assets) together. Returns
+    None when fewer than two metrics carry total_assets, or when the
+    previous value is zero (would divide by zero).
+    """
+    valid = [m for m in metrics if m.total_assets is not None]
+    if len(valid) < 2:
+        return None
+
+    ordered = sorted(valid, key=lambda metric: metric.report_date, reverse=True)
+    latest = float(ordered[0].total_assets)
+    previous = float(ordered[1].total_assets)
+
+    if previous == 0:
+        return None
+
+    return round(((latest - previous) / previous) * 100, 2)
+
+
 def classify_health_status(
     *,
     latest_net_capital: float | None,
