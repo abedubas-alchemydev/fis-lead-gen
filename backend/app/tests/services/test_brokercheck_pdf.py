@@ -259,61 +259,96 @@ def test_parse_types_of_business_other_stops_at_next_section_header() -> None:
     )
 
 
-def test_parse_registration_date_finds_in_firm_profile() -> None:
-    sections = {
-        "Firm Profile": (
-            "Firm Profile\n"
-            "Initial date firm became registered with the SEC: 03/15/2018\n"
-            "Other field: foo"
-        )
-    }
-    assert _parse_registration_date(sections, "") == date(2018, 3, 15)
+def test_parse_registration_date_matches_sec_table_row() -> None:
+    """Real Form BD PDFs surface the SEC registration date as a row in
+    the Federal Regulator Status table: ``SEC Approved MM/DD/YYYY``.
+    Verified against the Schwab fixture (CRD 5393 -> 06/13/1971)."""
+    full_text = (
+        "Federal Regulator Status Date Effective\n"
+        "SEC Approved 06/13/1971\n"
+        "Some Other Regulator Approved 10/13/1970"
+    )
+    assert _parse_registration_date({}, full_text) == date(1971, 6, 13)
+
+
+def test_parse_registration_date_handles_active_status_variant() -> None:
+    full_text = "SEC Active 03/15/2018"
+    assert _parse_registration_date({}, full_text) == date(2018, 3, 15)
 
 
 def test_parse_registration_date_falls_back_to_full_text() -> None:
-    full_text = (
-        "Some preamble text.\n"
-        "Initial Registration Date: 11/01/2017\n"
-        "More text below."
-    )
+    """When pdfplumber's section splitter doesn't carve out the
+    Registrations section cleanly, the regex must still find the row in
+    the full document text."""
+    full_text = "Lots of preamble.\nSEC Approved 11/01/2017\nMore text."
     assert _parse_registration_date({}, full_text) == date(2017, 11, 1)
 
 
 def test_parse_registration_date_returns_none_when_missing() -> None:
-    assert _parse_registration_date({}, "no date here") is None
+    """A firm that was deregistered (e.g. fixture firm_10997_rhsecurities)
+    has no SEC row in the Registrations table, so the column stays NULL."""
+    assert _parse_registration_date({}, "no SEC row here") is None
 
 
-def test_parse_formation_date_finds_in_firm_profile() -> None:
-    sections = {
-        "Firm Profile": (
-            "Firm Profile\n"
-            "Date of Formation: 11/01/2017"
-        )
-    }
-    assert _parse_formation_date(sections, "") == date(2017, 11, 1)
+def test_parse_registration_date_does_not_match_other_regulators() -> None:
+    """Other regulators (FINRA, Cboe, MEMX, Nasdaq) also appear in the
+    Federal Regulator table with the same shape. The regex must anchor
+    on 'SEC' specifically — or every firm would inherit FINRA's date."""
+    full_text = "FINRA Approved 10/13/1970"
+    assert _parse_registration_date({}, full_text) is None
 
 
-def test_parse_formation_date_handles_inception_label_variant() -> None:
-    sections = {
-        "Firm Profile": (
-            "Firm Profile\n"
-            "Date of Inception: January 5, 2010"
-        )
-    }
-    assert _parse_formation_date(sections, "") == date(2010, 1, 5)
+def test_parse_formation_date_matches_cover_page_prose() -> None:
+    """Real Form BD PDFs put formation date in cover-page prose:
+    'This firm was formed in <state> on MM/DD/YYYY.' Verified against
+    Schwab (formed in California 04/01/1971) and R H Securities."""
+    full_text = "This firm was formed in California on 04/01/1971."
+    assert _parse_formation_date({}, full_text) == date(1971, 4, 1)
+
+
+def test_parse_formation_date_tolerates_collapsed_whitespace() -> None:
+    """pdfplumber renders kerned legacy-PDF text as zero-width gaps,
+    producing 'ThisfirmwasformedinCaliforniaon5/12/1982' for terminated
+    firms (firm_10997_rhsecurities fixture). The regex uses ``\\s*`` so
+    it matches both spaced and collapsed forms."""
+    full_text = "ThisfirmwasformedinCaliforniaon5/12/1982."
+    assert _parse_formation_date({}, full_text) == date(1982, 5, 12)
+
+
+def test_parse_formation_date_handles_multi_word_jurisdiction() -> None:
+    full_text = "This firm was formed in U.S. Virgin Islands on 06/15/2010."
+    assert _parse_formation_date({}, full_text) == date(2010, 6, 15)
 
 
 def test_parse_formation_date_returns_none_when_missing() -> None:
-    assert _parse_formation_date({}, "no date here") is None
+    assert _parse_formation_date({}, "no formation prose here") is None
 
 
-def test_parse_formation_date_does_not_match_registration_label() -> None:
-    """Make sure 'Initial Registration Date' doesn't satisfy the formation
-    regex — they should be distinct fields."""
-    sections = {
-        "Firm Profile": "Initial Registration Date: 03/15/2018"
-    }
-    assert _parse_formation_date(sections, "") is None
+def test_parse_formation_date_does_not_match_sec_registration() -> None:
+    """Make sure 'SEC Approved' rows don't accidentally satisfy the
+    formation regex — registration_date and formation_date are distinct."""
+    full_text = "SEC Approved 06/13/1971"
+    assert _parse_formation_date({}, full_text) is None
+
+
+# Integration test: run the parser end-to-end on the real Schwab PDF
+# fixture and verify the dates come back as expected.
+
+def test_parser_extracts_dates_from_modern_firm() -> None:
+    detail = _parse_form_bd_pdf("5393", _fixture_bytes("firm_5393_schwab.pdf"))
+    assert detail.registration_date == date(1971, 6, 13)
+    assert detail.formation_date == date(1971, 4, 1)
+
+
+def test_parser_extracts_formation_date_from_terminated_firm() -> None:
+    """The R H Securities fixture is a terminated firm whose pdfplumber
+    text is space-collapsed. registration_date stays None (no SEC row,
+    they deregistered), but formation_date should still parse."""
+    detail = _parse_form_bd_pdf(
+        "10997", _fixture_bytes("firm_10997_rhsecurities.pdf")
+    )
+    assert detail.formation_date == date(1982, 5, 12)
+    assert detail.registration_date is None
 
 
 def test_form_bd_detail_defaults_keep_old_constructors_working() -> None:
