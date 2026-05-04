@@ -38,6 +38,7 @@ __all__ = [
     "PipelineRun",
     "ScoringSetting",
     "UserVisit",
+    "VaultFolder",
     "Verification",
     "VerificationRun",
 ]

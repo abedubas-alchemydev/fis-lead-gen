@@ -410,3 +410,37 @@ export type FocusCeoExtractionResponse = {
   extraction_status: string;
   extraction_notes: string | null;
 };
+
+// ── Vault folders + Outreach drafts (MVP) ─────────────────────────────────
+// Mirrors backend/app/schemas/vault.py. Each folder is a named service
+// (e.g. "Custody") plus a freeform description used by the Outreach modal
+// to compose a tailored cold email via Gemini Flash. Draft-only — there is
+// no send path yet.
+export type VaultFolder = {
+  id: number;
+  name: string;
+  description: string;
+  created_at: string;
+  updated_at: string;
+};
+
+export type VaultFolderCreate = {
+  name: string;
+  description: string;
+};
+
+export type VaultFolderUpdate = {
+  name?: string;
+  description?: string;
+};
+
+export type OutreachDraftRequest = {
+  broker_dealer_id: number;
+  contact_id: number;
+  folder_id: number;
+};
+
+export type OutreachDraft = {
+  subject: string;
+  body: string;
+};

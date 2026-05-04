@@ -99,9 +99,14 @@ import type {
   PaginatedFavoriteListItems
 } from "@/types/favorite-list";
 import type {
+  OutreachDraft,
+  OutreachDraftRequest,
   PipelineRunItem,
   PipelineStatusResponse,
   PipelineTriggerResponse,
+  VaultFolder,
+  VaultFolderCreate,
+  VaultFolderUpdate,
   WipeBdDataResponse
 } from "@/lib/types";
 
@@ -418,5 +423,49 @@ export async function getPipelineRunStatus(
 ): Promise<PipelineRunDetail> {
   return apiRequest<PipelineRunDetail>(`/api/v1/pipeline/run/${runId}`, {
     method: "GET",
+  });
+}
+
+// ── Vault folders + Outreach drafts (MVP) ─────────────────────────────────
+// Backs the /vault folder-CRUD UI and the Outreach modal on
+// /master-list/{id}. Folders are per-user (the BE filters on the session
+// user); the Outreach endpoint validates the (folder, BD, contact) triple
+// before calling Gemini Flash.
+
+export async function listVaultFolders(): Promise<VaultFolder[]> {
+  return apiRequest<VaultFolder[]>("/api/v1/vault/folders");
+}
+
+export async function createVaultFolder(
+  payload: VaultFolderCreate
+): Promise<VaultFolder> {
+  return apiRequest<VaultFolder>("/api/v1/vault/folders", {
+    method: "POST",
+    body: JSON.stringify(payload)
+  });
+}
+
+export async function updateVaultFolder(
+  folderId: number,
+  payload: VaultFolderUpdate
+): Promise<VaultFolder> {
+  return apiRequest<VaultFolder>(`/api/v1/vault/folders/${folderId}`, {
+    method: "PUT",
+    body: JSON.stringify(payload)
+  });
+}
+
+export async function deleteVaultFolder(folderId: number): Promise<void> {
+  await apiRequest<void>(`/api/v1/vault/folders/${folderId}`, {
+    method: "DELETE"
+  });
+}
+
+export async function generateOutreachDraft(
+  payload: OutreachDraftRequest
+): Promise<OutreachDraft> {
+  return apiRequest<OutreachDraft>("/api/v1/outreach/draft", {
+    method: "POST",
+    body: JSON.stringify(payload)
   });
 }
