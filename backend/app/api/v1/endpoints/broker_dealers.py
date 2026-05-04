@@ -849,6 +849,15 @@ async def trigger_health_check(
             if enriched_record.website and enriched_record.website != broker_dealer.website:
                 broker_dealer.website = enriched_record.website
                 changes.append("website")
+            if enriched_record.registration_date and enriched_record.registration_date != broker_dealer.registration_date:
+                broker_dealer.registration_date = enriched_record.registration_date
+                changes.append("registration_date")
+            if enriched_record.formation_date and enriched_record.formation_date != broker_dealer.formation_date:
+                broker_dealer.formation_date = enriched_record.formation_date
+                changes.append("formation_date")
+            if enriched_record.types_of_business_other and enriched_record.types_of_business_other != broker_dealer.types_of_business_other:
+                broker_dealer.types_of_business_other = enriched_record.types_of_business_other
+                changes.append("types_of_business_other")
 
     # Re-apply classification logic
     from app.services.classification import determine_clearing_classification, classify_niche_restricted

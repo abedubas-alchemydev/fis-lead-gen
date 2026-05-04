@@ -39,6 +39,7 @@ import io
 import logging
 import re
 from dataclasses import dataclass
+from datetime import date, datetime
 from typing import Optional
 
 import pdfplumber
@@ -125,6 +126,11 @@ class FormBdDetail:
     the Form BD Detailed Report PDF doesn't carry the firm's web address,
     only IAPD references for regulatory disclosures. We pluck it
     opportunistically on the off chance a firm filed it.
+
+    ``types_of_business_other``, ``registration_date``, and ``formation_date``
+    were added 2026-05-04 to fill three previously-empty UI sections on the
+    firm-detail page. Each defaults to None so pre-existing call sites that
+    construct ``FormBdDetail`` without these fields keep working.
     """
 
     crd: str
@@ -132,6 +138,9 @@ class FormBdDetail:
     executive_officers: list[dict[str, str]]
     firm_operations_text: Optional[str]
     web_address: Optional[str]
+    types_of_business_other: Optional[str] = None
+    registration_date: Optional[date] = None
+    formation_date: Optional[date] = None
 
 
 async def fetch_form_bd_detail(crd: str) -> Optional[FormBdDetail]:
@@ -166,6 +175,11 @@ def _parse_form_bd_pdf(crd: str, pdf_bytes: bytes) -> FormBdDetail:
         ),
         firm_operations_text=_parse_firm_operations(sections),
         web_address=_parse_web_address(full_text),
+        types_of_business_other=_parse_types_of_business_other(
+            sections.get("Other Types of Business", "")
+        ),
+        registration_date=_parse_registration_date(sections, full_text),
+        formation_date=_parse_formation_date(sections, full_text),
     )
 
 
@@ -433,6 +447,136 @@ def _parse_web_address(full_text: str) -> Optional[str]:
     if not re.match(r"^(?:https?://|[\w\-]+\.)", candidate):
         return None
     return candidate
+
+
+# ---------------------------------------------------------------------------
+# Other Types of Business — free-text "Other - Describe" body
+# ---------------------------------------------------------------------------
+
+# Section headers that may appear immediately after the "Other Types of
+# Business" body and which we must NOT capture as part of its text.
+_OTHER_TYPES_TERMINATORS = {
+    "Clearing Arrangements",
+    "Introducing Arrangements",
+    "Industry Arrangements",
+    "Disclosure Events",
+    "Firm Operations",
+    "Registrations",
+}
+
+
+def _parse_types_of_business_other(section_text: str) -> Optional[str]:
+    """Extract the free-text "Other - Describe" body from the section.
+
+    Item 12B on Form BD lets a firm describe a business type that isn't
+    in the standard list. The Detailed Report PDF surfaces it under the
+    "Other Types of Business" header. Returns None for the
+    "Information not available" boilerplate or empty bodies.
+    """
+    if not section_text or _INFO_NOT_AVAILABLE.search(section_text):
+        return None
+    body = re.sub(
+        r"^\s*Other Types of Business\s*\n?",
+        "",
+        section_text,
+        count=1,
+        flags=re.IGNORECASE,
+    ).strip()
+    if not body:
+        return None
+    lines: list[str] = []
+    for line in body.splitlines():
+        ln = line.strip()
+        if not ln:
+            continue
+        if ln in _OTHER_TYPES_TERMINATORS:
+            break
+        if ln.startswith("©") or ln.startswith("www.finra.org"):
+            continue
+        lines.append(ln)
+    if not lines:
+        return None
+    return " ".join(lines)
+
+
+# ---------------------------------------------------------------------------
+# Registration & formation dates (Firm Profile cover-page fields)
+# ---------------------------------------------------------------------------
+
+# Date format on Form BD: MM/DD/YYYY (most common) or "Month DD, YYYY".
+_DATE_VALUE = r"(\d{1,2}/\d{1,2}/\d{4}|[A-Z][a-z]+\s+\d{1,2},?\s+\d{4})"
+
+_DATE_LABEL_REGISTRATION = re.compile(
+    r"(?im)"
+    r"(?:Initial\s+date\s+firm\s+became\s+registered\s+with\s+the\s+SEC"
+    r"|Initial\s+Registration\s+Date"
+    r"|SEC\s+Registration\s+Date"
+    r"|Registration\s+Date)"
+    r"\s*[:\-]?\s*" + _DATE_VALUE
+)
+
+_DATE_LABEL_FORMATION = re.compile(
+    r"(?im)"
+    r"(?:Date\s+of\s+Formation"
+    r"|Date\s+Firm\s+Formed"
+    r"|Date\s+Formed"
+    r"|Date\s+of\s+Inception"
+    r"|Inception\s+Date)"
+    r"\s*[:\-]?\s*" + _DATE_VALUE
+)
+
+
+def _parse_us_date(value: str) -> Optional[date]:
+    """Parse a Form-BD-shaped date string into a ``date``.
+
+    Tries MM/DD/YYYY then "Month DD, YYYY" / "Mon DD, YYYY". Returns None
+    when the string doesn't match any known shape.
+    """
+    s = value.strip().rstrip(".,;")
+    if not s:
+        return None
+    for fmt in ("%m/%d/%Y", "%B %d, %Y", "%B %d %Y", "%b %d, %Y", "%b %d %Y"):
+        try:
+            return datetime.strptime(s, fmt).date()
+        except ValueError:
+            continue
+    return None
+
+
+def _parse_registration_date(
+    sections: dict[str, str], full_text: str
+) -> Optional[date]:
+    """Find the firm's initial SEC registration date.
+
+    Looks first inside the "Firm Profile" section (where the cover-page
+    fields land after pdfplumber's text extraction), then falls back to
+    the full document text in case the section splitter dropped it.
+    """
+    for source in (sections.get("Firm Profile", ""), full_text):
+        if not source:
+            continue
+        m = _DATE_LABEL_REGISTRATION.search(source)
+        if m:
+            parsed = _parse_us_date(m.group(1))
+            if parsed is not None:
+                return parsed
+    return None
+
+
+def _parse_formation_date(
+    sections: dict[str, str], full_text: str
+) -> Optional[date]:
+    """Find the firm's legal date of formation. Same lookup shape as
+    :func:`_parse_registration_date`."""
+    for source in (sections.get("Firm Profile", ""), full_text):
+        if not source:
+            continue
+        m = _DATE_LABEL_FORMATION.search(source)
+        if m:
+            parsed = _parse_us_date(m.group(1))
+            if parsed is not None:
+                return parsed
+    return None
 
 
 __all__ = [
