@@ -15,6 +15,9 @@ from app.models.introducing_arrangement import IntroducingArrangement
 from app.models.pipeline_run import PipelineRun
 from app.models.scoring_setting import ScoringSetting
 from app.models.user_visit import UserVisit
+from app.models.vault_folder import VaultFolder
+from app.models.vault_folder_chunk import VaultFolderChunk
+from app.models.vault_folder_file import VaultFolderFile
 from app.models.verification_run import VerificationRun
 
 __all__ = [
@@ -39,6 +42,8 @@ __all__ = [
     "ScoringSetting",
     "UserVisit",
     "VaultFolder",
+    "VaultFolderChunk",
+    "VaultFolderFile",
     "Verification",
     "VerificationRun",
 ]
