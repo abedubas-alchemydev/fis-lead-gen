@@ -15,6 +15,7 @@ import type { VaultFolder, VaultFolderFile } from "@/lib/types";
 
 import { VaultFileRow } from "./vault-file-row";
 import { VaultFileUploader } from "./vault-file-uploader";
+import { VaultInstructionsEditor } from "./vault-instructions-editor";
 
 // Detail panel for a single Vault service. Three editable surfaces:
 // the description, the per-service outreach instructions (Deshorn's ask),
@@ -297,22 +298,11 @@ function FolderEditor({
             characters
           </span>
         </label>
-        <label className="block text-xs font-medium uppercase tracking-[0.18em] text-slate-500">
-          Outreach instructions
-          <textarea
-            value={instructions}
-            onChange={(event) => setInstructions(event.target.value)}
-            maxLength={INSTRUCTIONS_MAX}
-            rows={4}
-            placeholder='e.g. "Keep emails under 100 words. Always mention 24-hour turnaround. Tone: formal, never casual."'
-            className="mt-2 block w-full rounded-xl border border-slate-200 bg-white px-3 py-2 text-sm leading-6 text-navy outline-none transition focus:border-blue focus:ring-2 focus:ring-blue/20"
-          />
-          <span className="mt-1 block text-[11px] text-slate-400">
-            Permanent prompt guidance — the AI follows this on every draft for
-            this service. {instructions.length.toLocaleString()} /{" "}
-            {INSTRUCTIONS_MAX.toLocaleString()} characters.
-          </span>
-        </label>
+        <VaultInstructionsEditor
+          value={instructions}
+          onChange={setInstructions}
+          maxLength={INSTRUCTIONS_MAX}
+        />
       </div>
 
       {error ? (
