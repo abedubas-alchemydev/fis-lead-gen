@@ -58,3 +58,8 @@ python-docx>=1.1.2
 python-pptx>=1.0.2
 openpyxl>=3.1.5
 striprtf>=0.0.27
+# python-multipart is required by FastAPI for File(...) / UploadFile in the
+# vault_files upload endpoint. Without it, the app import itself crashes on
+# route registration — which breaks every test that touches app.main, even
+# ones unrelated to file uploads.
+python-multipart>=0.0.20
