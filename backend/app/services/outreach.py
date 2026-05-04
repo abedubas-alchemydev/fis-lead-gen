@@ -31,6 +31,15 @@ _MAX_RETRIES = 2
 _TIMEOUT_SECONDS = 30.0
 _DESCRIPTION_BUDGET = 8_000
 _FIRM_OPS_BUDGET = 2_000
+# Sum cap on retrieved-chunk text injected into the prompt. Each chunk
+# averages ~500 tokens; 5 chunks × 500 = ~2,500 tokens of context, well
+# under Gemini Flash's effective input limit while leaving headroom for
+# instructions + firm/contact/service blocks.
+_RETRIEVED_CHUNKS_BUDGET = 12_000
+# Per-service ``instructions`` field cap mirrors the schema's max_length
+# of 10_000 — quoted again here so a client bypassing the schema can't
+# blow out the prompt size.
+_INSTRUCTIONS_BUDGET = 10_000
 
 
 class OutreachConfigurationError(RuntimeError):
@@ -63,10 +72,19 @@ class ContactContext:
 
 @dataclass(frozen=True)
 class ServiceContext:
-    """Subset of vault_folder fields the LLM is expected to sell."""
+    """Subset of vault_folder fields the LLM is expected to sell.
+
+    ``instructions`` is the per-service permanent prompt guidance
+    (Deshorn's 2026-05-04 ask) — empty string means "no extra rules".
+    ``retrieved_chunks`` are top-K excerpts from the user's attached
+    files (RAG); empty tuple means description-only generation, which
+    is exactly what the original Outreach MVP did.
+    """
 
     name: str
     description: str
+    instructions: str = ""
+    retrieved_chunks: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -97,6 +115,27 @@ def _build_prompt(
         else "Their current clearing partner is unknown."
     )
 
+    instructions = (service.instructions or "").strip()[:_INSTRUCTIONS_BUDGET]
+    instructions_block = (
+        f"\n── User-supplied instructions for THIS service (must follow exactly) ──\n{instructions}\n"
+        if instructions
+        else ""
+    )
+
+    retrieved = list(service.retrieved_chunks or ())
+    if retrieved:
+        joined = "\n\n--- excerpt boundary ---\n\n".join(
+            chunk.strip() for chunk in retrieved if chunk and chunk.strip()
+        )
+        joined = joined[:_RETRIEVED_CHUNKS_BUDGET]
+        retrieved_block = (
+            "\n── Reference excerpts from the user's attached materials "
+            "(use them as factual ground truth — do NOT make claims that aren't here) ──\n"
+            f"{joined}\n"
+        )
+    else:
+        retrieved_block = ""
+
     return (
         "You are an experienced clearing-and-custody business-development representative writing "
         "a cold email on behalf of the user. The user's firm offers a service described below; "
@@ -115,7 +154,9 @@ def _build_prompt(
         f"Firm operations text (raw, possibly noisy): {firm_ops}\n\n"
         "── Service the user is pitching ──\n"
         f"Service name: {service.name}\n"
-        f"Description: {description}\n\n"
+        f"Description: {description}\n"
+        f"{instructions_block}"
+        f"{retrieved_block}\n"
         "Return a single JSON object with exactly two string fields: \"subject\" and \"body\". "
         "The body must use \"\\n\\n\" between paragraphs and end with a sign-off line."
     )

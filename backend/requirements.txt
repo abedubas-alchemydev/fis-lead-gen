@@ -41,3 +41,25 @@ py3-validate-email==1.0.5.post1
 # The TheHarvester provider reports "binary not installed" cleanly when the CLI
 # is absent from PATH, so the rest of the discovery pipeline keeps working.
 # Install out-of-band (apt/pipx/Docker) if theHarvester output is needed.
+
+# ── Vault RAG (2026-05-05) ─────────────────────────────────────────────────
+# Files attached to vault folders live in GCS (bucket per env, see
+# plans/vault-rag-ops-2026-05-04.md). google-cloud-storage handles
+# upload/download/signed-URL via the runtime SA on Cloud Run; ADC for local.
+google-cloud-storage>=2.18.0
+# pgvector Python bindings — exposes the Vector SQLAlchemy column type for
+# vault_folder_chunk.embedding (768-dim). Server-side extension is created
+# by Alembic migration 20260505_0028.
+pgvector>=0.3.0
+# Multi-MIME text extractors for the Vault uploader. python-docx / python-pptx
+# / openpyxl are mutually independent — each MIME path imports only what it
+# needs. striprtf is a pure-Python RTF parser, no native deps.
+python-docx>=1.1.2
+python-pptx>=1.0.2
+openpyxl>=3.1.5
+striprtf>=0.0.27
+# python-multipart is required by FastAPI for File(...) / UploadFile in the
+# vault_files upload endpoint. Without it, the app import itself crashes on
+# route registration — which breaks every test that touches app.main, even
+# ones unrelated to file uploads.
+python-multipart>=0.0.20

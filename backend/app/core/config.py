@@ -147,6 +147,13 @@ class Settings(BaseSettings):
     smtp_verify_from_address: str = "verify@email-extractor.local"
     smtp_verify_helo_host: str = "email-extractor.local"
 
+    # Vault file-upload + RAG (2026-05-05). The bucket is per-environment
+    # (``fis-vault-staging`` vs ``fis-vault-prod``); see
+    # ``plans/vault-rag-ops-2026-05-04.md`` for provisioning. Empty string
+    # = feature disabled — services/vault_storage.py raises VaultStorageError
+    # when an upload is attempted, which the endpoint maps to 503.
+    vault_storage_bucket: str = ""
+
     # Cloud Scheduler / OIDC dual-auth for Tier 2 pipeline trigger endpoints.
     # ``cloud_scheduler_sa_email`` is the only ``email`` claim accepted on the
     # OIDC path of ``_ensure_admin_or_scheduler_sa``. Defaults to the runtime

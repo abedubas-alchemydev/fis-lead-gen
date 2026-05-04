@@ -49,6 +49,14 @@ class VaultFolder(Base):
     description: Mapped[str] = mapped_column(
         Text, nullable=False, server_default=""
     )
+    # Permanent per-service prompt guidance — fed verbatim to Gemini on
+    # every Outreach draft generated against this folder. Examples:
+    # "Keep emails under 80 words", "Always mention 24h turnaround",
+    # "Tone: formal, never casual". Added 2026-05-05 (Deshorn's ask
+    # via Slack 2026-05-04). Per-draft override is a v2 concern.
+    outreach_instructions: Mapped[str] = mapped_column(
+        Text, nullable=False, server_default=""
+    )
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True),
         nullable=False,
