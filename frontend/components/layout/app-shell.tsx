@@ -4,9 +4,10 @@ import Link from "next/link";
 import type { Route } from "next";
 import type { ReactNode } from "react";
 import { useEffect, useState } from "react";
-import { usePathname } from "next/navigation";
+import { usePathname, useRouter } from "next/navigation";
 
 import { apiRequest } from "@/lib/api";
+import { authClient } from "@/lib/auth-client";
 
 // ─── Sidebar nav icons — verbatim SVG paths from dashboard-redesign.html ──
 // Each accepts className + strokeWidth so the SidebarNavLink can size + stroke
@@ -171,7 +172,24 @@ export function AppShell({
   session: { user: SessionUser };
 }) {
   const pathname = usePathname();
+  const router = useRouter();
   const [stats, setStats] = useState<StatsLite | null>(null);
+  const [signingOut, setSigningOut] = useState(false);
+
+  async function handleSignOut() {
+    if (signingOut) return;
+    setSigningOut(true);
+    try {
+      await authClient.signOut();
+    } catch {
+      // BetterAuth swallows errors with a thrown Response in some
+      // codepaths. Either way, the cookie is cleared client-side and
+      // the next gated page hit will redirect to /login. So we still
+      // navigate even if signOut() throws.
+    }
+    router.push("/login");
+    router.refresh();
+  }
 
   // One-shot stats fetch for sidebar badges. Silent on failure — badges
   // simply don't render, which is the graceful degraded state.
@@ -262,7 +280,8 @@ export function AppShell({
           </nav>
 
           {/* User card — pinned to bottom of sidebar. Matches mockup
-              .user-card exactly: avatar + user-name + user-role only. */}
+              .user-card exactly: avatar + user-name + user-role, plus a
+              sign-out icon button on the right (added 2026-05-04). */}
           <div className="mt-auto flex items-center gap-3 rounded-[14px] border border-[var(--border,rgba(30,64,175,0.1))] bg-[var(--surface-2,#f1f6fd)] p-3.5">
             <div
               className="grid h-[38px] w-[38px] shrink-0 place-items-center rounded-full text-[14px] font-bold text-white"
@@ -270,7 +289,7 @@ export function AppShell({
             >
               {initials}
             </div>
-            <div className="min-w-0">
+            <div className="min-w-0 flex-1">
               <div className="truncate text-[13px] font-semibold text-[var(--text,#0f172a)]">
                 {session.user.name ?? "Authenticated User"}
               </div>
@@ -278,6 +297,30 @@ export function AppShell({
                 {displayRole} · DOX Clearing
               </div>
             </div>
+            <button
+              type="button"
+              onClick={handleSignOut}
+              disabled={signingOut}
+              aria-label="Sign out"
+              title="Sign out"
+              className="grid h-9 w-9 shrink-0 place-items-center rounded-[10px] border border-[var(--border,rgba(30,64,175,0.1))] bg-white text-[var(--text-muted,#94a3b8)] transition hover:bg-[#f1f6fd] hover:text-[var(--text,#0f172a)] disabled:cursor-not-allowed disabled:opacity-50"
+            >
+              {/* Door-with-arrow "sign out" icon. Matches the bell/search
+                  16-18px stroke-2 family used elsewhere in the topbar. */}
+              <svg
+                width="16"
+                height="16"
+                fill="none"
+                stroke="currentColor"
+                strokeWidth={2}
+                viewBox="0 0 24 24"
+                aria-hidden
+              >
+                <path d="M9 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h4" />
+                <polyline points="16 17 21 12 16 7" />
+                <line x1="21" y1="12" x2="9" y2="12" />
+              </svg>
+            </button>
           </div>
         </aside>
 
