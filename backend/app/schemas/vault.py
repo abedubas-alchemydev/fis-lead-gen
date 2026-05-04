@@ -15,6 +15,10 @@ class VaultFolderResponse(BaseModel):
     id: int
     name: str
     description: str
+    # Permanent per-service prompt guidance — fed verbatim into Gemini on
+    # every Outreach draft for this folder. Default '' means "no extra
+    # guidance, prompt the AI with description + retrieved files only".
+    outreach_instructions: str = ""
     created_at: datetime
     updated_at: datetime
 
@@ -22,11 +26,13 @@ class VaultFolderResponse(BaseModel):
 class VaultFolderCreate(BaseModel):
     name: str = Field(..., min_length=1, max_length=255)
     description: str = Field(default="", max_length=20_000)
+    outreach_instructions: str = Field(default="", max_length=10_000)
 
 
 class VaultFolderUpdate(BaseModel):
     name: str | None = Field(default=None, min_length=1, max_length=255)
     description: str | None = Field(default=None, max_length=20_000)
+    outreach_instructions: str | None = Field(default=None, max_length=10_000)
 
 
 class OutreachDraftRequest(BaseModel):

@@ -30,6 +30,7 @@ from app.services.outreach import (
     ServiceContext,
     generate_outreach_draft,
 )
+from app.services.vault_retrieval import retrieve_chunks
 
 logger = logging.getLogger(__name__)
 
@@ -82,9 +83,46 @@ async def create_outreach_draft(
         title=contact.title,
         email=contact.email,
     )
+    # Build a retrieval query from the firm + contact context so RAG
+    # surfaces material relevant to *this specific draft*, not just the
+    # service description in the abstract. Mixing in firm-side text
+    # (city, current clearing partner, firm operations) produces
+    # query embeddings that lean toward chunks discussing similar firms,
+    # similar clearing setups, etc.
+    query_parts = [
+        broker_dealer.name,
+        contact.title or "",
+        broker_dealer.city or "",
+        broker_dealer.state or "",
+        broker_dealer.current_clearing_partner or "",
+        (broker_dealer.firm_operations_text or "")[:500],
+        folder.name,
+    ]
+    retrieval_query = " ".join(part for part in query_parts if part)
+
+    retrieved: tuple[str, ...] = ()
+    if folder.description or retrieval_query:
+        try:
+            chunks = await retrieve_chunks(
+                folder_id=folder.id, query=retrieval_query, db=db
+            )
+            retrieved = tuple(chunk.text for chunk in chunks)
+        except Exception as exc:  # noqa: BLE001
+            # Retrieval failure shouldn't break the draft path — fall
+            # back to description + instructions only and log it. The
+            # endpoint stays responsive even if pgvector / embeddings
+            # are temporarily down.
+            logger.warning(
+                "outreach: chunk retrieval failed for folder %s: %s",
+                folder.id,
+                exc,
+            )
+
     service_ctx = ServiceContext(
         name=folder.name,
         description=folder.description,
+        instructions=folder.outreach_instructions or "",
+        retrieved_chunks=retrieved,
     )
 
     try:
