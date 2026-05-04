@@ -780,6 +780,8 @@ export function BrokerDealerDetailClient({ brokerDealerId }: { brokerDealerId: s
                   title={owner.title}
                   extra={owner.ownership_pct ? `Ownership: ${owner.ownership_pct}` : null}
                   contact={matchForFinra(owner.name)}
+                  brokerDealerId={bd.id}
+                  brokerDealerName={bd.name}
                 />
               ))}
             </PeopleSubGroup>
@@ -793,6 +795,8 @@ export function BrokerDealerDetailClient({ brokerDealerId }: { brokerDealerId: s
                   name={officer.name}
                   title={officer.title}
                   contact={matchForFinra(officer.name)}
+                  brokerDealerId={bd.id}
+                  brokerDealerName={bd.name}
                 />
               ))}
             </PeopleSubGroup>
@@ -807,6 +811,8 @@ export function BrokerDealerDetailClient({ brokerDealerId }: { brokerDealerId: s
                   title={contact.title}
                   contact={contact}
                   source={`${contact.source} · ${formatDate(contact.enriched_at)}`}
+                  brokerDealerId={bd.id}
+                  brokerDealerName={bd.name}
                 />
               ))}
             </PeopleSubGroup>
@@ -1106,19 +1112,25 @@ function PeopleSubGroup({ title, children }: { title: string; children: React.Re
 }
 
 // Single owner / officer / contact row used by every PeopleSubGroup. Keeps
-// the Apollo source + enriched_at footer when present.
+// the Apollo source + enriched_at footer when present. brokerDealerId +
+// brokerDealerName are forwarded to ContactRow → OutreachButton so the
+// cold-email modal knows which firm the recipient belongs to.
 function PersonCard({
   name,
   title,
   extra,
   contact,
   source,
+  brokerDealerId,
+  brokerDealerName,
 }: {
   name: string;
   title: string;
   extra?: string | null;
   contact?: ExecutiveContactItem;
   source?: string;
+  brokerDealerId: number;
+  brokerDealerName: string;
 }) {
   return (
     <div className="rounded-2xl bg-[var(--surface-2,#f1f6fd)] px-4 py-3 text-sm text-[var(--text-dim,#475569)]">
@@ -1128,7 +1140,13 @@ function PersonCard({
       </p>
       {title ? <p className="mt-1">{title}</p> : null}
       {extra ? <p className="mt-1 text-xs text-[var(--text-muted,#94a3b8)]">{extra}</p> : null}
-      {contact ? <ContactRow contact={contact} /> : null}
+      {contact ? (
+        <ContactRow
+          brokerDealerId={brokerDealerId}
+          brokerDealerName={brokerDealerName}
+          contact={contact}
+        />
+      ) : null}
       {source ? (
         <p className="mt-1 text-[11px] uppercase tracking-[0.08em] text-[var(--text-muted,#94a3b8)]">
           {source}

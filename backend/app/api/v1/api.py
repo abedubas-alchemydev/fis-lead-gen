@@ -9,9 +9,11 @@ from app.api.v1.endpoints import (
     favorite_lists,
     favorites,
     health,
+    outreach,
     pipeline,
     settings,
     stats,
+    vault,
     visits,
 )
 
@@ -30,3 +32,5 @@ api_router.include_router(email_extractor.router, tags=["email-extractor"])
 api_router.include_router(favorites.router, tags=["favorites"])
 api_router.include_router(favorite_lists.router, tags=["favorite-lists"])
 api_router.include_router(visits.router, tags=["visits"])
+api_router.include_router(vault.router, tags=["vault"])
+api_router.include_router(outreach.router, tags=["outreach"])
