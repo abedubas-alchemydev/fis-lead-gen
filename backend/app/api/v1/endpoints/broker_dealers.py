@@ -28,6 +28,7 @@ from app.schemas.broker_dealer import (
     FilingHistoryItem,
     FinancialMetricItem,
     FinancialMetricsResponse,
+    RefreshAllRequest,
     RefreshAllResponse,
     RefreshFinancialsResponse,
     RegistrationComplianceSummary,
@@ -1162,6 +1163,7 @@ async def refresh_broker_dealer_all(
     broker_dealer_id: int,
     background_tasks: BackgroundTasks,
     response: Response,
+    body: RefreshAllRequest = Body(default_factory=RefreshAllRequest),
     current_user: AuthenticatedUser = Depends(get_current_user),
     db: AsyncSession = Depends(get_db_session),
 ) -> RefreshAllResponse:
@@ -1172,6 +1174,12 @@ async def refresh_broker_dealer_all(
     sub-pipelines whose target fields are still missing. If every gate
     fails, returns 200 + ``status="skipped"`` immediately with no
     PipelineRun row and zero provider cost.
+
+    ``body.scope`` (default ``"all"``, preserves back-compat for empty
+    POST bodies the FE used to send) controls which sub-pipelines the
+    orchestrator considers. ``scope="list_only"`` is what the
+    master-list row icon sends — it force-skips ``website`` and
+    ``contacts`` because neither drives a column on the grid.
 
     Auth: any authenticated user. Each click costs at most ~2 Gemini +
     ~1 Apollo + ~1 Hunter calls (less when gates close); a 30-second
@@ -1191,7 +1199,7 @@ async def refresh_broker_dealer_all(
         )
 
     has_contacts = await has_executive_contacts(db, broker_dealer_id)
-    decision = decide_pipelines(broker_dealer, has_contacts=has_contacts)
+    decision = decide_pipelines(broker_dealer, has_contacts=has_contacts, scope=body.scope)
 
     # Skipped short-circuit: every gate closed. No row, no cost.
     if not decision.to_run:
@@ -1276,6 +1284,7 @@ async def refresh_broker_dealer_all(
             {
                 "bd_id": broker_dealer_id,
                 "stage": "queued",
+                "scope": body.scope,
                 "ran": list(decision.to_run),
                 "skipped": list(decision.to_skip),
             }

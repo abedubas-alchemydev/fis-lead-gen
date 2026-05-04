@@ -11,6 +11,7 @@ import {
   refreshFirm,
   type PipelineRunDetail,
   type PipelineRunStatus,
+  type RefreshScope,
 } from "@/lib/api";
 
 // User-clickable button that triggers the BE's selective per-firm
@@ -96,6 +97,11 @@ interface RefreshFirmButtonProps {
   // re-trigger the client-side useEffect that owns the profile state on
   // /master-list/{id}.
   onRefreshComplete?: () => void;
+  // Which subset of sub-pipelines the BE should consider. ``"list_only"``
+  // is what the master-list row icon sends — it force-skips
+  // ``website`` + ``contacts`` because neither drives a column on the
+  // grid. Detail-page button leaves this default ``"all"``.
+  scope?: RefreshScope;
 }
 
 export function RefreshFirmButton({
@@ -103,6 +109,7 @@ export function RefreshFirmButton({
   compact = false,
   autoFire = false,
   onRefreshComplete,
+  scope = "all",
 }: RefreshFirmButtonProps) {
   const router = useRouter();
   const toast = useToast();
@@ -206,7 +213,7 @@ export function RefreshFirmButton({
     slowToastFiredRef.current = false;
 
     try {
-      const result = await refreshFirm(firmId);
+      const result = await refreshFirm(firmId, scope);
       if (cancelledRef.current) return;
 
       if (result.status === "skipped" || result.run_id === null) {

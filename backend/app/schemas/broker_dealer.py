@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from datetime import date, datetime
+from typing import Literal
 
 from pydantic import BaseModel, ConfigDict
 
@@ -305,6 +306,19 @@ class RefreshFinancialsResponse(BaseModel):
     run_id: int
     status: str
     broker_dealer_id: int
+
+
+class RefreshAllRequest(BaseModel):
+    """Request body for ``POST /broker-dealers/{id}/refresh-all``.
+
+    ``scope="all"`` (default, back-compat with empty bodies) considers
+    all five sub-pipelines (financials, website, clearing, contacts,
+    filings). ``scope="list_only"`` is what the master-list row icon
+    sends — it force-skips ``website`` and ``contacts`` because neither
+    drives a column on the grid.
+    """
+
+    scope: Literal["all", "list_only"] = "all"
 
 
 class RefreshAllResponse(BaseModel):
