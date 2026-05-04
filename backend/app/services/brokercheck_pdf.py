@@ -66,6 +66,13 @@ _SECTION_HEADERS = [
     "Firm Operations",
     "Registrations",
     "Types of Business",
+    # Optional Item 12B "Other - Describe" body. FINRA omits the section
+    # entirely when the firm doesn't fill that line on Form BD, so most
+    # PDFs in our universe never carry this header. When a firm DOES file
+    # an Other entry, this header sits between the standard Types of
+    # Business list and the Clearing Arrangements section, and the
+    # ``_parse_types_of_business_other`` helper reads its body.
+    "Other Types of Business",
     "Clearing Arrangements",
     "Introducing Arrangements",
     "Industry Arrangements",

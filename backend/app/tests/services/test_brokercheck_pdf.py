@@ -351,6 +351,49 @@ def test_parser_extracts_formation_date_from_terminated_firm() -> None:
     assert detail.registration_date is None
 
 
+def test_section_splitter_carves_out_other_types_of_business() -> None:
+    """The section-splitter must include 'Other Types of Business' in
+    its header list so the section actually gets carved out and the
+    parser can read it. Pre-2026-05-04 the header was missing from
+    _SECTION_HEADERS, which made _parse_types_of_business_other always
+    receive an empty section dict and return None — even on firms that
+    DID file Item 12B."""
+    from app.services.brokercheck_pdf import _split_sections, _SECTION_HEADERS
+
+    full_text = (
+        "Types of Business\n"
+        "This firm currently conducts 6 types of businesses\n"
+        "Types of Business\n"
+        "Broker or dealer retailing corporate equity securities\n"
+        "Other Types of Business\n"
+        "Insurance Premium Finance\n"
+        "Clearing Arrangements\n"
+        "This firm does not hold or maintain funds or securities.\n"
+    )
+    sections = _split_sections(full_text, _SECTION_HEADERS)
+    assert "Other Types of Business" in sections
+    assert "Insurance Premium Finance" in sections["Other Types of Business"]
+
+
+def test_parse_types_of_business_other_end_to_end_via_split_sections() -> None:
+    """Integration check: section splitter + parser together return the
+    free-text body when a firm has filed Item 12B."""
+    from app.services.brokercheck_pdf import _split_sections, _SECTION_HEADERS
+
+    full_text = (
+        "Types of Business\n"
+        "This firm currently conducts 1 type of business\n"
+        "Types of Business\n"
+        "Mutual fund retailer\n"
+        "Other Types of Business\n"
+        "Crypto OTC Desk\n"
+        "Clearing Arrangements\n"
+    )
+    sections = _split_sections(full_text, _SECTION_HEADERS)
+    other = _parse_types_of_business_other(sections.get("Other Types of Business", ""))
+    assert other == "Crypto OTC Desk"
+
+
 def test_form_bd_detail_defaults_keep_old_constructors_working() -> None:
     """The 3 new fields default to None so test fixtures and call sites
     pre-2026-05-04 that construct FormBdDetail without them keep working."""
