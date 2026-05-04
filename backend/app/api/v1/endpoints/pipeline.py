@@ -30,6 +30,7 @@ from app.services.cloud_run_client import (
 )
 from app.services.filing_monitor import FilingMonitorService
 from app.services.pipeline import ClearingPipelineService
+from app.services.registration_watcher import RegistrationWatcherService
 
 logger = logging.getLogger(__name__)
 
@@ -39,6 +40,7 @@ admin_destructive_router = APIRouter(prefix="/pipeline")
 repository = BrokerDealerRepository()
 pipeline_service = ClearingPipelineService()
 filing_monitor_service = FilingMonitorService()
+registration_watcher_service = RegistrationWatcherService()
 
 
 def _ensure_admin(current_user: AuthenticatedUser) -> None:
@@ -288,6 +290,28 @@ async def run_filing_monitor(
     final outcome alongside the 200.
     """
     run = await filing_monitor_service.run(db, trigger_source=f"scheduled:{caller}")
+    return _trigger_response(run)
+
+
+@scheduled_router.post("/registration-monitor", response_model=PipelineTriggerResponse)
+async def run_registration_monitor(
+    caller: str = Depends(_ensure_admin_or_scheduler_sa),
+    db: AsyncSession = Depends(get_db_session),
+) -> PipelineTriggerResponse:
+    """Trigger the FINRA Form BD registration watcher.
+
+    Restores the PRD-spec'd "Registrations" alert category (was empty
+    pre-2026-05-04 because the old filing monitor read EDGAR which
+    doesn't carry Form BD signals; see ``services/registration_watcher.py``
+    for the full rationale).
+
+    Synchronous: the watcher is a single SQL scan over ``broker_dealers``
+    plus an idempotent ``filing_alerts`` upsert — completes in seconds,
+    well inside Cloud Run's request timeout.
+    """
+    run = await registration_watcher_service.run(
+        db, trigger_source=f"scheduled:{caller}"
+    )
     return _trigger_response(run)
 
 
