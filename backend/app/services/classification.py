@@ -117,12 +117,32 @@ def extract_clearing_partner_from_operations(firm_operations_text: str | None) -
 
 
 _NICHE_TYPES = {
+    # Original set — firms entirely focused on private placements or
+    # investment advisory.
     "private placement",
     "private placement only",
     "private placements of securities",
     "investment advisory",
     "investment advisory services",
     "investment adviser",
+    # 2026-05-04 — additional Form BD Item 12 categories that flag a
+    # firm as a single-vertical specialist (munis-only, insurance-only,
+    # DPP-only, mortgage-paper, oil & gas, real estate syndicator,
+    # non-profit / church bonds, CD solicitor). The classifier requires
+    # ALL of a firm's business types to be in this set, so adding more
+    # categories doesn't cast a wider net by itself — it just means a
+    # firm with e.g. munis + investment advisory now flags niche where
+    # before it didn't.
+    "municipal securities broker",
+    "municipal securities dealer",
+    "broker or dealer selling variable life insurance or annuities",
+    "broker or dealer selling tax shelters or limited partnerships in primary distributions",
+    "broker or dealer selling tax shelters or limited partnerships in the secondary market",
+    "broker or dealer selling interests in mortgages or other receivables",
+    "solicitor of time deposits in a financial institution",
+    "broker or dealer selling oil and gas interests",
+    "real estate syndicator",
+    "broker or dealer selling securities of non-profit organizations (e.g., churches, hospitals)",
 }
 
 
