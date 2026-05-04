@@ -1,5 +1,6 @@
 "use client";
 
+import Link from "next/link";
 import { useEffect, useRef, useState } from "react";
 
 import {
@@ -249,14 +250,13 @@ function FolderCard({
           </div>
         </div>
       ) : (
-        <div className="mt-4 flex justify-end gap-2">
-          <button
-            type="button"
-            onClick={onEdit}
+        <div className="mt-4 flex justify-end gap-3">
+          <Link
+            href={`/vault/${folder.id}`}
             className="text-xs font-medium text-blue underline-offset-4 transition hover:underline"
           >
-            Edit
-          </button>
+            Manage files & instructions →
+          </Link>
           <button
             type="button"
             onClick={onAskDelete}

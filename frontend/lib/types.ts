@@ -411,15 +411,16 @@ export type FocusCeoExtractionResponse = {
   extraction_notes: string | null;
 };
 
-// ── Vault folders + Outreach drafts (MVP) ─────────────────────────────────
+// ── Vault folders + Outreach drafts ───────────────────────────────────────
 // Mirrors backend/app/schemas/vault.py. Each folder is a named service
-// (e.g. "Custody") plus a freeform description used by the Outreach modal
-// to compose a tailored cold email via Gemini Flash. Draft-only — there is
-// no send path yet.
+// (e.g. "Custody") plus a freeform description AND a permanent
+// "instructions" string (Deshorn's 2026-05-04 ask) the AI follows on
+// every draft for that service.
 export type VaultFolder = {
   id: number;
   name: string;
   description: string;
+  outreach_instructions: string;
   created_at: string;
   updated_at: string;
 };
@@ -427,11 +428,36 @@ export type VaultFolder = {
 export type VaultFolderCreate = {
   name: string;
   description: string;
+  outreach_instructions?: string;
 };
 
 export type VaultFolderUpdate = {
   name?: string;
   description?: string;
+  outreach_instructions?: string;
+};
+
+// File rows attached to a folder. The status walks
+// extracting -> embedding -> ready (success) or any -> failed (terminal-fail).
+// FE polls non-terminal rows on a 2s interval until terminal.
+export type VaultFolderFileStatus =
+  | "extracting"
+  | "embedding"
+  | "ready"
+  | "failed";
+
+export type VaultFolderFile = {
+  id: number;
+  folder_id: number;
+  original_filename: string;
+  mime_type: string;
+  size_bytes: number;
+  processing_status: VaultFolderFileStatus;
+  processing_error: string | null;
+  processing_started_at: string;
+  processing_finished_at: string | null;
+  created_at: string;
+  updated_at: string;
 };
 
 export type OutreachDraftRequest = {
