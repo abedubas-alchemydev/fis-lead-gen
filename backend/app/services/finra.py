@@ -220,6 +220,12 @@ class FinraService:
         if detail.web_address and not record.website:
             record.website = detail.web_address
             record.website_source = "finra"
+        if detail.types_of_business_other:
+            record.types_of_business_other = detail.types_of_business_other
+        if detail.registration_date:
+            record.registration_date = detail.registration_date
+        if detail.formation_date:
+            record.formation_date = detail.formation_date
 
     async def fetch_website_by_crd(
         self,

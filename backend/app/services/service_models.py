@@ -38,6 +38,12 @@ class FinraBrokerDealerRecord:
     direct_owners: list[dict[str, str]] | None = None
     executive_officers: list[dict[str, str]] | None = None
     firm_operations_text: str | None = None
+    # ── Form BD cover-page + Item 12B fields (added 2026-05-04) ──
+    # Sourced from services/brokercheck_pdf.py FormBdDetail. Each is None
+    # when the PDF parser couldn't recover the field.
+    registration_date: date | None = None
+    formation_date: date | None = None
+    types_of_business_other: str | None = None
 
 
 @dataclass(slots=True)

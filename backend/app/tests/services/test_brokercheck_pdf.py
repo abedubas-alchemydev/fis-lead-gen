@@ -23,11 +23,17 @@ from unittest.mock import patch
 
 import pytest
 
+from datetime import date
+
 from app.services.brokercheck_pdf import (
     FinraPdfFetchError,
     FinraPdfNotFound,
     FormBdDetail,
     _parse_form_bd_pdf,
+    _parse_formation_date,
+    _parse_registration_date,
+    _parse_types_of_business_other,
+    _parse_us_date,
     fetch_form_bd_detail,
 )
 
@@ -182,3 +188,144 @@ async def test_fetch_form_bd_detail_parses_pdf_when_fetch_succeeds() -> None:
     assert detail.crd == "5393"
     assert len(detail.types_of_business) == 6
     assert detail.firm_operations_text is not None
+
+
+# ─────────────────────────────────────────────────────────────────────
+# 2026-05-04 additions: types_of_business_other, registration_date,
+# formation_date. The existing fixture-based tests don't exercise these
+# because the fixtures pre-date the fields. Unit-level coverage with
+# synthetic section text is sufficient — the section splitter and PDF
+# extraction layers above are already covered by the integration tests.
+# ─────────────────────────────────────────────────────────────────────
+
+
+def test_parse_us_date_handles_slash_format() -> None:
+    assert _parse_us_date("03/15/2018") == date(2018, 3, 15)
+
+
+def test_parse_us_date_handles_long_month_format() -> None:
+    assert _parse_us_date("March 15, 2018") == date(2018, 3, 15)
+
+
+def test_parse_us_date_handles_short_month_format() -> None:
+    assert _parse_us_date("Mar 15, 2018") == date(2018, 3, 15)
+
+
+def test_parse_us_date_strips_trailing_punctuation() -> None:
+    assert _parse_us_date("03/15/2018.") == date(2018, 3, 15)
+
+
+def test_parse_us_date_returns_none_for_garbage() -> None:
+    assert _parse_us_date("not a date") is None
+    assert _parse_us_date("") is None
+
+
+def test_parse_types_of_business_other_returns_text() -> None:
+    section = "Other Types of Business\nInsurance Premium Finance"
+    assert _parse_types_of_business_other(section) == "Insurance Premium Finance"
+
+
+def test_parse_types_of_business_other_joins_multiple_lines() -> None:
+    section = (
+        "Other Types of Business\n"
+        "Crypto OTC Desk\n"
+        "Private Placement Agent\n"
+    )
+    assert (
+        _parse_types_of_business_other(section)
+        == "Crypto OTC Desk Private Placement Agent"
+    )
+
+
+def test_parse_types_of_business_other_returns_none_for_information_not_available() -> None:
+    section = "Other Types of Business\nInformation not available"
+    assert _parse_types_of_business_other(section) is None
+
+
+def test_parse_types_of_business_other_returns_none_for_empty_input() -> None:
+    assert _parse_types_of_business_other("") is None
+
+
+def test_parse_types_of_business_other_stops_at_next_section_header() -> None:
+    section = (
+        "Other Types of Business\n"
+        "Insurance Premium Finance\n"
+        "Clearing Arrangements\n"
+        "This firm clears for ACME ..."
+    )
+    assert (
+        _parse_types_of_business_other(section)
+        == "Insurance Premium Finance"
+    )
+
+
+def test_parse_registration_date_finds_in_firm_profile() -> None:
+    sections = {
+        "Firm Profile": (
+            "Firm Profile\n"
+            "Initial date firm became registered with the SEC: 03/15/2018\n"
+            "Other field: foo"
+        )
+    }
+    assert _parse_registration_date(sections, "") == date(2018, 3, 15)
+
+
+def test_parse_registration_date_falls_back_to_full_text() -> None:
+    full_text = (
+        "Some preamble text.\n"
+        "Initial Registration Date: 11/01/2017\n"
+        "More text below."
+    )
+    assert _parse_registration_date({}, full_text) == date(2017, 11, 1)
+
+
+def test_parse_registration_date_returns_none_when_missing() -> None:
+    assert _parse_registration_date({}, "no date here") is None
+
+
+def test_parse_formation_date_finds_in_firm_profile() -> None:
+    sections = {
+        "Firm Profile": (
+            "Firm Profile\n"
+            "Date of Formation: 11/01/2017"
+        )
+    }
+    assert _parse_formation_date(sections, "") == date(2017, 11, 1)
+
+
+def test_parse_formation_date_handles_inception_label_variant() -> None:
+    sections = {
+        "Firm Profile": (
+            "Firm Profile\n"
+            "Date of Inception: January 5, 2010"
+        )
+    }
+    assert _parse_formation_date(sections, "") == date(2010, 1, 5)
+
+
+def test_parse_formation_date_returns_none_when_missing() -> None:
+    assert _parse_formation_date({}, "no date here") is None
+
+
+def test_parse_formation_date_does_not_match_registration_label() -> None:
+    """Make sure 'Initial Registration Date' doesn't satisfy the formation
+    regex — they should be distinct fields."""
+    sections = {
+        "Firm Profile": "Initial Registration Date: 03/15/2018"
+    }
+    assert _parse_formation_date(sections, "") is None
+
+
+def test_form_bd_detail_defaults_keep_old_constructors_working() -> None:
+    """The 3 new fields default to None so test fixtures and call sites
+    pre-2026-05-04 that construct FormBdDetail without them keep working."""
+    detail = FormBdDetail(
+        crd="123",
+        types_of_business=["Broker"],
+        executive_officers=[],
+        firm_operations_text=None,
+        web_address=None,
+    )
+    assert detail.types_of_business_other is None
+    assert detail.registration_date is None
+    assert detail.formation_date is None
