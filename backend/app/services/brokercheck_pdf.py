@@ -504,25 +504,30 @@ def _parse_types_of_business_other(section_text: str) -> Optional[str]:
 # ---------------------------------------------------------------------------
 
 # Date format on Form BD: MM/DD/YYYY (most common) or "Month DD, YYYY".
-_DATE_VALUE = r"(\d{1,2}/\d{1,2}/\d{4}|[A-Z][a-z]+\s+\d{1,2},?\s+\d{4})"
+# pdfplumber sometimes collapses whitespace inside cover-page paragraphs on
+# legacy / terminated firms (the kerned typesetting renders as zero-width
+# gaps), so all label patterns below tolerate ``\s*`` between words.
 
+# Registration date appears as a row in the "Federal Regulator Status Date
+# Effective" table inside the Firm Operations / Registrations section. The
+# row is "SEC <Status> MM/DD/YYYY" where Status is typically "Approved"
+# (active firms), occasionally "Active" or "Registered". A firm whose SEC
+# registration was withdrawn has no row at all — that's intentional: we
+# return None and leave the column NULL.
 _DATE_LABEL_REGISTRATION = re.compile(
-    r"(?im)"
-    r"(?:Initial\s+date\s+firm\s+became\s+registered\s+with\s+the\s+SEC"
-    r"|Initial\s+Registration\s+Date"
-    r"|SEC\s+Registration\s+Date"
-    r"|Registration\s+Date)"
-    r"\s*[:\-]?\s*" + _DATE_VALUE
+    r"(?im)^\s*SEC\s+(?:Approved|Active|Registered|Effective)\s+"
+    r"(\d{1,2}/\d{1,2}/\d{4})"
 )
 
+# Formation date appears as prose on the cover-page Firm Profile section:
+# "This firm was formed in <state-or-jurisdiction> on MM/DD/YYYY."
+# The state/jurisdiction can include letters, spaces, commas, ampersands,
+# periods, and hyphens (e.g. "U.S. Virgin Islands", "British Columbia").
+# pdfplumber may collapse the whitespace on legacy reports, so all
+# inter-word gaps use ``\s*`` rather than ``\s+``.
 _DATE_LABEL_FORMATION = re.compile(
-    r"(?im)"
-    r"(?:Date\s+of\s+Formation"
-    r"|Date\s+Firm\s+Formed"
-    r"|Date\s+Formed"
-    r"|Date\s+of\s+Inception"
-    r"|Inception\s+Date)"
-    r"\s*[:\-]?\s*" + _DATE_VALUE
+    r"(?im)This\s*firm\s*was\s*formed\s*in\s*[\w\s,&.\-]*?\s*on\s*"
+    r"(\d{1,2}/\d{1,2}/\d{4})"
 )
 
 
