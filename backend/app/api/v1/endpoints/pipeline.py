@@ -28,6 +28,7 @@ from app.services.cloud_run_client import (
     CloudRunUpdateError,
     update_env_var as cloud_run_update_env_var,
 )
+from app.services.deficiency_watcher import DeficiencyWatcherService
 from app.services.filing_monitor import FilingMonitorService
 from app.services.pipeline import ClearingPipelineService
 from app.services.registration_watcher import RegistrationWatcherService
@@ -41,6 +42,7 @@ repository = BrokerDealerRepository()
 pipeline_service = ClearingPipelineService()
 filing_monitor_service = FilingMonitorService()
 registration_watcher_service = RegistrationWatcherService()
+deficiency_watcher_service = DeficiencyWatcherService()
 
 
 def _ensure_admin(current_user: AuthenticatedUser) -> None:
@@ -310,6 +312,30 @@ async def run_registration_monitor(
     well inside Cloud Run's request timeout.
     """
     run = await registration_watcher_service.run(
+        db, trigger_source=f"scheduled:{caller}"
+    )
+    return _trigger_response(run)
+
+
+@scheduled_router.post("/deficiency-monitor", response_model=PipelineTriggerResponse)
+async def run_deficiency_monitor(
+    caller: str = Depends(_ensure_admin_or_scheduler_sa),
+    db: AsyncSession = Depends(get_db_session),
+) -> PipelineTriggerResponse:
+    """Trigger the SEC Rule 17a-11 deficiency-notice watcher.
+
+    Polls SEC EDGAR full-text search for filings mentioning "17a-11" in
+    the last 30 days, joins matching CIKs against ``broker_dealers``, and
+    inserts ``Form 17a-11`` alerts at ``priority="critical"``. Restores
+    the PRD-spec'd "Critical: Deficiencies" alert tab. See
+    ``services/deficiency_watcher.py`` for why this can't be done by
+    form-code matching alone.
+
+    Synchronous: a single EFTS query (paginated up to ~100 hits per
+    page; rarely more than one page given ~60 hits/year nationwide)
+    plus an idempotent upsert. Completes in seconds.
+    """
+    run = await deficiency_watcher_service.run(
         db, trigger_source=f"scheduled:{caller}"
     )
     return _trigger_response(run)
