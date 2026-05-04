@@ -38,7 +38,7 @@ import json
 import logging
 from dataclasses import dataclass
 from datetime import datetime, timezone
-from typing import Iterable
+from typing import Iterable, Literal
 
 from sqlalchemy import select, update
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -53,12 +53,16 @@ from app.services.contacts import (
     ContactEnrichmentUnavailableError,
     ExecutiveContactService,
 )
+from app.services.edgar import EdgarService
 from app.services.finra import FinraService
 from app.services.focus_reports import FocusReportService
 from app.services.hunter import HunterClient
 from app.services.serpapi import SerpAPIClient
 from app.services.service_models import FinraBrokerDealerRecord
 from app.services.website_resolver import resolve_website
+
+
+RefreshScope = Literal["all", "list_only"]
 
 logger = logging.getLogger(__name__)
 
@@ -73,6 +77,7 @@ SUB_REFRESH_FINANCIALS = "financial_pdf_pipeline_single"
 SUB_RESOLVE_WEBSITE = "broker_dealer_resolve_website"
 SUB_HEALTH_CHECK = "broker_dealer_health_check"
 SUB_ENRICH = "broker_dealer_enrich_contacts"
+SUB_REFRESH_FILINGS = "broker_dealer_refresh_filings"
 
 # Display labels used in the parent's notes.summary toast string.
 _SUB_LABEL = {
@@ -80,7 +85,16 @@ _SUB_LABEL = {
     SUB_RESOLVE_WEBSITE: "website",
     SUB_HEALTH_CHECK: "clearing",
     SUB_ENRICH: "contacts",
+    SUB_REFRESH_FILINGS: "filings",
 }
+
+# Sub-pipelines whose target fields drive a column the user can see in the
+# /master-list grid. The row-level Refresh button passes scope="list_only"
+# so it doesn't burn website + contacts calls fixing data the list view
+# can't even render. The detail-page button still uses scope="all".
+_LIST_ONLY_PIPELINES: frozenset[str] = frozenset(
+    {SUB_REFRESH_FINANCIALS, SUB_HEALTH_CHECK, SUB_REFRESH_FILINGS}
+)
 
 
 @dataclass(frozen=True)
@@ -91,13 +105,23 @@ class GateDecision:
     to_skip: tuple[str, ...]
 
 
-def decide_pipelines(broker_dealer: BrokerDealer, has_contacts: bool) -> GateDecision:
+def decide_pipelines(
+    broker_dealer: BrokerDealer,
+    has_contacts: bool,
+    scope: RefreshScope = "all",
+) -> GateDecision:
     """Inspect the BD and return the (run, skip) split.
 
     The caller queries ``has_contacts`` separately because the BD row
     doesn't carry an ``executive_contacts`` count column — we count the
     relationship explicitly instead of joining, to avoid the cost of
     fetching every row when all we need is "any?".
+
+    ``scope="list_only"`` force-skips ``SUB_RESOLVE_WEBSITE`` and
+    ``SUB_ENRICH`` regardless of their gate, because neither populates a
+    column on the master-list grid. The other three sub-pipelines are
+    evaluated normally — i.e. still skipped if their target fields are
+    already set — so we never overwrite present data.
     """
     to_run: list[str] = []
     to_skip: list[str] = []
@@ -110,7 +134,11 @@ def decide_pipelines(broker_dealer: BrokerDealer, has_contacts: bool) -> GateDec
     (to_run if needs_financials else to_skip).append(SUB_REFRESH_FINANCIALS)
 
     needs_website = not broker_dealer.website
-    (to_run if needs_website else to_skip).append(SUB_RESOLVE_WEBSITE)
+    if scope == "list_only":
+        # Force-skip — website is not a list-view field.
+        to_skip.append(SUB_RESOLVE_WEBSITE)
+    else:
+        (to_run if needs_website else to_skip).append(SUB_RESOLVE_WEBSITE)
 
     needs_health = (
         broker_dealer.current_clearing_type is None
@@ -119,7 +147,16 @@ def decide_pipelines(broker_dealer: BrokerDealer, has_contacts: bool) -> GateDec
     (to_run if needs_health else to_skip).append(SUB_HEALTH_CHECK)
 
     needs_contacts = not has_contacts
-    (to_run if needs_contacts else to_skip).append(SUB_ENRICH)
+    if scope == "list_only":
+        # Force-skip — contacts are detail-page only.
+        to_skip.append(SUB_ENRICH)
+    else:
+        (to_run if needs_contacts else to_skip).append(SUB_ENRICH)
+
+    # Filings: open if the BD has a CIK we can re-query AND last_filing_date
+    # is missing. No CIK means we have no way to ask EDGAR — treat as skip.
+    needs_filings = bool(broker_dealer.cik) and broker_dealer.last_filing_date is None
+    (to_run if needs_filings else to_skip).append(SUB_REFRESH_FILINGS)
 
     return GateDecision(to_run=tuple(to_run), to_skip=tuple(to_skip))
 
@@ -452,11 +489,87 @@ async def _run_refresh_financials(parent_run_id: int, bd_id: int, trigger_source
         return child.status, summary[:500]
 
 
+async def _run_refresh_filings(parent_run_id: int, bd_id: int, trigger_source: str) -> tuple[str, str]:
+    """Re-query EDGAR submissions for the BD's CIK and update
+    ``BrokerDealer.last_filing_date`` if a more recent filing exists.
+
+    Gate is "BD has a CIK and last_filing_date is None" (see
+    ``decide_pipelines``), so we don't run for firms without an EDGAR
+    presence. Stale-but-present dates are still refreshed by the daily
+    ``filing_monitor`` cron — this sub-pipeline is a per-firm catch-up
+    for rows initial_load missed.
+    """
+    async with SessionLocal() as db:
+        child_id = await _create_child_run(
+            db,
+            pipeline_name=SUB_REFRESH_FILINGS,
+            parent_run_id=parent_run_id,
+            bd_id=bd_id,
+            trigger_source=trigger_source,
+        )
+
+    try:
+        async with SessionLocal() as run_db:
+            run = await run_db.get(PipelineRun, child_id)
+            if run is not None:
+                run.status = "running"
+                await run_db.commit()
+
+        async with SessionLocal() as db:
+            broker_dealer = await db.get(BrokerDealer, bd_id)
+            if broker_dealer is None:
+                raise RuntimeError(f"Broker-dealer {bd_id} not found mid-flight.")
+
+            if not broker_dealer.cik:
+                summary = "No CIK on file — cannot query EDGAR."
+                await _finalize_child(
+                    child_id, status="completed_with_errors", success=0, failure=1, summary=summary
+                )
+                return "completed_with_errors", summary
+
+            edgar = EdgarService()
+            latest = await edgar.fetch_last_filing_for_cik(broker_dealer.cik)
+
+            if latest is None:
+                summary = "EDGAR returned no parseable filings."
+                await _finalize_child(
+                    child_id, status="completed_with_errors", success=0, failure=1, summary=summary
+                )
+                return "completed_with_errors", summary
+
+            existing = broker_dealer.last_filing_date
+            if existing is not None and latest <= existing:
+                summary = f"No newer filings (current: {existing.isoformat()})."
+                await _finalize_child(
+                    child_id, status="completed", success=1, failure=0, summary=summary
+                )
+                return "completed", summary
+
+            broker_dealer.last_filing_date = latest
+            if not broker_dealer.filings_index_url:
+                padded = broker_dealer.cik.strip().lstrip("0").zfill(10)
+                broker_dealer.filings_index_url = (
+                    f"{settings.sec_submissions_base_url}/CIK{padded}.json"
+                )
+            await db.commit()
+
+        summary = f"Updated last_filing_date to {latest.isoformat()}."
+        await _finalize_child(child_id, status="completed", success=1, failure=0, summary=summary)
+        return "completed", summary
+
+    except Exception as exc:
+        logger.exception("refresh-all/refresh-filings failed for bd %s", bd_id)
+        summary = f"{type(exc).__name__}: {str(exc)[:200]}"
+        await _finalize_child(child_id, status="failed", success=0, failure=1, summary=summary)
+        return "failed", summary
+
+
 _RUNNERS = {
     SUB_REFRESH_FINANCIALS: _run_refresh_financials,
     SUB_RESOLVE_WEBSITE: _run_resolve_website,
     SUB_HEALTH_CHECK: _run_health_check,
     SUB_ENRICH: _run_enrich,
+    SUB_REFRESH_FILINGS: _run_refresh_filings,
 }
 
 
@@ -569,8 +682,10 @@ async def run_refresh_all(
 __all__ = [
     "GateDecision",
     "REFRESH_ALL_PIPELINE_NAME",
+    "RefreshScope",
     "SUB_ENRICH",
     "SUB_HEALTH_CHECK",
+    "SUB_REFRESH_FILINGS",
     "SUB_REFRESH_FINANCIALS",
     "SUB_RESOLVE_WEBSITE",
     "decide_pipelines",

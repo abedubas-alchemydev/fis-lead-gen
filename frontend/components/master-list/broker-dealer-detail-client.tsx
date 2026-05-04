@@ -488,24 +488,17 @@ export function BrokerDealerDetailClient({ brokerDealerId }: { brokerDealerId: s
               variant="detail"
               initialDefaultMember={profile.is_favorited}
             />
-            {isFirmIncomplete(bd) ? (
-              // autoFire: the firm-detail page kicks off the refresh-all
-              // orchestrator immediately on mount when the firm is
-              // incomplete. The orchestrator self-gates to only the
-              // sub-pipelines whose target fields are still missing, so
-              // existing data is preserved. Per-(user, BD) cooldown on the
-              // BE prevents rapid revisits from re-firing.
-              //
-              // onRefreshComplete bumps profileRefreshKey, which is in the
-              // loadProfile useEffect deps — this re-fetches the profile
-              // in place when the run completes, so values update without
-              // a full page reload.
-              <RefreshFirmButton
-                firmId={bd.id}
-                autoFire
-                onRefreshComplete={() => setProfileRefreshKey((k) => k + 1)}
-              />
-            ) : null}
+            {/* Always rendered so users have a manual "re-check for
+                updates" trigger even after the firm is fully populated.
+                autoFire stays gated on incompleteness so a complete firm
+                isn't auto-refreshed on every navigation — a manual click
+                on a complete firm hits the BE which returns
+                status="skipped" with an "Already complete." toast. */}
+            <RefreshFirmButton
+              firmId={bd.id}
+              autoFire={isFirmIncomplete(bd)}
+              onRefreshComplete={() => setProfileRefreshKey((k) => k + 1)}
+            />
           </div>
           <FirmWebsiteLink firmId={bd.id} firmName={bd.name} website={bd.website} />
           <div className="mt-2 flex flex-wrap items-center gap-x-3 gap-y-1 text-[12px] text-[var(--text-muted,#94a3b8)]">

@@ -267,6 +267,74 @@ class EdgarService:
 
         return resolved_records
 
+    async def fetch_last_filing_for_cik(self, cik: str) -> date | None:
+        """Fetch the most recent filing date for a single CIK via the
+        submissions JSON endpoint. Used by the per-firm refresh-all
+        orchestrator to keep ``broker_dealers.last_filing_date`` fresh
+        between daily filing-monitor runs.
+
+        Returns ``None`` if the CIK has no parseable filings, the response
+        is malformed, or the network call fails after retries.
+        """
+        normalized = (cik or "").strip().lstrip("0")
+        if not normalized:
+            return None
+        padded = normalized.zfill(10)
+        url = f"{settings.sec_submissions_base_url}/CIK{padded}.json"
+        headers = {
+            "User-Agent": settings.sec_user_agent,
+            "Accept": "application/json",
+            "Accept-Encoding": "identity",
+        }
+        async with httpx.AsyncClient(
+            timeout=settings.sec_request_timeout_seconds,
+            headers=headers,
+            follow_redirects=True,
+        ) as client:
+            for attempt in range(1, settings.sec_request_max_retries + 1):
+                try:
+                    response = await client.get(url)
+                except httpx.HTTPError as exc:
+                    if attempt == settings.sec_request_max_retries:
+                        logger.warning("EDGAR submissions fetch failed for CIK %s: %s", padded, exc)
+                        return None
+                    await asyncio.sleep(min(2**attempt, 30))
+                    continue
+
+                if response.status_code == 429:
+                    retry_after = response.headers.get("retry-after")
+                    try:
+                        wait_seconds = float(retry_after) if retry_after else min(2**attempt, 60)
+                    except ValueError:
+                        wait_seconds = min(2**attempt, 60)
+                    await asyncio.sleep(wait_seconds)
+                    continue
+
+                if response.status_code == 404:
+                    return None
+
+                try:
+                    response.raise_for_status()
+                except httpx.HTTPStatusError as exc:
+                    if attempt == settings.sec_request_max_retries:
+                        logger.warning("EDGAR submissions fetch failed for CIK %s: %s", padded, exc)
+                        return None
+                    await asyncio.sleep(min(2**attempt, 8))
+                    continue
+
+                try:
+                    payload = response.json()
+                except (json.JSONDecodeError, ValueError) as exc:
+                    logger.warning("EDGAR submissions JSON parse failed for CIK %s: %s", padded, exc)
+                    return None
+
+                if not isinstance(payload, dict):
+                    return None
+                recent = self._get_recent_filings(payload)
+                return self._extract_last_filing_date(recent)
+
+        return None
+
     async def _ensure_bulk_submissions_zip(self, *, force_refresh: bool) -> Path:
         zip_path = self._resolve_project_path(settings.sec_bulk_submissions_zip_path)
         zip_path.parent.mkdir(parents=True, exist_ok=True)

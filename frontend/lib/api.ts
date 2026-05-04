@@ -396,13 +396,16 @@ function parseConflictDetail(detail: string): ConflictDetail | null {
   return null;
 }
 
+export type RefreshScope = "all" | "list_only";
+
 export async function refreshFirm(
-  firmId: number
+  firmId: number,
+  scope: RefreshScope = "all"
 ): Promise<RefreshFirmResponse> {
   try {
     return await apiRequest<RefreshFirmResponse>(
       `/api/v1/broker-dealers/${firmId}/refresh-all`,
-      { method: "POST" }
+      { method: "POST", body: JSON.stringify({ scope }) }
     );
   } catch (err) {
     if (err instanceof ApiError && err.status === 409) {

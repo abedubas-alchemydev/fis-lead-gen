@@ -29,3 +29,31 @@ export function isFirmIncomplete(
     !item.website
   );
 }
+
+// Narrower variant for the master-list row icon button. Only the cells
+// the grid actually renders count — website + contacts are detail-page
+// concerns and would burn Apollo/Hunter/SerpAPI calls without changing
+// anything the user sees from the list view.
+//
+// Mirrors the BE's ``scope="list_only"`` orchestrator path:
+//   - financial_unknown_reason → financials sub-pipeline
+//   - current_clearing_unknown_reason → health-check sub-pipeline
+//   - last_filing_date == null → filings sub-pipeline (refreshes EDGAR
+//     submissions for the BD's CIK)
+//
+// The detail-page button keeps using ``isFirmIncomplete`` (broad) so its
+// auto-fire still covers website + contacts on visit.
+export function isFirmListIncomplete(
+  item: Pick<
+    BrokerDealerListItem,
+    | "current_clearing_unknown_reason"
+    | "financial_unknown_reason"
+    | "last_filing_date"
+  >,
+): boolean {
+  return (
+    item.current_clearing_unknown_reason != null ||
+    item.financial_unknown_reason != null ||
+    item.last_filing_date == null
+  );
+}
