@@ -4,7 +4,7 @@ import asyncio
 from datetime import datetime, timezone
 import logging
 
-from sqlalchemy import select
+from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.config import settings
@@ -35,15 +35,23 @@ class ClearingPipelineService:
         trigger_source: str = "manual",
         only_failed: bool = False,
         only_null_partner: bool = False,
+        only_needs_review: bool = False,
     ) -> PipelineRun:
-        if only_failed and only_null_partner:
-            raise ValueError("only_failed and only_null_partner are mutually exclusive.")
+        # Targeted-rerun selector flags are mutually exclusive — only one
+        # custom universe at a time. The sum check guards against silent
+        # overlap if a future flag is added without revisiting the matrix.
+        if sum([only_failed, only_null_partner, only_needs_review]) > 1:
+            raise ValueError(
+                "only_failed, only_null_partner, and only_needs_review are mutually exclusive."
+            )
         if only_failed:
             broker_dealers = (await db.execute(select(BrokerDealer).order_by(BrokerDealer.id.asc()))).scalars().all()
             failed_ids = await self.repository.list_failed_clearing_broker_dealer_ids(db)
             broker_dealers = [item for item in broker_dealers if item.id in failed_ids]
         elif only_null_partner:
             broker_dealers = await self._select_null_partner_targets(db)
+        elif only_needs_review:
+            broker_dealers = await self._select_needs_review_targets(db)
         else:
             broker_dealers = await self._select_default_targets(db)
 
@@ -207,6 +215,44 @@ class ClearingPipelineService:
             .where(
                 BrokerDealer.current_clearing_partner.is_(None),
                 BrokerDealer.filings_index_url.is_not(None),
+            )
+            .order_by(BrokerDealer.id.asc())
+        )).scalars().all()
+
+        if settings.clearing_pipeline_offset > 0:
+            broker_dealers = broker_dealers[settings.clearing_pipeline_offset :]
+        if settings.clearing_pipeline_limit:
+            broker_dealers = broker_dealers[: settings.clearing_pipeline_limit]
+
+        return broker_dealers
+
+    async def _select_needs_review_targets(self, db: AsyncSession) -> list[BrokerDealer]:
+        # Targeted re-run mode for firms whose LATEST clearing extraction
+        # landed as ``needs_review``. Used after a prompt change to flip the
+        # fixable subset (e.g. M&A advisory firms / no-customer-accounts
+        # boilerplate) without re-processing the already-parsed universe.
+        #
+        # The MAX(extracted_at) subquery scopes the EXISTS to the most-
+        # recent clearing_arrangement row per bd_id — a firm whose newer
+        # row is already 'parsed' is excluded even if an older row was
+        # 'needs_review'. Honors the same offset/limit knobs as the other
+        # selectors so an operator can chunk a large re-run.
+        latest_extracted_at_subq = (
+            select(func.max(ClearingArrangement.extracted_at))
+            .where(ClearingArrangement.bd_id == BrokerDealer.id)
+            .correlate(BrokerDealer)
+            .scalar_subquery()
+        )
+        broker_dealers = (await db.execute(
+            select(BrokerDealer)
+            .where(
+                select(ClearingArrangement.id)
+                .where(
+                    ClearingArrangement.bd_id == BrokerDealer.id,
+                    ClearingArrangement.extraction_status == "needs_review",
+                    ClearingArrangement.extracted_at == latest_extracted_at_subq,
+                )
+                .exists()
             )
             .order_by(BrokerDealer.id.asc())
         )).scalars().all()

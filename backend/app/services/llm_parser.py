@@ -46,6 +46,14 @@ class LlmParserService:
             '- "executes and clears"\n'
             '- "prime broker"\n'
             '- "omnibus account"\n\n'
+            "## Special-case rule — firms that do not carry customer accounts\n"
+            "If the firm explicitly states it does not carry customer accounts, does not hold customer "
+            "funds or securities, is limited to M&A advisory or other non-custodial activity, or operates "
+            "under a Section 15(c)(3)-1 (or (k)(2)(i) / (k)(2)(ii)) exemption, return "
+            "clearing_type='self_clearing' with confidence_score >= 0.85. Do NOT return 'unknown' and do "
+            "NOT set clearing_partner to null with low confidence in this case — the firm's regulatory "
+            "status (no customer accounts → no clearing relationship needed) IS the answer. "
+            "clearing_partner should be null because there is no third-party clearing firm to name.\n\n"
             "Return a JSON object with these fields:\n"
             "- clearing_partner: The name of the clearing firm (e.g. 'Pershing LLC', 'Apex Clearing Corporation'). "
             "Use null only if no clearing partner is mentioned or the firm is self-clearing.\n"
@@ -122,6 +130,40 @@ class LlmParserService:
             'and clears under a written clearing agreement — fully disclosed arrangement.", '
             '"evidence_excerpt": "RBC Capital Markets, LLC executes and clears all securities transactions '
             "for the Company's customers under a written clearing agreement.\"}\n\n"
+            "Example 9 — M&A advisory only (no customer accounts):\n"
+            'Document says: "The Company\'s business is limited to mergers-and-acquisitions advisory '
+            "services. The Company does not carry accounts of or for customers and does not hold customer "
+            'funds or securities."\n'
+            "Expected output:\n"
+            '{"clearing_partner": null, "clearing_type": "self_clearing", "agreement_date": null, '
+            '"confidence_score": 0.95, "rationale": "Firm is limited to M&A advisory and explicitly does '
+            'not carry customer accounts, so no clearing relationship is required — treat as '
+            'self_clearing with null partner per the special-case rule.", "evidence_excerpt": "The '
+            "Company's business is limited to mergers-and-acquisitions advisory services. The Company "
+            'does not carry accounts of or for customers and does not hold customer funds or securities."}\n\n'
+            "Example 10 — Section 15(c)(3)-1 / (k)(2)(i) exemption report:\n"
+            'Document says: "The Company claims exemption from Rule 15c3-3 under paragraph (k)(2)(i) of '
+            'the Rule, as it does not carry customer accounts and all customer transactions are cleared '
+            'through another broker-dealer on a fully disclosed basis."\n'
+            "Expected output:\n"
+            '{"clearing_partner": null, "clearing_type": "self_clearing", "agreement_date": null, '
+            '"confidence_score": 0.9, "rationale": "Exemption Report cites Rule 15c3-3(k)(2)(i) and the '
+            'firm does not carry customer accounts. The (k)(2)(i) exemption itself IS the regulatory '
+            'answer — return self_clearing with null partner per the special-case rule, even though the '
+            'document mentions transactions are cleared through an unnamed broker-dealer.", '
+            '"evidence_excerpt": "The Company claims exemption from Rule 15c3-3 under paragraph (k)(2)(i) '
+            'of the Rule, as it does not carry customer accounts and all customer transactions are '
+            'cleared through another broker-dealer on a fully disclosed basis."}\n\n'
+            'Example 11 — "Does not carry customer accounts" boilerplate:\n'
+            'Document says: "The Notes to Financial Statements explicitly state that the Company does not '
+            'carry customer accounts or hold customer funds or securities. No clearing partner or clearing '
+            'agreement is mentioned anywhere in the filing."\n'
+            "Expected output:\n"
+            '{"clearing_partner": null, "clearing_type": "self_clearing", "agreement_date": null, '
+            '"confidence_score": 0.85, "rationale": "Firm explicitly does not carry customer accounts and '
+            'does not hold customer funds — no clearing relationship is required. Return self_clearing '
+            'with null partner per the special-case rule rather than unknown.", "evidence_excerpt": "The '
+            'Company does not carry customer accounts or hold customer funds or securities."}\n\n'
             "Now analyze the attached PDF and extract the clearing arrangement data. Use only evidence from "
             "the document. Treat uncertain or conflicting references conservatively. If the firm names "
             "multiple clearing relationships (e.g. an introducing partner plus a separate omnibus or prime "
