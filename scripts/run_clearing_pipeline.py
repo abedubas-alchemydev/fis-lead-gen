@@ -54,6 +54,26 @@ def _parse_args() -> argparse.Namespace:
             "without invoking Gemini or writing to the database."
         ),
     )
+    parser.add_argument(
+        "--limit",
+        type=int,
+        default=None,
+        help=(
+            "Cap the number of broker-dealers processed in this run. "
+            "Overrides settings.clearing_pipeline_limit for the lifetime "
+            "of the process. Useful for canary runs."
+        ),
+    )
+    parser.add_argument(
+        "--offset",
+        type=int,
+        default=None,
+        help=(
+            "Skip this many broker-dealers before processing. Overrides "
+            "settings.clearing_pipeline_offset for the lifetime of the "
+            "process."
+        ),
+    )
     return parser.parse_args()
 
 
@@ -98,6 +118,17 @@ async def main() -> None:
 
     if args.only_failed and args.only_null_partner:
         raise SystemExit("--only-failed and --only-null-partner are mutually exclusive.")
+
+    # CLI flags take precedence over the env-driven settings for the
+    # lifetime of this process. _select_*_targets() reads these values
+    # off ``settings`` directly, so writing through here covers both the
+    # default and only-null-partner paths without touching the service.
+    from app.core.config import settings  # noqa: E402
+
+    if args.limit is not None:
+        settings.clearing_pipeline_limit = args.limit
+    if args.offset is not None:
+        settings.clearing_pipeline_offset = args.offset
 
     if args.dry_run:
         await _print_dry_run_targets(
