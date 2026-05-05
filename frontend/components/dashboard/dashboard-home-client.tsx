@@ -226,13 +226,12 @@ export function DashboardHomeClient() {
         <div className="mb-6 grid grid-cols-1 gap-4 md:grid-cols-2 xl:grid-cols-4">
           <div className="animate-fade-in">
             <KpiCard
-              title="Total Active BDs"
+              title="Total Broker-Dealers"
               value={totalBds}
               tone="blue"
               icon={KpiIconBuilding}
               helper="All broker-dealers in Master List"
               href="/master-list?list=all"
-              trend={{ direction: "up", label: "2.4%" }}
             />
           </div>
           <div className="animate-fade-in delay-75">
@@ -243,7 +242,6 @@ export function DashboardHomeClient() {
               icon={KpiIconPulse}
               helper="Recent registrations from filing activity"
               href="/master-list?list=all"
-              trend={{ direction: "down", label: "66%" }}
             />
           </div>
           <div className="animate-fade-in delay-150">
@@ -254,7 +252,6 @@ export function DashboardHomeClient() {
               icon={KpiIconAlert}
               helper="Active Form 17a-11 notices"
               href="/alerts?form_type=Form%2017a-11"
-              trend={{ direction: "up", label: "12" }}
             />
           </div>
           <div className="animate-fade-in delay-200">
@@ -265,7 +262,6 @@ export function DashboardHomeClient() {
               icon={KpiIconTarget}
               helper="Weighted scoring, last updated 8m ago"
               href="/master-list?lead_priority=hot"
-              trend={{ direction: "up", label: "5" }}
             />
           </div>
         </div>
