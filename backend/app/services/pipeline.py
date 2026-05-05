@@ -28,11 +28,22 @@ class ClearingPipelineService:
         self.processor = PdfProcessorService()
         self.competitors = CompetitorProviderService()
 
-    async def run(self, db: AsyncSession, *, trigger_source: str = "manual", only_failed: bool = False) -> PipelineRun:
+    async def run(
+        self,
+        db: AsyncSession,
+        *,
+        trigger_source: str = "manual",
+        only_failed: bool = False,
+        only_null_partner: bool = False,
+    ) -> PipelineRun:
+        if only_failed and only_null_partner:
+            raise ValueError("only_failed and only_null_partner are mutually exclusive.")
         if only_failed:
             broker_dealers = (await db.execute(select(BrokerDealer).order_by(BrokerDealer.id.asc()))).scalars().all()
             failed_ids = await self.repository.list_failed_clearing_broker_dealer_ids(db)
             broker_dealers = [item for item in broker_dealers if item.id in failed_ids]
+        elif only_null_partner:
+            broker_dealers = await self._select_null_partner_targets(db)
         else:
             broker_dealers = await self._select_default_targets(db)
 
@@ -181,6 +192,31 @@ class ClearingPipelineService:
             await write_db.commit()
             await write_db.refresh(persisted_run)
             return persisted_run
+
+    async def _select_null_partner_targets(self, db: AsyncSession) -> list[BrokerDealer]:
+        # Backfill mode: target firms whose ``current_clearing_partner`` is
+        # still NULL but for which an X-17A-5 filing is reachable (i.e. a
+        # ``filings_index_url`` is on file). The default mode also gates on
+        # ``filings_index_url IS NOT NULL`` indirectly via the no-row branch
+        # — we make it explicit here so a backfill run does not waste Gemini
+        # calls on firms with no filings index. Honors the same offset/limit
+        # knobs as the default run so an operator can chunk a large backfill
+        # without re-engineering the selector.
+        broker_dealers = (await db.execute(
+            select(BrokerDealer)
+            .where(
+                BrokerDealer.current_clearing_partner.is_(None),
+                BrokerDealer.filings_index_url.is_not(None),
+            )
+            .order_by(BrokerDealer.id.asc())
+        )).scalars().all()
+
+        if settings.clearing_pipeline_offset > 0:
+            broker_dealers = broker_dealers[settings.clearing_pipeline_offset :]
+        if settings.clearing_pipeline_limit:
+            broker_dealers = broker_dealers[: settings.clearing_pipeline_limit]
+
+        return broker_dealers
 
     async def _select_default_targets(self, db: AsyncSession) -> list[BrokerDealer]:
         # Prioritize firms that have a filings_index_url but no clearing row
