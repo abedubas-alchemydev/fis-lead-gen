@@ -8,6 +8,7 @@ import re
 import time
 from datetime import date
 from pathlib import Path
+from typing import Protocol
 from zipfile import ZipFile
 
 import httpx
@@ -21,6 +22,19 @@ logger = logging.getLogger(__name__)
 
 # Cached bulk ZIP is considered stale after this many seconds (7 days).
 _BULK_ZIP_TTL_SECONDS = 7 * 24 * 60 * 60
+
+
+class CikLookupTarget(Protocol):
+    """Structural type for ``EdgarService.lookup_cik_for_bd``.
+
+    Lets the service consume a SQLAlchemy ``BrokerDealer`` row without
+    importing the model (keeps services/ free of models/ deps), and lets
+    tests pass any object with the same three attributes.
+    """
+
+    name: str
+    state: str | None
+    sec_file_number: str | None
 
 
 class EdgarService:
@@ -605,3 +619,155 @@ class EdgarService:
         if path.is_absolute():
             return path
         return self.PROJECT_ROOT / path
+
+    async def lookup_cik_for_bd(
+        self,
+        client: httpx.AsyncClient,
+        bd: CikLookupTarget,
+    ) -> tuple[str, str | None]:
+        """Resolve a CIK for a broker_dealer row missing one.
+
+        Tries ``_fetch_browse_record(sec_file_number)`` first when the row
+        carries a SEC file number; falls back to a company-name search on
+        ``browse-edgar``, disambiguated by ``bd.state`` when the search
+        returns multiple hits.
+
+        Returns ``(status, cik)`` where status is one of:
+
+        * ``"found"`` — CIK resolved (cik populated, 10-digit zero-padded)
+        * ``"not_found"`` — neither path produced a hit (cik is None)
+        * ``"ambiguous"`` — name search returned multiple hits and the
+          ``state`` tiebreaker did not narrow it to a single row; do not
+          write a guess (cik is None)
+        """
+        if bd.sec_file_number:
+            record = await self._fetch_browse_record(client, bd.sec_file_number)
+            if record is not None and record.cik:
+                return ("found", record.cik)
+
+        return await self._fetch_browse_record_by_name(client, bd.name, bd.state)
+
+    async def _fetch_browse_record_by_name(
+        self,
+        client: httpx.AsyncClient,
+        company_name: str,
+        state_hint: str | None,
+    ) -> tuple[str, str | None]:
+        """Hit ``browse-edgar`` with a company-name query and return the
+        best CIK match for a broker-dealer-like firm.
+
+        Uses ``type=BD`` to narrow to broker-dealer filings (avoids the
+        common case where a firm shares a name with an unrelated mutual-
+        fund issuer that has its own CIK).
+        """
+        params = {
+            "action": "getcompany",
+            "company": company_name,
+            "type": "BD",
+            "dateb": "",
+            "owner": "include",
+            "count": 40,
+        }
+        last_error: Exception | None = None
+        page = ""
+        for attempt in range(1, settings.sec_request_max_retries + 1):
+            try:
+                response = await client.get(
+                    "https://www.sec.gov/cgi-bin/browse-edgar", params=params,
+                )
+            except httpx.HTTPError as exc:
+                last_error = exc
+                if attempt == settings.sec_request_max_retries:
+                    break
+                await asyncio.sleep(min(2**attempt, 30))
+                continue
+
+            if response.status_code == 429:
+                retry_after = response.headers.get("retry-after")
+                try:
+                    wait_seconds = float(retry_after) if retry_after else min(2**attempt, 60)
+                except ValueError:
+                    wait_seconds = min(2**attempt, 60)
+                await asyncio.sleep(wait_seconds)
+                last_error = httpx.HTTPStatusError(
+                    "SEC browse-edgar rate limited the request.",
+                    request=response.request,
+                    response=response,
+                )
+                continue
+
+            try:
+                response.raise_for_status()
+            except httpx.HTTPStatusError as exc:
+                last_error = exc
+                if attempt == settings.sec_request_max_retries:
+                    break
+                await asyncio.sleep(min(2**attempt, 8))
+                continue
+
+            page = response.text
+            break
+
+        if not page:
+            if last_error is not None:
+                logger.warning(
+                    "SEC browse-edgar name lookup failed for '%s': %s",
+                    company_name,
+                    last_error,
+                )
+            return ("not_found", None)
+
+        if "No matching" in page:
+            return ("not_found", None)
+
+        # Single-match path: browse-edgar redirects to the company detail
+        # page when exactly one filer matches. That page carries the
+        # canonical header with company name + CIK.
+        header_match = self.BROWSE_HEADER_PATTERN.search(page)
+        if header_match is not None:
+            return ("found", header_match.group("cik").zfill(10))
+
+        # Multi-match path: parse the results table for (cik, state) pairs.
+        candidates = self._parse_browse_edgar_name_results(page)
+        if not candidates:
+            return ("not_found", None)
+
+        if len(candidates) == 1:
+            return ("found", candidates[0][0])
+
+        if state_hint:
+            normalized_hint = state_hint.strip().upper()
+            state_matches = [
+                pair for pair in candidates
+                if pair[1] and pair[1].upper() == normalized_hint
+            ]
+            if len(state_matches) == 1:
+                return ("found", state_matches[0][0])
+
+        return ("ambiguous", None)
+
+    def _parse_browse_edgar_name_results(
+        self, page_html: str,
+    ) -> list[tuple[str, str | None]]:
+        """Parse a browse-edgar company-name search results page into
+        ``(cik, state)`` pairs. State may be ``None`` when the row's
+        State/Country column is blank (rare but legal)."""
+        pairs: list[tuple[str, str | None]] = []
+        matches = list(self._COMPANY_TABLE_ROW_PATTERN.finditer(page_html))
+        if not matches:
+            matches = list(self._COMPANY_ROW_PATTERN.finditer(page_html))
+
+        for match in matches:
+            cik = match.group("cik").strip().zfill(10)
+            if not cik:
+                continue
+            row_start = match.start()
+            row_end = min(match.end() + 300, len(page_html))
+            row_region = page_html[row_start:row_end]
+            state_match = self._STATE_IN_ROW_PATTERN.search(
+                row_region[match.end() - row_start:]
+            )
+            state = state_match.group("state").upper() if state_match else None
+            pairs.append((cik, state))
+
+        return pairs
