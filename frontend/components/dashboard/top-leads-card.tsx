@@ -56,7 +56,7 @@ export function TopLeadsCard() {
     async function load() {
       try {
         const response = await apiRequest<BrokerDealerListResponse>(
-          "/api/v1/broker-dealers?lead_priority=hot&limit=5&sort=lead_score_desc"
+          "/api/v1/broker-dealers?lead_priority=hot&limit=5&sort_by=lead_score&sort_dir=desc"
         );
         if (!active) return;
         setItems(response.items);
