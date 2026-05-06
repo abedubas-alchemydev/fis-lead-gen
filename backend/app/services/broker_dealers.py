@@ -323,7 +323,7 @@ class BrokerDealerRepository:
             (latest_run.completed_at or latest_run.started_at) if latest_run else None
         )
         unknown_reasons = await self._build_list_unknown_reasons(
-            db, [item.id for item in items]
+            db, list(items)
         )
         for item in items:
             clearing_reason, financial_reason = unknown_reasons.get(
@@ -358,18 +358,23 @@ class BrokerDealerRepository:
     async def _build_list_unknown_reasons(
         self,
         db: AsyncSession,
-        bd_ids: list[int],
+        broker_dealers: list[BrokerDealer],
     ) -> dict[int, tuple[UnknownReasonResult | None, UnknownReasonResult | None]]:
         """Look up the latest clearing + financial row per BD and classify.
 
         Two queries (one per child table), each filtered by ``bd_id IN
         :ids`` and ordered so the first row per BD is the most recent. Built
-        once per list response so we never N+1 against the master list. The
-        helper keys back to ``bd_id`` so the caller can attach reasons to
-        each item without re-querying.
+        once per list response so we never N+1 against the master list.
+        Takes the BD objects (not just ids) so the financial classifier
+        can consult ``cik`` / ``filings_index_url`` on the row to
+        distinguish ``not_yet_extracted`` from ``no_filing_available``
+        when no financial_metric row exists.
         """
-        if not bd_ids:
+        if not broker_dealers:
             return {}
+
+        bd_by_id = {bd.id: bd for bd in broker_dealers}
+        bd_ids = list(bd_by_id.keys())
 
         clearing_stmt = (
             select(ClearingArrangement)
@@ -403,7 +408,8 @@ class BrokerDealerRepository:
                 latest_clearing.get(bd_id)
             )
             financial_reason = derive_financial_unknown_reason(
-                latest_financial.get(bd_id)
+                latest_financial.get(bd_id),
+                broker_dealer=bd_by_id.get(bd_id),
             )
             out[bd_id] = (clearing_reason, financial_reason)
         return out
