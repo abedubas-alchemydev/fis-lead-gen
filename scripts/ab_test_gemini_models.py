@@ -7,19 +7,28 @@ and ~5x lower cost -- IF Flash matches Pro's accuracy on the load-bearing
 fields. This script answers that question on a representative 10-firm sample
 without touching the production model setting or the database.
 
-For each sampled broker-dealer we download the X-17A-5 PDF once and call
-BOTH models with the SAME prompt. The output is a side-by-side table plus
-per-model rollups (status counts, mean confidence, agreement rate on key
-fields, estimated total cost) and a regression signal (count of firms where
-Flash flips a Pro ``parsed`` row to ``needs_review``).
+Two modes:
 
-No DB writes. Pure read-sample-firms + dual-model call + print.
+* ``--mode ab`` (default) -- live dual call. For each sampled broker-dealer
+  we download the X-17A-5 PDF once and call BOTH models with the SAME prompt.
+  Side-by-side table plus per-model rollups (status counts, mean confidence,
+  agreement rate on key fields, estimated total cost) and a regression
+  signal (count of firms where Flash flips a Pro ``parsed`` row to
+  ``needs_review``). Requires Pro quota to be healthy.
+* ``--mode flash-only`` -- single live Flash call per firm, compared against
+  the persisted Pro extraction in ``clearing_arrangements``
+  (``extraction_status='parsed'`` rows from prior pipeline runs). Unblocks
+  validation today when Pro daily quota is already exhausted. Clearing only;
+  financial baselines live in a different table and are out of scope here.
+
+No DB writes in either mode. Pure read-sample-firms + Gemini call(s) + print.
 
 Usage:
-    python -m scripts.ab_test_gemini_models                 # 10 firms, clearing
+    python -m scripts.ab_test_gemini_models                       # 10 firms, clearing, AB mode
     python -m scripts.ab_test_gemini_models --type financial
     python -m scripts.ab_test_gemini_models --limit 5
     python -m scripts.ab_test_gemini_models --bd-ids 1,2,3
+    python -m scripts.ab_test_gemini_models --mode flash-only      # validate Flash vs DB baseline
 """
 
 from __future__ import annotations
@@ -70,6 +79,10 @@ logger = logging.getLogger(__name__)
 
 PRO_MODEL = "gemini-2.5-pro"
 FLASH_MODEL = "gemini-2.5-flash"
+# Synthetic ``CallStats.model`` tag for the persisted Pro extraction loaded
+# from ``clearing_arrangements`` in ``--mode flash-only``. Distinguishes the
+# DB-sourced baseline from a live ``PRO_MODEL`` call in the printed output.
+BASELINE_MODEL = "baseline"
 
 # USD per million tokens, public Gemini paid-tier pricing.
 COST_INPUT_PER_M: dict[str, float] = {PRO_MODEL: 1.25, FLASH_MODEL: 0.075}
@@ -85,6 +98,7 @@ APPROX_INPUT_TOKENS_PER_CALL = 50_000
 APPROX_OUTPUT_TOKENS_PER_CALL = 250
 
 EXTRACTION_TYPES = ("clearing", "financial")
+MODES = ("ab", "flash-only")
 
 
 @dataclass(slots=True)
@@ -138,7 +152,7 @@ def _override_gemini_model(model: str):
 
 
 async def _select_target_bds(
-    db, *, extraction_type: str, limit: int, bd_ids: list[int] | None
+    db, *, extraction_type: str, mode: str, limit: int, bd_ids: list[int] | None
 ) -> list[BrokerDealer]:
     stmt = select(BrokerDealer).where(BrokerDealer.filings_index_url.is_not(None))
     if bd_ids:
@@ -148,6 +162,15 @@ async def _select_target_bds(
             select(ClearingArrangement.id)
             .where(ClearingArrangement.bd_id == BrokerDealer.id)
         )
+        if mode == "flash-only":
+            # Flash-only validation needs a real Pro extraction to compare
+            # against, not just any clearing_arrangement row. ``parsed`` plus
+            # a non-null ``clearing_partner`` is the load-bearing combination
+            # the partner-agreement metric needs.
+            clearing_baseline = clearing_baseline.where(
+                ClearingArrangement.extraction_status == "parsed",
+                ClearingArrangement.clearing_partner.is_not(None),
+            )
         stmt = stmt.where(exists(clearing_baseline)).order_by(BrokerDealer.id.asc()).limit(limit)
     else:
         stmt = (
@@ -175,6 +198,40 @@ def _classify_financial_status(extraction: GeminiFinancialExtraction) -> str:
         confidence_score=extraction.confidence_score,
         min_confidence=settings.financial_extraction_min_confidence,
         has_required_fields=extraction.net_capital is not None,
+    )
+
+
+async def _load_clearing_baseline(db, bd: BrokerDealer) -> CallStats | None:
+    """Load the most recent ``parsed`` clearing extraction for a broker-dealer.
+
+    Used by ``--mode flash-only`` to populate ``FirmRow.pro`` from the DB
+    instead of a live Pro call. Returns ``None`` if no parsed row exists --
+    the firm is then skipped from the flash-only run because there is
+    nothing to compare Flash output against.
+    """
+    stmt = (
+        select(ClearingArrangement)
+        .where(ClearingArrangement.bd_id == bd.id)
+        .where(ClearingArrangement.extraction_status == "parsed")
+        .order_by(
+            ClearingArrangement.filing_year.desc(),
+            ClearingArrangement.id.desc(),
+        )
+        .limit(1)
+    )
+    row = (await db.execute(stmt)).scalar_one_or_none()
+    if row is None:
+        return None
+    confidence = float(row.extraction_confidence) if row.extraction_confidence is not None else None
+    return CallStats(
+        model=BASELINE_MODEL,
+        bd_id=bd.id,
+        bd_name=bd.name,
+        extraction_status=row.extraction_status,
+        confidence=confidence,
+        clearing_partner=row.clearing_partner,
+        clearing_type=row.clearing_type,
+        rationale="(persisted Pro baseline)",
     )
 
 
@@ -243,18 +300,19 @@ def _trunc(value: object, width: int) -> str:
     return text if len(text) <= width else text[: width - 1] + "…"
 
 
-def _print_clearing_rows(rows: list[FirmRow]) -> None:
+def _print_clearing_rows(rows: list[FirmRow], mode: str) -> None:
     header = (
         f"{'BD':>5} {'Name':<30} {'Model':<8} {'Status':<13} "
         f"{'Conf':>5} {'Type':<16} {'Partner':<28}"
     )
     print(header)
     print("-" * len(header))
+    pro_label = "baseline" if mode == "flash-only" else "pro"
     for row in rows:
         if row.skip_reason:
             print(f"{row.bd_id:>5} {_trunc(row.bd_name, 30):<30} -- skipped: {row.skip_reason}")
             continue
-        for tag, stats in (("pro", row.pro), ("flash", row.flash)):
+        for tag, stats in ((pro_label, row.pro), ("flash", row.flash)):
             if stats is None:
                 continue
             conf = "" if stats.confidence is None else f"{stats.confidence:0.2f}"
@@ -314,7 +372,7 @@ def _rollup_for(rows: list[FirmRow], picker) -> Rollup:
     return rollup
 
 
-def _print_rollups(rows: list[FirmRow], extraction_type: str) -> None:
+def _print_rollups(rows: list[FirmRow], extraction_type: str, mode: str) -> None:
     pro = _rollup_for(rows, lambda r: r.pro)
     flash = _rollup_for(rows, lambda r: r.flash)
 
@@ -326,9 +384,12 @@ def _print_rollups(rows: list[FirmRow], extraction_type: str) -> None:
             f"mean_conf={mean_conf:0.3f}"
         )
 
+    pro_label = (
+        f"{BASELINE_MODEL} ({PRO_MODEL})" if mode == "flash-only" else PRO_MODEL
+    )
     print()
     print("Per-model rollups")
-    print(_summary(PRO_MODEL, pro))
+    print(_summary(pro_label, pro))
     print(_summary(FLASH_MODEL, flash))
 
     if extraction_type == "clearing":
@@ -351,15 +412,40 @@ def _print_rollups(rows: list[FirmRow], extraction_type: str) -> None:
     # Per CLAUDE.md "review-queue semantics in LLM extraction must be
     # preserved" -- a non-zero count here is the yellow flag for the
     # follow-up brief that flips GEMINI_PDF_MODEL to Flash.
+    other_label = "baseline" if mode == "flash-only" else "Pro"
     regressions = [
         r.bd_id for r in paired
         if r.pro.extraction_status == STATUS_PARSED
         and r.flash.extraction_status == STATUS_NEEDS_REVIEW
     ]
     print(
-        f"  Flash regressions (Pro=parsed -> Flash=needs_review): "
+        f"  Flash regressions ({other_label}=parsed -> Flash=needs_review): "
         f"{len(regressions)} firms {regressions}"
     )
+
+    if mode == "flash-only":
+        # Mean confidence delta: positive => Flash is more confident than the
+        # persisted Pro extraction; negative => Flash is more uncertain. The
+        # paired set already excludes errors, but we still need to gate on
+        # both confidences being non-null since older baselines occasionally
+        # persisted with NULL extraction_confidence.
+        deltas = [
+            r.flash.confidence - r.pro.confidence
+            for r in paired
+            if r.flash.confidence is not None and r.pro.confidence is not None
+        ]
+        if deltas:
+            mean_delta = sum(deltas) / len(deltas)
+            print(
+                f"  mean_confidence_delta (flash - baseline): {mean_delta:+0.3f} "
+                f"over {len(deltas)} paired firms"
+            )
+        else:
+            print("  mean_confidence_delta: n/a (no paired confidences)")
+        # Cost block in this mode would be misleading -- we did not actually
+        # call Pro, so any "Pro cost" figure would suggest a charge that did
+        # not happen. Skip it entirely.
+        return
 
     pro_cost = (
         pro.total
@@ -396,8 +482,13 @@ async def _process_firm(
     client: GeminiResponsesClient,
     prompt: str,
     extraction_type: str,
+    mode: str,
+    baseline: CallStats | None = None,
 ) -> FirmRow:
     row = FirmRow(bd_id=bd.id, bd_name=bd.name)
+    if mode == "flash-only" and baseline is None:
+        row.skip_reason = "no_parsed_baseline_in_clearing_arrangements"
+        return row
     with pdf_tempdir(prefix="ab_test_") as tmp_dir:
         try:
             record = await downloader.download_latest_x17a5_pdf(bd, tmp_dir)
@@ -409,16 +500,21 @@ async def _process_firm(
             return row
 
         caller = _call_clearing if extraction_type == "clearing" else _call_financial
-        row.pro = await caller(
-            client, pdf_b64=record.bytes_base64, prompt=prompt, model=PRO_MODEL, bd=bd
-        )
+        if mode == "flash-only":
+            row.pro = baseline
+        else:
+            row.pro = await caller(
+                client, pdf_b64=record.bytes_base64, prompt=prompt, model=PRO_MODEL, bd=bd
+            )
         row.flash = await caller(
             client, pdf_b64=record.bytes_base64, prompt=prompt, model=FLASH_MODEL, bd=bd
         )
     return row
 
 
-async def main(*, extraction_type: str, limit: int, bd_ids: list[int] | None) -> None:
+async def main(
+    *, extraction_type: str, mode: str, limit: int, bd_ids: list[int] | None
+) -> None:
     if not settings.gemini_api_key:
         print("ERROR: GEMINI_API_KEY is not set. Cannot run A/B test.", file=sys.stderr)
         sys.exit(1)
@@ -433,16 +529,34 @@ async def main(*, extraction_type: str, limit: int, bd_ids: list[int] | None) ->
             file=sys.stderr,
         )
         sys.exit(2)
+    if mode == "flash-only" and extraction_type != "clearing":
+        # Financial baselines persist in financial_metrics rows, not
+        # clearing_arrangements. Reusing this script's flash-only path for
+        # financial would silently treat every firm as "no baseline" and
+        # produce an empty report.
+        print(
+            "ERROR: --mode flash-only currently supports --type clearing only "
+            "(financial baselines are not in clearing_arrangements).",
+            file=sys.stderr,
+        )
+        sys.exit(2)
 
-    print(f"A/B test: {extraction_type} extraction, Pro vs Flash")
+    label = "Flash vs persisted Pro baseline" if mode == "flash-only" else "Pro vs Flash"
+    print(f"A/B test: {extraction_type} extraction, {label} (mode={mode})")
     print(f"  Sample size: {len(bd_ids) if bd_ids else limit}")
     print(f"  BD IDs override: {bd_ids if bd_ids else '(auto-selected)'}")
     print()
 
     async with SessionLocal() as db:
         bds = await _select_target_bds(
-            db, extraction_type=extraction_type, limit=limit, bd_ids=bd_ids,
+            db, extraction_type=extraction_type, mode=mode, limit=limit, bd_ids=bd_ids,
         )
+        baselines: dict[int, CallStats] = {}
+        if mode == "flash-only":
+            for bd in bds:
+                baseline = await _load_clearing_baseline(db, bd)
+                if baseline is not None:
+                    baselines[bd.id] = baseline
 
     if not bds:
         print("No matching broker-dealers found. Check filters or DB state.")
@@ -460,24 +574,27 @@ async def main(*, extraction_type: str, limit: int, bd_ids: list[int] | None) ->
         prompt = FocusReportService()._build_financial_prompt()
 
     rows: list[FirmRow] = []
+    step_label = "downloading + flash-only" if mode == "flash-only" else "downloading + dual-extraction"
     for idx, bd in enumerate(bds, start=1):
-        print(f"[{idx:>2}/{len(bds)}] BD {bd.id} {bd.name}: downloading + dual-extraction...")
+        print(f"[{idx:>2}/{len(bds)}] BD {bd.id} {bd.name}: {step_label}...")
         row = await _process_firm(
             bd,
             downloader=downloader,
             client=client,
             prompt=prompt,
             extraction_type=extraction_type,
+            mode=mode,
+            baseline=baselines.get(bd.id),
         )
         rows.append(row)
 
     print()
     print(f"Side-by-side comparison ({extraction_type})")
     if extraction_type == "clearing":
-        _print_clearing_rows(rows)
+        _print_clearing_rows(rows, mode=mode)
     else:
         _print_financial_rows(rows)
-    _print_rollups(rows, extraction_type)
+    _print_rollups(rows, extraction_type, mode=mode)
 
 
 def _parse_args() -> argparse.Namespace:
@@ -487,6 +604,15 @@ def _parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--type", choices=EXTRACTION_TYPES, default="clearing",
         help="Extraction type (default: clearing)",
+    )
+    parser.add_argument(
+        "--mode", choices=MODES, default="ab",
+        help=(
+            "Validation mode (default: ab). 'ab' = live dual call to Pro and "
+            "Flash. 'flash-only' = single live Flash call compared against "
+            "the persisted Pro extraction in clearing_arrangements; clearing "
+            "type only; unblocks validation when Pro daily quota is exhausted."
+        ),
     )
     parser.add_argument(
         "--limit", type=int, default=10,
@@ -521,6 +647,10 @@ if __name__ == "__main__":
         with asyncio.Runner(
             loop_factory=lambda: asyncio.SelectorEventLoop(selectors.SelectSelector())
         ) as runner:
-            runner.run(main(extraction_type=args.type, limit=args.limit, bd_ids=bd_ids))
+            runner.run(
+                main(extraction_type=args.type, mode=args.mode, limit=args.limit, bd_ids=bd_ids)
+            )
     else:
-        asyncio.run(main(extraction_type=args.type, limit=args.limit, bd_ids=bd_ids))
+        asyncio.run(
+            main(extraction_type=args.type, mode=args.mode, limit=args.limit, bd_ids=bd_ids)
+        )
