@@ -21,7 +21,6 @@ import { ContactRow } from "@/components/master-list/detail/contact-row";
 import { FinancialTrendChart } from "@/components/master-list/detail/financial-trend-chart";
 import { FindEmailsButton } from "@/components/master-list/detail/find-emails-button";
 import { FirmWebsiteLink } from "@/components/master-list/detail/firm-website-link";
-import { RefreshFirmButton } from "@/components/master-list/detail/refresh-firm-button";
 import { FocusReportSection } from "@/components/master-list/detail/focus-report-section";
 import {
   classificationDisplay,
@@ -43,7 +42,6 @@ import { Pill } from "@/components/ui/pill";
 import { SourceBadge } from "@/components/master-list/source-badge";
 import { UnknownCell } from "@/components/master-list/unknown-cell";
 import { apiRequest, buildApiPath } from "@/lib/api";
-import { isFirmIncomplete } from "@/lib/firm-completeness";
 import { parseArrangementBlob } from "@/lib/arrangements";
 import {
   recordVisit,
@@ -162,11 +160,6 @@ export function BrokerDealerDetailClient({ brokerDealerId }: { brokerDealerId: s
   const [isEnriching, setIsEnriching] = useState(false);
   const [attemptedAutoEnrich, setAttemptedAutoEnrich] = useState(false);
   const [isHealthChecking, setIsHealthChecking] = useState(false);
-  // Bumped by RefreshFirmButton's onRefreshComplete to re-fire the
-  // profile-fetch useEffect after a refresh-all run completes. The page
-  // owns profile state via useState — router.refresh() alone won't update
-  // it, so we drive a manual refetch via this dep on loadProfile below.
-  const [profileRefreshKey, setProfileRefreshKey] = useState(0);
   const [healthCheckResult, setHealthCheckResult] = useState<string | null>(null);
   const [prevId, setPrevId] = useState<number | null>(null);
   const [nextId, setNextId] = useState<number | null>(null);
@@ -343,7 +336,7 @@ export function BrokerDealerDetailClient({ brokerDealerId }: { brokerDealerId: s
     return () => {
       active = false;
     };
-  }, [brokerDealerId, profileRefreshKey]);
+  }, [brokerDealerId]);
 
   async function runHealthCheck() {
     setIsHealthChecking(true);
@@ -487,17 +480,6 @@ export function BrokerDealerDetailClient({ brokerDealerId }: { brokerDealerId: s
               firmId={bd.id}
               variant="detail"
               initialDefaultMember={profile.is_favorited}
-            />
-            {/* Always rendered so users have a manual "re-check for
-                updates" trigger even after the firm is fully populated.
-                autoFire stays gated on incompleteness so a complete firm
-                isn't auto-refreshed on every navigation — a manual click
-                on a complete firm hits the BE which returns
-                status="skipped" with an "Already complete." toast. */}
-            <RefreshFirmButton
-              firmId={bd.id}
-              autoFire={isFirmIncomplete(bd)}
-              onRefreshComplete={() => setProfileRefreshKey((k) => k + 1)}
             />
           </div>
           <FirmWebsiteLink firmId={bd.id} firmName={bd.name} website={bd.website} />

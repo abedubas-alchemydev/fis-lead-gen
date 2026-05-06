@@ -22,9 +22,7 @@ import { Combo } from "@/components/ui/combo";
 import { ListPicker } from "@/components/list-picker/list-picker";
 import { NetCapitalRangeFilter } from "@/components/master-list/filters/net-capital-range-filter";
 import { RegistrationDateRangeFilter } from "@/components/master-list/filters/registration-date-range-filter";
-import { RefreshFirmButton } from "@/components/master-list/detail/refresh-firm-button";
 import { UnknownCell } from "@/components/master-list/unknown-cell";
-import { isFirmListIncomplete } from "@/lib/firm-completeness";
 import {
   MultiSelectFilter,
   type MultiSelectFilterOption,
@@ -205,13 +203,6 @@ export function MasterListWorkspaceClient() {
 
   // ── Table data — fetched on every URL-state change ─────────────────
   const [items, setItems] = useState<BrokerDealerListItem[]>([]);
-  // Bumped by the row-button's onRefreshComplete to re-trigger the table
-  // useEffect after a per-firm refresh-all run finishes. Keeps the row's
-  // updated cells visible without a full page reload.
-  const [refreshNonce, setRefreshNonce] = useState(0);
-  const refetchList = useCallback(() => {
-    setRefreshNonce((n) => n + 1);
-  }, []);
   const [clearingPartners, setClearingPartners] = useState<string[]>([]);
   const [competitorSeeds, setCompetitorSeeds] = useState<string[]>([]);
   // Distinct types-of-business values + per-type firm counts. Loaded once
@@ -323,7 +314,7 @@ export function MasterListWorkspaceClient() {
     return () => {
       active = false;
     };
-  }, [queryPath, refreshNonce]);
+  }, [queryPath]);
 
   // One-shot filter-metadata fetch. Pulls states + clearing-partners +
   // active-competitor names (for the Combo's quick-chips) + per-list totals
@@ -989,16 +980,6 @@ export function MasterListWorkspaceClient() {
           <table className="w-full min-w-[1080px] text-left">
             <thead>
               <tr>
-                {/*
-                  Utility column for the per-row "Refresh firm" button.
-                  No label, no sort button — it's an action column, not a
-                  data column. Width tracks the button itself.
-                */}
-                <th
-                  scope="col"
-                  aria-label="Refresh firm"
-                  className="w-10 whitespace-nowrap border-b border-[var(--border,rgba(30,64,175,0.1))] bg-[var(--surface-2,#f1f6fd)] px-3 py-3"
-                />
                 {columns.map((column) => {
                   const isSorted = sortBy === column.key;
                   return (
@@ -1032,7 +1013,6 @@ export function MasterListWorkspaceClient() {
                     key={`loading-${index}`}
                     className="border-t border-[var(--border,rgba(30,64,175,0.1))]"
                   >
-                    <td className="px-3 py-3.5" aria-hidden />
                     {columns.map((column) => (
                       <td key={column.key} className="px-5 py-3.5">
                         <div className="h-4 w-full animate-pulse rounded bg-[var(--surface-2,#f1f6fd)]" />
@@ -1043,7 +1023,7 @@ export function MasterListWorkspaceClient() {
               ) : items.length === 0 ? (
                 <tr>
                   <td
-                    colSpan={columns.length + 1}
+                    colSpan={columns.length}
                     className="px-5 py-12 text-center text-sm text-[var(--text-muted,#94a3b8)]"
                   >
                     No broker-dealers matched the current filters.
@@ -1071,16 +1051,6 @@ export function MasterListWorkspaceClient() {
                       key={item.id}
                       className="border-t border-[var(--border,rgba(30,64,175,0.1))] align-top transition hover:bg-[var(--row-hover,rgba(99,102,241,0.04))]"
                     >
-                      <td className="px-3 py-3.5">
-                        {isFirmListIncomplete(item) ? (
-                          <RefreshFirmButton
-                            firmId={item.id}
-                            compact
-                            scope="list_only"
-                            onRefreshComplete={refetchList}
-                          />
-                        ) : null}
-                      </td>
                       <td className="min-w-[220px] px-5 py-3.5" style={firmCellStyle}>
                         <div className="flex items-start justify-between gap-3">
                           <div className="min-w-0 flex-1">
