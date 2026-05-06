@@ -62,7 +62,7 @@ export function DashboardHomeClient() {
   const [totalBds, setTotalBds] = useState<string>("-");
   const [newBds, setNewBds] = useState<string>("-");
   const [deficiencyAlerts, setDeficiencyAlerts] = useState<string>("-");
-  const [highValueProspects, setHighValueProspects] = useState<string>("-");
+  const [highValueParticipants, setHighValueParticipants] = useState<string>("-");
   const [distribution, setDistribution] = useState<ClearingDistributionResponse["items"]>([]);
   const [alerts, setAlerts] = useState<AlertListItem[]>([]);
 
@@ -110,7 +110,7 @@ export function DashboardHomeClient() {
         setTotalBds(stats.total_active_bds.toLocaleString());
         setNewBds(stats.new_bds_30_days.toLocaleString());
         setDeficiencyAlerts(stats.deficiency_alerts.toLocaleString());
-        setHighValueProspects(stats.high_value_leads.toLocaleString());
+        setHighValueParticipants(stats.high_value_participants.toLocaleString());
       })
       .catch((err) => {
         if (!active) return;
@@ -256,12 +256,12 @@ export function DashboardHomeClient() {
           </div>
           <div className="animate-fade-in delay-200">
             <KpiCard
-              title="High-Value Prospects"
-              value={highValueProspects}
+              title="High Value Participants"
+              value={highValueParticipants}
               tone="amber"
               icon={KpiIconTarget}
-              helper="Weighted scoring, last updated 8m ago"
-              href="/master-list?prospect_priority=hot"
+              helper="Net Capital between $5M and $100M"
+              href="/master-list?min_net_capital=5000000&max_net_capital=100000000"
             />
           </div>
         </div>
