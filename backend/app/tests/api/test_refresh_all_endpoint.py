@@ -25,7 +25,7 @@ Coverage:
 
 from __future__ import annotations
 
-from datetime import datetime, timedelta, timezone
+from datetime import date, datetime, timedelta, timezone
 from typing import Any
 
 import httpx
@@ -193,6 +193,8 @@ async def test_skipped_already_complete_returns_200_no_writes(
         health_status="healthy",
         current_clearing_type="self_clearing",
         current_clearing_partner="Acme Self Clearing",
+        registration_date=date(1990, 1, 1),
+        formation_date=date(1989, 12, 1),
     )
 
     async def _fake_get(_db: Any, _firm_id: int) -> BrokerDealer | None:
@@ -288,6 +290,8 @@ async def test_only_website_missing_runs_only_resolve_website(
         health_status="ok",
         current_clearing_type="introducing",
         current_clearing_partner="Pershing",
+        registration_date=date(1990, 1, 1),
+        formation_date=date(1989, 12, 1),
     )
 
     async def _fake_get(_db: Any, _firm_id: int) -> BrokerDealer | None:
