@@ -105,7 +105,16 @@ class Settings(BaseSettings):
     contact_discovery_timeout: float = 10.0
     gemini_api_key: str | None = None
     gemini_api_base: str = "https://generativelanguage.googleapis.com/v1beta"
-    gemini_pdf_model: str = "gemini-2.5-pro"
+    # Production default for the structured-PDF extraction path
+    # (clearing pipeline, financial pipeline, classification fan-out). Tier 1
+    # of the Gemini paid plan caps ``gemini-2.5-pro`` at 1,000 requests/day
+    # but allows ``gemini-2.5-flash`` at 10,000 requests/day with the same
+    # JSON-schema + multi-modal capabilities and ~5x lower per-call cost,
+    # so Flash is the production default. Override with the
+    # ``GEMINI_PDF_MODEL`` env var (e.g. on Cloud Run) to flip back to Pro
+    # for ad-hoc reruns when Pro quota is healthy and the deeper reasoning
+    # chain is wanted on rationale-heavy ambiguous cases.
+    gemini_pdf_model: str = "gemini-2.5-flash"
     gemini_request_timeout_seconds: float = 120.0
     gemini_request_max_retries: int = 2
     gemini_inline_pdf_max_size_mb: int = 45
