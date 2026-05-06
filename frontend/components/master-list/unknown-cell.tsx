@@ -11,7 +11,7 @@ import {
 import { createPortal } from "react-dom";
 import { Info } from "lucide-react";
 
-import { unknownReasonShort } from "@/lib/format";
+import { triggerFieldLabel, unknownReasonShort } from "@/lib/format";
 import type { UnknownReason } from "@/lib/types";
 
 // Notes can run long when the BE captures the full extraction narrative.
@@ -129,12 +129,21 @@ export function UnknownCell({
   }
 
   const shortLabel = unknownReasonShort(reason);
-  // BE prepends `[Triggered by missing: <field>]` to `note` so the tooltip
-  // can lead with the specific column that triggered the cluster-level
-  // reason. Strip it from the note body and surface it as a separate line.
+  // BE prepends `[Triggered by missing: <field>]` (or comma-separated for
+  // multi-field clusters) to `note` so the tooltip can lead with the specific
+  // column(s) that triggered the cluster-level reason. Strip the prefix from
+  // the note body and surface it as a separate line, mapping each raw column
+  // name to its user-facing display label.
   const triggerMatch =
     reason.note?.match(/^\[Triggered by missing:\s*([^\]]+)\]\s*/) ?? null;
-  const triggerField = triggerMatch ? triggerMatch[1].trim() : null;
+  const triggerFieldsLabel = triggerMatch
+    ? triggerMatch[1]
+        .split(",")
+        .map((token) => token.trim())
+        .filter(Boolean)
+        .map(triggerFieldLabel)
+        .join(", ")
+    : null;
   const rawNote = triggerMatch
     ? reason.note!.slice(triggerMatch[0].length)
     : reason.note;
@@ -166,9 +175,9 @@ export function UnknownCell({
             className="pointer-events-none w-max rounded-lg border border-[var(--border,rgba(30,64,175,0.1))] bg-[var(--surface,#ffffff)] px-3 py-2 text-left text-[12px] leading-5 text-[var(--text,#0f172a)] shadow-[0_10px_28px_rgba(15,23,42,0.18)]"
           >
             <span className="block font-semibold">{shortLabel}</span>
-            {triggerField ? (
+            {triggerFieldsLabel ? (
               <span className="mt-1 block text-[11px] font-medium text-[var(--text-dim,#475569)]">
-                Missing field: <span className="font-mono">{triggerField}</span>
+                Triggered by: {triggerFieldsLabel}
               </span>
             ) : null}
             {note ? (
