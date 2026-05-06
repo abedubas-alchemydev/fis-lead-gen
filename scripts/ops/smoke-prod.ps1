@@ -150,7 +150,7 @@ Test-Endpoint -Path "/settings/pipelines" -ExpectedStatus 307 -ExpectedLocation 
 # marker so we catch React-mount failures (page returns 200 but the
 # tree never hydrates) or copy regressions.
 if ($AdminCookie) {
-    Test-Endpoint -Path "/dashboard" -ContainsText "Lead Intelligence Workspace" -UseAuth $true -Description "/dashboard renders for admin"
+    Test-Endpoint -Path "/dashboard" -ContainsText "Prospect Intelligence Workspace" -UseAuth $true -Description "/dashboard renders for admin"
     Test-Endpoint -Path "/master-list" -ContainsText "Broker-Dealer Master List" -UseAuth $true -Description "/master-list renders for admin"
     Test-Endpoint -Path "/alerts" -ContainsText "Daily filing monitor" -UseAuth $true -Description "/alerts renders for admin"
     Test-Endpoint -Path "/my-favorites" -ContainsText "Saved firms" -UseAuth $true -Description "/my-favorites renders for admin"
