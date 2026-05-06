@@ -1,15 +1,22 @@
 """Backfill missing master-list grid data for the top N rows.
 
-Reuses the per-firm refresh-all orchestrator with ``scope="list_only"``
-to fill the seven columns the master-list page renders:
+Reuses the per-firm refresh-all orchestrator with ``scope="all"`` minus
+the Apollo contact-enrichment sub-pipeline. Fills:
 
-    Clearing Partner   -> current_clearing_partner   (health-check)
-    Clearing Type      -> current_clearing_type      (health-check)
+    Clearing Partner   -> current_clearing_partner   (health-check; classification only — partner naming comes from scripts.run_clearing_pipeline's LLM extraction over X-17A-5 PDFs)
+    Clearing Type      -> current_clearing_type      (health-check + run_clearing_pipeline)
     Financial Health   -> health_status              (refresh-financials)
     Net Capital        -> latest_net_capital         (refresh-financials)
     YoY Growth         -> yoy_growth                 (refresh-financials)
     Last Filing        -> last_filing_date           (refresh-filings)
-    Prospect Priority  -> lead_priority              (scoring)
+    Prospect Priority  -> lead_priority              (scoring, end-of-run)
+    Registration Date  -> registration_date          (health-check, FINRA Form BD)
+    Formation Date     -> formation_date             (health-check, FINRA Form BD)
+    Website            -> website                    (resolve-website chain: Apollo / Hunter / SerpAPI fallback)
+
+Apollo executive-contact enrichment (``enrich`` sub-pipeline) is force-
+skipped — emails / phones aren't on the master-list grid and the FE has
+its own dedicated "Find emails" button for per-officer discovery.
 
 Mirrors the master-list page's default query: ``list_mode='primary'``
 (``is_deficient = false``), ``ORDER BY name ASC NULLS LAST, id ASC``,
@@ -18,9 +25,9 @@ column is populated, so this never overwrites existing data.
 
 Driven sequentially per BD: each refresh-all is internally parallel via
 ``asyncio.gather``, so stacking BDs on top would multiply provider
-concurrency. Provider cost: at most ~2 Gemini calls per BD that needs
-financials. Apollo / Hunter / SerpAPI are never called (``list_only``
-force-skips ``resolve-website`` and ``enrich``).
+concurrency. Provider cost per firm with everything still NULL: ~2
+Gemini calls (financials) + ~1 Apollo call + ~1 Hunter call (resolve-
+website chain) ≈ $0.05 / firm.
 
 Usage (from repo root):
     python -m scripts.backfill_master_list_top
@@ -58,6 +65,8 @@ from app.models.broker_dealer import BrokerDealer  # noqa: E402
 from app.models.pipeline_run import PipelineRun  # noqa: E402
 from app.services.refresh_all_orchestrator import (  # noqa: E402
     REFRESH_ALL_PIPELINE_NAME,
+    SUB_ENRICH,
+    GateDecision,
     decide_pipelines,
     has_executive_contacts,
     run_refresh_all,
@@ -101,11 +110,36 @@ def _null_count(rows, attr: str) -> int:
     return sum(1 for r in rows if getattr(r, attr) is None)
 
 
+def _strip_enrich(decision: GateDecision) -> GateDecision:
+    """Move SUB_ENRICH from to_run into to_skip.
+
+    The recipe runs ``scope="all"`` so ``resolve-website`` is included
+    (the firm-detail page's Website cell is otherwise stuck NULL on
+    every firm whose initial-load FINRA enrichment didn't pick up a
+    homepage). But the Apollo contact-enrichment sub-pipeline is a
+    separate cost concern — emails / phones aren't part of the
+    master-list grid and the FE has its own dedicated "Find emails"
+    button when the operator wants per-officer enrichment. Strip
+    ``enrich`` so the recipe stays scoped to the master-list +
+    detail-page columns we actually care about for backfill.
+    """
+    to_run = tuple(name for name in decision.to_run if name != SUB_ENRICH)
+    to_skip = tuple(decision.to_skip) + (
+        (SUB_ENRICH,) if SUB_ENRICH in decision.to_run else ()
+    )
+    # If SUB_ENRICH was already in to_skip, dedupe.
+    seen: set[str] = set()
+    deduped_skip = tuple(name for name in to_skip if not (name in seen or seen.add(name)))
+    return GateDecision(to_run=to_run, to_skip=deduped_skip)
+
+
 async def _process_bd(bd: BrokerDealer, *, dry_run: bool) -> dict:
     """Drive refresh-all for one BD and return a per-BD result row."""
     async with SessionLocal() as db:
         has_contacts = await has_executive_contacts(db, bd.id)
-        decision = decide_pipelines(bd, has_contacts=has_contacts, scope="list_only")
+        decision = _strip_enrich(
+            decide_pipelines(bd, has_contacts=has_contacts, scope="all")
+        )
 
         if not decision.to_run:
             return {
@@ -137,7 +171,7 @@ async def _process_bd(bd: BrokerDealer, *, dry_run: bool) -> dict:
                 {
                     "bd_id": bd.id,
                     "stage": "queued",
-                    "scope": "list_only",
+                    "scope": "all_minus_enrich",
                     "ran": list(decision.to_run),
                     "skipped": list(decision.to_skip),
                 }
