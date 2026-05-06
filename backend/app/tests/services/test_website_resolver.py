@@ -479,3 +479,76 @@ async def test_apollo_wins_serpapi_not_called() -> None:
     assert (website, source, reason) == (_CANDIDATE_URL, "apollo", None)
     hunter.find_company.assert_not_awaited()
     serpapi.search_firm.assert_not_awaited()
+
+
+# ─────────────────────── subdomain + file-download rejects ──────────────
+
+
+@respx.mock
+async def test_serpapi_brokercheck_pdf_subdomain_rejected() -> None:
+    """Real-world Abacus regression: SerpAPI ranks the firm's BrokerCheck
+    Detailed Report PDF (``files.brokercheck.finra.org/firm/firm_<crd>.pdf``)
+    above every other result for obscure firms. Both the subdomain
+    (``finra.org`` suffix) and the ``.pdf`` path should reject it; the
+    chain falls through to a clean miss instead of stamping the FINRA
+    CDN as the firm's website. Pre-fix, the exact-match blocklist let
+    this through and the FE rendered ``files.brokercheck.finra.org`` as
+    the firm's domain."""
+    apollo = AsyncMock()
+    apollo.search_organization = AsyncMock(return_value=None)
+    hunter = AsyncMock()
+    hunter.find_company = AsyncMock(return_value=None)
+    serpapi = AsyncMock()
+    serpapi.search_firm = AsyncMock(
+        return_value=_serp_results(
+            "https://files.brokercheck.finra.org/firm/firm_32119.pdf",
+        ),
+    )
+
+    website, source, reason = await resolve_website(
+        _FIRM_NAME, "32119", apollo, hunter, serpapi,
+    )
+
+    assert (website, source, reason) == (None, None, "no_valid_candidate")
+
+
+@respx.mock
+async def test_finra_subdomain_rejected_via_suffix_match() -> None:
+    """Any subdomain of ``finra.org`` is rejected because the blocklist
+    suffix-matches. Pre-fix only the exact entries on the list were
+    rejected, which let any new BrokerCheck/FINRA subdomain in."""
+    apollo = AsyncMock()
+    apollo.search_organization = AsyncMock(
+        return_value=_apollo_org(
+            website_url="https://reports.brokercheck.finra.org/firm/12345",
+            domain="reports.brokercheck.finra.org",
+        ),
+    )
+    hunter = AsyncMock()
+    hunter.find_company = AsyncMock(return_value=None)
+
+    website, source, reason = await resolve_website(
+        _FIRM_NAME, None, apollo, hunter,
+    )
+
+    assert (website, source, reason) == (None, None, "no_valid_candidate")
+
+
+@respx.mock
+async def test_pdf_path_rejected_on_otherwise_clean_domain() -> None:
+    """A candidate hosted on a non-blocked domain is still rejected when
+    the path looks like a file download. Stops the chain from stamping a
+    hosted-PDF/whitepaper URL as the firm's homepage."""
+    apollo = AsyncMock()
+    pdf_url = "https://example-cdn.test/files/whitepaper.pdf"
+    apollo.search_organization = AsyncMock(
+        return_value=_apollo_org(website_url=pdf_url, domain="example-cdn.test"),
+    )
+    hunter = AsyncMock()
+    hunter.find_company = AsyncMock(return_value=None)
+
+    website, source, reason = await resolve_website(
+        _FIRM_NAME, None, apollo, hunter,
+    )
+
+    assert (website, source, reason) == (None, None, "no_valid_candidate")

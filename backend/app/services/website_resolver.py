@@ -51,38 +51,38 @@ from app.services.serpapi import SerpAPIClient, SerpAPIError
 logger = logging.getLogger(__name__)
 
 
-# Domains we never accept as a firm's primary website. Kept defensive
-# even though the chain isn't open-web search — Apollo and Hunter both
-# return social profiles or aggregator links from time to time.
+# Apex domains we never accept as a firm's primary website. ``_is_blocked_domain``
+# matches each entry as either the exact host or any subdomain, so a single
+# ``finra.org`` entry covers ``brokercheck.finra.org`` AND
+# ``files.brokercheck.finra.org`` (the BrokerCheck PDF CDN — Google ranks
+# the Detailed Report PDF as the top organic result for many small firms
+# with no public site, and pre-suffix-match those URLs were stamping
+# ``broker_dealer.website`` with the FINRA CDN host).
 DOMAIN_BLOCKLIST: Final = frozenset(
     {
-        "linkedin.com",
-        "www.linkedin.com",
-        "sec.gov",
-        "www.sec.gov",
+        # Regulator portals — covers brokercheck/files.brokercheck/adviserinfo/efts/data
         "finra.org",
-        "www.finra.org",
-        "brokercheck.finra.org",
-        "bloomberg.com",
-        "www.bloomberg.com",
-        "reuters.com",
-        "www.reuters.com",
-        "wsj.com",
-        "www.wsj.com",
-        "nytimes.com",
-        "www.nytimes.com",
-        "youtube.com",
-        "www.youtube.com",
+        "sec.gov",
+        # Social and people-search
+        "linkedin.com",
         "facebook.com",
-        "www.facebook.com",
         "twitter.com",
-        "www.twitter.com",
         "x.com",
-        "www.x.com",
         "instagram.com",
-        "www.instagram.com",
+        "youtube.com",
+        # Major news outlets that frequently rank above small-firm sites
+        "bloomberg.com",
+        "reuters.com",
+        "wsj.com",
+        "nytimes.com",
     }
 )
+
+# URL-path suffixes that signal "this is a file download, not a homepage".
+# A firm's primary website is never a PDF / Word doc / Excel sheet, but
+# SerpAPI happily returns hosted PDFs as the top organic result for
+# obscure firms (BrokerCheck Detailed Report being the canonical offender).
+_BLOCKED_PATH_SUFFIXES: Final = (".pdf", ".doc", ".docx", ".xls", ".xlsx")
 
 
 _VALIDATE_TIMEOUT_S: Final = 5.0
@@ -226,13 +226,14 @@ def _firm_token(firm_name: str) -> str:
 
 
 async def _validate(url: str, firm_token: str) -> bool:
-    """Run HEAD reachability + blocklist + title-or-domain check on ``url``.
+    """Run path/host blocklist + HEAD reachability + title-or-domain check on ``url``.
 
     Returns ``False`` on any network error, non-200/301/302 status,
-    blocklisted host, or page that fails BOTH the title-match AND the
-    domain-match fallback. A page with no ``<title>`` is allowed
-    through as long as HEAD passed and the domain is clear — small
-    broker-dealer sites often render an empty title from a JS shell.
+    blocklisted host (apex or subdomain), file-download path, or page
+    that fails BOTH the title-match AND the domain-match fallback. A
+    page with no ``<title>`` is allowed through as long as HEAD passed
+    and the domain + path are clear — small broker-dealer sites often
+    render an empty title from a JS shell.
 
     Domain-match fallback: when the page title is present but doesn't
     carry the firm token, check whether the firm token is a prefix of
@@ -247,7 +248,7 @@ async def _validate(url: str, firm_token: str) -> bool:
     if not url or not firm_token:
         return False
 
-    if is_blocklisted_host(url):
+    if is_blocklisted_host(url) or _is_blocked_path(url):
         return False
     domain = _hostname(url)
     if not domain:
@@ -262,11 +263,14 @@ async def _validate(url: str, firm_token: str) -> bool:
             if head.status_code not in (200, 301, 302):
                 return False
 
-            # Re-check the final URL after redirects so a candidate
-            # that redirects to LinkedIn still gets rejected.
-            if is_blocklisted_host(str(head.url)):
+            # Re-check the final URL after redirects so a candidate that
+            # redirects to a blocked vendor (LinkedIn) or to a file
+            # download (a SaaS landing page that 302s to a hosted PDF)
+            # still gets rejected.
+            final_url = str(head.url)
+            if is_blocklisted_host(final_url) or _is_blocked_path(final_url):
                 return False
-            final_host = _hostname(str(head.url))
+            final_host = _hostname(final_url)
 
             page = await client.get(url, timeout=_VALIDATE_TIMEOUT_S)
             match = _TITLE_RE.search(page.text or "")
@@ -323,6 +327,18 @@ def _domain_segment_starts_with(host: str, firm_token: str) -> bool:
         if normalised.startswith(firm_token):
             return True
     return False
+
+
+def _is_blocked_path(url: str) -> bool:
+    """Reject URLs whose path looks like a file download.
+
+    A firm's primary website is never a PDF / Office doc / Excel sheet.
+    SerpAPI sometimes ranks the BrokerCheck Detailed Report PDF above any
+    other result for obscure firms with no public site, and we don't want
+    that bleeding into ``broker_dealer.website``.
+    """
+    path = urlparse(url).path.lower()
+    return any(path.endswith(ext) for ext in _BLOCKED_PATH_SUFFIXES)
 
 
 def _hostname(url: str) -> str | None:
