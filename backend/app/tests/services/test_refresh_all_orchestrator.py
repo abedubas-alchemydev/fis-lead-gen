@@ -96,6 +96,8 @@ def test_default_scope_already_complete_returns_empty_to_run() -> None:
         current_clearing_type="self_clearing",
         current_clearing_partner="Acme Self Clearing",
         last_filing_date=date(2025, 8, 15),
+        registration_date=date(1990, 1, 1),
+        formation_date=date(1989, 12, 1),
     )
     decision = decide_pipelines(bd, has_contacts=True)
     assert decision.to_run == ()
@@ -140,6 +142,8 @@ def test_list_only_respects_closed_list_gates() -> None:
         current_clearing_type="introducing",
         current_clearing_partner="Pershing",
         last_filing_date=date(2025, 6, 1),
+        registration_date=date(1990, 1, 1),
+        formation_date=date(1989, 12, 1),
     )
     decision = decide_pipelines(bd, has_contacts=False, scope="list_only")
 
@@ -165,11 +169,57 @@ def test_list_only_includes_filings_when_only_filing_date_is_missing() -> None:
         health_status="ok",
         current_clearing_type="introducing",
         current_clearing_partner="Pershing",
+        registration_date=date(1990, 1, 1),
+        formation_date=date(1989, 12, 1),
         # last_filing_date stays None
     )
     decision = decide_pipelines(bd, has_contacts=True, scope="list_only")
 
     assert decision.to_run == (SUB_REFRESH_FILINGS,)
+
+
+# ─────────────────────────── health-check gate edge cases ───────────────────────────
+
+
+def test_health_check_fires_when_registration_date_missing_even_with_clearing_filled() -> None:
+    """The gate widening: health-check is the catch-all for any FINRA
+    Form BD-derived field that's still NULL. A firm whose clearing
+    partner / type are already extracted but whose registration_date is
+    null must still trigger health-check, otherwise the FINRA enrichment
+    that would fill registration_date never runs. Regression for the
+    pre-fix behavior where 2,793 of 2,798 broker_dealers ended up with
+    NULL registration_date because their clearing fields were filled
+    first and the gate closed."""
+    bd = _bd(
+        cik="0000320193",
+        latest_net_capital=2_000_000.0,
+        yoy_growth=3.5,
+        health_status="ok",
+        current_clearing_type="fully_disclosed",
+        current_clearing_partner="Pershing",
+        last_filing_date=date(2025, 6, 1),
+        # registration_date stays None — the trigger
+    )
+    decision = decide_pipelines(bd, has_contacts=True)
+    assert SUB_HEALTH_CHECK in decision.to_run
+
+
+def test_health_check_fires_when_formation_date_missing_even_with_everything_else_filled() -> None:
+    """Symmetric regression for ``formation_date`` — both fields come off
+    the same FINRA Form BD parse and are paired in the gate predicate."""
+    bd = _bd(
+        cik="0000320193",
+        latest_net_capital=2_000_000.0,
+        yoy_growth=3.5,
+        health_status="ok",
+        current_clearing_type="fully_disclosed",
+        current_clearing_partner="Pershing",
+        last_filing_date=date(2025, 6, 1),
+        registration_date=date(1990, 1, 1),
+        # formation_date stays None — the trigger
+    )
+    decision = decide_pipelines(bd, has_contacts=True)
+    assert SUB_HEALTH_CHECK in decision.to_run
 
 
 # ─────────────────────────── filings gate edge cases ───────────────────────────
