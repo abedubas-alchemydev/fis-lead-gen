@@ -410,6 +410,7 @@ class BrokerDealerRepository:
             financial_reason = derive_financial_unknown_reason(
                 latest_financial.get(bd_id),
                 broker_dealer=bd_by_id.get(bd_id),
+                clearing_arrangement=latest_clearing.get(bd_id),
             )
             out[bd_id] = (clearing_reason, financial_reason)
         return out
