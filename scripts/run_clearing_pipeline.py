@@ -58,6 +58,17 @@ def _parse_args() -> argparse.Namespace:
         ),
     )
     parser.add_argument(
+        "--bd-ids",
+        type=str,
+        default=None,
+        help=(
+            "Comma-separated list of broker-dealer IDs to target explicitly. "
+            "When set, supersedes the selector flags — the pipeline runs over "
+            "exactly the BDs you name. Use this for one-off backfills scoped "
+            "to a specific cohort (e.g., the master-list top-25)."
+        ),
+    )
+    parser.add_argument(
         "--dry-run",
         action="store_true",
         help=(
@@ -68,15 +79,34 @@ def _parse_args() -> argparse.Namespace:
     return parser.parse_args()
 
 
+def _parse_bd_ids(raw: str | None) -> list[int] | None:
+    if raw is None:
+        return None
+    ids = [int(token.strip()) for token in raw.split(",") if token.strip()]
+    if not ids:
+        raise SystemExit("--bd-ids was provided but parsed to an empty list.")
+    return ids
+
+
 async def _print_dry_run_targets(
     *,
     only_null_partner: bool,
     only_failed: bool,
     only_needs_review: bool,
+    target_bd_ids: list[int] | None,
 ) -> None:
     service = ClearingPipelineService()
     async with SessionLocal() as db:
-        if only_null_partner:
+        if target_bd_ids is not None:
+            fetched = (
+                await db.execute(
+                    select(BrokerDealer).where(BrokerDealer.id.in_(target_bd_ids))
+                )
+            ).scalars().all()
+            by_id = {bd.id: bd for bd in fetched}
+            broker_dealers = [by_id[i] for i in target_bd_ids if i in by_id]
+            mode = "target_bd_ids"
+        elif only_null_partner:
             broker_dealers = await service._select_null_partner_targets(db)
             mode = "only_null_partner"
         elif only_failed:
@@ -129,11 +159,14 @@ async def main() -> None:
             "--only-failed, --only-null-partner, and --only-needs-review are mutually exclusive."
         )
 
+    target_bd_ids = _parse_bd_ids(args.bd_ids)
+
     if args.dry_run:
         await _print_dry_run_targets(
             only_null_partner=args.only_null_partner,
             only_failed=args.only_failed,
             only_needs_review=args.only_needs_review,
+            target_bd_ids=target_bd_ids,
         )
         return
 
@@ -144,6 +177,7 @@ async def main() -> None:
             only_failed=args.only_failed,
             only_null_partner=args.only_null_partner,
             only_needs_review=args.only_needs_review,
+            target_bd_ids=target_bd_ids,
         )
     print(
         "Clearing pipeline completed:",
