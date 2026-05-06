@@ -432,3 +432,41 @@ def test_with_trigger_fields_synthesizes_data_not_present_when_result_is_none() 
     assert annotated.note == "[Triggered by missing: yoy_growth]"
     assert annotated.extracted_at is None
     assert annotated.confidence is None
+
+
+def test_clearing_partial_null_partner_present_type_null_synthesizes_tooltip() -> None:
+    """Regression: production rows where the latest clearing arrangement
+    parsed a ``clearing_partner`` but no ``clearing_type`` were returning
+    ``current_clearing_unknown_reason: null`` to the FE, dropping the
+    info-icon affordance on the Clearing Type column.
+
+    Pin the exact composition the master-list / firm-detail / firm-profile
+    endpoints run end-to-end::
+
+        with_trigger_fields(
+            derive_clearing_unknown_reason(arrangement),
+            clearing_trigger_fields(item),
+        )
+
+    With ``arrangement.clearing_partner`` set, ``derive_*`` returns ``None``
+    (parsed row, no reason). The cluster still has a null
+    ``current_clearing_type`` on the rolled-up BD row, so the synthesizer
+    must emit ``data_not_present`` with the trigger-field marker."""
+    arrangement = _arrangement(
+        clearing_partner="Pershing LLC",
+        extraction_status=STATUS_PARSED,
+        extraction_confidence=0.95,
+    )
+    item = SimpleNamespace(
+        current_clearing_partner="Pershing LLC",
+        current_clearing_type=None,
+    )
+
+    annotated = with_trigger_fields(
+        derive_clearing_unknown_reason(arrangement),
+        clearing_trigger_fields(item),
+    )
+
+    assert annotated is not None
+    assert annotated.category == "data_not_present"
+    assert annotated.note == "[Triggered by missing: current_clearing_type]"
