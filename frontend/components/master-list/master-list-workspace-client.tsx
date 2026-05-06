@@ -40,12 +40,12 @@ import type {
 
 // ── Column catalog ────────────────────────────────────────────────────────
 // 9 columns (mockup Q1 resolution). Location is merged into the firm-cell
-// as sub-text so the table has room for the Clearing Partner column, which
+// as sub-text so the table has room for the Clearing Arrangement column, which
 // frequently carries long compound provider names.
 const columns = [
   { key: "name", label: "Firm Name" },
   { key: "cik", label: "CIK" },
-  { key: "current_clearing_partner", label: "Clearing Partner" },
+  { key: "current_clearing_partner", label: "Clearing Arrangement" },
   { key: "current_clearing_type", label: "Clearing Type" },
   { key: "health_status", label: "Financial Health" },
   { key: "lead_score", label: "Prospect Priority" },
@@ -646,7 +646,7 @@ export function MasterListWorkspaceClient() {
 
           <div>
             <label className="mb-1.5 block text-[11px] font-semibold uppercase tracking-[0.08em] text-[var(--text-muted,#94a3b8)]">
-              Clearing Partner
+              Clearing Arrangement
             </label>
             <Combo
               value={clearingPartnerFilter}
@@ -654,7 +654,7 @@ export function MasterListWorkspaceClient() {
               options={clearingPartners}
               placeholder="Search partners…"
               emptyLabel="All providers"
-              ariaLabel="Clearing Partner"
+              ariaLabel="Clearing Arrangement"
             />
           </div>
 
