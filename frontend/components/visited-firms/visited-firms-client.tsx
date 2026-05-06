@@ -44,7 +44,7 @@ function healthLabel(status: string | null): string {
   if (status === "healthy") return "Healthy";
   if (status === "ok") return "OK";
   if (status === "at_risk") return "At Risk";
-  return "Unknown";
+  return "Not assessed";
 }
 
 function priorityVariant(priority: string | null): PillVariant | null {

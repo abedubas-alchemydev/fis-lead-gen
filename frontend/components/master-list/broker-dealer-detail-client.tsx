@@ -981,7 +981,7 @@ export function BrokerDealerDetailClient({ brokerDealerId }: { brokerDealerId: s
                         {item.clearing_partner ?? (
                           <UnknownCell
                             reason={item.unknown_reason}
-                            fallback="Unknown partner"
+                            fallback="Partner not on file"
                           />
                         )}
                       </p>
