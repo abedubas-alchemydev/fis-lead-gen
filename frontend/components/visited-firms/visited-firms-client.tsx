@@ -30,7 +30,7 @@ function formatVisitCount(count: number): string {
 
 // Local backend-enum → Pill variant / label mappings — cloned from the
 // master-list table renderer so we don't fork a new shared util in this
-// PR. The shared HealthBadge / LeadPriorityBadge components are still
+// PR. The shared HealthBadge / ProspectPriorityBadge components are still
 // used by /my-favorites and other surfaces; we render <Pill> inline
 // here to match the language used on /master-list and /master-list/{id}.
 function healthVariant(status: string | null): PillVariant {
@@ -130,7 +130,7 @@ export function VisitedFirmsClient() {
   );
 
   // Sprint 6 task #29: thread `source=visited` into the firm-detail
-  // URL so the Next-Lead button on /master-list/{id} walks the visit
+  // URL so the Next-Prospect button on /master-list/{id} walks the visit
   // history (not the master-list result set) and the breadcrumb
   // back-link reads "Back to Visited Firms".
   const detailHrefSuffix = useMemo(() => {

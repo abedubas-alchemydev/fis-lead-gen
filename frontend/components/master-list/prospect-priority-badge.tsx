@@ -6,7 +6,7 @@ const toneMap: Record<string, { label: string; stars: string; className: string 
   cold: { label: "Cold", stars: "*", className: "bg-slate-100 text-slate-600" }
 };
 
-export function LeadPriorityBadge({
+export function ProspectPriorityBadge({
   priority,
   score
 }: {

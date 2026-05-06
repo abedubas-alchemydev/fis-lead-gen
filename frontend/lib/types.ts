@@ -47,6 +47,10 @@ export type BrokerDealerListItem = {
   health_status: string | null;
   is_deficient: boolean;
   latest_deficiency_filed_at: string | null;
+  // BE boundary fields — names mirror the FastAPI response contract verbatim
+  // (broker_dealers.lead_score / lead_priority columns). The FE displays
+  // these as "prospect score" / "prospect priority" everywhere user-facing,
+  // but the wire shape stays in BE vocabulary. Don't rename here.
   lead_score: number | null;
   lead_priority: string | null;
   current_clearing_partner: string | null;
@@ -102,6 +106,9 @@ export type DashboardStats = {
   total_active_bds: number;
   new_bds_30_days: number;
   deficiency_alerts: number;
+  // BE boundary field — mirrors FastAPI response shape. Surfaced in the FE
+  // KPI grid as "High-Value Prospects"; the wire field name keeps BE
+  // vocabulary so the contract stays in lockstep with the BE schema.
   high_value_leads: number;
 };
 

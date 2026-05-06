@@ -51,7 +51,7 @@ const columns = [
   { key: "current_clearing_partner", label: "Clearing Partner" },
   { key: "current_clearing_type", label: "Clearing Type" },
   { key: "health_status", label: "Financial Health" },
-  { key: "lead_score", label: "Lead Priority" },
+  { key: "lead_score", label: "Prospect Priority" },
   { key: "latest_net_capital", label: "Net Capital" },
   { key: "yoy_growth", label: "YoY Growth" },
   { key: "last_filing_date", label: "Last Filing" },
@@ -189,7 +189,7 @@ export function MasterListWorkspaceClient() {
   const stateFilter = queryState.state;
   const search = queryState.search;
   const healthFilter = queryState.health;
-  const leadPriorityFilter = queryState.leadPriority;
+  const prospectPriorityFilter = queryState.prospectPriority;
   const clearingTypeFilter = queryState.clearingType;
   const clearingPartnerFilter = queryState.clearingPartner;
   const typesOfBusinessFilter = queryState.typesOfBusiness;
@@ -260,7 +260,7 @@ export function MasterListWorkspaceClient() {
         search,
         state: stateFilter ? [stateCodeFromName(stateFilter) ?? stateFilter] : undefined,
         health: healthFilter === "All" ? undefined : [healthFilter],
-        lead_priority: leadPriorityFilter === "All" ? undefined : [leadPriorityFilter],
+        lead_priority: prospectPriorityFilter === "All" ? undefined : [prospectPriorityFilter],
         clearing_partner: clearingPartnerFilter ? [clearingPartnerFilter] : undefined,
         clearing_type: clearingTypeFilter === "All" ? undefined : [clearingTypeFilter],
         types_of_business:
@@ -282,7 +282,7 @@ export function MasterListWorkspaceClient() {
       search,
       stateFilter,
       healthFilter,
-      leadPriorityFilter,
+      prospectPriorityFilter,
       clearingPartnerFilter,
       clearingTypeFilter,
       typesOfBusinessFilter,
@@ -460,7 +460,7 @@ export function MasterListWorkspaceClient() {
     if (search !== "") count += 1;
     if (stateFilter !== "") count += 1;
     if (healthFilter !== "All") count += 1;
-    if (leadPriorityFilter !== "All") count += 1;
+    if (prospectPriorityFilter !== "All") count += 1;
     if (clearingPartnerFilter !== "") count += 1;
     if (clearingTypeFilter !== "All") count += 1;
     if (typesOfBusinessFilter.length > 0) count += 1;
@@ -473,7 +473,7 @@ export function MasterListWorkspaceClient() {
     search,
     stateFilter,
     healthFilter,
-    leadPriorityFilter,
+    prospectPriorityFilter,
     clearingPartnerFilter,
     clearingTypeFilter,
     typesOfBusinessFilter,
@@ -739,13 +739,13 @@ export function MasterListWorkspaceClient() {
           </div>
           <div>
             <p className="mb-1.5 text-[11px] font-semibold uppercase tracking-[0.08em] text-[var(--text-muted,#94a3b8)]">
-              Lead Priority
+              Prospect Priority
             </p>
             <Segmented
-              value={leadPriorityFilter}
-              onChange={(next) => updateState({ leadPriority: next, page: 1 })}
+              value={prospectPriorityFilter}
+              onChange={(next) => updateState({ prospectPriority: next, page: 1 })}
               items={PRIORITY_ITEMS}
-              ariaLabel="Lead priority"
+              ariaLabel="Prospect priority"
             />
           </div>
         </div>
@@ -801,13 +801,13 @@ export function MasterListWorkspaceClient() {
                 Health: {healthLabel(healthFilter)}
               </Tag>
             ) : null}
-            {leadPriorityFilter !== "All" ? (
+            {prospectPriorityFilter !== "All" ? (
               <Tag
                 onDismiss={() =>
-                  updateState({ leadPriority: "All", page: 1 })
+                  updateState({ prospectPriority: "All", page: 1 })
                 }
               >
-                Priority: {priorityLabel(leadPriorityFilter)}
+                Priority: {priorityLabel(prospectPriorityFilter)}
               </Tag>
             ) : null}
             {clearingTypeFilter !== "All" ? (

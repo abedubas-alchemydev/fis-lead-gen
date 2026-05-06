@@ -58,7 +58,7 @@ export function PipelinesAdminClient() {
           pipelineName="Populate All Data"
           cadence="Weekly · Sunday 02:00 UTC"
           eta="30–90 minutes"
-          description="Full enrichment refresh: financials, clearing arrangements, executives, and lead scoring. Heavy run — schedule deliberately."
+          description="Full enrichment refresh: financials, clearing arrangements, executives, and prospect scoring. Heavy run — schedule deliberately."
           runAction={runPopulateAll}
           onSuccess={bumpRecentRuns}
         />
