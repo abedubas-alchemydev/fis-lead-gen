@@ -140,9 +140,20 @@ def decide_pipelines(
     else:
         (to_run if needs_website else to_skip).append(SUB_RESOLVE_WEBSITE)
 
+    # health-check is the catch-all for *any* FINRA Form BD-derived field
+    # that's still missing. Firing on clearing-partner-or-type-null alone
+    # was too narrow: firms that already had a clearing partner extracted
+    # would skip the FINRA enrichment entirely, which left derived fields
+    # like ``registration_date`` / ``formation_date`` permanently NULL even
+    # though they're free to fetch. Cost is bounded — health-check is
+    # FINRA-only (no LLM), so a perpetual fire on a firm whose Form BD
+    # genuinely doesn't disclose one of these fields is cheap noise, not a
+    # money sink. The trade favors completeness over idempotency.
     needs_health = (
         broker_dealer.current_clearing_type is None
         or broker_dealer.current_clearing_partner is None
+        or broker_dealer.registration_date is None
+        or broker_dealer.formation_date is None
     )
     (to_run if needs_health else to_skip).append(SUB_HEALTH_CHECK)
 
