@@ -92,7 +92,7 @@ const SECONDARY_BTN =
 // Builds the same /api/v1/broker-dealers query the master list emits,
 // from a recovered MasterListQueryState. Mirrors the queryPath useMemo
 // in master-list-workspace-client.tsx so the two callers stay in lock
-// step — Next Lead must walk the *exact* same result set the user was
+// step — Next Prospect must walk the *exact* same result set the user was
 // looking at when they clicked into the firm.
 function listPathFromReturnState(
   state: MasterListQueryState,
@@ -105,7 +105,7 @@ function listPathFromReturnState(
       : undefined,
     health: state.health === "All" ? undefined : [state.health],
     lead_priority:
-      state.leadPriority === "All" ? undefined : [state.leadPriority],
+      state.prospectPriority === "All" ? undefined : [state.prospectPriority],
     clearing_partner: state.clearingPartner ? [state.clearingPartner] : undefined,
     clearing_type:
       state.clearingType === "All" ? undefined : [state.clearingType],
@@ -130,7 +130,7 @@ export function BrokerDealerDetailClient({ brokerDealerId }: { brokerDealerId: s
   // The master-list workspace appends ?return=<encoded-url> to every
   // row link (see master-list-workspace-client.tsx). When present, it's
   // the source of truth for the user's filtered/sorted/paginated view.
-  // When absent (deep-link, bookmark, direct visit), Next Lead falls
+  // When absent (deep-link, bookmark, direct visit), Next Prospect falls
   // back to the global /adjacent endpoint so the button still works.
   const returnRaw = searchParams.get("return");
   const returnState = useMemo(
@@ -296,7 +296,7 @@ export function BrokerDealerDetailClient({ brokerDealerId }: { brokerDealerId: s
   }, [brokerDealerId, returnState]);
 
   // Build a same-shape /master-list/{id} link that preserves the same
-  // return envelope so chaining Next Lead doesn't lose the master-list
+  // return envelope so chaining Next Prospect doesn't lose the master-list
   // context after the first click.
   const buildAdjacentHref = useCallback(
     (id: number): Route => {
@@ -574,7 +574,7 @@ export function BrokerDealerDetailClient({ brokerDealerId }: { brokerDealerId: s
           className={SECONDARY_BTN}
         >
           <ArrowLeft className="h-4 w-4" strokeWidth={2} />
-          Previous Lead
+          Previous Prospect
         </button>
         <Link
           href={sourceListHref}
@@ -588,7 +588,7 @@ export function BrokerDealerDetailClient({ brokerDealerId }: { brokerDealerId: s
           onClick={() => nextId && router.push(buildAdjacentHref(nextId))}
           className={SECONDARY_BTN}
         >
-          Next Lead
+          Next Prospect
           <ArrowRight className="h-4 w-4" strokeWidth={2} />
         </button>
       </div>

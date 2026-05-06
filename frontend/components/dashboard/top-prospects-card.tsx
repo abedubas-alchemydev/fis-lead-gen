@@ -4,7 +4,7 @@ import Link from "next/link";
 import { useCallback, useEffect, useState } from "react";
 
 import { DashboardErrorCard } from "@/components/dashboard/dashboard-error-card";
-import { EmptyTopLeadsState } from "@/components/dashboard/empty-top-leads-state";
+import { EmptyTopProspectsState } from "@/components/dashboard/empty-top-prospects-state";
 import { apiRequest } from "@/lib/api";
 import type { BrokerDealerListItem, BrokerDealerListResponse } from "@/lib/types";
 
@@ -35,7 +35,7 @@ function scoreColor(score: number | null): string {
   return "#059669";
 }
 
-export function TopLeadsCard() {
+export function TopProspectsCard() {
   const [items, setItems] = useState<BrokerDealerListItem[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
@@ -55,6 +55,10 @@ export function TopLeadsCard() {
 
     async function load() {
       try {
+        // BE filter/sort field names (lead_priority, lead_score) are the
+        // backend contract — kept verbatim. The FE-internal state and
+        // user-facing wording use "prospect" everywhere; only this API
+        // call sticks to BE shape.
         const response = await apiRequest<BrokerDealerListResponse>(
           "/api/v1/broker-dealers?lead_priority=hot&limit=5&sort_by=lead_score&sort_dir=desc"
         );
@@ -62,7 +66,7 @@ export function TopLeadsCard() {
         setItems(response.items);
       } catch (err) {
         if (!active) return;
-        setError(err instanceof Error ? err.message : "Could not load leads");
+        setError(err instanceof Error ? err.message : "Could not load prospects");
       } finally {
         if (active) setLoading(false);
       }
@@ -84,15 +88,15 @@ export function TopLeadsCard() {
       <div className="mb-4 flex items-center justify-between gap-4">
         <div>
           <h3 className="text-[15px] font-semibold tracking-[-0.01em] text-[var(--text,#0f172a)]">
-            Top high-value leads
+            Top high-value prospects
           </h3>
           <p className="mt-0.5 text-[12px] text-[var(--text-muted,#94a3b8)]">
-            Ranked by weighted lead score
+            Ranked by weighted prospect score
           </p>
         </div>
         {/* .link-btn: 12px, weight 600, color var(--accent)=#6366f1. */}
         <Link
-          href="/master-list?lead_priority=hot"
+          href="/master-list?prospect_priority=hot"
           className="inline-flex items-center gap-1 text-[12px] font-semibold text-[#6366f1] transition hover:text-[#a5b4fc]"
         >
           View all
@@ -104,7 +108,7 @@ export function TopLeadsCard() {
 
       {error ? (
         <DashboardErrorCard
-          title="Couldn&rsquo;t load top leads"
+          title="Couldn&rsquo;t load top prospects"
           message={error}
           onRetry={handleRetry}
         />
@@ -125,7 +129,7 @@ export function TopLeadsCard() {
           ))}
         </div>
       ) : items.length === 0 ? (
-        <EmptyTopLeadsState />
+        <EmptyTopProspectsState />
       ) : (
         <div>
           {items.map((item, idx) => {
