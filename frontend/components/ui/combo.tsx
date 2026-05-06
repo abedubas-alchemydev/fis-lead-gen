@@ -80,8 +80,10 @@ export function Combo({
     }
   }
 
-  // When open, let the user type. When closed, show the committed value.
-  const inputValue = open ? query : value;
+  // Show the committed value until the user actually starts typing — keeps
+  // the field stable when re-clicking an already-selected Combo so users
+  // don't read the empty input as "my filter got cleared".
+  const inputValue = open ? query || value : value;
 
   return (
     <div ref={rootRef} className={className}>
