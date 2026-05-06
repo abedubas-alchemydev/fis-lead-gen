@@ -105,7 +105,7 @@ function healthLabel(status: string | null): string {
   if (status === "healthy") return "Healthy";
   if (status === "ok") return "OK";
   if (status === "at_risk") return "At Risk";
-  return "Unknown";
+  return "Not assessed";
 }
 
 function clearingTypeVariant(value: string | null): PillVariant {
@@ -119,7 +119,7 @@ function clearingTypeLabel(value: string | null): string {
   if (value === "fully_disclosed") return "Fully Disclosed";
   if (value === "self_clearing") return "Self-Clearing";
   if (value === "omnibus") return "Omnibus";
-  return "Unknown";
+  return "Not classified";
 }
 
 function priorityLabel(priority: string | null): string {
@@ -1116,6 +1116,7 @@ export function MasterListWorkspaceClient() {
                           ) : (
                             <UnknownCell
                               reason={item.current_clearing_unknown_reason}
+                              fallback="Not on file"
                             />
                           )}
                           {item.current_clearing_is_competitor ? (
