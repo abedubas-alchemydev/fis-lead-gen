@@ -130,20 +130,21 @@ export function UnknownCell({
 
   const shortLabel = unknownReasonShort(reason);
   // BE prepends `[Triggered by missing: <field>]` (or comma-separated for
-  // multi-field clusters) to `note` so the tooltip can lead with the specific
-  // column(s) that triggered the cluster-level reason. Strip the prefix from
-  // the note body and surface it as a separate line, mapping each raw column
-  // name to its user-facing display label.
+  // multi-field clusters) to `note`. Strip the prefix from the body, then
+  // only render the line when 2+ fields are named — single-field cases are
+  // redundant because the user is already hovering the cell whose column
+  // would be named. Multi-field cases stay informative ("by the way, these
+  // other cells in the same cluster are also empty for this reason").
   const triggerMatch =
     reason.note?.match(/^\[Triggered by missing:\s*([^\]]+)\]\s*/) ?? null;
-  const triggerFieldsLabel = triggerMatch
+  const triggerTokens = triggerMatch
     ? triggerMatch[1]
         .split(",")
         .map((token) => token.trim())
         .filter(Boolean)
-        .map(triggerFieldLabel)
-        .join(", ")
-    : null;
+    : [];
+  const triggerFieldsLabel =
+    triggerTokens.length >= 2 ? triggerTokens.map(triggerFieldLabel).join(", ") : null;
   const rawNote = triggerMatch
     ? reason.note!.slice(triggerMatch[0].length)
     : reason.note;
