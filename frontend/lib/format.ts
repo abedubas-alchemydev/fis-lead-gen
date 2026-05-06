@@ -7,12 +7,19 @@ import type {
 // Human-readable label for each unknown_reason category. Sourced from the
 // cli01 BE contract (feature/be-unknown-reasons-api). Surfaced verbatim in
 // the UnknownCell tooltip when a master-list / firm-detail field is null.
+//
+// ``low_confidence_extraction`` is the BE catchall for any ``needs_review``
+// row that isn't matched by the ``firm_does_not_disclose`` exemption
+// patterns — that includes genuinely-low-confidence extractions AND rows
+// where the LLM was confident on type but couldn't find the partner name
+// in the filing. The label avoids saying "below threshold" because the
+// underlying confidence may actually be high (e.g., 0.9) for the
+// missing-partner case.
 export const UNKNOWN_REASON_LABELS: Record<UnknownReasonCategory, string> = {
   firm_does_not_disclose:
     "Firm doesn't disclose this — fully-disclosed exemption",
   no_filing_available: "No recent X-17A-5 filing on SEC EDGAR",
-  low_confidence_extraction:
-    "Extraction confidence below threshold — pending re-review",
+  low_confidence_extraction: "Extraction needs review — value pending",
   pdf_unparseable:
     "Filing PDF couldn't be parsed (corrupt or scanned image)",
   provider_error: "Extraction provider returned an error — retry pending",
@@ -22,6 +29,33 @@ export const UNKNOWN_REASON_LABELS: Record<UnknownReasonCategory, string> = {
 
 export function unknownReasonShort(reason: UnknownReason): string {
   return UNKNOWN_REASON_LABELS[reason.category] ?? "Reason unavailable";
+}
+
+// Display labels for the BD columns that the BE may name in a
+// ``[Triggered by missing: <field>]`` prefix. The BE emits the raw column
+// name (snake_case) so the FE controls user-visible casing in one place.
+// Unknown columns fall back to a humanized version via ``triggerFieldLabel``.
+const TRIGGER_FIELD_LABELS: Record<string, string> = {
+  current_clearing_partner: "Clearing Partner",
+  current_clearing_type: "Clearing Type",
+  latest_net_capital: "Net Capital",
+  latest_excess_net_capital: "Excess Net Capital",
+  yoy_growth: "YoY Growth",
+  health_status: "Financial Health",
+  last_filing_date: "Last Filing",
+  lead_priority: "Prospect Priority",
+};
+
+export function triggerFieldLabel(rawName: string): string {
+  const trimmed = rawName.trim();
+  if (TRIGGER_FIELD_LABELS[trimmed]) return TRIGGER_FIELD_LABELS[trimmed];
+  // Fallback: humanize snake_case so the user never sees a raw identifier
+  // even when the BE names a column we don't have in the map yet.
+  return trimmed
+    .split("_")
+    .filter(Boolean)
+    .map((part) => part.charAt(0).toUpperCase() + part.slice(1))
+    .join(" ");
 }
 
 // Visual treatment for the source pill that sits next to an executive
