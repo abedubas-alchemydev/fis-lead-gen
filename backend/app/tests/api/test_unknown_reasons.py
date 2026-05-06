@@ -131,6 +131,38 @@ def test_clearing_needs_review_without_exemption_is_low_confidence() -> None:
     assert result.note == notes
 
 
+def test_clearing_needs_review_with_fully_disclosed_basis_is_disclosed() -> None:
+    """needs_review + "on a fully disclosed basis" notes => firm_does_not_disclose.
+
+    Pins the exemption-regex broadening for filings that describe the
+    exemption arrangement with the SEC's term-of-art ("clears... on a
+    fully disclosed basis") but never cite Rule 15c3-3, Footnote 74, or
+    the explicit "exempt" wording the older patterns required. Surfaced
+    by &PARTNERS (CIK 0000107136), whose partner-less needs_review row
+    used to land as low_confidence_extraction even though the filing was
+    unambiguous about the fully-disclosed arrangement.
+    """
+    notes = (
+        "The Notes to Financial Statements explicitly state that the Company "
+        "clears all of its proprietary and customer transactions through "
+        "another broker-dealer on a fully disclosed basis. While the clearing "
+        "partner is not named, the clearing type is unambiguous."
+    )
+
+    result = derive_clearing_unknown_reason(
+        _arrangement(
+            clearing_partner=None,
+            extraction_status=STATUS_NEEDS_REVIEW,
+            extraction_notes=notes,
+            extraction_confidence=0.90,
+        )
+    )
+
+    assert result is not None
+    assert result.category == "firm_does_not_disclose"
+    assert result.note == notes
+
+
 def test_clearing_missing_pdf_status_maps_to_no_filing_available() -> None:
     result = derive_clearing_unknown_reason(
         _arrangement(clearing_partner=None, extraction_status=STATUS_MISSING_PDF)
