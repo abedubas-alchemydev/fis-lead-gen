@@ -34,7 +34,6 @@ import { ThemeToggle } from "@/components/ui/theme-toggle";
 import type {
   BrokerDealerListItem,
   BrokerDealerListResponse,
-  CompetitorProvidersResponse,
   DashboardStats,
   TypeOfBusinessOption,
 } from "@/lib/types";
@@ -204,7 +203,6 @@ export function MasterListWorkspaceClient() {
   // ── Table data — fetched on every URL-state change ─────────────────
   const [items, setItems] = useState<BrokerDealerListItem[]>([]);
   const [clearingPartners, setClearingPartners] = useState<string[]>([]);
-  const [competitorSeeds, setCompetitorSeeds] = useState<string[]>([]);
   // Distinct types-of-business values + per-type firm counts. Loaded once
   // from /broker-dealers/types-of-business; sorted by count desc inside the
   // filter so the most common types surface first. Empty array until the
@@ -316,27 +314,22 @@ export function MasterListWorkspaceClient() {
     };
   }, [queryPath]);
 
-  // One-shot filter-metadata fetch. Pulls states + clearing-partners +
-  // active-competitor names (for the Combo's quick-chips) + per-list totals
-  // (for the tab-count badges). Per plan Q3 default (a): three limit=1
-  // probes instead of a new backend endpoint.
+  // One-shot filter-metadata fetch. Pulls clearing-partners +
+  // types-of-business + per-list totals (for the tab-count badges).
   useEffect(() => {
     let active = true;
 
     async function loadFilters() {
-      // Each fetch is settled independently so one failing endpoint (e.g.
-      // a 403 on /settings/competitors for the Viewer role) does not wipe
-      // every other filter on the page.
+      // Each fetch is settled independently so one failing endpoint does not
+      // wipe every other filter on the page.
       const [
         partner,
-        competitor,
         types,
         primary,
         alternative,
         all,
       ] = await Promise.allSettled([
         apiRequest<string[]>("/api/v1/broker-dealers/clearing-partners"),
-        apiRequest<CompetitorProvidersResponse>("/api/v1/settings/competitors"),
         apiRequest<TypeOfBusinessOption[]>(
           "/api/v1/broker-dealers/types-of-business",
         ),
@@ -353,17 +346,6 @@ export function MasterListWorkspaceClient() {
       if (!active) return;
 
       setClearingPartners(partner.status === "fulfilled" ? partner.value : []);
-
-      if (competitor.status === "fulfilled") {
-        setCompetitorSeeds(
-          competitor.value.items
-            .filter((item) => item.is_active)
-            .sort((a, b) => a.priority - b.priority)
-            .map((item) => item.name),
-        );
-      } else {
-        setCompetitorSeeds([]);
-      }
 
       if (types.status === "fulfilled") {
         // Defensive parsing: the BE has occasionally returned thousands of
@@ -670,7 +652,6 @@ export function MasterListWorkspaceClient() {
               value={clearingPartnerFilter}
               onChange={(next) => updateState({ clearingPartner: next, page: 1 })}
               options={clearingPartners}
-              quickChips={competitorSeeds}
               placeholder="Search partners…"
               emptyLabel="All providers"
               ariaLabel="Clearing Partner"
