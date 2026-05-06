@@ -1,4 +1,4 @@
-"""Gemini ``text-embedding-004`` client for the Vault RAG path.
+"""Gemini ``gemini-embedding-001`` client for the Vault RAG path.
 
 Two entry points:
 
@@ -30,7 +30,10 @@ logger = logging.getLogger(__name__)
 
 
 _GEMINI_KEY_SHAPE = re.compile(r"^AIzaSy[A-Za-z0-9_\-]{33}$")
-_EMBEDDING_MODEL = "text-embedding-004"
+# text-embedding-004 was retired 2026-01-14. gemini-embedding-001
+# defaults to 3072 dims; we truncate to 768 via outputDimensionality
+# (MRL) so the existing Vector(768) column + HNSW index still fit.
+_EMBEDDING_MODEL = "gemini-embedding-001"
 _EMBEDDING_DIM = 768
 # Gemini's batchEmbedContents accepts up to 100 requests per call. We
 # stay under that explicitly; uploaders chunked into >100 pieces just
@@ -143,6 +146,7 @@ async def embed_query(text: str) -> list[float]:
         "model": f"models/{_EMBEDDING_MODEL}",
         "content": {"parts": [{"text": text}]},
         "taskType": "RETRIEVAL_QUERY",
+        "outputDimensionality": _EMBEDDING_DIM,
     }
     response = await _post(url, payload, api_key)
     return _parse_single(response)
@@ -170,6 +174,7 @@ async def embed_chunks(texts: list[str]) -> list[list[float]]:
                     "model": f"models/{_EMBEDDING_MODEL}",
                     "content": {"parts": [{"text": chunk}]},
                     "taskType": "RETRIEVAL_DOCUMENT",
+                    "outputDimensionality": _EMBEDDING_DIM,
                 }
                 for chunk in batch
             ]
