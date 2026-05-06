@@ -134,13 +134,18 @@ class UnknownReasonResult:
 # holding customer funds/securities under the SEC's fully-disclosed exemption.
 # The match is intentionally narrow — only fires when the text uses the
 # exemption-flavored verbiage, not on every needs_review row that mentions
-# the word "fully".
+# the word "fully". The "on a fully[-_ ]disclosed basis" pattern catches
+# filings that describe the exemption arrangement using the SEC's standard
+# term-of-art ("clears... on a fully disclosed basis") without citing
+# Rule 15c3-3 or Footnote 74 explicitly — common in BD financial-statement
+# notes where the partner is unnamed but the arrangement is unambiguous.
 _EXEMPTION_PATTERNS = (
     re.compile(r"does not\s+(?:directly|indirectly)?\s*receive[, ]+hold", re.IGNORECASE),
     re.compile(r"exemption report", re.IGNORECASE),
     re.compile(r"fully[-_ ]disclosed[\w ,]*exempt", re.IGNORECASE),
     re.compile(r"footnote\s*74", re.IGNORECASE),
     re.compile(r"\(k\)\s*\(2\)\s*\(ii\)", re.IGNORECASE),
+    re.compile(r"on\s+a\s+fully[-_ ]disclosed\s+basis", re.IGNORECASE),
 )
 
 
