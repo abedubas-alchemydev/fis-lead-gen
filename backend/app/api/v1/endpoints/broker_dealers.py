@@ -312,6 +312,7 @@ async def get_broker_dealer(
             derive_financial_unknown_reason(
                 financials[0] if financials else None,
                 broker_dealer=broker_dealer,
+                clearing_arrangement=arrangements[0] if arrangements else None,
             ),
             financial_trigger_fields(broker_dealer),
         )
@@ -763,6 +764,7 @@ async def get_broker_dealer_profile(
             derive_financial_unknown_reason(
                 financials[0] if financials else None,
                 broker_dealer=broker_dealer,
+                clearing_arrangement=clearing_arrangements[0] if clearing_arrangements else None,
             ),
             financial_trigger_fields(broker_dealer),
         )

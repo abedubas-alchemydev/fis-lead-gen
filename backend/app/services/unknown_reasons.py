@@ -248,6 +248,7 @@ def derive_financial_unknown_reason(
     metric: FinancialMetric | None,
     *,
     broker_dealer: BrokerDealer | None = None,
+    clearing_arrangement: ClearingArrangement | None = None,
 ) -> UnknownReasonResult | None:
     """Return the unknown_reason for the rolled-up financial summary.
 
@@ -256,23 +257,44 @@ def derive_financial_unknown_reason(
     — a row exists ⇒ the extraction landed those fields. The reason is
     therefore mostly about whether a row exists at all.
 
-    The ``broker_dealer`` kwarg disambiguates the no-row case. Without
-    it, callers fell into ``not_yet_extracted`` ("Pipeline hasn't covered
-    this firm yet") even when the firm has no CIK or no filings index —
-    structural conditions that mean the pipeline can't *possibly* land a
-    row no matter how many times it runs. With the BD in hand, those
-    cases get reclassified as ``no_filing_available`` ("No recent
-    X-17A-5 filing on SEC EDGAR"), which mirrors how the clearing path
-    classifies the same situation via the ``clearing_arrangement`` row's
-    ``extraction_status='missing_pdf'``. Tooltip honesty: an amber
-    "pending" icon stops appearing on firms whose source data is
-    structurally unavailable.
+    The ``broker_dealer`` and ``clearing_arrangement`` kwargs disambiguate
+    the no-row case so the FE doesn't render the misleading
+    "Pipeline hasn't covered this firm yet" tooltip on firms where the
+    pipeline tried and the source data is unreachable. Three structural
+    signals get reclassified to ``no_filing_available``:
+
+    1. ``broker_dealer.cik is None`` — no SEC EDGAR record at all.
+    2. ``broker_dealer.filings_index_url`` falsy — submissions JSON not
+       reachable.
+    3. ``clearing_arrangement.extraction_status == 'missing_pdf'`` — the
+       clearing pipeline (which uses the same X-17A-5 PDF source) already
+       determined no extractable PDF exists for the latest filing year.
+       Financial pipeline can't possibly succeed on the same source, so
+       propagate the structural signal.
+
+    Two additional cross-pipeline signals propagate other categories:
+
+    * ``clearing_arrangement.extraction_status == 'pipeline_error'`` →
+      ``pdf_unparseable`` (PDF download / parse failed)
+    * ``clearing_arrangement.extraction_status == 'provider_error'`` →
+      ``provider_error`` (Gemini / LLM blew up)
+
+    The propagation is one-way (clearing → financial). Without these
+    kwargs, callers fall into ``not_yet_extracted`` (legacy behavior).
     """
     if metric is None:
         if broker_dealer is not None and (
             broker_dealer.cik is None or not broker_dealer.filings_index_url
         ):
             return UnknownReasonResult(category="no_filing_available")
+        if clearing_arrangement is not None:
+            ca_status = clearing_arrangement.extraction_status
+            if ca_status == STATUS_MISSING_PDF:
+                return UnknownReasonResult(category="no_filing_available")
+            if ca_status == STATUS_PIPELINE_ERROR:
+                return UnknownReasonResult(category="pdf_unparseable")
+            if ca_status == STATUS_PROVIDER_ERROR:
+                return UnknownReasonResult(category="provider_error")
         return UnknownReasonResult(category="not_yet_extracted")
 
     status = metric.extraction_status or STATUS_PENDING

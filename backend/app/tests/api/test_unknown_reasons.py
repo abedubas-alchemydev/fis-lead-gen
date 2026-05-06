@@ -271,6 +271,77 @@ def test_financial_no_row_with_bd_having_cik_and_index_keeps_not_yet_extracted()
     assert result.category == "not_yet_extracted"
 
 
+def test_financial_no_row_propagates_clearing_missing_pdf_to_no_filing_available() -> None:
+    """No financial_metric row AND BD has CIK + filings_index_url BUT
+    the clearing pipeline already determined ``missing_pdf`` => the
+    same source is unreachable for both pipelines. Propagate to
+    ``no_filing_available`` so the FE doesn't lie with the amber
+    "Pipeline hasn't covered this firm yet" tooltip on a firm where
+    the X-17A-5 PDF genuinely doesn't exist for the latest filing."""
+    bd = SimpleNamespace(
+        cik="0001567191",
+        filings_index_url="https://data.sec.gov/submissions/CIK0001567191.json",
+    )
+    arrangement = SimpleNamespace(extraction_status="missing_pdf")
+    result = derive_financial_unknown_reason(
+        None, broker_dealer=bd, clearing_arrangement=arrangement
+    )
+
+    assert result is not None
+    assert result.category == "no_filing_available"
+
+
+def test_financial_no_row_propagates_clearing_pipeline_error_to_pdf_unparseable() -> None:
+    """Cross-pipeline structural propagation: clearing extraction failed
+    with ``pipeline_error`` (PDF download / parse blew up). Financial
+    is in the same boat → ``pdf_unparseable``."""
+    bd = SimpleNamespace(
+        cik="0001567191",
+        filings_index_url="https://data.sec.gov/submissions/CIK0001567191.json",
+    )
+    arrangement = SimpleNamespace(extraction_status="pipeline_error")
+    result = derive_financial_unknown_reason(
+        None, broker_dealer=bd, clearing_arrangement=arrangement
+    )
+
+    assert result is not None
+    assert result.category == "pdf_unparseable"
+
+
+def test_financial_no_row_propagates_clearing_provider_error_to_provider_error() -> None:
+    """Cross-pipeline structural propagation: clearing extraction failed
+    with ``provider_error`` (Gemini blew up). Financial mirrors."""
+    bd = SimpleNamespace(
+        cik="0001567191",
+        filings_index_url="https://data.sec.gov/submissions/CIK0001567191.json",
+    )
+    arrangement = SimpleNamespace(extraction_status="provider_error")
+    result = derive_financial_unknown_reason(
+        None, broker_dealer=bd, clearing_arrangement=arrangement
+    )
+
+    assert result is not None
+    assert result.category == "provider_error"
+
+
+def test_financial_no_row_with_clearing_parsed_keeps_not_yet_extracted() -> None:
+    """Clearing succeeded but financial_metric is still missing — the
+    financial pipeline genuinely hasn't reached this firm. Keep the
+    pending tone (the cross-pipeline propagation only fires when the
+    clearing side ALSO failed structurally)."""
+    bd = SimpleNamespace(
+        cik="0001567191",
+        filings_index_url="https://data.sec.gov/submissions/CIK0001567191.json",
+    )
+    arrangement = SimpleNamespace(extraction_status="parsed")
+    result = derive_financial_unknown_reason(
+        None, broker_dealer=bd, clearing_arrangement=arrangement
+    )
+
+    assert result is not None
+    assert result.category == "not_yet_extracted"
+
+
 def test_financial_parsed_returns_none() -> None:
     """A parsed financial row carries net_capital + report_date — no reason."""
     result = derive_financial_unknown_reason(_metric(extraction_status=STATUS_PARSED))
