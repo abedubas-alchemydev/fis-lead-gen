@@ -36,7 +36,7 @@ export function unknownReasonShort(reason: UnknownReason): string {
 // name (snake_case) so the FE controls user-visible casing in one place.
 // Unknown columns fall back to a humanized version via ``triggerFieldLabel``.
 const TRIGGER_FIELD_LABELS: Record<string, string> = {
-  current_clearing_partner: "Clearing Partner",
+  current_clearing_partner: "Clearing Arrangement",
   current_clearing_type: "Clearing Type",
   latest_net_capital: "Net Capital",
   latest_excess_net_capital: "Excess Net Capital",
