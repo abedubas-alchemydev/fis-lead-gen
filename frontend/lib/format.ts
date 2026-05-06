@@ -31,33 +31,6 @@ export function unknownReasonShort(reason: UnknownReason): string {
   return UNKNOWN_REASON_LABELS[reason.category] ?? "Reason unavailable";
 }
 
-// Display labels for the BD columns that the BE may name in a
-// ``[Triggered by missing: <field>]`` prefix. The BE emits the raw column
-// name (snake_case) so the FE controls user-visible casing in one place.
-// Unknown columns fall back to a humanized version via ``triggerFieldLabel``.
-const TRIGGER_FIELD_LABELS: Record<string, string> = {
-  current_clearing_partner: "Clearing Arrangement",
-  current_clearing_type: "Clearing Type",
-  latest_net_capital: "Net Capital",
-  latest_excess_net_capital: "Excess Net Capital",
-  yoy_growth: "YoY Growth",
-  health_status: "Financial Health",
-  last_filing_date: "Last Filing",
-  lead_priority: "Prospect Priority",
-};
-
-export function triggerFieldLabel(rawName: string): string {
-  const trimmed = rawName.trim();
-  if (TRIGGER_FIELD_LABELS[trimmed]) return TRIGGER_FIELD_LABELS[trimmed];
-  // Fallback: humanize snake_case so the user never sees a raw identifier
-  // even when the BE names a column we don't have in the map yet.
-  return trimmed
-    .split("_")
-    .filter(Boolean)
-    .map((part) => part.charAt(0).toUpperCase() + part.slice(1))
-    .join(" ");
-}
-
 // Visual treatment for the source pill that sits next to an executive
 // contact's name. Sourced from the cli01 BE contract for
 // `feature/be-apollo-executive-enrichment`:
