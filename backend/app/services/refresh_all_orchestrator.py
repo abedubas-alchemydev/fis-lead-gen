@@ -382,6 +382,20 @@ async def _run_health_check(parent_run_id: int, bd_id: int, trigger_source: str)
                     if enriched_record.website and enriched_record.website != broker_dealer.website:
                         broker_dealer.website = enriched_record.website
                         changes.append("website")
+                    # registration_date + formation_date come off the same
+                    # FINRA Form BD PDF (services/brokercheck_pdf.py) and are
+                    # already plumbed onto FinraBrokerDealerRecord. They were
+                    # silently dropped here, leaving the firm-detail page's
+                    # "Registration Date" stat NULL on every refresh-all
+                    # path. Mirror the truthiness-and-changed gate the other
+                    # fields use so we never overwrite a present value with
+                    # a fresh None from a partial parse.
+                    if enriched_record.registration_date and enriched_record.registration_date != broker_dealer.registration_date:
+                        broker_dealer.registration_date = enriched_record.registration_date
+                        changes.append("registration_date")
+                    if enriched_record.formation_date and enriched_record.formation_date != broker_dealer.formation_date:
+                        broker_dealer.formation_date = enriched_record.formation_date
+                        changes.append("formation_date")
 
             new_classification = determine_clearing_classification(broker_dealer.firm_operations_text)
             if broker_dealer.clearing_classification != new_classification:
