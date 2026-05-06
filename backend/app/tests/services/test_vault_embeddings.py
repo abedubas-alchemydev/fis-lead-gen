@@ -1,4 +1,4 @@
-"""Unit tests for the Gemini text-embedding-004 client.
+"""Unit tests for the Gemini gemini-embedding-001 client.
 
 Mirrors the pattern in ``test_outreach.py``: respx intercepts the
 outbound HTTP, monkeypatch installs a syntactically-valid Gemini key
@@ -22,8 +22,8 @@ from app.services.vault_embeddings import (
 
 _VALID_KEY = "AIzaSy" + "a" * 33  # 39 chars, matches ^AIzaSy[A-Za-z0-9_\-]{33}$
 _BASE = "https://generativelanguage.googleapis.com/v1beta"
-_SINGLE_URL = f"{_BASE}/models/text-embedding-004:embedContent"
-_BATCH_URL = f"{_BASE}/models/text-embedding-004:batchEmbedContents"
+_SINGLE_URL = f"{_BASE}/models/gemini-embedding-001:embedContent"
+_BATCH_URL = f"{_BASE}/models/gemini-embedding-001:batchEmbedContents"
 
 
 def _vec(value: float) -> list[float]:
