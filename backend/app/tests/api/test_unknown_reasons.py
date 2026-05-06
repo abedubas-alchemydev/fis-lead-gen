@@ -324,11 +324,16 @@ def test_financial_no_row_propagates_clearing_provider_error_to_provider_error()
     assert result.category == "provider_error"
 
 
-def test_financial_no_row_with_clearing_parsed_keeps_not_yet_extracted() -> None:
-    """Clearing succeeded but financial_metric is still missing — the
-    financial pipeline genuinely hasn't reached this firm. Keep the
-    pending tone (the cross-pipeline propagation only fires when the
-    clearing side ALSO failed structurally)."""
+def test_financial_no_row_with_clearing_parsed_classifies_as_data_not_present() -> None:
+    """Clearing extraction succeeded (status='parsed') AND financial
+    has no row → the financial pipeline ran on the same X-17A-5 source
+    but couldn't persist a row that satisfies the NOT NULL constraints
+    (low confidence on net_capital, missing comparison year, source
+    didn't include the figure, etc.). Source-side absence is the
+    honest read — re-running won't help, so classify as
+    ``data_not_present`` ("Source filing doesn't include this field")
+    rather than ``not_yet_extracted`` which would imply the pipeline
+    will fill it on a future run."""
     bd = SimpleNamespace(
         cik="0001567191",
         filings_index_url="https://data.sec.gov/submissions/CIK0001567191.json",
@@ -339,7 +344,7 @@ def test_financial_no_row_with_clearing_parsed_keeps_not_yet_extracted() -> None
     )
 
     assert result is not None
-    assert result.category == "not_yet_extracted"
+    assert result.category == "data_not_present"
 
 
 def test_financial_parsed_returns_none() -> None:
