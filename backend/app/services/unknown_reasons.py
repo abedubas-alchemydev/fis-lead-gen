@@ -246,6 +246,8 @@ def derive_clearing_unknown_reason(
 
 def derive_financial_unknown_reason(
     metric: FinancialMetric | None,
+    *,
+    broker_dealer: BrokerDealer | None = None,
 ) -> UnknownReasonResult | None:
     """Return the unknown_reason for the rolled-up financial summary.
 
@@ -253,8 +255,24 @@ def derive_financial_unknown_reason(
     confidence) because both ``net_capital`` and ``report_date`` are NOT NULL
     — a row exists ⇒ the extraction landed those fields. The reason is
     therefore mostly about whether a row exists at all.
+
+    The ``broker_dealer`` kwarg disambiguates the no-row case. Without
+    it, callers fell into ``not_yet_extracted`` ("Pipeline hasn't covered
+    this firm yet") even when the firm has no CIK or no filings index —
+    structural conditions that mean the pipeline can't *possibly* land a
+    row no matter how many times it runs. With the BD in hand, those
+    cases get reclassified as ``no_filing_available`` ("No recent
+    X-17A-5 filing on SEC EDGAR"), which mirrors how the clearing path
+    classifies the same situation via the ``clearing_arrangement`` row's
+    ``extraction_status='missing_pdf'``. Tooltip honesty: an amber
+    "pending" icon stops appearing on firms whose source data is
+    structurally unavailable.
     """
     if metric is None:
+        if broker_dealer is not None and (
+            broker_dealer.cik is None or not broker_dealer.filings_index_url
+        ):
+            return UnknownReasonResult(category="no_filing_available")
         return UnknownReasonResult(category="not_yet_extracted")
 
     status = metric.extraction_status or STATUS_PENDING

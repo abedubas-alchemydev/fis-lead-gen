@@ -223,8 +223,49 @@ def test_clearing_pending_status_maps_to_not_yet_extracted() -> None:
 
 
 def test_financial_no_row_means_not_yet_extracted() -> None:
-    """No financial_metric row => pipeline hasn't reached the firm."""
+    """No financial_metric row + no BD context => pipeline hasn't reached the firm."""
     result = derive_financial_unknown_reason(None)
+
+    assert result is not None
+    assert result.category == "not_yet_extracted"
+
+
+def test_financial_no_row_with_bd_missing_cik_returns_no_filing_available() -> None:
+    """No financial_metric row AND BD has no CIK => the firm has no
+    SEC filings to extract from. Re-classify from the misleading
+    ``not_yet_extracted`` ("Pipeline hasn't covered this firm yet") to
+    the honest ``no_filing_available`` ("No recent X-17A-5 filing on
+    SEC EDGAR"). Mirrors how the clearing path classifies the same
+    structural condition via the clearing_arrangement row's
+    ``extraction_status='missing_pdf'``."""
+    bd = SimpleNamespace(cik=None, filings_index_url=None)
+    result = derive_financial_unknown_reason(None, broker_dealer=bd)
+
+    assert result is not None
+    assert result.category == "no_filing_available"
+
+
+def test_financial_no_row_with_bd_missing_filings_index_returns_no_filing_available() -> None:
+    """No financial_metric row AND BD has CIK but no filings_index_url
+    => SEC submissions JSON not reachable for this firm. Same
+    classification as missing-CIK; re-running the pipeline won't help."""
+    bd = SimpleNamespace(cik="0000123456", filings_index_url=None)
+    result = derive_financial_unknown_reason(None, broker_dealer=bd)
+
+    assert result is not None
+    assert result.category == "no_filing_available"
+
+
+def test_financial_no_row_with_bd_having_cik_and_index_keeps_not_yet_extracted() -> None:
+    """No financial_metric row AND BD has both CIK and filings_index_url
+    => pipeline genuinely hasn't reached this firm yet (the structural
+    inputs are present). Keep ``not_yet_extracted`` so the FE shows the
+    pending tone."""
+    bd = SimpleNamespace(
+        cik="0000123456",
+        filings_index_url="https://data.sec.gov/submissions/CIK0000123456.json",
+    )
+    result = derive_financial_unknown_reason(None, broker_dealer=bd)
 
     assert result is not None
     assert result.category == "not_yet_extracted"
