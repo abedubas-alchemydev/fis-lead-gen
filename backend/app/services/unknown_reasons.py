@@ -295,6 +295,15 @@ def derive_financial_unknown_reason(
                 return UnknownReasonResult(category="pdf_unparseable")
             if ca_status == STATUS_PROVIDER_ERROR:
                 return UnknownReasonResult(category="provider_error")
+            # Catch-all: a clearing_arrangement row exists with a non-error
+            # status (parsed / needs_review / pending / etc.). The clearing
+            # pipeline ran for this firm; the financial pipeline ran on the
+            # same X-17A-5 source and couldn't produce a row that satisfies
+            # the NOT NULL constraints. Source-side absence is the most
+            # honest read — re-running won't change it. Treat as
+            # data_not_present rather than the misleading "Pipeline hasn't
+            # covered this firm yet" pending tooltip.
+            return UnknownReasonResult(category="data_not_present")
         return UnknownReasonResult(category="not_yet_extracted")
 
     status = metric.extraction_status or STATUS_PENDING
