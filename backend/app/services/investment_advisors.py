@@ -15,6 +15,7 @@ from app.schemas.investment_advisor import (
     InvestmentAdvisorListMeta,
     InvestmentAdvisorListResponse,
 )
+from app.services.service_models import MergedInvestmentAdvisorRecord
 
 
 # Same minimum-adoption threshold as the BD ``types_of_business`` filter
@@ -327,3 +328,86 @@ class InvestmentAdvisorRepository:
                 await db.execute(insert(InvestmentAdvisor).values(record))
 
         return len(records)
+
+    async def upsert_many(
+        self,
+        db: AsyncSession,
+        records: list[MergedInvestmentAdvisorRecord],
+    ) -> int:
+        """Bulk CRD-keyed upsert from the IAPD ingestion pipeline.
+
+        Mirrors ``BrokerDealerRepository.upsert_many``'s no-CIK path
+        (select existing keys → branch insert vs update per record)
+        because ``crd_number`` is non-unique-indexed and can't drive
+        ``ON CONFLICT``. Splits the input into batches of 500 to keep
+        the existing-CRD set query bounded.
+
+        Caller commits.
+        """
+
+        if not records:
+            return 0
+
+        total = 0
+        batch_size = 500
+        for start in range(0, len(records), batch_size):
+            batch = records[start : start + batch_size]
+            crds = [r.crd_number for r in batch if r.crd_number]
+            if not crds:
+                continue
+
+            existing_stmt = select(InvestmentAdvisor.crd_number).where(
+                InvestmentAdvisor.crd_number.in_(crds)
+            )
+            existing = set((await db.execute(existing_stmt)).scalars().all())
+
+            for record in batch:
+                values = _record_to_columns(record)
+                if record.crd_number in existing:
+                    update_fields = {
+                        k: v for k, v in values.items() if k != "crd_number"
+                    }
+                    await db.execute(
+                        InvestmentAdvisor.__table__.update()
+                        .where(InvestmentAdvisor.crd_number == record.crd_number)
+                        .values(**update_fields)
+                    )
+                else:
+                    await db.execute(insert(InvestmentAdvisor).values(**values))
+                total += 1
+
+        return total
+
+
+def _record_to_columns(record: MergedInvestmentAdvisorRecord) -> dict[str, object]:
+    """Map a merge-output record onto ``investment_advisors`` columns.
+
+    JSONB columns expect Python ``list`` / ``dict``; empty arrays land
+    as ``[]`` rather than NULL so the FE renders "no data extracted yet"
+    rather than "data missing entirely". (PR 3 will overwrite these
+    with Form ADV-extracted values.)
+    """
+
+    return {
+        "crd_number": record.crd_number,
+        "sec_file_number": record.sec_file_number,
+        "cik": record.cik,
+        "name": record.name,
+        "legal_name": record.legal_name,
+        "city": record.city,
+        "state": record.state,
+        "status": record.status,
+        "matched_source": record.matched_source,
+        "last_filing_date": record.last_filing_date,
+        "website": record.website,
+        "website_source": record.website_source,
+        "regulatory_aum": record.regulatory_aum,
+        "discretionary_aum": record.discretionary_aum,
+        "non_discretionary_aum": record.non_discretionary_aum,
+        "total_clients": record.total_clients,
+        "advisory_activities": list(record.advisory_activities),
+        "client_types": list(record.client_types),
+        "client_counts": dict(record.client_counts),
+        "files_13f": record.files_13f,
+        "latest_13f_filing_date": record.latest_13f_filing_date,
+    }

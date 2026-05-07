@@ -58,6 +58,39 @@ class Settings(BaseSettings):
     sec_bulk_submissions_url: str = "https://www.sec.gov/Archives/edgar/daily-index/bulkdata/submissions.zip"
     sec_bulk_submissions_zip_path: str = ".tmp/sec/submissions.zip"
     edgar_target_sic_codes: str = "6211"
+    # ── IAPD Investment Adviser bulk download (PR 2 of advisor-list rollout) ──
+    # Index page that lists monthly ``ia{MMDDYY}.zip`` snapshots of all
+    # SEC-registered Investment Advisers. The IapdService scrapes this page
+    # rather than constructing a URL by date because the SEC moved the file
+    # path from ``/files/investment/data/.../`` to
+    # ``/files/investment/data/other/.../`` mid-Jan 2026 and may move it again.
+    # Both old and new paths still serve historical files; scraping the index
+    # avoids hard-coding a fragile path.
+    iapd_index_url: str = (
+        "https://www.sec.gov/data-research/sec-markets-data/"
+        "information-about-registered-investment-advisers-exempt-reporting-advisers"
+    )
+    # Local cache for the downloaded ZIP. ~5 MB / month. TTL'd to 7 days to
+    # match the BD bulk submissions cache.
+    iapd_zip_cache_path: str = ".tmp/iapd/registered_advisers.zip"
+    iapd_zip_ttl_seconds: int = 7 * 24 * 60 * 60
+    # Same SEC-wide 10 req/sec ceiling as EDGAR. The IAPD bulk path is one
+    # GET per month, so this limit is effectively for the EFTS 13F pass.
+    iapd_request_timeout_seconds: float = 60.0
+    iapd_request_max_retries: int = 3
+    # ── EDGAR full-text search (EFTS) for Form 13F-HR enumeration ──
+    # Used by ThirteenFFilterService to flag IAPD records that have filed a
+    # 13F holdings report in the recent window. EFTS pages are capped at
+    # ``from + size <= 10000`` (Elasticsearch default), and 90 days of
+    # 13F-HR easily exceeds that, so the service partitions by week and
+    # dedupes by CIK.
+    sec_efts_search_url: str = "https://efts.sec.gov/LATEST/search-index"
+    # 90 days = ~one quarter, which is the 13F filing cadence. Tighter
+    # windows yield fresher data (and miss fewer recent filers); wider
+    # windows pick up more historical filers but inflate scan cost.
+    thirteen_f_lookback_days: int = 120
+    thirteen_f_partition_days: int = 7
+    initial_load_advisors_limit: int | None = None
     finra_search_base_url: str = "https://api.brokercheck.finra.org/search/firm"
     finra_request_timeout_seconds: float = 20.0
     finra_request_delay_seconds: float = 0.5
