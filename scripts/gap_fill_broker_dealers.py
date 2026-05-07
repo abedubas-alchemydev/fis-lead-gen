@@ -61,6 +61,7 @@ async def main() -> None:
         decide_pipelines,
         run_refresh_all,
     )
+    from app.services.scoring import score_broker_dealers
 
     sub_label = {
         SUB_REFRESH_FINANCIALS: "financials",
@@ -229,6 +230,28 @@ async def main() -> None:
     except KeyboardInterrupt:
         print()
         print("Interrupted by user. Resuming on next run via the cooldown stamp.")
+
+    # Re-score every BD after the gap-fill pass. Newly-filled financials,
+    # clearing partners, and competitor flags all change scores; running
+    # the scorer at the end keeps lead_priority consistent with whatever
+    # data the pass managed to land. Cheap (no API calls) and idempotent,
+    # so it's safe to run even on a partial / interrupted bulk pass.
+    print()
+    print("Re-scoring every BD against current data...")
+    score_t0 = time.monotonic()
+    try:
+        async with SessionLocal() as db:
+            score_summary = await score_broker_dealers(
+                db, only_null_priority=False, limit=None, dry_run=False
+            )
+            await db.commit()
+        print(
+            f"Scored {score_summary.scored:,} BDs "
+            f"(skipped_no_data={score_summary.skipped_no_data:,}, "
+            f"elapsed={time.monotonic() - score_t0:.1f}s)."
+        )
+    except Exception as exc:
+        print(f"Scoring failed: {type(exc).__name__}: {exc}")
 
     # Final summary
     wall = time.monotonic() - started_wall
