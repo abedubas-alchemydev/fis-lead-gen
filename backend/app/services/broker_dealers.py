@@ -546,6 +546,7 @@ class BrokerDealerRepository:
                 "is_competitor": stmt.excluded.is_competitor,
                 "is_verified": stmt.excluded.is_verified,
                 "extracted_at": stmt.excluded.extracted_at,
+                "clearing_statement_text": stmt.excluded.clearing_statement_text,
                 "updated_at": func.now(),
             },
         )

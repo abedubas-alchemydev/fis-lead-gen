@@ -124,6 +124,7 @@ class ClearingPipelineService:
                                 "is_competitor": False,
                                 "is_verified": False,
                                 "extracted_at": datetime.now(timezone.utc),
+                                "clearing_statement_text": None,
                             }
                         )
                         pipeline_run.processed_items += 1
@@ -150,6 +151,7 @@ class ClearingPipelineService:
                             "is_competitor": self.repository.match_competitor(parsed.clearing_partner, competitors),
                             "is_verified": False,
                             "extracted_at": parsed.extracted_at,
+                            "clearing_statement_text": parsed.clearing_statement_text,
                         }
                     )
                     pipeline_run.processed_items += 1
@@ -178,6 +180,7 @@ class ClearingPipelineService:
                         "is_competitor": False,
                         "is_verified": False,
                         "extracted_at": datetime.now(timezone.utc),
+                        "clearing_statement_text": None,
                     }
                 )
                 pipeline_run.processed_items += 1

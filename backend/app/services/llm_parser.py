@@ -270,6 +270,7 @@ class LlmParserService:
             extraction_status=status,
             extraction_notes=notes,
             extracted_at=datetime.now(timezone.utc),
+            clearing_statement_text=extraction.evidence_excerpt,
         )
 
     async def extract_structured_data(self, pdf_record: DownloadedPdfRecord) -> ClearingExtractionResult:
@@ -325,6 +326,7 @@ class LlmParserService:
             extraction_status=status,
             extraction_notes=notes,
             extracted_at=datetime.now(timezone.utc),
+            clearing_statement_text=extraction.evidence_excerpt,
         )
 
     def _build_filename(self, pdf_record: DownloadedPdfRecord) -> str:
