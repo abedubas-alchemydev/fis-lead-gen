@@ -233,6 +233,13 @@ class ClearingExtractionResult:
     extraction_status: str
     extraction_notes: str | None
     extracted_at: datetime | None
+    # The LLM's verbatim ``evidence_excerpt`` — the FOCUS-report sentence(s)
+    # that named the clearing partner. Populated on success; None on error /
+    # missing-PDF paths. Read by services/classification.py to give the
+    # classifier the audited FOCUS text alongside the (self-declared) FINRA
+    # operations text. Has a default so synthetic test fixtures that omit it
+    # keep working unchanged.
+    clearing_statement_text: str | None = None
 
 
 @dataclass(slots=True)
