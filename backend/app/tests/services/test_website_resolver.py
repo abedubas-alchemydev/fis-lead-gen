@@ -584,3 +584,98 @@ async def test_pdf_path_rejected_on_otherwise_clean_domain() -> None:
     website, source, reason = await resolve_website(_FIRM_NAME, None, apollo)
 
     assert (website, source, reason) == (None, None, "no_valid_candidate")
+
+
+# ─────────────────────── content-page path rejects ──────────────────────
+
+
+@respx.mock
+async def test_transactions_announcement_path_rejected() -> None:
+    """Real-world 3WIRE ADVISORY regression: SerpAPI ranked the
+    Houlihan Lokey transaction-announcement page above the firm's own
+    site. The page's ``<title>`` mentioned "3Wire Advisory", so the
+    title-token check admitted it and the wrong URL got stamped on the
+    BD row. Path-keyword guard rejects ``/transactions/`` and friends
+    pre-HEAD."""
+    apollo = AsyncMock()
+    apollo.search_organization = AsyncMock(return_value=None)
+    serpapi = AsyncMock()
+    serpapi.search_firm = AsyncMock(
+        return_value=_serp_results(
+            "https://hl.com/about-us/transactions/parry-labs-capitol-meridian-partners/",
+        ),
+    )
+
+    website, source, reason = await resolve_website(
+        _FIRM_NAME, None, apollo, serpapi=serpapi,
+    )
+
+    assert (website, source, reason) == (None, None, "no_valid_candidate")
+
+
+@respx.mock
+async def test_news_article_path_rejected() -> None:
+    """Real-world 777 SECURITIES regression: SerpAPI ranked a CFO.com
+    news article (``/news/leaders-of-miami-investment-firm-...``) above
+    the firm's own site. The article mentioned the firm by name, so the
+    title-token check admitted it. Path-keyword guard rejects
+    ``/news/`` pre-HEAD."""
+    apollo = AsyncMock()
+    apollo.search_organization = AsyncMock(return_value=None)
+    serpapi = AsyncMock()
+    serpapi.search_firm = AsyncMock(
+        return_value=_serp_results(
+            "https://www.cfo.com/news/leaders-of-miami-investment-firm-face-securities-charges/803863/",
+        ),
+    )
+
+    website, source, reason = await resolve_website(
+        _FIRM_NAME, None, apollo, serpapi=serpapi,
+    )
+
+    assert (website, source, reason) == (None, None, "no_valid_candidate")
+
+
+@respx.mock
+async def test_lei_lookup_record_path_rejected() -> None:
+    """Real-world 4170 SECURITIES regression: SerpAPI ranked the firm's
+    LEI registry record (``lei-lookup.com/record/...``) as the top
+    organic hit for an obscure broker-dealer. Path-keyword guard
+    rejects ``/record/`` pre-HEAD so the LEI lookup page can't be
+    mistaken for the firm's homepage."""
+    apollo = AsyncMock()
+    apollo.search_organization = AsyncMock(return_value=None)
+    serpapi = AsyncMock()
+    serpapi.search_firm = AsyncMock(
+        return_value=_serp_results(
+            "https://www.lei-lookup.com/record/254900AX56TV6OE5G885/",
+        ),
+    )
+
+    website, source, reason = await resolve_website(
+        _FIRM_NAME, None, apollo, serpapi=serpapi,
+    )
+
+    assert (website, source, reason) == (None, None, "no_valid_candidate")
+
+
+@respx.mock
+async def test_press_release_path_rejected() -> None:
+    """Press-release pages mention the firm by name, so they pass the
+    title-token check, but they aren't the firm's homepage. The path-
+    keyword guard rejects ``/press-release`` (and ``/press-releases``)
+    pre-HEAD."""
+    apollo = AsyncMock()
+    apollo.search_organization = AsyncMock(return_value=None)
+    serpapi = AsyncMock()
+    serpapi.search_firm = AsyncMock(
+        return_value=_serp_results(
+            "https://example.test/press-release/acme-securities-launches-new-product/",
+        ),
+    )
+
+    website, source, reason = await resolve_website(
+        _FIRM_NAME, None, apollo, serpapi=serpapi,
+    )
+
+    assert (website, source, reason) == (None, None, "no_valid_candidate")

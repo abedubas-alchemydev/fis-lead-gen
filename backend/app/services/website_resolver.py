@@ -84,6 +84,40 @@ DOMAIN_BLOCKLIST: Final = frozenset(
 # obscure firms (BrokerCheck Detailed Report being the canonical offender).
 _BLOCKED_PATH_SUFFIXES: Final = (".pdf", ".doc", ".docx", ".xls", ".xlsx")
 
+# Path substrings that mark a URL as a content / aggregator / registry
+# page — never the firm's homepage. The validator's title-token check
+# admits any page whose ``<title>`` contains the firm name as a
+# substring, and Google ranks deal-announcement / news / LEI-registry
+# pages above the firm's own site for many obscure broker-dealers, so
+# without this guard those URLs pass and get stamped on the firm row.
+# Concrete pre-fix repros:
+#   - 3WIRE ADVISORY LLC → ``hl.com/about-us/transactions/parry-labs-...``
+#     (Houlihan Lokey transaction announcement page)
+#   - 777 SECURITIES → ``cfo.com/news/leaders-of-miami-investment-firm-...``
+#     (CFO.com news article that mentioned the firm by name)
+#   - 4170 SECURITIES LLC → ``lei-lookup.com/record/254900AX56TV6OE5G885/``
+#     (LEI registry record)
+# Substring match against the lower-cased URL path; a slash on each
+# side keeps these from matching a homepage segment that happens to
+# contain the keyword in another context.
+_NON_HOMEPAGE_PATH_KEYWORDS: Final = (
+    "/news/",
+    "/article/",
+    "/articles/",
+    "/transactions/",
+    "/transaction/",
+    "/press-release",
+    "/press-releases",
+    "/blog/",
+    "/blogs/",
+    "/events/",
+    "/event/",
+    "/lookup/",
+    "/record/",
+    "/records/",
+    "/profile/",
+)
+
 
 _VALIDATE_TIMEOUT_S: Final = 5.0
 _FIRM_TOKEN_LEN: Final = 8
@@ -272,7 +306,11 @@ async def _validate(url: str, firm_token: str) -> bool:
     if not url or not firm_token:
         return False
 
-    if is_blocklisted_host(url) or _is_blocked_path(url):
+    if (
+        is_blocklisted_host(url)
+        or _is_blocked_path(url)
+        or _is_content_page_path(url)
+    ):
         return False
     domain = _hostname(url)
     if not domain:
@@ -292,7 +330,11 @@ async def _validate(url: str, firm_token: str) -> bool:
             # download (a SaaS landing page that 302s to a hosted PDF)
             # still gets rejected.
             final_url = str(head.url)
-            if is_blocklisted_host(final_url) or _is_blocked_path(final_url):
+            if (
+                is_blocklisted_host(final_url)
+                or _is_blocked_path(final_url)
+                or _is_content_page_path(final_url)
+            ):
                 return False
             final_host = _hostname(final_url)
 
@@ -351,6 +393,18 @@ def _domain_segment_starts_with(host: str, firm_token: str) -> bool:
         if normalised.startswith(firm_token):
             return True
     return False
+
+
+def _is_content_page_path(url: str) -> bool:
+    """Reject URLs whose path marks the page as content, not a homepage.
+
+    Catches news articles / deal-announcement pages / LEI-registry
+    records / press releases / blog posts that pass the title-token
+    check (because the page mentions the firm by name) but live at a
+    URL whose path makes clear they aren't the firm's homepage.
+    """
+    path = urlparse(url).path.lower()
+    return any(kw in path for kw in _NON_HOMEPAGE_PATH_KEYWORDS)
 
 
 def _is_blocked_path(url: str) -> bool:
