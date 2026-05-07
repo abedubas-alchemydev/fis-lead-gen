@@ -80,11 +80,19 @@ class Settings(BaseSettings):
     clearing_pipeline_limit: int | None = None
     contact_enrichment_provider: str = "disabled"
     apollo_api_key: str | None = None
-    # Tier 3 of the firm-website resolver chain (Apollo -> Hunter -> SerpAPI).
-    # Free-tier key gives 100 searches/month — enough for the lazy resolution
-    # flow (fires only on a master-list detail-page visit when bd.website is
-    # NULL and Apollo + Hunter both miss). Optional: when unset, the resolver
-    # skips Tier 3 the same way it skips Hunter when hunter_api_key is unset.
+    # Tier 3 of the firm-website resolver chain
+    # (Apollo -> Hunter -> serper.dev -> SerpAPI). Slotted ahead of SerpAPI
+    # because serper.dev is ~50× cheaper per query and ships a 2,500-query
+    # one-time free credit on signup, so it's the right primary search tier
+    # for both the lazy on-demand resolver and the bulk backfill scripts.
+    # Optional: when unset, the resolver skips this tier and falls straight
+    # through to SerpAPI.
+    serper_api_key: str | None = None
+    # Tier 4 of the firm-website resolver chain — fallback when serper.dev
+    # is unset or misses. Free-tier key gives 250 searches/month; bulk
+    # backfills should run on a paid plan. Optional: when unset, the
+    # resolver skips this tier the same way it skips Hunter when
+    # hunter_api_key is unset.
     serpapi_api_key: str | None = None
     # Cooldown window between successive Apollo /enrich attempts for the same
     # broker-dealer. Stops the detail-page useEffect from re-firing /enrich

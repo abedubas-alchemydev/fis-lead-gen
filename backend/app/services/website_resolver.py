@@ -47,6 +47,7 @@ import httpx
 from app.services.apollo import ApolloClient, ApolloError
 from app.services.hunter import HunterClient, HunterError
 from app.services.serpapi import SerpAPIClient, SerpAPIError
+from app.services.serper import SerperClient, SerperError
 
 logger = logging.getLogger(__name__)
 
@@ -126,19 +127,27 @@ async def resolve_website(
     apollo: ApolloClient,
     hunter: HunterClient | None,
     serpapi: SerpAPIClient | None = None,
+    serper: SerperClient | None = None,
 ) -> tuple[str | None, str | None, str | None]:
     """Run the resolver chain for ``firm_name``.
 
     Returns
     -------
     (website, source, reason)
-      - On success: ``(url, 'apollo'|'hunter'|'serpapi', None)``
+      - On success: ``(url, 'apollo'|'hunter'|'serper'|'serpapi', None)``
       - On clean miss (chain ran, no valid candidate): ``(None, None, 'no_valid_candidate')``
       - On total provider failure: ``(None, None, 'all_providers_errored: ...')``
 
-    ``hunter`` and ``serpapi`` may be ``None`` when their respective API
-    keys aren't configured; the chain skips that tier and falls through
-    to a clean miss / partial-error case.
+    ``hunter``, ``serper`` and ``serpapi`` may be ``None`` when their
+    respective API keys aren't configured; the chain skips that tier and
+    falls through to a clean miss / partial-error case.
+
+    Tier order
+    ----------
+    Apollo → Hunter → serper.dev → SerpAPI. serper.dev runs ahead of
+    SerpAPI because it's ~50× cheaper per query and shipped with a
+    2,500-query free credit; SerpAPI stays as the final fallback so a
+    transient serper.dev outage or quota cap doesn't lose firms.
     """
     firm_token = _firm_token(firm_name)
     errors: list[str] = []
@@ -171,7 +180,25 @@ async def resolve_website(
         except Exception as exc:  # pragma: no cover - belt + braces
             errors.append(f"hunter: {exc}")
 
-    # Tier 3 — SerpAPI Google search (last resort)
+    # Tier 3 — serper.dev Google search (primary search provider)
+    # Walks ALL organic results returned by the client (already capped at
+    # 10). serper.dev is structurally identical to SerpAPI for our
+    # purposes (same Google organic results, same SerpResult dataclass)
+    # but ~50× cheaper, so we hit it first to keep SerpAPI quota for the
+    # genuine fallback case.
+    if serper is not None:
+        providers_attempted += 1
+        try:
+            results = await serper.search_firm(firm_name)
+            for result in results:
+                if await _validate(result.url, firm_token):
+                    return (result.url, "serper", None)
+        except SerperError as exc:
+            errors.append(f"serper: {exc}")
+        except Exception as exc:  # pragma: no cover - belt + braces
+            errors.append(f"serper: {exc}")
+
+    # Tier 4 — SerpAPI Google search (last-resort fallback)
     # Walks ALL organic results returned by the client (already capped at
     # 10) so a strong-but-not-first hit can still win once the earlier
     # ones get rejected by blocklist / content-type / title checks. The
