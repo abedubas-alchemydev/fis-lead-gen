@@ -142,6 +142,7 @@ async def test_admin_runs_chain_persists_returns(
         _apollo: Any,
         _hunter: Any,
         _serpapi: Any = None,
+        _serper: Any = None,
     ) -> tuple[str | None, str | None, str | None]:
         return ("https://acme-securities.example.test", "apollo", None)
 

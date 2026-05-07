@@ -77,6 +77,7 @@ from app.services.refresh_all_orchestrator import (
     run_refresh_all,
 )
 from app.services.serpapi import SerpAPIClient
+from app.services.serper import SerperClient
 from app.services.service_models import FinraBrokerDealerRecord
 from app.services.website_resolver import resolve_website
 
@@ -956,6 +957,11 @@ async def resolve_broker_dealer_website(
         if settings.hunter_api_key
         else None
     )
+    serper = (
+        SerperClient(settings.serper_api_key)
+        if settings.serper_api_key
+        else None
+    )
     serpapi = (
         SerpAPIClient(settings.serpapi_api_key)
         if settings.serpapi_api_key
@@ -968,6 +974,7 @@ async def resolve_broker_dealer_website(
         apollo,
         hunter,
         serpapi,
+        serper,
     )
 
     if website and source:

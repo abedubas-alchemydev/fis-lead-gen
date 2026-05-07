@@ -18,6 +18,7 @@ import respx
 from app.services.apollo import ApolloError, ApolloOrganization
 from app.services.hunter import HunterCompany, HunterError
 from app.services.serpapi import SerpAPIError, SerpResult
+from app.services.serper import SerperError
 from app.services.website_resolver import resolve_website
 
 
@@ -512,6 +513,82 @@ async def test_apollo_wins_serpapi_not_called() -> None:
     assert (website, source, reason) == (_CANDIDATE_URL, "apollo", None)
     hunter.find_company.assert_not_awaited()
     serpapi.search_firm.assert_not_awaited()
+
+
+# ─────────────────────────── serper.dev tier 3 ─────────────────────────────
+
+
+_SERPER_URL = "https://acme-from-serper.example.test"
+
+
+@respx.mock
+async def test_serper_runs_before_serpapi_when_apollo_hunter_miss() -> None:
+    """Tier order is Apollo → Hunter → serper.dev → SerpAPI. When
+    Apollo + Hunter both miss and serper.dev returns a valid candidate,
+    SerpAPI must NOT fire (saves the more expensive quota)."""
+    apollo = AsyncMock()
+    apollo.search_organization = AsyncMock(return_value=None)
+    hunter = AsyncMock()
+    hunter.find_company = AsyncMock(return_value=None)
+    serper = AsyncMock()
+    serper.search_firm = AsyncMock(
+        return_value=[
+            SerpResult(url=_SERPER_URL, domain="acme-from-serper.example.test", title="Acme Securities — Home"),
+        ],
+    )
+    serpapi = AsyncMock()
+    serpapi.search_firm = AsyncMock(return_value=_serp_results(_SERPAPI_URL))
+    _mock_validate_pass(_SERPER_URL)
+
+    website, source, reason = await resolve_website(
+        _FIRM_NAME, None, apollo, hunter, serpapi, serper,
+    )
+
+    assert (website, source, reason) == (_SERPER_URL, "serper", None)
+    serpapi.search_firm.assert_not_awaited()
+
+
+@respx.mock
+async def test_serper_errors_falls_through_to_serpapi() -> None:
+    """When serper.dev errors (e.g., 429 quota burn), the chain must
+    fall through to SerpAPI rather than recording all_providers_errored
+    after just three tiers."""
+    apollo = AsyncMock()
+    apollo.search_organization = AsyncMock(return_value=None)
+    hunter = AsyncMock()
+    hunter.find_company = AsyncMock(return_value=None)
+    serper = AsyncMock()
+    serper.search_firm = AsyncMock(side_effect=SerperError("serper.dev returned 429"))
+    serpapi = AsyncMock()
+    serpapi.search_firm = AsyncMock(return_value=_serp_results(_SERPAPI_URL))
+    _mock_validate_pass(_SERPAPI_URL)
+
+    website, source, reason = await resolve_website(
+        _FIRM_NAME, None, apollo, hunter, serpapi, serper,
+    )
+
+    assert (website, source, reason) == (_SERPAPI_URL, "serpapi", None)
+
+
+@respx.mock
+async def test_serper_none_falls_through_to_serpapi() -> None:
+    """When serper.dev key is unset (client passed as None), the chain
+    skips Tier 3 silently and uses SerpAPI as before. This is the
+    no-config-change path so existing deployments without SERPER_API_KEY
+    keep working."""
+    apollo = AsyncMock()
+    apollo.search_organization = AsyncMock(return_value=None)
+    hunter = AsyncMock()
+    hunter.find_company = AsyncMock(return_value=None)
+    serpapi = AsyncMock()
+    serpapi.search_firm = AsyncMock(return_value=_serp_results(_SERPAPI_URL))
+    _mock_validate_pass(_SERPAPI_URL)
+
+    website, source, reason = await resolve_website(
+        _FIRM_NAME, None, apollo, hunter, serpapi, serper=None,
+    )
+
+    assert (website, source, reason) == (_SERPAPI_URL, "serpapi", None)
 
 
 # ─────────────────────── subdomain + file-download rejects ──────────────
