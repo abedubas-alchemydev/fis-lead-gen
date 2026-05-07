@@ -159,7 +159,6 @@ export function BrokerDealerDetailClient({ brokerDealerId }: { brokerDealerId: s
   const [error, setError] = useState<string | null>(null);
   const [enrichError, setEnrichError] = useState<string | null>(null);
   const [isEnriching, setIsEnriching] = useState(false);
-  const [attemptedAutoEnrich, setAttemptedAutoEnrich] = useState(false);
   const [isHealthChecking, setIsHealthChecking] = useState(false);
   const [healthCheckResult, setHealthCheckResult] = useState<string | null>(null);
   const [prevId, setPrevId] = useState<number | null>(null);
@@ -383,13 +382,6 @@ export function BrokerDealerDetailClient({ brokerDealerId }: { brokerDealerId: s
       setIsEnriching(false);
     }
   }
-
-  useEffect(() => {
-    if (!profile || profile.executive_contacts.length > 0 || attemptedAutoEnrich || isEnriching) return;
-    setAttemptedAutoEnrich(true);
-    void enrichContacts();
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [attemptedAutoEnrich, isEnriching, profile]);
 
   const chartPoints = useMemo(() => {
     if (!profile) return [] as Array<{ label: string; value: number }>;
