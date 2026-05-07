@@ -35,6 +35,7 @@ the migration is straightforward when that day comes.
 
 from __future__ import annotations
 
+import asyncio
 import io
 import logging
 import re
@@ -163,7 +164,10 @@ async def fetch_form_bd_detail(crd: str) -> Optional[FormBdDetail]:
     except FinraPdfNotFound:
         logger.info("FINRA has no Form BD PDF on file for CRD %s", crd)
         return None
-    return _parse_form_bd_pdf(crd, pdf_bytes)
+    # pdfplumber + pypdf are CPU-bound and synchronous; ~4-5s per PDF after
+    # slicing (see _extract_text). Offload to a worker thread so concurrent
+    # FINRA enrichment doesn't stall the event loop.
+    return await asyncio.to_thread(_parse_form_bd_pdf, crd, pdf_bytes)
 
 
 def _parse_form_bd_pdf(crd: str, pdf_bytes: bytes) -> FormBdDetail:

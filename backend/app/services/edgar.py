@@ -370,7 +370,12 @@ class EdgarService:
             "Accept-Encoding": "identity",
         }
 
-        async with httpx.AsyncClient(timeout=None, headers=headers, follow_redirects=True) as client:
+        # Explicit timeouts: connect/write/pool are short (failure modes are
+        # fast); read is per-event, not total — applies between successive
+        # chunks on the streaming body, so a healthy 1.5 GB download runs as
+        # long as it needs but a stalled connection fails in 120s.
+        bulk_timeout = httpx.Timeout(connect=15.0, read=120.0, write=15.0, pool=10.0)
+        async with httpx.AsyncClient(timeout=bulk_timeout, headers=headers, follow_redirects=True) as client:
             async with client.stream("GET", settings.sec_bulk_submissions_url) as response:
                 response.raise_for_status()
                 # aiter_raw, NOT aiter_bytes. The body is a .zip file (already
