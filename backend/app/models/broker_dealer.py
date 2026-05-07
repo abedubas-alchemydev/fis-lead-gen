@@ -65,6 +65,12 @@ class BrokerDealer(Base):
     is_niche_restricted: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
     formation_date: Mapped[date | None] = mapped_column(Date, nullable=True)
     total_assets_yoy: Mapped[float | None] = mapped_column(Numeric(8, 2), nullable=True)
+    # FINRA "Doing Business As" / alternate trade names. Parsed from
+    # ``firm_other_names`` in the BrokerCheck firm-search payload. Used by
+    # the website resolver so a firm registered as ``303 ALTERNATIVES,
+    # LLC`` but operating at ``303capitalmarkets.com`` (DBA "303Capital
+    # Markets") can still anchor a candidate URL on the trade-name token.
+    dba_names: Mapped[list | None] = mapped_column(JSONB(none_as_null=True), nullable=True)
 
     status: Mapped[str] = mapped_column(String(64), default="pending", nullable=False)
     # Stamped on every Apollo /enrich attempt that the API "owns" (success or

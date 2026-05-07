@@ -561,9 +561,20 @@ class FinraService:
         if sec_file_number is None:
             return None
 
+        # ``firm_other_names`` is the FINRA "doing business as" / alternate
+        # trade-name field. It used to be conflated with ``business_type``
+        # as a fallback alongside ``firm_ia_full_sec_number`` / ``firm_type``,
+        # which discarded DBA data entirely. Parse it on its own so the
+        # website resolver can anchor candidate URLs on the trade name when
+        # the legal LLC name doesn't match the firm's brand domain
+        # (canonical case: ``303 ALTERNATIVES, LLC`` operating at
+        # ``303capitalmarkets.com``).
+        dba_names = self._parse_dba_names(
+            source.get("firm_other_names"), legal_name=name,
+        )
+
         business_type = self._clean_text(
             source.get("firm_ia_full_sec_number")
-            or source.get("firm_other_names")
             or source.get("firm_type")
         )
 
@@ -576,7 +587,67 @@ class FinraService:
             address_city=self._clean_text(address_source.get("city")),
             address_state=self._clean_text(address_source.get("state")),
             business_type=business_type,
+            dba_names=dba_names,
         )
+
+    @staticmethod
+    def _parse_dba_names(
+        raw: object, *, legal_name: str
+    ) -> list[str] | None:
+        """Split FINRA's ``firm_other_names`` into a list of trade names.
+
+        Real-world shapes observed in the FINRA payload:
+          - ``"303 CAPITAL MARKETS, LLC"`` (single DBA)
+          - ``"303 CAPITAL MARKETS, LLC; OTHER NAME"`` (semi-delimited)
+          - ``"303 CAPITAL MARKETS, LLC, OTHER NAME"`` (comma-delimited;
+            ambiguous with intra-name commas — split on the LAST comma
+            before each LLC/INC/CORP marker would be ideal but is brittle.
+            For now we only split on semicolons + line breaks, which
+            covers the bulk of real cases without false-splitting names
+            that legitimately contain a comma.)
+          - ``"d/b/a 303Capital Markets"`` (with explicit DBA prefix —
+            strip and keep only the trade name)
+          - ``None`` / empty string
+
+        Returns ``None`` when nothing usable remains. Drops items that
+        match the firm's legal name (case-insensitive, whitespace-
+        insensitive) so the legal name doesn't double as a "DBA".
+        """
+        if raw is None:
+            return None
+        text = str(raw).strip()
+        if not text:
+            return None
+
+        # Split on the unambiguous delimiters (semicolons and newlines).
+        # Comma split is intentionally avoided — many legitimate firm
+        # names carry an internal ", LLC" / ", INC" / ", L.P." suffix.
+        parts: list[str] = []
+        for chunk in text.replace("\r", "\n").split("\n"):
+            for sub in chunk.split(";"):
+                cleaned = sub.strip()
+                if not cleaned:
+                    continue
+                # Strip a leading "d/b/a " / "DBA " prefix if present.
+                lower = cleaned.lower()
+                for marker in ("d/b/a ", "dba "):
+                    if lower.startswith(marker):
+                        cleaned = cleaned[len(marker):].strip()
+                        break
+                if cleaned:
+                    parts.append(cleaned)
+
+        # De-dupe (case-insensitive) and drop legal-name matches.
+        legal_norm = " ".join(legal_name.lower().split())
+        seen: set[str] = set()
+        out: list[str] = []
+        for p in parts:
+            norm = " ".join(p.lower().split())
+            if not norm or norm == legal_norm or norm in seen:
+                continue
+            seen.add(norm)
+            out.append(p)
+        return out or None
 
     def _parse_address_details(self, value: object) -> dict[str, object]:
         if isinstance(value, dict):

@@ -730,6 +730,60 @@ async def test_truncated_brand_domain_admits() -> None:
 
 
 @respx.mock
+async def test_dba_anchor_admits_when_legal_name_misses() -> None:
+    """Real-world 303 ALTERNATIVES, LLC regression: firm registered as
+    ``303 Alternatives, LLC`` (legal-name token ``"alternat"``) operates
+    as ``303Capital Markets`` and the brand domain is
+    ``303capitalmarkets.com``. The legal-name token shares zero overlap
+    with the brand domain — without DBA awareness, the firm misses
+    every time. Passing ``dba_names=["303Capital Markets, LLC"]`` adds
+    the DBA token to the anchor candidate set; the segment
+    ``303capitalmarkets`` startswith the DBA token ``"capitalm"`` and
+    admits."""
+    candidate = "https://www.303capitalmarkets.com"
+    apollo = AsyncMock()
+    apollo.search_organization = AsyncMock(
+        return_value=ApolloOrganization(
+            name="303 ALTERNATIVES, LLC",
+            website_url=candidate,
+            domain="303capitalmarkets.com",
+        ),
+    )
+
+    respx.head(candidate).mock(
+        return_value=httpx.Response(200, request=httpx.Request("HEAD", candidate)),
+    )
+
+    website, source, reason = await resolve_website(
+        "303 ALTERNATIVES, LLC",
+        None,
+        apollo,
+        dba_names=["303Capital Markets, LLC"],
+    )
+
+    assert (website, source, reason) == (candidate, "apollo", None)
+
+
+@respx.mock
+async def test_dba_names_none_preserves_legacy_legal_name_path() -> None:
+    """Sanity: callers that don't yet pass ``dba_names`` (or pass None)
+    still get the legal-name-only behavior. No regression on firms whose
+    domain anchors on the legal name."""
+    apollo = AsyncMock()
+    apollo.search_organization = AsyncMock(return_value=_apollo_org())
+
+    respx.head(_CANDIDATE_URL).mock(
+        return_value=httpx.Response(200, request=httpx.Request("HEAD", _CANDIDATE_URL)),
+    )
+
+    website, source, reason = await resolve_website(
+        _FIRM_NAME, None, apollo, dba_names=None,
+    )
+
+    assert (website, source, reason) == (_CANDIDATE_URL, "apollo", None)
+
+
+@respx.mock
 async def test_short_segment_does_not_admit_via_truncated_anchor() -> None:
     """Truncated-brand mitigation is gated on a minimum segment length
     so a 2-3 char segment doesn't gain admission. Firm

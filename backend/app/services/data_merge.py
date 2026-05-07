@@ -180,6 +180,7 @@ class BrokerDealerMergeService:
                     direct_owners=finra_record.direct_owners,
                     executive_officers=finra_record.executive_officers,
                     firm_operations_text=finra_record.firm_operations_text,
+                    dba_names=finra_record.dba_names,
                 ))
                 report.matched_both_count += 1
             else:
@@ -204,6 +205,7 @@ class BrokerDealerMergeService:
                     direct_owners=finra_record.direct_owners,
                     executive_officers=finra_record.executive_officers,
                     firm_operations_text=finra_record.firm_operations_text,
+                    dba_names=finra_record.dba_names,
                 ))
                 report.finra_only_count += 1
 
