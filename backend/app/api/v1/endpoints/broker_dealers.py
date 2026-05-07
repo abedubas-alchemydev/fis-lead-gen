@@ -279,11 +279,15 @@ async def download_brokercheck_pdf(
             detail=f"Could not fetch BrokerCheck PDF from FINRA: {exc}",
         ) from exc
 
+    # `inline` lets the browser render the PDF in the new tab opened by the
+    # frontend's `<a target="_blank">`. `attachment` would force a download
+    # regardless of `target`, which is exactly what the client asked us to
+    # stop doing.
     return Response(
         content=pdf_bytes,
         media_type="application/pdf",
         headers={
-            "Content-Disposition": f"attachment; filename={broker_dealer.crd_number}-brokercheck.pdf"
+            "Content-Disposition": f"inline; filename={broker_dealer.crd_number}-brokercheck.pdf"
         },
     )
 

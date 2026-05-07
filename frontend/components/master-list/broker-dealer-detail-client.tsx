@@ -104,7 +104,8 @@ function listPathFromReturnState(
     health: state.health === "All" ? undefined : [state.health],
     lead_priority:
       state.prospectPriority === "All" ? undefined : [state.prospectPriority],
-    clearing_partner: state.clearingPartner ? [state.clearingPartner] : undefined,
+    clearing_partner:
+      state.clearingPartner.length > 0 ? state.clearingPartner : undefined,
     clearing_type:
       state.clearingType === "All" ? undefined : [state.clearingType],
     types_of_business:
@@ -710,7 +711,7 @@ export function BrokerDealerDetailClient({ brokerDealerId }: { brokerDealerId: s
                 rel="noopener noreferrer"
                 className="inline-flex items-center gap-1.5 rounded-[10px] border border-[var(--border-2,rgba(30,64,175,0.16))] bg-[var(--surface,#ffffff)] px-3 py-1.5 text-[12px] font-medium text-[var(--text-dim,#475569)] transition hover:bg-[var(--surface-2,#f1f6fd)] hover:text-[var(--text,#0f172a)]"
               >
-                <Download className="h-3.5 w-3.5" strokeWidth={2} />
+                <ExternalLink className="h-3.5 w-3.5" strokeWidth={2} />
                 FINRA BrokerCheck (PDF)
               </a>
             ) : null}

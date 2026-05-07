@@ -19,6 +19,11 @@ from app.models.financial_metric import FinancialMetric
 from app.models.pipeline_run import PipelineRun
 from app.models.scoring_setting import ScoringSetting
 from app.schemas.broker_dealer import BrokerDealerListMeta, BrokerDealerListResponse
+from app.services.clearing_consolidation import (
+    consolidated_label_set,
+    expand_filter_predicate,
+    load_providers as load_consolidation_providers,
+)
 from app.services.scoring import CompetitorLookup, calculate_lead_score, classify_lead_priority
 from app.services.service_models import MergedBrokerDealerRecord, ProviderDistributionRecord
 from app.services.unknown_reasons import (
@@ -263,7 +268,29 @@ class BrokerDealerRepository:
             filters.append(BrokerDealer.lead_priority.in_(lead_priorities))
 
         if clearing_partners:
-            filters.append(BrokerDealer.current_clearing_partner.in_(clearing_partners))
+            # Selected labels are canonical short forms ("Pershing", "Apex"),
+            # not raw extracted strings. Expand each label back to the set
+            # of raw values that consolidate to it, then filter by
+            # `current_clearing_partner IN (raw_values)`. Reuses the same
+            # consolidate function the dropdown uses, so what the user sees
+            # and what they filter by are guaranteed to agree.
+            distinct_raw_stmt = (
+                select(BrokerDealer.current_clearing_partner)
+                .where(BrokerDealer.current_clearing_partner.is_not(None))
+                .distinct()
+            )
+            distinct_raw = list(
+                (await db.execute(distinct_raw_stmt)).scalars().all()
+            )
+            providers = await load_consolidation_providers(db)
+            predicate = expand_filter_predicate(
+                clearing_partners,
+                providers,
+                BrokerDealer.current_clearing_partner,
+                distinct_raw,
+            )
+            if predicate is not None:
+                filters.append(predicate)
 
         if clearing_types:
             filters.append(BrokerDealer.current_clearing_type.in_(clearing_types))
@@ -455,14 +482,23 @@ class BrokerDealerRepository:
         return [row for row in rows if row]
 
     async def list_clearing_partners(self, db: AsyncSession) -> list[str]:
+        """Distinct clearing partners, consolidated to canonical short labels.
+
+        Raw `current_clearing_partner` values from extraction frequently arrive
+        in multiple shapes for the same firm ("PERSHING LLC" / "PERSHING NFS"
+        / "BNY PERSHING"). The dropdown groups them via
+        ``CompetitorProvider`` aliases into one entry per canonical firm
+        (using ``display_name`` as the short label). Long-tail raw values
+        that don't match any provider are kept as their trimmed text.
+        """
         stmt = (
             select(BrokerDealer.current_clearing_partner)
             .where(BrokerDealer.current_clearing_partner.is_not(None))
             .distinct()
-            .order_by(BrokerDealer.current_clearing_partner.asc())
         )
         rows = (await db.execute(stmt)).scalars().all()
-        return [row for row in rows if row]
+        providers = await load_consolidation_providers(db)
+        return consolidated_label_set(list(rows), providers)
 
     async def list_types_of_business(self, db: AsyncSession) -> list[dict[str, object]]:
         """Distinct types-of-business across all firms with per-type counts.

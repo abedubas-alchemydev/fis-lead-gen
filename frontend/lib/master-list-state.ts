@@ -31,7 +31,7 @@ export interface MasterListQueryState {
   state: string;
   health: string;
   prospectPriority: string;
-  clearingPartner: string;
+  clearingPartner: string[];
   clearingType: string;
   typesOfBusiness: string[];
   // Sprint 3 task #15: net-capital range. Dollars (not cents). null when
@@ -59,7 +59,7 @@ export const MASTER_LIST_STATE_DEFAULTS: MasterListQueryState = {
   state: "",
   health: "All",
   prospectPriority: "All",
-  clearingPartner: "",
+  clearingPartner: [],
   clearingType: "All",
   typesOfBusiness: [],
   minNetCapital: null,
@@ -140,8 +140,7 @@ export function fromSearchParams(sp: SearchParamsLike): MasterListQueryState {
     health: sp.get("health") ?? MASTER_LIST_STATE_DEFAULTS.health,
     prospectPriority:
       sp.get("prospect_priority") ?? MASTER_LIST_STATE_DEFAULTS.prospectPriority,
-    clearingPartner:
-      sp.get("clearing_partner") ?? MASTER_LIST_STATE_DEFAULTS.clearingPartner,
+    clearingPartner: parseMultiParam(sp, "clearing_partner"),
     clearingType:
       sp.get("clearing_type") ?? MASTER_LIST_STATE_DEFAULTS.clearingType,
     typesOfBusiness: parseMultiParam(sp, "types_of_business"),
@@ -191,8 +190,10 @@ export function toSearchParams(state: MasterListQueryState): URLSearchParams {
   if (state.prospectPriority !== MASTER_LIST_STATE_DEFAULTS.prospectPriority) {
     sp.set("prospect_priority", state.prospectPriority);
   }
-  if (state.clearingPartner !== MASTER_LIST_STATE_DEFAULTS.clearingPartner) {
-    sp.set("clearing_partner", state.clearingPartner);
+  if (state.clearingPartner.length > 0) {
+    state.clearingPartner.forEach((entry) =>
+      sp.append("clearing_partner", entry),
+    );
   }
   if (state.clearingType !== MASTER_LIST_STATE_DEFAULTS.clearingType) {
     sp.set("clearing_type", state.clearingType);
@@ -302,7 +303,7 @@ export function hasActiveFilters(state: MasterListQueryState): boolean {
     state.state !== MASTER_LIST_STATE_DEFAULTS.state ||
     state.health !== MASTER_LIST_STATE_DEFAULTS.health ||
     state.prospectPriority !== MASTER_LIST_STATE_DEFAULTS.prospectPriority ||
-    state.clearingPartner !== MASTER_LIST_STATE_DEFAULTS.clearingPartner ||
+    state.clearingPartner.length > 0 ||
     state.clearingType !== MASTER_LIST_STATE_DEFAULTS.clearingType ||
     state.typesOfBusiness.length > 0 ||
     state.minNetCapital !== null ||
@@ -328,7 +329,7 @@ export function clearAllFilters(
     state: MASTER_LIST_STATE_DEFAULTS.state,
     health: MASTER_LIST_STATE_DEFAULTS.health,
     prospectPriority: MASTER_LIST_STATE_DEFAULTS.prospectPriority,
-    clearingPartner: MASTER_LIST_STATE_DEFAULTS.clearingPartner,
+    clearingPartner: [],
     clearingType: MASTER_LIST_STATE_DEFAULTS.clearingType,
     typesOfBusiness: [],
     minNetCapital: null,
