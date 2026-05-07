@@ -163,6 +163,61 @@ def test_clearing_needs_review_with_fully_disclosed_basis_is_disclosed() -> None
     assert result.note == notes
 
 
+def test_clearing_needs_review_with_jbo_language_is_disclosed() -> None:
+    """needs_review + Joint Back Office (JBO) language => firm_does_not_disclose.
+
+    Surfaced by COMMONWEALTH FINANCIAL NETWORK on the staging master-list:
+    the LLM correctly identified the firm as fully-disclosed via a JBO
+    arrangement but didn't have a partner name in the FOCUS report. Before
+    this regex broadening the case landed as ``low_confidence_extraction``
+    (amber pending tooltip) even though the firm IS disclosed — they just
+    didn't name the clearer in the source.
+    """
+    notes = (
+        "The firm explicitly states it has a Joint Back Office (JBO) "
+        "clearing agreement with 'its clearing firm' and is a JBO "
+        "participant, which typically implies a fully disclosed "
+        "arrangement where the clearing firm carries the accounts."
+    )
+
+    result = derive_clearing_unknown_reason(
+        _arrangement(
+            clearing_partner=None,
+            extraction_status=STATUS_NEEDS_REVIEW,
+            extraction_notes=notes,
+            extraction_confidence=0.85,
+        )
+    )
+
+    assert result is not None
+    assert result.category == "firm_does_not_disclose"
+
+
+def test_clearing_needs_review_with_fully_disclosed_arrangement_is_disclosed() -> None:
+    """needs_review + "fully disclosed arrangement / agreement / clearing"
+    phrasing => firm_does_not_disclose. Catches filings that describe the
+    exemption shape without using the SEC's exact "on a fully disclosed
+    basis" boilerplate."""
+    for noun in ("arrangement", "agreement", "clearing", "relationship"):
+        notes = (
+            f"The firm clears its customer transactions through a third-party "
+            f"broker on a fully disclosed {noun}. The clearing firm is not "
+            f"named in the filing."
+        )
+        result = derive_clearing_unknown_reason(
+            _arrangement(
+                clearing_partner=None,
+                extraction_status=STATUS_NEEDS_REVIEW,
+                extraction_notes=notes,
+                extraction_confidence=0.90,
+            )
+        )
+        assert result is not None, f"None result for noun={noun!r}"
+        assert result.category == "firm_does_not_disclose", (
+            f"Expected firm_does_not_disclose for noun={noun!r}, got {result.category!r}"
+        )
+
+
 def test_clearing_missing_pdf_status_maps_to_no_filing_available() -> None:
     result = derive_clearing_unknown_reason(
         _arrangement(clearing_partner=None, extraction_status=STATUS_MISSING_PDF)
