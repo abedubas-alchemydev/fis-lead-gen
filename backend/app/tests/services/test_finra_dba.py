@@ -76,3 +76,66 @@ def test_comma_in_name_not_split() -> None:
     assert _parse("ACME, LLC; BETA, INC") == ["ACME, LLC", "BETA, INC"]
     # Comma alone (no semicolon) is treated as part of one name.
     assert _parse("ACME, LLC, BETA, INC") == ["ACME, LLC, BETA, INC"]
+
+
+def test_list_input_passes_through() -> None:
+    """The detail endpoint surfaces ``otherNames`` already as a list of
+    strings (one entry per name). Pass-through preserves the list and
+    drops the legal-name match + dedupes."""
+    assert _parse(["303 ALTERNATIVES, LLC", "303 CAPITAL MARKETS, LLC"]) == [
+        "303 CAPITAL MARKETS, LLC"
+    ]
+    assert _parse(["FOO LLC", "FOO LLC", "BAR INC"]) == ["FOO LLC", "BAR INC"]
+    assert _parse([]) is None
+
+
+# ─────────────────── extract_dba_names_from_detail ────────────────────
+
+
+def test_extract_dba_from_detail_nested_content() -> None:
+    """Real-world detail-endpoint shape (CRD 166675, 303 ALTERNATIVES,
+    LLC): DBA names live inside a JSON-encoded ``content`` string at
+    ``basicInformation.otherNames``."""
+    import json
+    detail = {
+        "hits": {
+            "hits": [
+                {
+                    "_source": {
+                        "content": json.dumps({
+                            "basicInformation": {
+                                "firmName": "303 ALTERNATIVES, LLC",
+                                "otherNames": [
+                                    "303 ALTERNATIVES, LLC",
+                                    "303 CAPITAL MARKETS, LLC",
+                                ],
+                            },
+                        }),
+                    },
+                },
+            ],
+        },
+    }
+    dba = FinraService.extract_dba_names_from_detail(detail, legal_name=_LEGAL)
+    assert dba == ["303 CAPITAL MARKETS, LLC"]
+
+
+def test_extract_dba_from_detail_returns_none_when_path_missing() -> None:
+    """Empty / missing / unparseable paths return None cleanly."""
+    assert FinraService.extract_dba_names_from_detail(None, legal_name=_LEGAL) is None
+    assert FinraService.extract_dba_names_from_detail({}, legal_name=_LEGAL) is None
+    # Missing content
+    assert FinraService.extract_dba_names_from_detail(
+        {"hits": {"hits": [{"_source": {}}]}}, legal_name=_LEGAL,
+    ) is None
+    # Bad JSON in content
+    assert FinraService.extract_dba_names_from_detail(
+        {"hits": {"hits": [{"_source": {"content": "not-json"}}]}},
+        legal_name=_LEGAL,
+    ) is None
+    # No otherNames key
+    import json
+    detail = {
+        "hits": {"hits": [{"_source": {"content": json.dumps({"basicInformation": {}})}}]},
+    }
+    assert FinraService.extract_dba_names_from_detail(detail, legal_name=_LEGAL) is None
