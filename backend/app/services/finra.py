@@ -594,60 +594,131 @@ class FinraService:
     def _parse_dba_names(
         raw: object, *, legal_name: str
     ) -> list[str] | None:
-        """Split FINRA's ``firm_other_names`` into a list of trade names.
+        """Normalize FINRA's "other names" payload into a list of DBAs.
 
-        Real-world shapes observed in the FINRA payload:
-          - ``"303 CAPITAL MARKETS, LLC"`` (single DBA)
-          - ``"303 CAPITAL MARKETS, LLC; OTHER NAME"`` (semi-delimited)
-          - ``"303 CAPITAL MARKETS, LLC, OTHER NAME"`` (comma-delimited;
-            ambiguous with intra-name commas — split on the LAST comma
-            before each LLC/INC/CORP marker would be ideal but is brittle.
-            For now we only split on semicolons + line breaks, which
-            covers the bulk of real cases without false-splitting names
-            that legitimately contain a comma.)
-          - ``"d/b/a 303Capital Markets"`` (with explicit DBA prefix —
-            strip and keep only the trade name)
-          - ``None`` / empty string
+        FINRA exposes the same DBA data under two different shapes
+        depending on which endpoint surfaced it:
 
-        Returns ``None`` when nothing usable remains. Drops items that
-        match the firm's legal name (case-insensitive, whitespace-
-        insensitive) so the legal name doesn't double as a "DBA".
+        - **Search endpoint** (``_search`` → ``_build_record``): a
+          string at top-level ``firm_other_names``. Format varies:
+          single name, semicolon-delimited, newline-delimited, or
+          ``"d/b/a <trade-name>"`` markers. Comma split is avoided
+          because legitimate LLC suffixes carry internal commas.
+        - **Detail endpoint** (``_fetch_firm_detail`` →
+          ``content.basicInformation.otherNames``): already a list of
+          strings, one entry per name. The list typically includes the
+          firm's own legal name as the first entry.
+
+        Both shapes pass through here. Returns ``None`` when nothing
+        usable remains. Drops items that match the firm's legal name
+        (case- and whitespace-insensitive) and de-dupes (same
+        normalization).
         """
         if raw is None:
             return None
-        text = str(raw).strip()
-        if not text:
-            return None
 
-        # Split on the unambiguous delimiters (semicolons and newlines).
-        # Comma split is intentionally avoided — many legitimate firm
-        # names carry an internal ", LLC" / ", INC" / ", L.P." suffix.
-        parts: list[str] = []
-        for chunk in text.replace("\r", "\n").split("\n"):
-            for sub in chunk.split(";"):
-                cleaned = sub.strip()
-                if not cleaned:
-                    continue
-                # Strip a leading "d/b/a " / "DBA " prefix if present.
-                lower = cleaned.lower()
-                for marker in ("d/b/a ", "dba "):
-                    if lower.startswith(marker):
-                        cleaned = cleaned[len(marker):].strip()
-                        break
-                if cleaned:
-                    parts.append(cleaned)
+        # Build the raw item list, regardless of input shape.
+        items: list[str]
+        if isinstance(raw, list):
+            items = [str(x).strip() for x in raw if str(x).strip()]
+        else:
+            text = str(raw).strip()
+            if not text:
+                return None
+            # Split on the unambiguous delimiters (semicolons and
+            # newlines). Comma split is intentionally avoided — many
+            # legitimate firm names carry an internal ``, LLC`` /
+            # ``, INC`` / ``, L.P.`` suffix.
+            items = []
+            for chunk in text.replace("\r", "\n").split("\n"):
+                for sub in chunk.split(";"):
+                    cleaned = sub.strip()
+                    if cleaned:
+                        items.append(cleaned)
+
+        # Per-item: strip a leading ``d/b/a`` / ``DBA`` prefix.
+        cleaned_items: list[str] = []
+        for item in items:
+            lower = item.lower()
+            for marker in ("d/b/a ", "dba "):
+                if lower.startswith(marker):
+                    item = item[len(marker):].strip()
+                    break
+            if item:
+                cleaned_items.append(item)
 
         # De-dupe (case-insensitive) and drop legal-name matches.
         legal_norm = " ".join(legal_name.lower().split())
         seen: set[str] = set()
         out: list[str] = []
-        for p in parts:
+        for p in cleaned_items:
             norm = " ".join(p.lower().split())
             if not norm or norm == legal_norm or norm in seen:
                 continue
             seen.add(norm)
             out.append(p)
         return out or None
+
+    @staticmethod
+    def extract_dba_names_from_detail(
+        detail: dict[str, object] | None, *, legal_name: str
+    ) -> list[str] | None:
+        """Parse DBA names out of a ``_fetch_firm_detail`` response.
+
+        The detail endpoint nests trade names inside a JSON-encoded
+        ``content`` string at ``content.basicInformation.otherNames``.
+        Concretely for CRD 166675 (303 ALTERNATIVES, LLC):
+
+            {
+              "_source": {
+                "content": "{\"basicInformation\": {\"firmName\":
+                  \"303 ALTERNATIVES, LLC\", \"otherNames\": [\"303
+                  ALTERNATIVES, LLC\", \"303 CAPITAL MARKETS, LLC\"]}}"
+              }
+            }
+
+        Returns the DBA list (with legal name dropped + dedupe) or
+        ``None`` when the path is absent / empty / unparseable.
+        """
+        if not detail:
+            return None
+        source = FinraService._extract_detail_source_static(detail)
+        if not isinstance(source, dict):
+            return None
+        content_raw = source.get("content")
+        if not isinstance(content_raw, str) or not content_raw.strip():
+            return None
+        try:
+            content = json.loads(content_raw)
+        except json.JSONDecodeError:
+            return None
+        if not isinstance(content, dict):
+            return None
+        basic_info = content.get("basicInformation")
+        if not isinstance(basic_info, dict):
+            return None
+        other_names = basic_info.get("otherNames")
+        return FinraService._parse_dba_names(other_names, legal_name=legal_name)
+
+    @staticmethod
+    def _extract_detail_source_static(
+        detail: dict[str, object],
+    ) -> dict[str, object] | None:
+        """Static mirror of ``_extract_detail_source`` so the static
+        ``extract_dba_names_from_detail`` helper doesn't need an
+        instance to navigate the ``hits.hits[0]._source`` envelope."""
+        if "firm_name" in detail or "firm_source_id" in detail or "content" in detail:
+            return detail  # type: ignore[return-value]
+        hits_container = detail.get("hits")
+        if isinstance(hits_container, dict):
+            hits = hits_container.get("hits", [])
+            if isinstance(hits, list) and hits:
+                first = hits[0]
+                if isinstance(first, dict):
+                    source = first.get("_source") or first.get("source")
+                    if isinstance(source, dict):
+                        return source
+        return None
 
     def _parse_address_details(self, value: object) -> dict[str, object]:
         if isinstance(value, dict):

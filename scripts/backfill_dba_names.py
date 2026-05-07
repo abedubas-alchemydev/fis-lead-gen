@@ -104,9 +104,13 @@ async def main(*, top: int | None, dry_run: bool) -> None:
                 print(f"  -> fetch_error: {type(exc).__name__}: {exc}")
                 continue
 
-            source = service._extract_detail_source(detail) if detail else None
-            raw = source.get("firm_other_names") if isinstance(source, dict) else None
-            dba = service._parse_dba_names(raw, legal_name=bd.name)
+            # Detail endpoint nests trade names at
+            # ``_source.content.basicInformation.otherNames`` (a list,
+            # JSON-encoded inside the ``content`` string). The
+            # search-endpoint format (top-level ``firm_other_names``
+            # string) is a different path — used at initial-load time,
+            # not here.
+            dba = service.extract_dba_names_from_detail(detail, legal_name=bd.name)
 
             if dba:
                 counts["populated"] += 1
