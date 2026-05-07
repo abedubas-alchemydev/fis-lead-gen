@@ -55,6 +55,20 @@ function MasterListIcon(props: IconProps) {
   );
 }
 
+// Briefcase + chart-bar mark — distinguishes the Investment Advisor list
+// from the Master List's three-line glyph at a glance.
+function AdvisorListIcon(props: IconProps) {
+  return (
+    <IconBase {...props}>
+      <rect x="3" y="7" width="18" height="13" rx="2" />
+      <path d="M9 7V5a2 2 0 012-2h2a2 2 0 012 2v2" />
+      <path d="M8 14v3" />
+      <path d="M12 12v5" />
+      <path d="M16 10v7" />
+    </IconBase>
+  );
+}
+
 function AlertsIcon(props: IconProps) {
   return (
     <IconBase {...props}>
@@ -143,6 +157,11 @@ type NavEntry = {
 const workspaceNav: ReadonlyArray<NavEntry> = [
   { href: "/dashboard", label: "Dashboard", icon: DashboardIcon, badgeKey: null },
   { href: "/master-list", label: "Master List", icon: MasterListIcon, badgeKey: "total" },
+  // ``as Route`` cast: Next's typed-routes type-gen runs on `next build`/`next
+  // dev`, so a fresh route added in a tsc-only check (no Next pipeline run)
+  // isn't yet known to the Route union. Removing once a build regenerates
+  // .next/types is fine but cheap to leave for new sibling routes.
+  { href: "/advisor-list" as Route, label: "Investment Advisors", icon: AdvisorListIcon, badgeKey: null },
   { href: "/alerts", label: "Alerts", icon: AlertsIcon, badgeKey: "alerts" },
   { href: "/email-extractor", label: "Email Extractor", icon: EmailExtractorIcon, badgeKey: null },
   { href: "/export", label: "Export", icon: ExportIcon, badgeKey: null },

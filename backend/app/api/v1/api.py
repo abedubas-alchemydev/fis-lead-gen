@@ -9,6 +9,7 @@ from app.api.v1.endpoints import (
     favorite_lists,
     favorites,
     health,
+    investment_advisors,
     outreach,
     pipeline,
     settings,
@@ -22,6 +23,7 @@ api_router = APIRouter()
 api_router.include_router(health.router, tags=["health"])
 api_router.include_router(auth.router, prefix="/auth", tags=["auth"])
 api_router.include_router(broker_dealers.router, tags=["broker-dealers"])
+api_router.include_router(investment_advisors.router, tags=["investment-advisors"])
 api_router.include_router(alerts.router, tags=["alerts"])
 api_router.include_router(export.router, tags=["export"])
 api_router.include_router(pipeline.router, tags=["pipeline"])

@@ -1,3 +1,5 @@
+from app.models.advisor_contact import AdvisorContact
+from app.models.advisor_filing import AdvisorFiling
 from app.models.audit_log import AuditLog
 from app.models.auth import Account, AuthSession, AuthUser, Verification
 from app.models.broker_dealer import BrokerDealer
@@ -12,6 +14,7 @@ from app.models.financial_metric import FinancialMetric
 from app.models.filing_alert import FilingAlert
 from app.models.industry_arrangement import IndustryArrangement
 from app.models.introducing_arrangement import IntroducingArrangement
+from app.models.investment_advisor import InvestmentAdvisor
 from app.models.pipeline_run import PipelineRun
 from app.models.scoring_setting import ScoringSetting
 from app.models.user_visit import UserVisit
@@ -22,6 +25,8 @@ from app.models.verification_run import VerificationRun
 
 __all__ = [
     "Account",
+    "AdvisorContact",
+    "AdvisorFiling",
     "AuditLog",
     "AuthSession",
     "AuthUser",
@@ -38,6 +43,7 @@ __all__ = [
     "FilingAlert",
     "IndustryArrangement",
     "IntroducingArrangement",
+    "InvestmentAdvisor",
     "PipelineRun",
     "ScoringSetting",
     "UserVisit",
