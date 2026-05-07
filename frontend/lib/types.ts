@@ -106,10 +106,10 @@ export type DashboardStats = {
   total_active_bds: number;
   new_bds_30_days: number;
   deficiency_alerts: number;
-  // BE boundary field — mirrors FastAPI response shape. Surfaced in the FE
-  // KPI grid as "High-Value Prospects"; the wire field name keeps BE
-  // vocabulary so the contract stays in lockstep with the BE schema.
-  high_value_leads: number;
+  // BE boundary field — mirrors FastAPI response shape. Counts firms with
+  // latest_net_capital in the [$5M, $100M] band (the "High Value Participant"
+  // business rule); decoupled from the ACG ICP scorer's lead_priority.
+  high_value_participants: number;
 };
 
 export type FinancialMetricItem = {

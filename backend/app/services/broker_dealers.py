@@ -438,8 +438,15 @@ class BrokerDealerRepository:
         stmt = select(func.count(BrokerDealer.id))
         return int((await db.execute(stmt)).scalar_one())
 
-    async def count_hot_leads(self, db: AsyncSession) -> int:
-        stmt = select(func.count(BrokerDealer.id)).where(BrokerDealer.lead_priority == "hot")
+    async def count_high_value_participants(self, db: AsyncSession) -> int:
+        # "High Value" = firms with latest_net_capital in the [$5M, $100M] band
+        # (business rule). Decoupled from the ACG ICP composite scorer, which
+        # still drives lead_priority hot/warm/cold for the master list and the
+        # Top Prospects card.
+        stmt = select(func.count(BrokerDealer.id)).where(
+            BrokerDealer.latest_net_capital >= 5_000_000,
+            BrokerDealer.latest_net_capital <= 100_000_000,
+        )
         return int((await db.execute(stmt)).scalar_one())
 
     async def list_states(self, db: AsyncSession) -> list[str]:

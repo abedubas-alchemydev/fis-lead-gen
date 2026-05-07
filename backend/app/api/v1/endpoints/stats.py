@@ -45,13 +45,13 @@ async def get_dashboard_stats(
     new_bds_stmt = select(func.count(BrokerDealer.id)).where(BrokerDealer.registration_date >= thirty_days_ago)
     new_bds_30_days = int((await db.execute(new_bds_stmt)).scalar_one())
     deficiency_alerts = await alert_repository.count_deficiency_firms(db)
-    high_value_leads = await repository.count_hot_leads(db)
+    high_value_participants = await repository.count_high_value_participants(db)
 
     return DashboardStatsResponse(
         total_active_bds=total_active_bds,
         new_bds_30_days=new_bds_30_days,
         deficiency_alerts=deficiency_alerts,
-        high_value_leads=high_value_leads,
+        high_value_participants=high_value_participants,
     )
 
 
