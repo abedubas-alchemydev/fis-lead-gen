@@ -91,6 +91,35 @@ _TITLE_RE: Final = re.compile(r"<title[^>]*>([^<]*)</title>", re.IGNORECASE)
 _NON_ALPHA_RE: Final = re.compile(r"[^a-z]")
 
 
+def is_blocklisted_host(url: str | None) -> bool:
+    """Return True when ``url``'s host (or any parent label-suffix of it)
+    is in :data:`DOMAIN_BLOCKLIST`.
+
+    Suffix matching means ``brokercheck.finra.org`` in the blocklist also
+    catches ``files.brokercheck.finra.org`` (the PDF host) and any future
+    sibling subdomain — an entry asserts "this domain and everything
+    under it is administrative/aggregator infrastructure, not a firm
+    website." ``sec.gov`` similarly catches ``adviserinfo.sec.gov``,
+    ``linkedin.com`` catches ``www.linkedin.com``, and so on.
+
+    Shared with the FINRA enumeration writer so a brokercheck/finra/sec.gov
+    self-reference URL never gets persisted onto ``broker_dealer.website``,
+    even when it appears in a Form-BD-canonical key. Empty / unparseable
+    inputs return ``False`` — callers handle the empty-string case via
+    their own truthy guard before calling this.
+    """
+    if not url:
+        return False
+    host = (urlparse(url).hostname or "").lower()
+    if not host:
+        return False
+    parts = host.split(".")
+    for i in range(len(parts)):
+        if ".".join(parts[i:]) in DOMAIN_BLOCKLIST:
+            return True
+    return False
+
+
 async def resolve_website(
     firm_name: str,
     crd: str | None,
@@ -218,8 +247,10 @@ async def _validate(url: str, firm_token: str) -> bool:
     if not url or not firm_token:
         return False
 
+    if is_blocklisted_host(url):
+        return False
     domain = _hostname(url)
-    if not domain or domain in DOMAIN_BLOCKLIST:
+    if not domain:
         return False
 
     try:
@@ -231,11 +262,11 @@ async def _validate(url: str, firm_token: str) -> bool:
             if head.status_code not in (200, 301, 302):
                 return False
 
-            # Re-check the final hostname after redirects so a candidate
+            # Re-check the final URL after redirects so a candidate
             # that redirects to LinkedIn still gets rejected.
-            final_host = _hostname(str(head.url))
-            if final_host and final_host in DOMAIN_BLOCKLIST:
+            if is_blocklisted_host(str(head.url)):
                 return False
+            final_host = _hostname(str(head.url))
 
             page = await client.get(url, timeout=_VALIDATE_TIMEOUT_S)
             match = _TITLE_RE.search(page.text or "")
