@@ -132,7 +132,7 @@ class BrokerDealerRepository:
             "status", "branch_count", "business_type", "registration_date",
             "matched_source", "last_filing_date", "filings_index_url",
             "website", "website_source", "types_of_business", "direct_owners",
-            "executive_officers", "firm_operations_text",
+            "executive_officers", "firm_operations_text", "dba_names",
         }
 
         def _to_values(batch: list[MergedBrokerDealerRecord]) -> list[dict[str, object]]:
@@ -157,6 +157,7 @@ class BrokerDealerRepository:
                     "direct_owners": record.direct_owners,
                     "executive_officers": record.executive_officers,
                     "firm_operations_text": record.firm_operations_text,
+                    "dba_names": record.dba_names,
                 }
                 for record in batch
             ]
@@ -209,6 +210,7 @@ class BrokerDealerRepository:
                             direct_owners=record.direct_owners,
                             executive_officers=record.executive_officers,
                             firm_operations_text=record.firm_operations_text,
+                            dba_names=record.dba_names,
                         )
                     )
                 else:

@@ -44,6 +44,13 @@ class FinraBrokerDealerRecord:
     registration_date: date | None = None
     formation_date: date | None = None
     types_of_business_other: str | None = None
+    # ── DBA / "doing business as" trade names (added 2026-05-07) ──
+    # Parsed from FINRA's ``firm_other_names`` payload field. Used by the
+    # website resolver's domain-anchor check so a firm registered as
+    # ``303 ALTERNATIVES, LLC`` but operating at ``303capitalmarkets.com``
+    # (DBA "303Capital Markets") can still anchor a candidate URL on the
+    # trade-name token. ``None`` when FINRA returned nothing parseable.
+    dba_names: list[str] | None = None
 
 
 @dataclass(slots=True)
@@ -70,6 +77,12 @@ class MergedBrokerDealerRecord:
     direct_owners: list[dict[str, str]] | None = None
     executive_officers: list[dict[str, str]] | None = None
     firm_operations_text: str | None = None
+    # Trade names parsed from FINRA's ``firm_other_names``. Carried
+    # through the merge step and persisted to ``broker_dealers.dba_names``
+    # so the website resolver can anchor on either the legal name or any
+    # DBA when the firm operates under a brand that doesn't share tokens
+    # with its registered LLC name.
+    dba_names: list[str] | None = None
 
 
 # ──────────────────────────────────────────────────────────────

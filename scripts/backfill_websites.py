@@ -141,6 +141,7 @@ async def main(*, top: int | None, dry_run: bool) -> None:
                 apollo,
                 serpapi=serpapi,
                 serper=serper,
+                dba_names=bd.dba_names,
             )
         except Exception as exc:
             counts["error"] += 1

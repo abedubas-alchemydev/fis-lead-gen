@@ -306,6 +306,7 @@ async def _run_resolve_website(parent_run_id: int, bd_id: int, trigger_source: s
                 apollo,
                 serpapi,
                 serper,
+                dba_names=broker_dealer.dba_names,
             )
 
             if website and source:

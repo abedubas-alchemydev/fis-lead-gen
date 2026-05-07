@@ -159,6 +159,7 @@ async def resolve_website(
     apollo: ApolloClient,
     serpapi: SerpAPIClient | None = None,
     serper: SerperClient | None = None,
+    dba_names: list[str] | None = None,
 ) -> tuple[str | None, str | None, str | None]:
     """Run the resolver chain for ``firm_name``.
 
@@ -172,6 +173,16 @@ async def resolve_website(
     ``serper`` and ``serpapi`` may be ``None`` when their respective API
     keys aren't configured; the chain skips that tier and falls through
     to a clean miss / partial-error case.
+
+    ``dba_names`` is the firm's list of "doing business as" / alternate
+    trade names (typically sourced from ``broker_dealers.dba_names``,
+    parsed from FINRA's ``firm_other_names``). Each name in the list is
+    converted to a firm token; the validator's domain-anchor check
+    admits a candidate if **any** of the (legal + DBA) tokens anchor the
+    candidate's hostname. Without this, firms registered as
+    ``303 ALTERNATIVES, LLC`` but operating at ``303capitalmarkets.com``
+    (DBA "303Capital Markets") would always miss because the legal-name
+    token doesn't share characters with the brand domain.
 
     Tier order
     ----------
@@ -187,7 +198,7 @@ async def resolve_website(
     cheaper per query; SerpAPI is the canonical fallback (and is the
     primary search tier when serper.dev is unset).
     """
-    firm_token = _firm_token(firm_name)
+    firm_tokens = _firm_tokens(firm_name, dba_names)
     errors: list[str] = []
     providers_attempted = 0
 
@@ -197,7 +208,7 @@ async def resolve_website(
         org = await apollo.search_organization(firm_name, crd)
         if org is not None:
             candidate = _candidate_from_apollo(org)
-            if candidate and await _validate(candidate, firm_token):
+            if candidate and await _validate(candidate, firm_tokens):
                 return (candidate, "apollo", None)
     except ApolloError as exc:
         errors.append(f"apollo: {exc}")
@@ -215,7 +226,7 @@ async def resolve_website(
         try:
             results = await serper.search_firm(firm_name)
             for result in results:
-                if await _validate(result.url, firm_token):
+                if await _validate(result.url, firm_tokens):
                     return (result.url, "serper", None)
         except SerperError as exc:
             errors.append(f"serper: {exc}")
@@ -237,7 +248,7 @@ async def resolve_website(
         try:
             results = await serpapi.search_firm(firm_name)
             for result in results:
-                if await _validate(result.url, firm_token):
+                if await _validate(result.url, firm_tokens):
                     return (result.url, "serpapi", None)
         except SerpAPIError as exc:
             errors.append(f"serpapi: {exc}")
@@ -278,40 +289,70 @@ def _ensure_scheme(url: str) -> str:
 
 
 def _firm_token(firm_name: str) -> str:
-    """Normalize a firm name to an alpha-only token used for the
+    """Normalize a single firm name to an alpha-only token used for the
     domain-anchor check."""
     return _NON_ALPHA_RE.sub("", firm_name.lower())[:_FIRM_TOKEN_LEN]
 
 
-async def _validate(url: str, firm_token: str) -> bool:
+def _firm_tokens(
+    firm_name: str, dba_names: list[str] | None
+) -> list[str]:
+    """Build the candidate-token set from the firm's legal name and any
+    "doing business as" trade names.
+
+    Returns a deduplicated list of non-empty 8-char tokens. The validator
+    admits a candidate if its domain anchors on **any** of these tokens,
+    so a firm registered as ``303 ALTERNATIVES, LLC`` (legal-name token
+    ``"alternat"``) operating at ``303capitalmarkets.com`` (DBA "303Capital
+    Markets" → token ``"capitalm"``) admits via the DBA token even though
+    the legal-name token has no overlap with the brand domain.
+    """
+    candidates = [firm_name, *(dba_names or [])]
+    tokens: list[str] = []
+    seen: set[str] = set()
+    for name in candidates:
+        if not name:
+            continue
+        token = _firm_token(name)
+        if token and token not in seen:
+            seen.add(token)
+            tokens.append(token)
+    return tokens
+
+
+async def _validate(url: str, firm_tokens: list[str]) -> bool:
     """Domain-anchor + reachability + content-type validation.
 
     The single admit gate is the **domain anchor**: at least one
     ``.``- / ``-``-delimited segment of the candidate's final
-    (post-redirect) hostname must align to the firm token via
-    ``_domain_segment_anchors_on_firm`` (forward or truncated-brand
-    direction). Title-match-only used to be an admit path on its own
-    but it admitted news articles, deal-announcement pages, LEI
-    registries, and third-party advisor directories that happened to
-    mention the firm by name — concretely it stamped
-    ``cfo.com/news/...`` on 777 SECURITIES, ``hl.com/about-us/
-    transactions/...`` on 3WIRE ADVISORY, ``lei-lookup.com/record/...``
-    on 4170 SECURITIES, and ``retirementplanning.net/.../<slug>/<id>``
-    on ACA/PRUDENT INVESTORS. With the title-only admit gone, the
-    page's content / title is informational only — it can't grant
-    admission without a matching domain.
+    (post-redirect) hostname must align to **any** of the firm's tokens
+    via ``_domain_segment_anchors_on_firm`` (forward or truncated-brand
+    direction). The token list typically combines the firm's legal name
+    and any "doing business as" trade names, so a firm registered as
+    ``303 ALTERNATIVES, LLC`` and operating at ``303capitalmarkets.com``
+    can admit on the DBA token even when the legal-name token misses.
+
+    Title-match-only used to be an admit path on its own but it admitted
+    news articles, deal-announcement pages, LEI registries, and third-
+    party advisor directories that happened to mention the firm by name
+    — concretely it stamped ``cfo.com/news/...`` on 777 SECURITIES,
+    ``hl.com/about-us/transactions/...`` on 3WIRE ADVISORY,
+    ``lei-lookup.com/record/...`` on 4170 SECURITIES, and
+    ``retirementplanning.net/.../<slug>/<id>`` on ACA/PRUDENT INVESTORS.
+    With the title-only admit gone, the page's content / title is
+    informational only — it can't grant admission without a matching
+    domain.
 
     Pre-domain gates that still apply (reject before the domain
     check ever runs): host blocklist (suffix-match on
-    ``DOMAIN_BLOCKLIST``), file-download path
-    (``.pdf``/``.doc``/etc.), content-page path (``/news/``,
-    ``/transactions/``, ``/lookup/``, etc.), HEAD non-2xx, and
-    non-HTML ``Content-Type`` on either HEAD or GET.
+    ``DOMAIN_BLOCKLIST``), file-download path (``.pdf``/``.doc``/etc.),
+    content-page path (``/news/``, ``/transactions/``, ``/lookup/``,
+    etc.), HEAD non-2xx.
 
     Returns ``False`` on any network error or any of the above gate
-    rejections.
+    rejections, including an empty ``firm_tokens`` list.
     """
-    if not url or not firm_token:
+    if not url or not firm_tokens:
         return False
 
     if (
@@ -347,19 +388,22 @@ async def _validate(url: str, firm_token: str) -> bool:
             final_host = _hostname(final_url)
 
             # The single admit gate: the candidate's final
-            # (post-redirect) hostname must anchor on the firm name.
-            # The earlier title-only admit path was the loose one —
-            # any page whose ``<title>`` mentioned the firm by name
-            # passed it, including news articles (``cfo.com/news/...``),
-            # deal-announcement pages (``hl.com/about-us/transactions/
-            # ...``), LEI-registry records (``lei-lookup.com/record/
-            # ...``), and third-party advisor directories
+            # (post-redirect) hostname must anchor on at least one of
+            # the firm's tokens (legal name + any DBA names). The
+            # earlier title-only admit path was the loose one — any
+            # page whose ``<title>`` mentioned the firm by name passed
+            # it, including news articles (``cfo.com/news/...``),
+            # deal-announcement pages (``hl.com/about-us/
+            # transactions/...``), LEI-registry records (``lei-lookup.com/
+            # record/...``), and third-party advisor directories
             # (``retirementplanning.net/.../firm-slug/<id>``). With
             # title parsing dropped, the GET request is unnecessary —
             # HEAD + blocklist + path-keyword + domain-anchor is the
             # full chain.
-            return _domain_segment_anchors_on_firm(
-                final_host or domain, firm_token
+            host_to_check = final_host or domain
+            return any(
+                _domain_segment_anchors_on_firm(host_to_check, token)
+                for token in firm_tokens
             )
     except httpx.HTTPError as exc:
         logger.info("Website validate failed for %s: %s", url, exc)

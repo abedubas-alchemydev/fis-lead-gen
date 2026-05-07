@@ -968,6 +968,7 @@ async def resolve_broker_dealer_website(
         apollo,
         serpapi,
         serper,
+        dba_names=broker_dealer.dba_names,
     )
 
     if website and source:
