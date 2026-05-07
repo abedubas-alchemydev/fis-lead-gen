@@ -461,6 +461,39 @@ async def test_all_three_providers_errored_returns_provider_error() -> None:
 
 
 @respx.mock
+async def test_serpapi_walks_past_top_5_when_earlier_results_rejected() -> None:
+    """Locks the post-2026-05-07 walk count: the resolver must walk
+    every result the SerpAPI client returns, not just top 5. Pre-fix
+    the slice ``results[:5]`` missed firms whose own homepage ranked
+    6+ (concrete repro: BANKERS LIFE SECURITIES, INC, where
+    bankerslife.com was rank 6 behind 5 rejected hits). The first 5
+    results in this test are all blocklisted social/regulator hits;
+    the 6th is the firm's real site."""
+    apollo = AsyncMock()
+    apollo.search_organization = AsyncMock(return_value=None)
+    hunter = AsyncMock()
+    hunter.find_company = AsyncMock(return_value=None)
+    serpapi = AsyncMock()
+    serpapi.search_firm = AsyncMock(
+        return_value=[
+            SerpResult(url="https://www.linkedin.com/company/acme-1", domain="www.linkedin.com", title="LinkedIn"),
+            SerpResult(url="https://www.facebook.com/acme-2", domain="www.facebook.com", title="Facebook"),
+            SerpResult(url="https://files.brokercheck.finra.org/firm/firm_1.pdf", domain="files.brokercheck.finra.org", title="FINRA PDF"),
+            SerpResult(url="https://twitter.com/acme-4", domain="twitter.com", title="Twitter"),
+            SerpResult(url="https://www.bloomberg.com/profile/company/acme", domain="www.bloomberg.com", title="Bloomberg"),
+            SerpResult(url=_SERPAPI_URL, domain="acme-from-serp.example.test", title="Acme — Home"),
+        ],
+    )
+    _mock_validate_pass(_SERPAPI_URL)
+
+    website, source, reason = await resolve_website(
+        _FIRM_NAME, None, apollo, hunter, serpapi,
+    )
+
+    assert (website, source, reason) == (_SERPAPI_URL, "serpapi", None)
+
+
+@respx.mock
 async def test_apollo_wins_serpapi_not_called() -> None:
     """When Apollo's first candidate validates, the chain must not waste
     SerpAPI quota — search_firm is never awaited."""

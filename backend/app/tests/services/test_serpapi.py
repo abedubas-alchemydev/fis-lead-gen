@@ -158,3 +158,24 @@ async def test_blank_link_entries_are_skipped() -> None:
 def test_blank_api_key_rejected() -> None:
     with pytest.raises(ValueError):
         SerpAPIClient("")
+
+
+@respx.mock
+async def test_query_string_is_firm_name_only_no_qualifier() -> None:
+    """Locks the post-2026-05-07 query shape: ``q=<firm_name>``, NOT
+    ``q=<firm_name> broker-dealer``. The trailing qualifier biased
+    Google toward regulator / news / aggregator pages and demoted firm
+    homepages past the resolver's rank cutoff (concrete repro:
+    BANKERS LIFE SECURITIES, INC, where bankerslife.com fell to rank 6+
+    behind FINRA / news hits the validator then rejected). Drop it."""
+    route = respx.get(_SEARCH_URL).mock(
+        return_value=httpx.Response(200, json=_payload([])),
+    )
+    client = SerpAPIClient(_API_KEY)
+
+    await client.search_firm("BANKERS LIFE SECURITIES, INC")
+
+    assert route.call_count == 1
+    sent_query = route.calls[0].request.url.params.get("q")
+    assert sent_query == "BANKERS LIFE SECURITIES, INC"
+    assert "broker-dealer" not in (sent_query or "")

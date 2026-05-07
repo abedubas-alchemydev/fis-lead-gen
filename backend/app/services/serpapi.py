@@ -3,11 +3,24 @@ firm-website resolver chain.
 
 Apollo (Tier 1) and Hunter (Tier 2) cover most firms via direct
 organization / company-finder lookups. When both miss, SerpAPI runs a
-plain Google search for ``"<firm name> broker-dealer"`` and returns the
-top organic results. The resolver's existing ``_validate()`` helper
-(HEAD reachability + domain blocklist + page-title firm-name match)
-filters those candidates exactly the same way Apollo + Hunter results
-are filtered, so a SerpAPI hit is held to the same bar.
+plain Google search for the firm name (no trailing qualifier) and
+returns the top organic results. The resolver's existing ``_validate()``
+helper (HEAD reachability + domain blocklist + page-title firm-name
+match) filters those candidates exactly the same way Apollo + Hunter
+results are filtered, so a SerpAPI hit is held to the same bar.
+
+Why no ``" broker-dealer"`` suffix
+----------------------------------
+The original query was ``"<firm name> broker-dealer"`` to bias toward
+regulatory pages. In practice that biased toward FINRA/SEC pages,
+news articles, and aggregator listings — which the validator then
+rejected via the blocklist + title checks — and demoted the firm's
+own homepage past rank 5 (where the resolver stops walking). Concrete
+repro: BANKERS LIFE SECURITIES, INC. Plain Google for the firm name
+returns ``bankerslife.com`` at rank 1; the ``broker-dealer`` variant
+demotes it to rank 6+ and the resolver missed every Bankers-Life-style
+firm. Drop the qualifier; the validator already blocks regulator /
+social / aggregator hits.
 
 Quota
 -----
@@ -76,7 +89,7 @@ class SerpAPIClient:
         self._timeout_s = timeout_s
 
     async def search_firm(self, firm_name: str) -> list[SerpResult]:
-        """Run a Google search for ``"<firm_name> broker-dealer"``.
+        """Run a Google search for the firm name (no qualifier).
 
         Returns the top-10 organic results trimmed to ``SerpResult``.
         Raises ``SerpAPIError`` on a non-2xx response so the resolver
@@ -89,7 +102,7 @@ class SerpAPIClient:
 
         params = {
             "engine": "google",
-            "q": f"{firm_name} broker-dealer",
+            "q": firm_name,
             "api_key": self._api_key,
             "num": "10",
         }

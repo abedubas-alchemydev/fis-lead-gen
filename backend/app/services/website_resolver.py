@@ -172,14 +172,20 @@ async def resolve_website(
             errors.append(f"hunter: {exc}")
 
     # Tier 3 — SerpAPI Google search (last resort)
-    # Walks the top-5 organic results so a strong-but-not-first hit can
-    # still win once the first few get rejected by blocklist/title checks
-    # (e.g. LinkedIn or a news article ranking above the firm's own site).
+    # Walks ALL organic results returned by the client (already capped at
+    # 10) so a strong-but-not-first hit can still win once the earlier
+    # ones get rejected by blocklist / content-type / title checks. The
+    # earlier top-5 cap missed firms whose own homepage ranked 6+ behind
+    # LinkedIn, news articles, BrokerCheck PDFs, and aggregator listings
+    # — concretely BANKERS LIFE SECURITIES, INC, where bankerslife.com
+    # was rank 6 behind five rejected hits. Walking all 10 costs nothing
+    # extra (SerpAPI is already paid for and returned), and the validator
+    # is the strict gate.
     if serpapi is not None:
         providers_attempted += 1
         try:
             results = await serpapi.search_firm(firm_name)
-            for result in results[:5]:
+            for result in results:
                 if await _validate(result.url, firm_token):
                     return (result.url, "serpapi", None)
         except SerpAPIError as exc:
