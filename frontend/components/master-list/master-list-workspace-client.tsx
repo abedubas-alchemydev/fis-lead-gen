@@ -250,7 +250,8 @@ export function MasterListWorkspaceClient() {
         state: stateFilter ? [stateCodeFromName(stateFilter) ?? stateFilter] : undefined,
         health: healthFilter === "All" ? undefined : [healthFilter],
         lead_priority: prospectPriorityFilter === "All" ? undefined : [prospectPriorityFilter],
-        clearing_partner: clearingPartnerFilter ? [clearingPartnerFilter] : undefined,
+        clearing_partner:
+          clearingPartnerFilter.length > 0 ? clearingPartnerFilter : undefined,
         clearing_type: clearingTypeFilter === "All" ? undefined : [clearingTypeFilter],
         types_of_business:
           typesOfBusinessFilter.length > 0 ? typesOfBusinessFilter : undefined,
@@ -434,7 +435,7 @@ export function MasterListWorkspaceClient() {
     if (stateFilter !== "") count += 1;
     if (healthFilter !== "All") count += 1;
     if (prospectPriorityFilter !== "All") count += 1;
-    if (clearingPartnerFilter !== "") count += 1;
+    if (clearingPartnerFilter.length > 0) count += 1;
     if (clearingTypeFilter !== "All") count += 1;
     if (typesOfBusinessFilter.length > 0) count += 1;
     if (minNetCapitalFilter !== null) count += 1;
@@ -469,6 +470,14 @@ export function MasterListWorkspaceClient() {
         })
         .map((item) => ({ value: item.type, label: item.type, count: item.count })),
     [typesOfBusinessOptions],
+  );
+
+  // Backend returns canonical short labels ("Pershing", "Apex") with the
+  // long-tail of raw provider strings deduped behind them, already sorted
+  // alphabetically. Wrap in the option shape MultiSelectFilter expects.
+  const clearingPartnerFilterOptions = useMemo<MultiSelectFilterOption[]>(
+    () => clearingPartners.map((name) => ({ value: name, label: name })),
+    [clearingPartners],
   );
 
   const pages = paginationPages(meta.page, meta.total_pages);
@@ -648,12 +657,16 @@ export function MasterListWorkspaceClient() {
             <label className="mb-1.5 block text-[11px] font-semibold uppercase tracking-[0.08em] text-[var(--text-muted,#94a3b8)]">
               Clearing Arrangement
             </label>
-            <Combo
+            <MultiSelectFilter
               value={clearingPartnerFilter}
-              onChange={(next) => updateState({ clearingPartner: next, page: 1 })}
-              options={clearingPartners}
+              onChange={(next) =>
+                updateState({ clearingPartner: next, page: 1 })
+              }
+              options={clearingPartnerFilterOptions}
+              triggerLabel="Clearing Arrangement"
               placeholder="Search partners…"
-              emptyLabel="All providers"
+              emptyLabel="No partners match your search"
+              noOptionsLabel="No clearing partners available."
               ariaLabel="Clearing Arrangement"
             />
           </div>
@@ -759,15 +772,21 @@ export function MasterListWorkspaceClient() {
                 State: {stateFilter}
               </Tag>
             ) : null}
-            {clearingPartnerFilter ? (
+            {clearingPartnerFilter.map((partner) => (
               <Tag
+                key={`partner-${partner}`}
                 onDismiss={() =>
-                  updateState({ clearingPartner: "", page: 1 })
+                  updateState({
+                    clearingPartner: clearingPartnerFilter.filter(
+                      (value) => value !== partner,
+                    ),
+                    page: 1,
+                  })
                 }
               >
-                Partner: {clearingPartnerFilter}
+                Partner: {partner}
               </Tag>
-            ) : null}
+            ))}
             {healthFilter !== "All" ? (
               <Tag onDismiss={() => updateState({ health: "All", page: 1 })}>
                 Health: {healthLabel(healthFilter)}
