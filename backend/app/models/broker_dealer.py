@@ -80,4 +80,12 @@ class BrokerDealer(Base):
     last_enrich_attempt_at: Mapped[datetime | None] = mapped_column(
         DateTime(timezone=True), nullable=True, index=True
     )
+    # Stamped after every bulk gap-fill pass over this BD (regardless of
+    # which sub-pipelines fired or what the result was). The bulk runner
+    # in scripts/gap_fill_broker_dealers.py uses this as a 30-day cooldown
+    # so a firm whose source genuinely has no value isn't re-queried on
+    # every run. NULL means "never attempted by gap-fill".
+    last_gap_fill_attempt_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True, index=True
+    )
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now(), nullable=False)
