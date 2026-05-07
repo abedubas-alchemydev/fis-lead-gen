@@ -188,17 +188,28 @@ async def test_blocklisted_domain_is_rejected_pre_head() -> None:
 
 @respx.mock
 async def test_title_without_firm_token_rejects_candidate() -> None:
+    """Title-mismatch + domain-mismatch → reject. Candidate URL's
+    domain (``unrelated-firm.example.test``) does not anchor on the
+    firm token (``"acmesecu"``), so neither the title check nor the
+    domain-match fallback admits."""
+    unrelated_url = "https://unrelated-firm.example.test"
     apollo = AsyncMock()
-    apollo.search_organization = AsyncMock(return_value=_apollo_org())
+    apollo.search_organization = AsyncMock(
+        return_value=ApolloOrganization(
+            name=_FIRM_NAME,
+            website_url=unrelated_url,
+            domain="unrelated-firm.example.test",
+        ),
+    )
     hunter = AsyncMock()
     hunter.find_company = AsyncMock(return_value=None)
 
-    respx.head(_CANDIDATE_URL).mock(
+    respx.head(unrelated_url).mock(
         return_value=httpx.Response(
-            200, request=httpx.Request("HEAD", _CANDIDATE_URL)
+            200, request=httpx.Request("HEAD", unrelated_url)
         ),
     )
-    respx.get(_CANDIDATE_URL).mock(
+    respx.get(unrelated_url).mock(
         return_value=httpx.Response(
             200,
             text="<html><head><title>Totally Unrelated Site</title></head></html>",
@@ -236,6 +247,100 @@ async def test_no_title_passes_when_head_and_blocklist_clear() -> None:
     assert website == _CANDIDATE_URL
     assert source == "apollo"
     assert reason is None
+
+
+# ─────────────────────────── domain-match fallback ────────────────────────────
+
+
+@respx.mock
+async def test_domain_match_accepts_when_title_unrelated_but_hostname_starts_with_firm_token() -> None:
+    """Hyphenated-domain case: the firm-name tokens span hyphenated
+    segments of the hostname. Title is generic ("Welcome"). The
+    full-host-prefix check (after stripping non-alpha chars) admits."""
+    firm = "Acme Securities LLC"  # firm_token = "acmesecu"
+    candidate = "https://acme-securities.brand.example.test"
+    apollo = AsyncMock()
+    apollo.search_organization = AsyncMock(
+        return_value=ApolloOrganization(name=firm, website_url=candidate, domain="acme-securities.brand.example.test"),
+    )
+    hunter = AsyncMock()
+    hunter.find_company = AsyncMock(return_value=None)
+
+    respx.head(candidate).mock(
+        return_value=httpx.Response(200, request=httpx.Request("HEAD", candidate)),
+    )
+    respx.get(candidate).mock(
+        return_value=httpx.Response(
+            200,
+            text="<html><head><title>Welcome to our firm</title></head></html>",
+        ),
+    )
+
+    website, source, reason = await resolve_website(firm, None, apollo, hunter)
+    assert website == candidate
+    assert source == "apollo"
+    assert reason is None
+
+
+@respx.mock
+async def test_domain_match_accepts_subdomain_when_segment_starts_with_firm_token() -> None:
+    """Subdomain case: firm token aligns with a non-leading segment.
+    e.g., ``trade.smithcapital.com`` for ``Smith Capital`` (token
+    ``"smithcap"``). Per-segment prefix check admits."""
+    firm = "Smith Capital"  # firm_token = "smithcap"
+    candidate = "https://trade.smithcapital.example.test"
+    apollo = AsyncMock()
+    apollo.search_organization = AsyncMock(
+        return_value=ApolloOrganization(name=firm, website_url=candidate, domain="trade.smithcapital.example.test"),
+    )
+    hunter = AsyncMock()
+    hunter.find_company = AsyncMock(return_value=None)
+
+    respx.head(candidate).mock(
+        return_value=httpx.Response(200, request=httpx.Request("HEAD", candidate)),
+    )
+    respx.get(candidate).mock(
+        return_value=httpx.Response(
+            200,
+            text="<html><head><title>Welcome</title></head></html>",
+        ),
+    )
+
+    website, source, reason = await resolve_website(firm, None, apollo, hunter)
+    assert website == candidate
+    assert source == "apollo"
+    assert reason is None
+
+
+@respx.mock
+async def test_domain_match_rejects_substring_in_middle_of_segment() -> None:
+    """Anchor safety: firm_token appearing in the middle of an
+    unrelated word must NOT match. Concrete: firm ``ABC Securities``
+    (token ``"abcsecur"``) on a Google hit at
+    ``blackabcsecurities.example.test`` — neither the full-host prefix
+    nor any per-segment prefix anchors at ``"abcsecur"``."""
+    firm = "ABC Securities"  # firm_token = "abcsecur"
+    candidate = "https://blackabcsecurities.example.test"
+    apollo = AsyncMock()
+    apollo.search_organization = AsyncMock(
+        return_value=ApolloOrganization(name=firm, website_url=candidate, domain="blackabcsecurities.example.test"),
+    )
+    hunter = AsyncMock()
+    hunter.find_company = AsyncMock(return_value=None)
+
+    respx.head(candidate).mock(
+        return_value=httpx.Response(200, request=httpx.Request("HEAD", candidate)),
+    )
+    respx.get(candidate).mock(
+        return_value=httpx.Response(
+            200,
+            text="<html><head><title>Some Other Site</title></head></html>",
+        ),
+    )
+
+    website, source, reason = await resolve_website(firm, None, apollo, hunter)
+    assert website is None
+    assert reason == "no_valid_candidate"
 
 
 # ─────────────────────────── hunter is None ────────────────────────────

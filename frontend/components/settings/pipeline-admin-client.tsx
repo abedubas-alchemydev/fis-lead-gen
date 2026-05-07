@@ -229,7 +229,7 @@ export function PipelineAdminClient() {
             Settings and controlled refresh
           </h1>
           <p className="mt-2 max-w-3xl text-[13px] leading-5 text-[var(--text-dim,#475569)]">
-            Adjust the weighted lead-scoring model, maintain the competitor provider list, and trigger a controlled refresh of the alert and clearing pipelines.
+            Adjust the weighted prospect-scoring model, maintain the competitor provider list, and trigger a controlled refresh of the alert and clearing pipelines.
           </p>
         </div>
       </div>
@@ -361,7 +361,7 @@ export function PipelineAdminClient() {
 
         <div className={CARD}>
           <p className={EYEBROW}>Scoring Weights</p>
-          <h2 className={CARD_TITLE}>Lead-priority weighting</h2>
+          <h2 className={CARD_TITLE}>Prospect-priority weighting</h2>
           {scoring ? (
             <div className="mt-4 space-y-4">
               {SCORING_FIELDS.map(([label, key]) => {

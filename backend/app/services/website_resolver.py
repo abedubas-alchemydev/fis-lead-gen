@@ -91,6 +91,35 @@ _TITLE_RE: Final = re.compile(r"<title[^>]*>([^<]*)</title>", re.IGNORECASE)
 _NON_ALPHA_RE: Final = re.compile(r"[^a-z]")
 
 
+def is_blocklisted_host(url: str | None) -> bool:
+    """Return True when ``url``'s host (or any parent label-suffix of it)
+    is in :data:`DOMAIN_BLOCKLIST`.
+
+    Suffix matching means ``brokercheck.finra.org`` in the blocklist also
+    catches ``files.brokercheck.finra.org`` (the PDF host) and any future
+    sibling subdomain — an entry asserts "this domain and everything
+    under it is administrative/aggregator infrastructure, not a firm
+    website." ``sec.gov`` similarly catches ``adviserinfo.sec.gov``,
+    ``linkedin.com`` catches ``www.linkedin.com``, and so on.
+
+    Shared with the FINRA enumeration writer so a brokercheck/finra/sec.gov
+    self-reference URL never gets persisted onto ``broker_dealer.website``,
+    even when it appears in a Form-BD-canonical key. Empty / unparseable
+    inputs return ``False`` — callers handle the empty-string case via
+    their own truthy guard before calling this.
+    """
+    if not url:
+        return False
+    host = (urlparse(url).hostname or "").lower()
+    if not host:
+        return False
+    parts = host.split(".")
+    for i in range(len(parts)):
+        if ".".join(parts[i:]) in DOMAIN_BLOCKLIST:
+            return True
+    return False
+
+
 async def resolve_website(
     firm_name: str,
     crd: str | None,
@@ -197,19 +226,31 @@ def _firm_token(firm_name: str) -> str:
 
 
 async def _validate(url: str, firm_token: str) -> bool:
-    """Run HEAD reachability + blocklist + title-token check on ``url``.
+    """Run HEAD reachability + blocklist + title-or-domain check on ``url``.
 
     Returns ``False`` on any network error, non-200/301/302 status,
-    blocklisted host, or title that doesn't carry the firm token. A
-    page with no ``<title>`` is allowed through as long as HEAD passed
-    and the domain is clear — small broker-dealer sites often render an
-    empty title from a JS shell and that shouldn't be a hard reject.
+    blocklisted host, or page that fails BOTH the title-match AND the
+    domain-match fallback. A page with no ``<title>`` is allowed
+    through as long as HEAD passed and the domain is clear — small
+    broker-dealer sites often render an empty title from a JS shell.
+
+    Domain-match fallback: when the page title is present but doesn't
+    carry the firm token, check whether the firm token is a prefix of
+    any ``.``- or ``-``-delimited segment of the final hostname
+    (post-redirect). Catches firms whose homepage uses a brand or
+    marketing tagline as its title (e.g., ``303alternatives.com`` with
+    title ``"Welcome"``). The segment-prefix anchor blocks the
+    obvious false-positive class — ``securiti`` won't match an unrelated
+    ``consecutivesecurities.com``, only domains that *start* with the
+    firm token.
     """
     if not url or not firm_token:
         return False
 
+    if is_blocklisted_host(url):
+        return False
     domain = _hostname(url)
-    if not domain or domain in DOMAIN_BLOCKLIST:
+    if not domain:
         return False
 
     try:
@@ -221,21 +262,67 @@ async def _validate(url: str, firm_token: str) -> bool:
             if head.status_code not in (200, 301, 302):
                 return False
 
-            # Re-check the final hostname after redirects so a candidate
+            # Re-check the final URL after redirects so a candidate
             # that redirects to LinkedIn still gets rejected.
-            final_host = _hostname(str(head.url))
-            if final_host and final_host in DOMAIN_BLOCKLIST:
+            if is_blocklisted_host(str(head.url)):
                 return False
+            final_host = _hostname(str(head.url))
 
             page = await client.get(url, timeout=_VALIDATE_TIMEOUT_S)
             match = _TITLE_RE.search(page.text or "")
             if match is None:
+                # JS-shell or empty-title sites: admit on reachability
+                # alone, same as before. The blocklist + redirect check
+                # already filtered the obvious garbage.
                 return True
             title_token = _NON_ALPHA_RE.sub("", match.group(1).lower())
-            return firm_token in title_token
+            if firm_token in title_token:
+                return True
+            # Title-match failed → domain-match fallback.
+            return _domain_segment_starts_with(
+                final_host or domain, firm_token
+            )
     except httpx.HTTPError as exc:
         logger.info("Website validate failed for %s: %s", url, exc)
         return False
+
+
+def _domain_segment_starts_with(host: str, firm_token: str) -> bool:
+    """Return True when ``firm_token`` aligns to a "natural" boundary in
+    ``host``. Two checks, OR'd:
+
+    1. **Full-host prefix**: the hostname (after stripping a leading
+       ``www.``) with all non-alpha chars removed *starts with* the
+       firm token. Catches hyphenated domains where the token spans
+       segments — e.g., ``acme-securities.com`` with firm ``Acme
+       Securities`` (firm_token ``"acmesecu"``) → strips to
+       ``"acmesecuritiescom"`` → matches.
+    2. **Per-segment prefix**: any ``.``- or ``-``-delimited segment of
+       the host, after per-segment non-alpha strip, starts with the
+       firm token. Catches subdomain layouts — e.g.,
+       ``trade.smithcapital.com`` with firm ``Smith Capital`` (token
+       ``"smithcap"``) → segment ``"smithcapital"`` matches.
+
+    Both checks are *prefix*, never substring — so the bad-class
+    false positive (firm token appearing in the middle of an
+    unrelated word, e.g., ``"securiti"`` matching
+    ``consecutivesecurities.com``) is structurally blocked.
+    """
+    if not host or not firm_token:
+        return False
+    host_lower = host.lower()
+    if host_lower.startswith("www."):
+        host_lower = host_lower[4:]
+
+    full_stripped = _NON_ALPHA_RE.sub("", host_lower)
+    if full_stripped.startswith(firm_token):
+        return True
+
+    for segment in re.split(r"[.\-]", host_lower):
+        normalised = _NON_ALPHA_RE.sub("", segment)
+        if normalised.startswith(firm_token):
+            return True
+    return False
 
 
 def _hostname(url: str) -> str | None:

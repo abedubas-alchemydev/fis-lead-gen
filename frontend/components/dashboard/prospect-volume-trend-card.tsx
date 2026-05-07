@@ -89,7 +89,7 @@ function pickAxisLabels(
   });
 }
 
-export function LeadVolumeTrendCard() {
+export function ProspectVolumeTrendCard() {
   const [range, setRange] = useState<TimeSeriesRange>("30D");
   const [buckets, setBuckets] = useState<TimeSeriesBucket[]>([]);
   const [loading, setLoading] = useState(true);
@@ -107,7 +107,7 @@ export function LeadVolumeTrendCard() {
 
   // Measure the chart container so the viewBox can mirror actual pixel
   // dimensions — this is what keeps strokes un-stretched when the card
-  // grows taller to match the TopLeadsCard row height.
+  // grows taller to match the TopProspectsCard row height.
   useEffect(() => {
     const node = containerRef.current;
     if (!node) return;
@@ -182,7 +182,7 @@ export function LeadVolumeTrendCard() {
 
   return (
     // `flex h-full flex-col` lets the chart fill whatever vertical space the
-    // grid row hands us (bounded by TopLeadsCard on the right). Themed
+    // grid row hands us (bounded by TopProspectsCard on the right). Themed
     // border/bg/shadow tokens match the KPI cards + mockup `.card` rule.
     <div
       className="flex h-full flex-col rounded-2xl border border-[var(--border,rgba(30,64,175,0.1))] bg-[var(--surface,#ffffff)] p-5"
@@ -192,7 +192,7 @@ export function LeadVolumeTrendCard() {
       <div className="mb-4 flex items-center justify-between gap-4">
         <div>
           <h3 className="text-[15px] font-semibold tracking-[-0.01em] text-[var(--text,#0f172a)]">
-            Lead volume trend
+            Prospect volume trend
           </h3>
           <p className="mt-0.5 text-[12px] text-[var(--text-muted,#94a3b8)]">
             Registrations vs. deficiency alerts

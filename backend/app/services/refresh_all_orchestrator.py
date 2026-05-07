@@ -140,9 +140,20 @@ def decide_pipelines(
     else:
         (to_run if needs_website else to_skip).append(SUB_RESOLVE_WEBSITE)
 
+    # health-check is the catch-all for *any* FINRA Form BD-derived field
+    # that's still missing. Firing on clearing-partner-or-type-null alone
+    # was too narrow: firms that already had a clearing partner extracted
+    # would skip the FINRA enrichment entirely, which left derived fields
+    # like ``registration_date`` / ``formation_date`` permanently NULL even
+    # though they're free to fetch. Cost is bounded — health-check is
+    # FINRA-only (no LLM), so a perpetual fire on a firm whose Form BD
+    # genuinely doesn't disclose one of these fields is cheap noise, not a
+    # money sink. The trade favors completeness over idempotency.
     needs_health = (
         broker_dealer.current_clearing_type is None
         or broker_dealer.current_clearing_partner is None
+        or broker_dealer.registration_date is None
+        or broker_dealer.formation_date is None
     )
     (to_run if needs_health else to_skip).append(SUB_HEALTH_CHECK)
 
@@ -382,6 +393,20 @@ async def _run_health_check(parent_run_id: int, bd_id: int, trigger_source: str)
                     if enriched_record.website and enriched_record.website != broker_dealer.website:
                         broker_dealer.website = enriched_record.website
                         changes.append("website")
+                    # registration_date + formation_date come off the same
+                    # FINRA Form BD PDF (services/brokercheck_pdf.py) and are
+                    # already plumbed onto FinraBrokerDealerRecord. They were
+                    # silently dropped here, leaving the firm-detail page's
+                    # "Registration Date" stat NULL on every refresh-all
+                    # path. Mirror the truthiness-and-changed gate the other
+                    # fields use so we never overwrite a present value with
+                    # a fresh None from a partial parse.
+                    if enriched_record.registration_date and enriched_record.registration_date != broker_dealer.registration_date:
+                        broker_dealer.registration_date = enriched_record.registration_date
+                        changes.append("registration_date")
+                    if enriched_record.formation_date and enriched_record.formation_date != broker_dealer.formation_date:
+                        broker_dealer.formation_date = enriched_record.formation_date
+                        changes.append("formation_date")
 
             new_classification = determine_clearing_classification(broker_dealer.firm_operations_text)
             if broker_dealer.clearing_classification != new_classification:

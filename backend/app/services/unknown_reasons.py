@@ -134,13 +134,18 @@ class UnknownReasonResult:
 # holding customer funds/securities under the SEC's fully-disclosed exemption.
 # The match is intentionally narrow — only fires when the text uses the
 # exemption-flavored verbiage, not on every needs_review row that mentions
-# the word "fully".
+# the word "fully". The "on a fully[-_ ]disclosed basis" pattern catches
+# filings that describe the exemption arrangement using the SEC's standard
+# term-of-art ("clears... on a fully disclosed basis") without citing
+# Rule 15c3-3 or Footnote 74 explicitly — common in BD financial-statement
+# notes where the partner is unnamed but the arrangement is unambiguous.
 _EXEMPTION_PATTERNS = (
     re.compile(r"does not\s+(?:directly|indirectly)?\s*receive[, ]+hold", re.IGNORECASE),
     re.compile(r"exemption report", re.IGNORECASE),
     re.compile(r"fully[-_ ]disclosed[\w ,]*exempt", re.IGNORECASE),
     re.compile(r"footnote\s*74", re.IGNORECASE),
     re.compile(r"\(k\)\s*\(2\)\s*\(ii\)", re.IGNORECASE),
+    re.compile(r"on\s+a\s+fully[-_ ]disclosed\s+basis", re.IGNORECASE),
 )
 
 
@@ -241,6 +246,9 @@ def derive_clearing_unknown_reason(
 
 def derive_financial_unknown_reason(
     metric: FinancialMetric | None,
+    *,
+    broker_dealer: BrokerDealer | None = None,
+    clearing_arrangement: ClearingArrangement | None = None,
 ) -> UnknownReasonResult | None:
     """Return the unknown_reason for the rolled-up financial summary.
 
@@ -248,8 +256,54 @@ def derive_financial_unknown_reason(
     confidence) because both ``net_capital`` and ``report_date`` are NOT NULL
     — a row exists ⇒ the extraction landed those fields. The reason is
     therefore mostly about whether a row exists at all.
+
+    The ``broker_dealer`` and ``clearing_arrangement`` kwargs disambiguate
+    the no-row case so the FE doesn't render the misleading
+    "Pipeline hasn't covered this firm yet" tooltip on firms where the
+    pipeline tried and the source data is unreachable. Three structural
+    signals get reclassified to ``no_filing_available``:
+
+    1. ``broker_dealer.cik is None`` — no SEC EDGAR record at all.
+    2. ``broker_dealer.filings_index_url`` falsy — submissions JSON not
+       reachable.
+    3. ``clearing_arrangement.extraction_status == 'missing_pdf'`` — the
+       clearing pipeline (which uses the same X-17A-5 PDF source) already
+       determined no extractable PDF exists for the latest filing year.
+       Financial pipeline can't possibly succeed on the same source, so
+       propagate the structural signal.
+
+    Two additional cross-pipeline signals propagate other categories:
+
+    * ``clearing_arrangement.extraction_status == 'pipeline_error'`` →
+      ``pdf_unparseable`` (PDF download / parse failed)
+    * ``clearing_arrangement.extraction_status == 'provider_error'`` →
+      ``provider_error`` (Gemini / LLM blew up)
+
+    The propagation is one-way (clearing → financial). Without these
+    kwargs, callers fall into ``not_yet_extracted`` (legacy behavior).
     """
     if metric is None:
+        if broker_dealer is not None and (
+            broker_dealer.cik is None or not broker_dealer.filings_index_url
+        ):
+            return UnknownReasonResult(category="no_filing_available")
+        if clearing_arrangement is not None:
+            ca_status = clearing_arrangement.extraction_status
+            if ca_status == STATUS_MISSING_PDF:
+                return UnknownReasonResult(category="no_filing_available")
+            if ca_status == STATUS_PIPELINE_ERROR:
+                return UnknownReasonResult(category="pdf_unparseable")
+            if ca_status == STATUS_PROVIDER_ERROR:
+                return UnknownReasonResult(category="provider_error")
+            # Catch-all: a clearing_arrangement row exists with a non-error
+            # status (parsed / needs_review / pending / etc.). The clearing
+            # pipeline ran for this firm; the financial pipeline ran on the
+            # same X-17A-5 source and couldn't produce a row that satisfies
+            # the NOT NULL constraints. Source-side absence is the most
+            # honest read — re-running won't change it. Treat as
+            # data_not_present rather than the misleading "Pipeline hasn't
+            # covered this firm yet" pending tooltip.
+            return UnknownReasonResult(category="data_not_present")
         return UnknownReasonResult(category="not_yet_extracted")
 
     status = metric.extraction_status or STATUS_PENDING

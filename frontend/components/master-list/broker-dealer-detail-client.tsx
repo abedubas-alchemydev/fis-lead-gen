@@ -21,7 +21,6 @@ import { ContactRow } from "@/components/master-list/detail/contact-row";
 import { FinancialTrendChart } from "@/components/master-list/detail/financial-trend-chart";
 import { FindEmailsButton } from "@/components/master-list/detail/find-emails-button";
 import { FirmWebsiteLink } from "@/components/master-list/detail/firm-website-link";
-import { RefreshFirmButton } from "@/components/master-list/detail/refresh-firm-button";
 import { FocusReportSection } from "@/components/master-list/detail/focus-report-section";
 import {
   classificationDisplay,
@@ -43,7 +42,6 @@ import { Pill } from "@/components/ui/pill";
 import { SourceBadge } from "@/components/master-list/source-badge";
 import { UnknownCell } from "@/components/master-list/unknown-cell";
 import { apiRequest, buildApiPath } from "@/lib/api";
-import { isFirmIncomplete } from "@/lib/firm-completeness";
 import { parseArrangementBlob } from "@/lib/arrangements";
 import {
   recordVisit,
@@ -92,7 +90,7 @@ const SECONDARY_BTN =
 // Builds the same /api/v1/broker-dealers query the master list emits,
 // from a recovered MasterListQueryState. Mirrors the queryPath useMemo
 // in master-list-workspace-client.tsx so the two callers stay in lock
-// step — Next Lead must walk the *exact* same result set the user was
+// step — Next Prospect must walk the *exact* same result set the user was
 // looking at when they clicked into the firm.
 function listPathFromReturnState(
   state: MasterListQueryState,
@@ -105,7 +103,7 @@ function listPathFromReturnState(
       : undefined,
     health: state.health === "All" ? undefined : [state.health],
     lead_priority:
-      state.leadPriority === "All" ? undefined : [state.leadPriority],
+      state.prospectPriority === "All" ? undefined : [state.prospectPriority],
     clearing_partner: state.clearingPartner ? [state.clearingPartner] : undefined,
     clearing_type:
       state.clearingType === "All" ? undefined : [state.clearingType],
@@ -130,7 +128,7 @@ export function BrokerDealerDetailClient({ brokerDealerId }: { brokerDealerId: s
   // The master-list workspace appends ?return=<encoded-url> to every
   // row link (see master-list-workspace-client.tsx). When present, it's
   // the source of truth for the user's filtered/sorted/paginated view.
-  // When absent (deep-link, bookmark, direct visit), Next Lead falls
+  // When absent (deep-link, bookmark, direct visit), Next Prospect falls
   // back to the global /adjacent endpoint so the button still works.
   const returnRaw = searchParams.get("return");
   const returnState = useMemo(
@@ -162,11 +160,6 @@ export function BrokerDealerDetailClient({ brokerDealerId }: { brokerDealerId: s
   const [isEnriching, setIsEnriching] = useState(false);
   const [attemptedAutoEnrich, setAttemptedAutoEnrich] = useState(false);
   const [isHealthChecking, setIsHealthChecking] = useState(false);
-  // Bumped by RefreshFirmButton's onRefreshComplete to re-fire the
-  // profile-fetch useEffect after a refresh-all run completes. The page
-  // owns profile state via useState — router.refresh() alone won't update
-  // it, so we drive a manual refetch via this dep on loadProfile below.
-  const [profileRefreshKey, setProfileRefreshKey] = useState(0);
   const [healthCheckResult, setHealthCheckResult] = useState<string | null>(null);
   const [prevId, setPrevId] = useState<number | null>(null);
   const [nextId, setNextId] = useState<number | null>(null);
@@ -296,7 +289,7 @@ export function BrokerDealerDetailClient({ brokerDealerId }: { brokerDealerId: s
   }, [brokerDealerId, returnState]);
 
   // Build a same-shape /master-list/{id} link that preserves the same
-  // return envelope so chaining Next Lead doesn't lose the master-list
+  // return envelope so chaining Next Prospect doesn't lose the master-list
   // context after the first click.
   const buildAdjacentHref = useCallback(
     (id: number): Route => {
@@ -343,7 +336,7 @@ export function BrokerDealerDetailClient({ brokerDealerId }: { brokerDealerId: s
     return () => {
       active = false;
     };
-  }, [brokerDealerId, profileRefreshKey]);
+  }, [brokerDealerId]);
 
   async function runHealthCheck() {
     setIsHealthChecking(true);
@@ -488,17 +481,6 @@ export function BrokerDealerDetailClient({ brokerDealerId }: { brokerDealerId: s
               variant="detail"
               initialDefaultMember={profile.is_favorited}
             />
-            {/* Always rendered so users have a manual "re-check for
-                updates" trigger even after the firm is fully populated.
-                autoFire stays gated on incompleteness so a complete firm
-                isn't auto-refreshed on every navigation — a manual click
-                on a complete firm hits the BE which returns
-                status="skipped" with an "Already complete." toast. */}
-            <RefreshFirmButton
-              firmId={bd.id}
-              autoFire={isFirmIncomplete(bd)}
-              onRefreshComplete={() => setProfileRefreshKey((k) => k + 1)}
-            />
           </div>
           <FirmWebsiteLink firmId={bd.id} firmName={bd.name} website={bd.website} />
           <div className="mt-2 flex flex-wrap items-center gap-x-3 gap-y-1 text-[12px] text-[var(--text-muted,#94a3b8)]">
@@ -574,7 +556,7 @@ export function BrokerDealerDetailClient({ brokerDealerId }: { brokerDealerId: s
           className={SECONDARY_BTN}
         >
           <ArrowLeft className="h-4 w-4" strokeWidth={2} />
-          Previous Lead
+          Previous Prospect
         </button>
         <Link
           href={sourceListHref}
@@ -588,7 +570,7 @@ export function BrokerDealerDetailClient({ brokerDealerId }: { brokerDealerId: s
           onClick={() => nextId && router.push(buildAdjacentHref(nextId))}
           className={SECONDARY_BTN}
         >
-          Next Lead
+          Next Prospect
           <ArrowRight className="h-4 w-4" strokeWidth={2} />
         </button>
       </div>
@@ -981,7 +963,7 @@ export function BrokerDealerDetailClient({ brokerDealerId }: { brokerDealerId: s
                         {item.clearing_partner ?? (
                           <UnknownCell
                             reason={item.unknown_reason}
-                            fallback="Unknown partner"
+                            fallback="Partner not on file"
                           />
                         )}
                       </p>

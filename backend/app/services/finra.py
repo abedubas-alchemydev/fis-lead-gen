@@ -15,6 +15,7 @@ from app.services.brokercheck_pdf import (
 )
 from app.services.normalization import normalize_sec_file_number
 from app.services.service_models import FinraBrokerDealerRecord
+from app.services.website_resolver import is_blocklisted_host
 
 logger = logging.getLogger(__name__)
 
@@ -217,7 +218,11 @@ class FinraService:
             record.executive_officers = detail.executive_officers
         if detail.firm_operations_text:
             record.firm_operations_text = detail.firm_operations_text
-        if detail.web_address and not record.website:
+        if (
+            detail.web_address
+            and not record.website
+            and not is_blocklisted_host(detail.web_address)
+        ):
             record.website = detail.web_address
             record.website_source = "finra"
         if detail.types_of_business_other:
@@ -248,13 +253,15 @@ class FinraService:
         source = self._extract_detail_source(detail)
         if source is None:
             return None
-        return self._clean_text(
+        website = self._clean_text(
             source.get("firm_ia_main_web_address")
             or source.get("firm_main_web_address")
             or source.get("firm_web_address")
             or source.get("firm_website")
-            or source.get("firm_bc_scope_url")
         )
+        if website and is_blocklisted_host(website):
+            return None
+        return website
 
     async def _fetch_firm_detail(
         self,
@@ -298,19 +305,25 @@ class FinraService:
         # Website. The BrokerCheck Form BD "Web Address" field surfaces under
         # several keys depending on the search vs. detail endpoint and how the
         # firm filed Form BD: ``firm_ia_main_web_address`` is the canonical
-        # snake-cased Form BD field, ``firm_main_web_address`` /
-        # ``firm_web_address`` show up on some firms, and ``firm_website`` /
-        # ``firm_bc_scope_url`` were the original keys we plucked. Try the
-        # Form-BD-canonical ones first so production rows are mostly populated
-        # straight from FINRA without needing the Apollo fallback.
+        # snake-cased Form BD field; ``firm_main_web_address`` /
+        # ``firm_web_address`` / ``firm_website`` show up as legacy variants.
+        # ``firm_bc_scope_url`` is intentionally NOT in the chain — that field
+        # is FINRA's pointer to the firm's own BrokerCheck profile/PDF (e.g.
+        # ``files.brokercheck.finra.org/firm/firm_<CRD>.pdf``), not a website
+        # the firm filed. Persisting it short-circuits the on-demand resolver
+        # (which only fires when ``website IS NULL``) and renders as a
+        # FINRA URL on the firm-detail page.
         website = self._clean_text(
             source.get("firm_ia_main_web_address")
             or source.get("firm_main_web_address")
             or source.get("firm_web_address")
             or source.get("firm_website")
-            or source.get("firm_bc_scope_url")
         )
-        if website:
+        # Defensive: even the canonical Form BD key occasionally carries a
+        # FINRA/SEC self-reference for firms that didn't file a real website.
+        # Blocklisted hosts are never persisted; the lazy
+        # Apollo→Hunter→SerpAPI resolver runs on first visit instead.
+        if website and not is_blocklisted_host(website):
             record.website = website
             record.website_source = "finra"
 

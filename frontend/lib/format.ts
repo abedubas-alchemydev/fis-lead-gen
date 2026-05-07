@@ -7,12 +7,19 @@ import type {
 // Human-readable label for each unknown_reason category. Sourced from the
 // cli01 BE contract (feature/be-unknown-reasons-api). Surfaced verbatim in
 // the UnknownCell tooltip when a master-list / firm-detail field is null.
+//
+// ``low_confidence_extraction`` is the BE catchall for any ``needs_review``
+// row that isn't matched by the ``firm_does_not_disclose`` exemption
+// patterns — that includes genuinely-low-confidence extractions AND rows
+// where the LLM was confident on type but couldn't find the partner name
+// in the filing. The label avoids saying "below threshold" because the
+// underlying confidence may actually be high (e.g., 0.9) for the
+// missing-partner case.
 export const UNKNOWN_REASON_LABELS: Record<UnknownReasonCategory, string> = {
   firm_does_not_disclose:
     "Firm doesn't disclose this — fully-disclosed exemption",
   no_filing_available: "No recent X-17A-5 filing on SEC EDGAR",
-  low_confidence_extraction:
-    "Extraction confidence below threshold — pending re-review",
+  low_confidence_extraction: "Extraction needs review — value pending",
   pdf_unparseable:
     "Filing PDF couldn't be parsed (corrupt or scanned image)",
   provider_error: "Extraction provider returned an error — retry pending",

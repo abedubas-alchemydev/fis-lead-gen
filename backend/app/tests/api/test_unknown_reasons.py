@@ -131,6 +131,38 @@ def test_clearing_needs_review_without_exemption_is_low_confidence() -> None:
     assert result.note == notes
 
 
+def test_clearing_needs_review_with_fully_disclosed_basis_is_disclosed() -> None:
+    """needs_review + "on a fully disclosed basis" notes => firm_does_not_disclose.
+
+    Pins the exemption-regex broadening for filings that describe the
+    exemption arrangement with the SEC's term-of-art ("clears... on a
+    fully disclosed basis") but never cite Rule 15c3-3, Footnote 74, or
+    the explicit "exempt" wording the older patterns required. Surfaced
+    by &PARTNERS (CIK 0000107136), whose partner-less needs_review row
+    used to land as low_confidence_extraction even though the filing was
+    unambiguous about the fully-disclosed arrangement.
+    """
+    notes = (
+        "The Notes to Financial Statements explicitly state that the Company "
+        "clears all of its proprietary and customer transactions through "
+        "another broker-dealer on a fully disclosed basis. While the clearing "
+        "partner is not named, the clearing type is unambiguous."
+    )
+
+    result = derive_clearing_unknown_reason(
+        _arrangement(
+            clearing_partner=None,
+            extraction_status=STATUS_NEEDS_REVIEW,
+            extraction_notes=notes,
+            extraction_confidence=0.90,
+        )
+    )
+
+    assert result is not None
+    assert result.category == "firm_does_not_disclose"
+    assert result.note == notes
+
+
 def test_clearing_missing_pdf_status_maps_to_no_filing_available() -> None:
     result = derive_clearing_unknown_reason(
         _arrangement(clearing_partner=None, extraction_status=STATUS_MISSING_PDF)
@@ -191,11 +223,128 @@ def test_clearing_pending_status_maps_to_not_yet_extracted() -> None:
 
 
 def test_financial_no_row_means_not_yet_extracted() -> None:
-    """No financial_metric row => pipeline hasn't reached the firm."""
+    """No financial_metric row + no BD context => pipeline hasn't reached the firm."""
     result = derive_financial_unknown_reason(None)
 
     assert result is not None
     assert result.category == "not_yet_extracted"
+
+
+def test_financial_no_row_with_bd_missing_cik_returns_no_filing_available() -> None:
+    """No financial_metric row AND BD has no CIK => the firm has no
+    SEC filings to extract from. Re-classify from the misleading
+    ``not_yet_extracted`` ("Pipeline hasn't covered this firm yet") to
+    the honest ``no_filing_available`` ("No recent X-17A-5 filing on
+    SEC EDGAR"). Mirrors how the clearing path classifies the same
+    structural condition via the clearing_arrangement row's
+    ``extraction_status='missing_pdf'``."""
+    bd = SimpleNamespace(cik=None, filings_index_url=None)
+    result = derive_financial_unknown_reason(None, broker_dealer=bd)
+
+    assert result is not None
+    assert result.category == "no_filing_available"
+
+
+def test_financial_no_row_with_bd_missing_filings_index_returns_no_filing_available() -> None:
+    """No financial_metric row AND BD has CIK but no filings_index_url
+    => SEC submissions JSON not reachable for this firm. Same
+    classification as missing-CIK; re-running the pipeline won't help."""
+    bd = SimpleNamespace(cik="0000123456", filings_index_url=None)
+    result = derive_financial_unknown_reason(None, broker_dealer=bd)
+
+    assert result is not None
+    assert result.category == "no_filing_available"
+
+
+def test_financial_no_row_with_bd_having_cik_and_index_keeps_not_yet_extracted() -> None:
+    """No financial_metric row AND BD has both CIK and filings_index_url
+    => pipeline genuinely hasn't reached this firm yet (the structural
+    inputs are present). Keep ``not_yet_extracted`` so the FE shows the
+    pending tone."""
+    bd = SimpleNamespace(
+        cik="0000123456",
+        filings_index_url="https://data.sec.gov/submissions/CIK0000123456.json",
+    )
+    result = derive_financial_unknown_reason(None, broker_dealer=bd)
+
+    assert result is not None
+    assert result.category == "not_yet_extracted"
+
+
+def test_financial_no_row_propagates_clearing_missing_pdf_to_no_filing_available() -> None:
+    """No financial_metric row AND BD has CIK + filings_index_url BUT
+    the clearing pipeline already determined ``missing_pdf`` => the
+    same source is unreachable for both pipelines. Propagate to
+    ``no_filing_available`` so the FE doesn't lie with the amber
+    "Pipeline hasn't covered this firm yet" tooltip on a firm where
+    the X-17A-5 PDF genuinely doesn't exist for the latest filing."""
+    bd = SimpleNamespace(
+        cik="0001567191",
+        filings_index_url="https://data.sec.gov/submissions/CIK0001567191.json",
+    )
+    arrangement = SimpleNamespace(extraction_status="missing_pdf")
+    result = derive_financial_unknown_reason(
+        None, broker_dealer=bd, clearing_arrangement=arrangement
+    )
+
+    assert result is not None
+    assert result.category == "no_filing_available"
+
+
+def test_financial_no_row_propagates_clearing_pipeline_error_to_pdf_unparseable() -> None:
+    """Cross-pipeline structural propagation: clearing extraction failed
+    with ``pipeline_error`` (PDF download / parse blew up). Financial
+    is in the same boat → ``pdf_unparseable``."""
+    bd = SimpleNamespace(
+        cik="0001567191",
+        filings_index_url="https://data.sec.gov/submissions/CIK0001567191.json",
+    )
+    arrangement = SimpleNamespace(extraction_status="pipeline_error")
+    result = derive_financial_unknown_reason(
+        None, broker_dealer=bd, clearing_arrangement=arrangement
+    )
+
+    assert result is not None
+    assert result.category == "pdf_unparseable"
+
+
+def test_financial_no_row_propagates_clearing_provider_error_to_provider_error() -> None:
+    """Cross-pipeline structural propagation: clearing extraction failed
+    with ``provider_error`` (Gemini blew up). Financial mirrors."""
+    bd = SimpleNamespace(
+        cik="0001567191",
+        filings_index_url="https://data.sec.gov/submissions/CIK0001567191.json",
+    )
+    arrangement = SimpleNamespace(extraction_status="provider_error")
+    result = derive_financial_unknown_reason(
+        None, broker_dealer=bd, clearing_arrangement=arrangement
+    )
+
+    assert result is not None
+    assert result.category == "provider_error"
+
+
+def test_financial_no_row_with_clearing_parsed_classifies_as_data_not_present() -> None:
+    """Clearing extraction succeeded (status='parsed') AND financial
+    has no row → the financial pipeline ran on the same X-17A-5 source
+    but couldn't persist a row that satisfies the NOT NULL constraints
+    (low confidence on net_capital, missing comparison year, source
+    didn't include the figure, etc.). Source-side absence is the
+    honest read — re-running won't help, so classify as
+    ``data_not_present`` ("Source filing doesn't include this field")
+    rather than ``not_yet_extracted`` which would imply the pipeline
+    will fill it on a future run."""
+    bd = SimpleNamespace(
+        cik="0001567191",
+        filings_index_url="https://data.sec.gov/submissions/CIK0001567191.json",
+    )
+    arrangement = SimpleNamespace(extraction_status="parsed")
+    result = derive_financial_unknown_reason(
+        None, broker_dealer=bd, clearing_arrangement=arrangement
+    )
+
+    assert result is not None
+    assert result.category == "data_not_present"
 
 
 def test_financial_parsed_returns_none() -> None:
@@ -432,3 +581,41 @@ def test_with_trigger_fields_synthesizes_data_not_present_when_result_is_none() 
     assert annotated.note == "[Triggered by missing: yoy_growth]"
     assert annotated.extracted_at is None
     assert annotated.confidence is None
+
+
+def test_clearing_partial_null_partner_present_type_null_synthesizes_tooltip() -> None:
+    """Regression: production rows where the latest clearing arrangement
+    parsed a ``clearing_partner`` but no ``clearing_type`` were returning
+    ``current_clearing_unknown_reason: null`` to the FE, dropping the
+    info-icon affordance on the Clearing Type column.
+
+    Pin the exact composition the master-list / firm-detail / firm-profile
+    endpoints run end-to-end::
+
+        with_trigger_fields(
+            derive_clearing_unknown_reason(arrangement),
+            clearing_trigger_fields(item),
+        )
+
+    With ``arrangement.clearing_partner`` set, ``derive_*`` returns ``None``
+    (parsed row, no reason). The cluster still has a null
+    ``current_clearing_type`` on the rolled-up BD row, so the synthesizer
+    must emit ``data_not_present`` with the trigger-field marker."""
+    arrangement = _arrangement(
+        clearing_partner="Pershing LLC",
+        extraction_status=STATUS_PARSED,
+        extraction_confidence=0.95,
+    )
+    item = SimpleNamespace(
+        current_clearing_partner="Pershing LLC",
+        current_clearing_type=None,
+    )
+
+    annotated = with_trigger_fields(
+        derive_clearing_unknown_reason(arrangement),
+        clearing_trigger_fields(item),
+    )
+
+    assert annotated is not None
+    assert annotated.category == "data_not_present"
+    assert annotated.note == "[Triggered by missing: current_clearing_type]"

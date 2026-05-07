@@ -8,8 +8,8 @@ import { DashboardErrorCard } from "@/components/dashboard/dashboard-error-card"
 import { KpiCard } from "@/components/dashboard/kpi-card";
 import type { KpiIconProps } from "@/components/dashboard/kpi-card";
 import { KpiCardSkeleton } from "@/components/dashboard/kpi-card-skeleton";
-import { LeadVolumeTrendCard } from "@/components/dashboard/lead-volume-trend-card";
-import { TopLeadsCard } from "@/components/dashboard/top-leads-card";
+import { ProspectVolumeTrendCard } from "@/components/dashboard/prospect-volume-trend-card";
+import { TopProspectsCard } from "@/components/dashboard/top-prospects-card";
 import { TopActions } from "@/components/layout/top-actions";
 import { apiRequest } from "@/lib/api";
 import type { AlertListItem, AlertListResponse, ClearingDistributionResponse, DashboardStats } from "@/lib/types";
@@ -62,7 +62,7 @@ export function DashboardHomeClient() {
   const [totalBds, setTotalBds] = useState<string>("-");
   const [newBds, setNewBds] = useState<string>("-");
   const [deficiencyAlerts, setDeficiencyAlerts] = useState<string>("-");
-  const [highValueLeads, setHighValueLeads] = useState<string>("-");
+  const [highValueParticipants, setHighValueParticipants] = useState<string>("-");
   const [distribution, setDistribution] = useState<ClearingDistributionResponse["items"]>([]);
   const [alerts, setAlerts] = useState<AlertListItem[]>([]);
 
@@ -110,7 +110,7 @@ export function DashboardHomeClient() {
         setTotalBds(stats.total_active_bds.toLocaleString());
         setNewBds(stats.new_bds_30_days.toLocaleString());
         setDeficiencyAlerts(stats.deficiency_alerts.toLocaleString());
-        setHighValueLeads(stats.high_value_leads.toLocaleString());
+        setHighValueParticipants(stats.high_value_participants.toLocaleString());
       })
       .catch((err) => {
         if (!active) return;
@@ -188,14 +188,14 @@ export function DashboardHomeClient() {
           {/* .crumbs: 12px, text-muted (slate-400), uppercase, 0.06em tracking.
               Only the "/" separator is in a span with text-dim (slate-600). */}
           <p className="text-[12px] uppercase tracking-[0.06em] text-slate-400">
-            Enterprise Dashboard <span className="text-slate-600">/</span> Lead Intelligence
+            Enterprise Dashboard <span className="text-slate-600">/</span> Prospect Intelligence
           </p>
           {/* .page-title: font-size 24px, weight 700, tracking -0.02em,
               margin-top 4px. No line-height → inherits body 1.5 (36px line-box).
               Using text-[24px] instead of text-2xl because text-2xl also
               applies line-height: 32px which shrinks the visible gap. */}
           <h1 className="mt-1 text-[24px] font-bold tracking-[-0.02em] text-slate-900">
-            Lead Intelligence Workspace
+            Prospect Intelligence Workspace
           </h1>
         </div>
         <div className="ml-auto">
@@ -256,28 +256,28 @@ export function DashboardHomeClient() {
           </div>
           <div className="animate-fade-in delay-200">
             <KpiCard
-              title="High-Value Leads"
-              value={highValueLeads}
+              title="High Value Participants"
+              value={highValueParticipants}
               tone="amber"
               icon={KpiIconTarget}
-              helper="Weighted scoring, last updated 8m ago"
-              href="/master-list?lead_priority=hot"
+              helper="Net Capital between $5M and $100M"
+              href="/master-list?min_net_capital=5000000&max_net_capital=100000000"
             />
           </div>
         </div>
       )}
 
-      {/* Trend (LEFT, narrower) + top leads (RIGHT, wider) — matches mockup 1fr 1.4fr.
+      {/* Trend (LEFT, narrower) + top prospects (RIGHT, wider) — matches mockup 1fr 1.4fr.
           `h-full` on both animate wrappers forwards the grid row's stretched
           height to the cards inside, so the trend chart's flex-fill resolves
           to the actual row height instead of collapsing to the SVG's intrinsic
           220px baseline. */}
       <div className="mb-4 grid grid-cols-1 gap-4 xl:grid-cols-[1fr_1.4fr]">
         <div className="h-full animate-fade-in-left delay-300">
-          <LeadVolumeTrendCard />
+          <ProspectVolumeTrendCard />
         </div>
         <div className="h-full animate-fade-in-right delay-300">
-          <TopLeadsCard />
+          <TopProspectsCard />
         </div>
       </div>
 

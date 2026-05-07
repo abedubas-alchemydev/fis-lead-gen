@@ -47,6 +47,10 @@ export type BrokerDealerListItem = {
   health_status: string | null;
   is_deficient: boolean;
   latest_deficiency_filed_at: string | null;
+  // BE boundary fields — names mirror the FastAPI response contract verbatim
+  // (broker_dealers.lead_score / lead_priority columns). The FE displays
+  // these as "prospect score" / "prospect priority" everywhere user-facing,
+  // but the wire shape stays in BE vocabulary. Don't rename here.
   lead_score: number | null;
   lead_priority: string | null;
   current_clearing_partner: string | null;
@@ -102,7 +106,10 @@ export type DashboardStats = {
   total_active_bds: number;
   new_bds_30_days: number;
   deficiency_alerts: number;
-  high_value_leads: number;
+  // BE boundary field — mirrors FastAPI response shape. Counts firms with
+  // latest_net_capital in the [$5M, $100M] band (the "High Value Participant"
+  // business rule); decoupled from the ACG ICP scorer's lead_priority.
+  high_value_participants: number;
 };
 
 export type FinancialMetricItem = {

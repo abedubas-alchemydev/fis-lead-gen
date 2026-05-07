@@ -3,24 +3,24 @@
 import Link from "next/link";
 import { ArrowRight, Target } from "lucide-react";
 
-// Empty state for the TopLeadsCard tile when /api/v1/broker-dealers
-// returns zero hot leads. Mirrors the medallion pattern shipped on
-// /alerts (EmptyAlertsState), /visited-firms (EmptyVisitedState),
-// /my-favorites (EmptyItemsState), and /export
-// (EmptyExportMatchesState) so the dashboard tile feels visually
-// consistent with the rest of the app.
-export function EmptyTopLeadsState() {
+// Empty state for the TopProspectsCard tile when /api/v1/broker-dealers
+// returns no firms inside the High Value Participant band ($5M–$100M
+// latest_net_capital). Mirrors the medallion pattern shipped on /alerts
+// (EmptyAlertsState), /visited-firms (EmptyVisitedState), /my-favorites
+// (EmptyItemsState), and /export (EmptyExportMatchesState) so the
+// dashboard tile feels visually consistent with the rest of the app.
+export function EmptyTopProspectsState() {
   return (
     <div className="my-2 rounded-2xl bg-[var(--surface-2,#f1f6fd)] px-6 py-12 text-center">
       <div className="mx-auto grid h-14 w-14 place-items-center rounded-full bg-[var(--surface-3,#dbeafe)] text-[var(--text-dim,#475569)]">
         <Target className="h-6 w-6" strokeWidth={1.75} aria-hidden />
       </div>
       <h3 className="mt-5 text-[15px] font-semibold tracking-[-0.01em] text-[var(--text,#0f172a)]">
-        No high-value leads yet
+        No high-value participants yet
       </h3>
       <p className="mx-auto mt-2 max-w-sm text-[13px] leading-5 text-[var(--text-dim,#475569)]">
-        New scoring passes surface hot leads here as soon as they
-        cross the threshold.
+        Firms with Net Capital between $5M and $100M surface here as the
+        financial pipeline fills in.
       </p>
       <Link
         href="/master-list"

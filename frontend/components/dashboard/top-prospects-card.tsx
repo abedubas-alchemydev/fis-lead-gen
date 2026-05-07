@@ -4,9 +4,14 @@ import Link from "next/link";
 import { useCallback, useEffect, useState } from "react";
 
 import { DashboardErrorCard } from "@/components/dashboard/dashboard-error-card";
-import { EmptyTopLeadsState } from "@/components/dashboard/empty-top-leads-state";
+import { EmptyTopProspectsState } from "@/components/dashboard/empty-top-prospects-state";
 import { apiRequest } from "@/lib/api";
+import { formatCurrency } from "@/lib/format";
 import type { BrokerDealerListItem, BrokerDealerListResponse } from "@/lib/types";
+
+// "High Value Participant" band — must match the KPI tile + count_high_value_participants.
+const HIGH_VALUE_MIN = 5_000_000;
+const HIGH_VALUE_MAX = 100_000_000;
 
 // Mockup's avatar gradient palette — rotated per row by index.
 const AVATAR_GRADIENTS = [
@@ -27,15 +32,17 @@ function initialsFromName(name: string): string {
   return `${words[0][0]}${words[1][0]}`.toUpperCase();
 }
 
-function scoreColor(score: number | null): string {
-  if (score === null) return "#64748b";
-  if (score >= 90) return "#dc2626";
-  if (score >= 80) return "#d97706";
-  if (score >= 70) return "#4f46e5";
-  return "#059669";
+// Where this firm sits within the [$5M, $100M] band, returned 0–100. Used to fill the
+// progress ring next to each row. NULL net-capital is unexpected here (the BE filter
+// excludes NULL via `>= min`), but we defensively floor to 0 rather than crashing the
+// math.
+function bandPosition(netCapital: number | null): number {
+  if (netCapital === null) return 0;
+  const clamped = Math.max(HIGH_VALUE_MIN, Math.min(HIGH_VALUE_MAX, netCapital));
+  return ((clamped - HIGH_VALUE_MIN) / (HIGH_VALUE_MAX - HIGH_VALUE_MIN)) * 100;
 }
 
-export function TopLeadsCard() {
+export function TopProspectsCard() {
   const [items, setItems] = useState<BrokerDealerListItem[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
@@ -55,14 +62,18 @@ export function TopLeadsCard() {
 
     async function load() {
       try {
+        // Pulls the same "High Value Participant" band the KPI tile counts
+        // ($5M ≤ latest_net_capital ≤ $100M), sorted largest-first. Decoupled
+        // from the ACG ICP scorer — see fix/high-value-participants-redefine
+        // where the KPI moved off lead_priority='hot'.
         const response = await apiRequest<BrokerDealerListResponse>(
-          "/api/v1/broker-dealers?lead_priority=hot&limit=5&sort_by=lead_score&sort_dir=desc"
+          `/api/v1/broker-dealers?min_net_capital=${HIGH_VALUE_MIN}&max_net_capital=${HIGH_VALUE_MAX}&sort_by=latest_net_capital&sort_dir=desc&limit=5`
         );
         if (!active) return;
         setItems(response.items);
       } catch (err) {
         if (!active) return;
-        setError(err instanceof Error ? err.message : "Could not load leads");
+        setError(err instanceof Error ? err.message : "Could not load prospects");
       } finally {
         if (active) setLoading(false);
       }
@@ -84,15 +95,15 @@ export function TopLeadsCard() {
       <div className="mb-4 flex items-center justify-between gap-4">
         <div>
           <h3 className="text-[15px] font-semibold tracking-[-0.01em] text-[var(--text,#0f172a)]">
-            Top high-value leads
+            Top High Value Participants
           </h3>
           <p className="mt-0.5 text-[12px] text-[var(--text-muted,#94a3b8)]">
-            Ranked by weighted lead score
+            Net Capital between $5M and $100M, largest first
           </p>
         </div>
         {/* .link-btn: 12px, weight 600, color var(--accent)=#6366f1. */}
         <Link
-          href="/master-list?lead_priority=hot"
+          href={`/master-list?min_net_capital=${HIGH_VALUE_MIN}&max_net_capital=${HIGH_VALUE_MAX}`}
           className="inline-flex items-center gap-1 text-[12px] font-semibold text-[#6366f1] transition hover:text-[#a5b4fc]"
         >
           View all
@@ -104,7 +115,7 @@ export function TopLeadsCard() {
 
       {error ? (
         <DashboardErrorCard
-          title="Couldn&rsquo;t load top leads"
+          title="Couldn&rsquo;t load top prospects"
           message={error}
           onRetry={handleRetry}
         />
@@ -125,12 +136,12 @@ export function TopLeadsCard() {
           ))}
         </div>
       ) : items.length === 0 ? (
-        <EmptyTopLeadsState />
+        <EmptyTopProspectsState />
       ) : (
         <div>
           {items.map((item, idx) => {
-            const color = scoreColor(item.lead_score);
-            const pct = item.lead_score !== null ? Math.max(0, Math.min(100, item.lead_score)) : 0;
+            const color = "#6366f1"; // single accent — all rows are inside the band
+            const pct = bandPosition(item.latest_net_capital);
             const dashArray = `${(pct / 100) * 88} 88`;
             return (
               <Link
@@ -156,7 +167,7 @@ export function TopLeadsCard() {
                 </div>
                 <div className="flex items-center gap-2">
                   <span className="text-[14px] font-bold" style={{ color }}>
-                    {item.lead_score ?? "—"}
+                    {formatCurrency(item.latest_net_capital)}
                   </span>
                   <svg width="30" height="30" viewBox="0 0 36 36" className="shrink-0">
                     <circle cx="18" cy="18" r="14" fill="none" stroke="rgba(15,23,42,0.06)" strokeWidth="3" />

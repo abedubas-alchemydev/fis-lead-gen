@@ -36,15 +36,29 @@ class ClearingPipelineService:
         only_failed: bool = False,
         only_null_partner: bool = False,
         only_needs_review: bool = False,
+        target_bd_ids: list[int] | None = None,
     ) -> PipelineRun:
         # Targeted-rerun selector flags are mutually exclusive — only one
         # custom universe at a time. The sum check guards against silent
         # overlap if a future flag is added without revisiting the matrix.
+        # ``target_bd_ids`` is the explicit-IDs override and supersedes all
+        # selector flags when supplied (operator already chose the universe).
         if sum([only_failed, only_null_partner, only_needs_review]) > 1:
             raise ValueError(
                 "only_failed, only_null_partner, and only_needs_review are mutually exclusive."
             )
-        if only_failed:
+        if target_bd_ids is not None:
+            fetched = (
+                await db.execute(
+                    select(BrokerDealer).where(BrokerDealer.id.in_(target_bd_ids))
+                )
+            ).scalars().all()
+            # Preserve caller-supplied order so operator-visible sequencing
+            # (e.g., the master-list page's name-ASC display order) is
+            # honored end-to-end. Drops any ids that don't resolve to a row.
+            by_id = {bd.id: bd for bd in fetched}
+            broker_dealers = [by_id[i] for i in target_bd_ids if i in by_id]
+        elif only_failed:
             broker_dealers = (await db.execute(select(BrokerDealer).order_by(BrokerDealer.id.asc()))).scalars().all()
             failed_ids = await self.repository.list_failed_clearing_broker_dealer_ids(db)
             broker_dealers = [item for item in broker_dealers if item.id in failed_ids]
@@ -110,6 +124,7 @@ class ClearingPipelineService:
                                 "is_competitor": False,
                                 "is_verified": False,
                                 "extracted_at": datetime.now(timezone.utc),
+                                "clearing_statement_text": None,
                             }
                         )
                         pipeline_run.processed_items += 1
@@ -136,6 +151,7 @@ class ClearingPipelineService:
                             "is_competitor": self.repository.match_competitor(parsed.clearing_partner, competitors),
                             "is_verified": False,
                             "extracted_at": parsed.extracted_at,
+                            "clearing_statement_text": parsed.clearing_statement_text,
                         }
                     )
                     pipeline_run.processed_items += 1
@@ -164,6 +180,7 @@ class ClearingPipelineService:
                         "is_competitor": False,
                         "is_verified": False,
                         "extracted_at": datetime.now(timezone.utc),
+                        "clearing_statement_text": None,
                     }
                 )
                 pipeline_run.processed_items += 1

@@ -309,7 +309,11 @@ async def get_broker_dealer(
     )
     detail.financial_unknown_reason = to_unknown_reason(
         with_trigger_fields(
-            derive_financial_unknown_reason(financials[0] if financials else None),
+            derive_financial_unknown_reason(
+                financials[0] if financials else None,
+                broker_dealer=broker_dealer,
+                clearing_arrangement=arrangements[0] if arrangements else None,
+            ),
             financial_trigger_fields(broker_dealer),
         )
     )
@@ -360,23 +364,33 @@ async def get_adjacent_broker_dealers(
     _: AuthenticatedUser = Depends(get_current_user),
     db: AsyncSession = Depends(get_db_session),
 ) -> dict[str, int | None]:
-    """Return the previous and next broker-dealer IDs for navigation arrows."""
-    from sqlalchemy import select as sel
+    """Return the previous and next broker-dealer IDs for navigation arrows.
 
-    prev_stmt = (
-        sel(BrokerDealer.id)
-        .where(BrokerDealer.id < broker_dealer_id)
-        .order_by(BrokerDealer.id.desc())
-        .limit(1)
-    )
-    next_stmt = (
-        sel(BrokerDealer.id)
-        .where(BrokerDealer.id > broker_dealer_id)
-        .order_by(BrokerDealer.id.asc())
-        .limit(1)
-    )
-    prev_id = (await db.execute(prev_stmt)).scalar_one_or_none()
-    next_id = (await db.execute(next_stmt)).scalar_one_or_none()
+    Walks the master-list page's *default* view: ``list_mode='primary'``
+    (``is_deficient=false``) ordered by ``name ASC NULLS LAST, id ASC``.
+    The frontend has a separate return-envelope path that walks whatever
+    filter / sort the user actually had on screen; this endpoint is the
+    fallback for direct-link / bookmark visits, so it should match what
+    the user would see if they navigated to ``/master-list`` fresh.
+    """
+    ordered_ids = (
+        await db.execute(
+            select(BrokerDealer.id)
+            .where(BrokerDealer.is_deficient.is_(False))
+            .order_by(BrokerDealer.name.asc().nullslast(), BrokerDealer.id.asc())
+        )
+    ).scalars().all()
+
+    try:
+        idx = ordered_ids.index(broker_dealer_id)
+    except ValueError:
+        # Firm exists but is filtered out of the primary list (e.g.
+        # is_deficient=true). Surface no neighbours rather than guess —
+        # the buttons disable, same UX contract as a head/tail row.
+        return {"prev_id": None, "next_id": None}
+
+    prev_id = ordered_ids[idx - 1] if idx > 0 else None
+    next_id = ordered_ids[idx + 1] if idx < len(ordered_ids) - 1 else None
     return {"prev_id": prev_id, "next_id": next_id}
 
 
@@ -747,7 +761,11 @@ async def get_broker_dealer_profile(
     )
     detail.financial_unknown_reason = to_unknown_reason(
         with_trigger_fields(
-            derive_financial_unknown_reason(financials[0] if financials else None),
+            derive_financial_unknown_reason(
+                financials[0] if financials else None,
+                broker_dealer=broker_dealer,
+                clearing_arrangement=clearing_arrangements[0] if clearing_arrangements else None,
+            ),
             financial_trigger_fields(broker_dealer),
         )
     )

@@ -27,6 +27,7 @@ from datetime import timedelta
 from pathlib import PurePosixPath
 
 from google.auth import default as google_auth_default
+from google.auth.exceptions import GoogleAuthError
 from google.auth.transport.requests import Request as GoogleAuthRequest
 from google.cloud import storage
 from google.cloud.exceptions import GoogleCloudError
@@ -194,7 +195,11 @@ async def signed_download_url(
 
     try:
         return await asyncio.to_thread(_sign)
-    except GoogleCloudError as exc:
+    except (GoogleCloudError, GoogleAuthError) as exc:
+        # GoogleAuthError covers IAM-delegated signing failures
+        # (TransportError on a 403 from iam.serviceAccounts.signBlob,
+        # RefreshError on stale credentials, etc.). Without this branch
+        # the endpoint surfaces a bare 500 instead of the intended 503.
         raise VaultStorageError(
             f"Failed to mint signed URL for {object_name!r}: {exc}"
         ) from exc
