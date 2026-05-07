@@ -25,7 +25,12 @@ from app.services.website_resolver import resolve_website
 _FIRM_NAME = "Acme Securities LLC"
 _CANDIDATE_URL = "https://acme-securities.example.test"
 _CANDIDATE_DOMAIN = "acme-securities.example.test"
-_SERPAPI_URL = "https://acme-from-serp.example.test"
+# Domain-anchored SerpAPI URL — the firm token "acmesecu" is a prefix
+# of the segment "acmesecurities-online" (forward direction match).
+# Required because the post-2026-05-07 validator admits only on a
+# domain anchor; the previous "acme-from-serp" stub didn't anchor and
+# would now always reject.
+_SERPAPI_URL = "https://acmesecurities-online.example.test"
 _SERPAPI_BLOCKLISTED_URL = "https://www.linkedin.com/company/acme-securities"
 
 
@@ -190,7 +195,13 @@ async def test_title_without_firm_token_rejects_candidate() -> None:
 
 
 @respx.mock
-async def test_no_title_passes_when_head_and_blocklist_clear() -> None:
+async def test_anchored_domain_admits_regardless_of_page_content() -> None:
+    """Post-2026-05-07 rule: the page's title / body content is no
+    longer a signal — admission is granted on domain anchor alone.
+    The candidate's hostname (``acme-securities.example.test``)
+    contains the segment ``acme-securities`` which startswith the firm
+    token ``"acmesecu"``, so HEAD-200 + clean blocklist + clean path
+    is enough."""
     apollo = AsyncMock()
     apollo.search_organization = AsyncMock(return_value=_apollo_org())
 
@@ -198,9 +209,6 @@ async def test_no_title_passes_when_head_and_blocklist_clear() -> None:
         return_value=httpx.Response(
             200, request=httpx.Request("HEAD", _CANDIDATE_URL)
         ),
-    )
-    respx.get(_CANDIDATE_URL).mock(
-        return_value=httpx.Response(200, text="<html><body>no title here</body></html>"),
     )
 
     website, source, reason = await resolve_website(
@@ -426,7 +434,7 @@ async def test_serpapi_walks_past_top_5_when_earlier_results_rejected() -> None:
             SerpResult(url="https://files.brokercheck.finra.org/firm/firm_1.pdf", domain="files.brokercheck.finra.org", title="FINRA PDF"),
             SerpResult(url="https://twitter.com/acme-4", domain="twitter.com", title="Twitter"),
             SerpResult(url="https://www.bloomberg.com/profile/company/acme", domain="www.bloomberg.com", title="Bloomberg"),
-            SerpResult(url=_SERPAPI_URL, domain="acme-from-serp.example.test", title="Acme — Home"),
+            SerpResult(url=_SERPAPI_URL, domain="acmesecurities-online.example.test", title="Acme — Home"),
         ],
     )
     _mock_validate_pass(_SERPAPI_URL)
@@ -459,7 +467,7 @@ async def test_apollo_wins_serpapi_not_called() -> None:
 # ─────────────────────────── serper.dev tier 2 ─────────────────────────────
 
 
-_SERPER_URL = "https://acme-from-serper.example.test"
+_SERPER_URL = "https://acmesecurities-from-serper.example.test"
 
 
 @respx.mock
@@ -472,7 +480,7 @@ async def test_serper_runs_before_serpapi_when_apollo_misses() -> None:
     serper = AsyncMock()
     serper.search_firm = AsyncMock(
         return_value=[
-            SerpResult(url=_SERPER_URL, domain="acme-from-serper.example.test", title="Acme Securities — Home"),
+            SerpResult(url=_SERPER_URL, domain="acmesecurities-from-serper.example.test", title="Acme Securities — Home"),
         ],
     )
     serpapi = AsyncMock()
@@ -656,6 +664,94 @@ async def test_lei_lookup_record_path_rejected() -> None:
         _FIRM_NAME, None, apollo, serpapi=serpapi,
     )
 
+    assert (website, source, reason) == (None, None, "no_valid_candidate")
+
+
+@respx.mock
+async def test_directory_listing_with_firm_in_title_rejected() -> None:
+    """Real-world ACA/PRUDENT INVESTORS regression: SerpAPI ranked a
+    third-party advisor directory listing
+    (``retirementplanning.net/.../firm-slug/<id>``) above the firm's
+    own site. The page's title contained the firm name verbatim, so
+    the pre-2026-05-07 title-token check would have admitted, but the
+    domain ``retirementplanning.net`` doesn't anchor on the firm token
+    (``"acaprude"`` for ACA/PRUDENT). With the title-only admit gone,
+    the directory listing is structurally rejected — the page can
+    mention the firm by name all it wants, the domain has to anchor.
+    Path-keyword guard doesn't help here because ``/retirement-
+    planners/`` is a generic directory category, not a content-page
+    marker we can blocklist without whack-a-mole."""
+    apollo = AsyncMock()
+    apollo.search_organization = AsyncMock(return_value=None)
+    serpapi = AsyncMock()
+    serpapi.search_firm = AsyncMock(
+        return_value=_serp_results(
+            "https://www.retirementplanning.net/retirement-planners/new-jersey/green-brook/acaprudent-investors/2001301",
+        ),
+    )
+
+    website, source, reason = await resolve_website(
+        "ACA/Prudent Investors Planning Corporation",
+        None,
+        apollo,
+        serpapi=serpapi,
+    )
+
+    assert (website, source, reason) == (None, None, "no_valid_candidate")
+
+
+@respx.mock
+async def test_truncated_brand_domain_admits() -> None:
+    """Truncated-brand mitigation: firm ``Acme Capital`` (token
+    ``"acmecapi"`` — 8 chars) has its homepage at
+    ``acmecap.example.test`` (segment ``"acmecap"`` — 7 chars). The
+    forward direction (segment startswith firm_token) misses because
+    ``"acmecap"`` is shorter than the token, but the reverse direction
+    (firm_token startswith segment) admits since ``"acmecap"`` is
+    >= 5 chars and a prefix of the token. Without this mitigation,
+    every firm whose domain abbreviates the formal name would miss."""
+    firm = "Acme Capital"  # token = "acmecapi"
+    candidate = "https://acmecap.example.test"
+    apollo = AsyncMock()
+    apollo.search_organization = AsyncMock(
+        return_value=ApolloOrganization(
+            name=firm, website_url=candidate, domain="acmecap.example.test",
+        ),
+    )
+
+    respx.head(candidate).mock(
+        return_value=httpx.Response(200, request=httpx.Request("HEAD", candidate)),
+    )
+
+    website, source, reason = await resolve_website(firm, None, apollo)
+    assert website == candidate
+    assert source == "apollo"
+    assert reason is None
+
+
+@respx.mock
+async def test_short_segment_does_not_admit_via_truncated_anchor() -> None:
+    """Truncated-brand mitigation is gated on a minimum segment length
+    so a 2-3 char segment doesn't gain admission. Firm
+    ``Big Investment Group`` (token ``"biginves"``) on ``big.example.test``:
+    segment ``"big"`` is 3 chars, below the 5-char threshold, so the
+    reverse direction must NOT admit even though ``"biginves"``
+    startswith ``"big"``. (Forward direction also doesn't admit since
+    ``"big"`` is shorter than the token.)"""
+    firm = "Big Investment Group"  # token = "biginves"
+    candidate = "https://big.example.test"
+    apollo = AsyncMock()
+    apollo.search_organization = AsyncMock(
+        return_value=ApolloOrganization(
+            name=firm, website_url=candidate, domain="big.example.test",
+        ),
+    )
+
+    respx.head(candidate).mock(
+        return_value=httpx.Response(200, request=httpx.Request("HEAD", candidate)),
+    )
+
+    website, source, reason = await resolve_website(firm, None, apollo)
     assert (website, source, reason) == (None, None, "no_valid_candidate")
 
 

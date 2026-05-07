@@ -121,7 +121,6 @@ _NON_HOMEPAGE_PATH_KEYWORDS: Final = (
 
 _VALIDATE_TIMEOUT_S: Final = 5.0
 _FIRM_TOKEN_LEN: Final = 8
-_TITLE_RE: Final = re.compile(r"<title[^>]*>([^<]*)</title>", re.IGNORECASE)
 _NON_ALPHA_RE: Final = re.compile(r"[^a-z]")
 
 
@@ -279,29 +278,38 @@ def _ensure_scheme(url: str) -> str:
 
 
 def _firm_token(firm_name: str) -> str:
-    """Normalize a firm name to an alpha-only token used for title matching."""
+    """Normalize a firm name to an alpha-only token used for the
+    domain-anchor check."""
     return _NON_ALPHA_RE.sub("", firm_name.lower())[:_FIRM_TOKEN_LEN]
 
 
 async def _validate(url: str, firm_token: str) -> bool:
-    """Run path/host blocklist + HEAD reachability + title-or-domain check on ``url``.
+    """Domain-anchor + reachability + content-type validation.
 
-    Returns ``False`` on any network error, non-200/301/302 status,
-    blocklisted host (apex or subdomain), file-download path, or page
-    that fails BOTH the title-match AND the domain-match fallback. A
-    page with no ``<title>`` is allowed through as long as HEAD passed
-    and the domain + path are clear — small broker-dealer sites often
-    render an empty title from a JS shell.
+    The single admit gate is the **domain anchor**: at least one
+    ``.``- / ``-``-delimited segment of the candidate's final
+    (post-redirect) hostname must align to the firm token via
+    ``_domain_segment_anchors_on_firm`` (forward or truncated-brand
+    direction). Title-match-only used to be an admit path on its own
+    but it admitted news articles, deal-announcement pages, LEI
+    registries, and third-party advisor directories that happened to
+    mention the firm by name — concretely it stamped
+    ``cfo.com/news/...`` on 777 SECURITIES, ``hl.com/about-us/
+    transactions/...`` on 3WIRE ADVISORY, ``lei-lookup.com/record/...``
+    on 4170 SECURITIES, and ``retirementplanning.net/.../<slug>/<id>``
+    on ACA/PRUDENT INVESTORS. With the title-only admit gone, the
+    page's content / title is informational only — it can't grant
+    admission without a matching domain.
 
-    Domain-match fallback: when the page title is present but doesn't
-    carry the firm token, check whether the firm token is a prefix of
-    any ``.``- or ``-``-delimited segment of the final hostname
-    (post-redirect). Catches firms whose homepage uses a brand or
-    marketing tagline as its title (e.g., ``303alternatives.com`` with
-    title ``"Welcome"``). The segment-prefix anchor blocks the
-    obvious false-positive class — ``securiti`` won't match an unrelated
-    ``consecutivesecurities.com``, only domains that *start* with the
-    firm token.
+    Pre-domain gates that still apply (reject before the domain
+    check ever runs): host blocklist (suffix-match on
+    ``DOMAIN_BLOCKLIST``), file-download path
+    (``.pdf``/``.doc``/etc.), content-page path (``/news/``,
+    ``/transactions/``, ``/lookup/``, etc.), HEAD non-2xx, and
+    non-HTML ``Content-Type`` on either HEAD or GET.
+
+    Returns ``False`` on any network error or any of the above gate
+    rejections.
     """
     if not url or not firm_token:
         return False
@@ -338,18 +346,19 @@ async def _validate(url: str, firm_token: str) -> bool:
                 return False
             final_host = _hostname(final_url)
 
-            page = await client.get(url, timeout=_VALIDATE_TIMEOUT_S)
-            match = _TITLE_RE.search(page.text or "")
-            if match is None:
-                # JS-shell or empty-title sites: admit on reachability
-                # alone, same as before. The blocklist + redirect check
-                # already filtered the obvious garbage.
-                return True
-            title_token = _NON_ALPHA_RE.sub("", match.group(1).lower())
-            if firm_token in title_token:
-                return True
-            # Title-match failed → domain-match fallback.
-            return _domain_segment_starts_with(
+            # The single admit gate: the candidate's final
+            # (post-redirect) hostname must anchor on the firm name.
+            # The earlier title-only admit path was the loose one —
+            # any page whose ``<title>`` mentioned the firm by name
+            # passed it, including news articles (``cfo.com/news/...``),
+            # deal-announcement pages (``hl.com/about-us/transactions/
+            # ...``), LEI-registry records (``lei-lookup.com/record/
+            # ...``), and third-party advisor directories
+            # (``retirementplanning.net/.../firm-slug/<id>``). With
+            # title parsing dropped, the GET request is unnecessary —
+            # HEAD + blocklist + path-keyword + domain-anchor is the
+            # full chain.
+            return _domain_segment_anchors_on_firm(
                 final_host or domain, firm_token
             )
     except httpx.HTTPError as exc:
@@ -357,24 +366,33 @@ async def _validate(url: str, firm_token: str) -> bool:
         return False
 
 
-def _domain_segment_starts_with(host: str, firm_token: str) -> bool:
+_MIN_TRUNCATED_DOMAIN_ANCHOR_CHARS: Final = 5
+
+
+def _domain_segment_anchors_on_firm(host: str, firm_token: str) -> bool:
     """Return True when ``firm_token`` aligns to a "natural" boundary in
-    ``host``. Two checks, OR'd:
+    ``host``. Walks each segment in two directions:
 
-    1. **Full-host prefix**: the hostname (after stripping a leading
-       ``www.``) with all non-alpha chars removed *starts with* the
-       firm token. Catches hyphenated domains where the token spans
-       segments — e.g., ``acme-securities.com`` with firm ``Acme
-       Securities`` (firm_token ``"acmesecu"``) → strips to
-       ``"acmesecuritiescom"`` → matches.
-    2. **Per-segment prefix**: any ``.``- or ``-``-delimited segment of
-       the host, after per-segment non-alpha strip, starts with the
-       firm token. Catches subdomain layouts — e.g.,
-       ``trade.smithcapital.com`` with firm ``Smith Capital`` (token
-       ``"smithcap"``) → segment ``"smithcapital"`` matches.
+    1. **Forward (segment startswith firm_token)**: catches the common
+       case where the firm token is the prefix of a domain segment —
+       ``acme-securities.com`` for firm ``Acme Securities`` (token
+       ``"acmesecu"``) → segment ``"acmesecurities"`` startswith the
+       token. Also runs on the full host (after ``www.`` strip + non-
+       alpha strip) to catch hyphenated domains where the token spans
+       segments.
 
-    Both checks are *prefix*, never substring — so the bad-class
-    false positive (firm token appearing in the middle of an
+    2. **Reverse (firm_token startswith segment)**: catches the
+       truncated-brand-domain case where the firm has a longer formal
+       name than its domain — ``acmecap.com`` for firm
+       ``Acme Capital`` (token ``"acmecapi"``, segment ``"acmecap"``,
+       length 7 < token length 8 so the forward check misses but the
+       segment is genuinely the firm's brand). Requires the segment to
+       be at least ``_MIN_TRUNCATED_DOMAIN_ANCHOR_CHARS`` characters so
+       a 2-3 char segment (``ms.com``, ``llc.io``) doesn't gain
+       admission via this path.
+
+    Both directions are *prefix* checks, never substring — so the bad-
+    class false positive (firm token appearing in the middle of an
     unrelated word, e.g., ``"securiti"`` matching
     ``consecutivesecurities.com``) is structurally blocked.
     """
@@ -390,7 +408,18 @@ def _domain_segment_starts_with(host: str, firm_token: str) -> bool:
 
     for segment in re.split(r"[.\-]", host_lower):
         normalised = _NON_ALPHA_RE.sub("", segment)
+        if not normalised:
+            continue
         if normalised.startswith(firm_token):
+            return True
+        # Truncated-brand mitigation: firm_token is longer than the
+        # segment but the segment is the segment's full prefix of the
+        # token. Only counts when the segment is long enough to
+        # plausibly be a brand on its own (>= _MIN_TRUNCATED_DOMAIN_ANCHOR_CHARS).
+        if (
+            len(normalised) >= _MIN_TRUNCATED_DOMAIN_ANCHOR_CHARS
+            and firm_token.startswith(normalised)
+        ):
             return True
     return False
 
