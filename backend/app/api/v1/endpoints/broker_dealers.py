@@ -68,7 +68,6 @@ from app.services.finra_pdf_service import (
 from app.services.apollo import ApolloClient
 from app.services.focus_ceo_extraction import FocusCeoExtractionService
 from app.services.focus_reports import FocusReportService
-from app.services.hunter import HunterClient
 from app.services.refresh_all_orchestrator import (
     REFRESH_ALL_PIPELINE_NAME,
     decide_pipelines,
@@ -952,11 +951,6 @@ async def resolve_broker_dealer_website(
             detail="Apollo API key is not configured.",
         )
     apollo = ApolloClient(apollo_key)
-    hunter = (
-        HunterClient(settings.hunter_api_key)
-        if settings.hunter_api_key
-        else None
-    )
     serper = (
         SerperClient(settings.serper_api_key)
         if settings.serper_api_key
@@ -972,7 +966,6 @@ async def resolve_broker_dealer_website(
         broker_dealer.name,
         broker_dealer.crd_number,
         apollo,
-        hunter,
         serpapi,
         serper,
     )

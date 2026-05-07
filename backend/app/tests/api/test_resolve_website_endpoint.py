@@ -140,7 +140,6 @@ async def test_admin_runs_chain_persists_returns(
         _name: str,
         _crd: str | None,
         _apollo: Any,
-        _hunter: Any,
         _serpapi: Any = None,
         _serper: Any = None,
     ) -> tuple[str | None, str | None, str | None]:

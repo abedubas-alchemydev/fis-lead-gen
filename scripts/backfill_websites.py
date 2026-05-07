@@ -2,11 +2,11 @@
 ``website IS NULL``.
 
 The orchestrator's ``resolve-website`` sub-pipeline runs Apollo first;
-firms that fail Apollo's company match silently skip Hunter + SerpAPI
-when those keys are missing from the local ``backend/.env``. This
-script targets the leftover NULL-website rows and re-runs the full
-chain (Apollo → Hunter → SerpAPI) so firms whose domain Apollo doesn't
-know but Hunter/SerpAPI do can land.
+firms that fail Apollo's company match silently skip serper.dev +
+SerpAPI when those keys are missing from the local ``backend/.env``.
+This script targets the leftover NULL-website rows and re-runs the full
+chain (Apollo → serper.dev → SerpAPI) so firms whose domain Apollo
+doesn't know but a search-tier hit lands cleanly.
 
 Idempotent: any row whose ``website`` is already set is skipped.
 
@@ -43,7 +43,6 @@ from app.core.config import settings  # noqa: E402
 from app.db.session import SessionLocal  # noqa: E402
 from app.models.broker_dealer import BrokerDealer  # noqa: E402
 from app.services.apollo import ApolloClient  # noqa: E402
-from app.services.hunter import HunterClient  # noqa: E402
 from app.services.serpapi import SerpAPIClient  # noqa: E402
 from app.services.serper import SerperClient  # noqa: E402
 from app.services.website_resolver import resolve_website  # noqa: E402
@@ -53,7 +52,6 @@ logger = logging.getLogger(__name__)
 
 def _build_clients() -> tuple[
     ApolloClient | None,
-    HunterClient | None,
     SerperClient | None,
     SerpAPIClient | None,
 ]:
@@ -64,10 +62,9 @@ def _build_clients() -> tuple[
     instead of crashing on instantiation.
     """
     apollo = ApolloClient(settings.apollo_api_key) if settings.apollo_api_key else None
-    hunter = HunterClient(settings.hunter_api_key) if settings.hunter_api_key else None
     serper = SerperClient(settings.serper_api_key) if settings.serper_api_key else None
     serpapi = SerpAPIClient(settings.serpapi_api_key) if settings.serpapi_api_key else None
-    return apollo, hunter, serper, serpapi
+    return apollo, serper, serpapi
 
 
 async def _select_targets(top: int | None) -> list[BrokerDealer]:
@@ -114,11 +111,10 @@ async def _persist(bd_id: int, url: str, source: str) -> None:
 
 async def main(*, top: int | None, dry_run: bool) -> None:
     started_at = time.monotonic()
-    apollo, hunter, serper, serpapi = _build_clients()
+    apollo, serper, serpapi = _build_clients()
     enabled = [
         name for name, client in (
             ("apollo", apollo),
-            ("hunter", hunter),
             ("serper", serper),
             ("serpapi", serpapi),
         )
@@ -131,7 +127,7 @@ async def main(*, top: int | None, dry_run: bool) -> None:
     if not targets:
         return
 
-    counts = {"apollo": 0, "hunter": 0, "serper": 0, "serpapi": 0, "miss": 0, "error": 0}
+    counts = {"apollo": 0, "serper": 0, "serpapi": 0, "miss": 0, "error": 0}
 
     for idx, bd in enumerate(targets, 1):
         print(f"[{idx}/{len(targets)}] BD {bd.id} {bd.name!r} ...", flush=True)
@@ -143,7 +139,6 @@ async def main(*, top: int | None, dry_run: bool) -> None:
                 bd.name,
                 bd.crd_number,
                 apollo,
-                hunter=hunter,
                 serpapi=serpapi,
                 serper=serper,
             )
@@ -163,7 +158,7 @@ async def main(*, top: int | None, dry_run: bool) -> None:
     elapsed = time.monotonic() - started_at
     print()
     print("=== outcome tally ===")
-    for k in ("apollo", "hunter", "serper", "serpapi", "miss", "error"):
+    for k in ("apollo", "serper", "serpapi", "miss", "error"):
         print(f"  {k}: {counts.get(k, 0)}")
     print(f"total elapsed: {elapsed:.1f}s")
 

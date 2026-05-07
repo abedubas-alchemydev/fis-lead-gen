@@ -1,10 +1,11 @@
 """Resolver-chain tests for ``app.services.website_resolver``.
 
-Locks the chain order (Apollo first, Hunter second), the validation
+Locks the chain order (Apollo → serper.dev → SerpAPI), the validation
 gates (HEAD reachability, blocklist, title-token), and the provider-
-error vs. clean-miss reason strings the endpoint relies on. Apollo +
-Hunter clients are stubbed with ``AsyncMock``; HEAD/GET to candidate
-URLs go through respx so the validator's behavior is also covered.
+error vs. clean-miss reason strings the endpoint relies on. Apollo /
+serper.dev / SerpAPI clients are stubbed with ``AsyncMock``; HEAD/GET
+to candidate URLs go through respx so the validator's behavior is also
+covered.
 """
 
 from __future__ import annotations
@@ -16,7 +17,6 @@ import pytest
 import respx
 
 from app.services.apollo import ApolloError, ApolloOrganization
-from app.services.hunter import HunterCompany, HunterError
 from app.services.serpapi import SerpAPIError, SerpResult
 from app.services.serper import SerperError
 from app.services.website_resolver import resolve_website
@@ -25,7 +25,6 @@ from app.services.website_resolver import resolve_website
 _FIRM_NAME = "Acme Securities LLC"
 _CANDIDATE_URL = "https://acme-securities.example.test"
 _CANDIDATE_DOMAIN = "acme-securities.example.test"
-_HUNTER_DOMAIN = "acme-from-hunter.example.test"
 _SERPAPI_URL = "https://acme-from-serp.example.test"
 _SERPAPI_BLOCKLISTED_URL = "https://www.linkedin.com/company/acme-securities"
 
@@ -40,13 +39,6 @@ def _apollo_org(
         website_url=website_url,
         domain=domain,
     )
-
-
-def _hunter_company(
-    *,
-    domain: str = _HUNTER_DOMAIN,
-) -> HunterCompany:
-    return HunterCompany(domain=domain, name=_FIRM_NAME)
 
 
 def _ok_html(title: str = "Acme Securities — Home") -> str:
@@ -66,41 +58,20 @@ def _mock_validate_pass(url: str, html: str | None = None) -> None:
 
 
 @respx.mock
-async def test_apollo_wins_first_hunter_not_called() -> None:
+async def test_apollo_wins_first_search_tiers_not_called() -> None:
     apollo = AsyncMock()
     apollo.search_organization = AsyncMock(return_value=_apollo_org())
-    hunter = AsyncMock()
-    hunter.find_company = AsyncMock(return_value=_hunter_company())
+    serpapi = AsyncMock()
+    serpapi.search_firm = AsyncMock(return_value=[])
     _mock_validate_pass(_CANDIDATE_URL)
 
     website, source, reason = await resolve_website(
-        _FIRM_NAME, "1234", apollo, hunter,
+        _FIRM_NAME, "1234", apollo, serpapi=serpapi,
     )
 
     assert (website, source, reason) == (_CANDIDATE_URL, "apollo", None)
     apollo.search_organization.assert_awaited_once_with(_FIRM_NAME, "1234")
-    hunter.find_company.assert_not_awaited()
-
-
-@respx.mock
-async def test_apollo_errors_hunter_wins() -> None:
-    apollo = AsyncMock()
-    apollo.search_organization = AsyncMock(
-        side_effect=ApolloError("apollo dead"),
-    )
-    hunter = AsyncMock()
-    hunter.find_company = AsyncMock(return_value=_hunter_company())
-
-    hunter_url = f"https://{_HUNTER_DOMAIN}"
-    _mock_validate_pass(hunter_url)
-
-    website, source, reason = await resolve_website(
-        _FIRM_NAME, None, apollo, hunter,
-    )
-
-    assert source == "hunter"
-    assert website == hunter_url
-    assert reason is None
+    serpapi.search_firm.assert_not_awaited()
 
 
 # ─────────────────────────── miss vs. provider-error ─────────────────────
@@ -110,11 +81,11 @@ async def test_apollo_errors_hunter_wins() -> None:
 async def test_no_valid_candidate_when_chain_returns_none() -> None:
     apollo = AsyncMock()
     apollo.search_organization = AsyncMock(return_value=None)
-    hunter = AsyncMock()
-    hunter.find_company = AsyncMock(return_value=None)
+    serpapi = AsyncMock()
+    serpapi.search_firm = AsyncMock(return_value=[])
 
     website, source, reason = await resolve_website(
-        _FIRM_NAME, None, apollo, hunter,
+        _FIRM_NAME, None, apollo, serpapi=serpapi,
     )
 
     assert website is None
@@ -128,19 +99,19 @@ async def test_all_providers_errored_when_both_raise() -> None:
     apollo.search_organization = AsyncMock(
         side_effect=ApolloError("apollo 503 retries exhausted"),
     )
-    hunter = AsyncMock()
-    hunter.find_company = AsyncMock(
-        side_effect=HunterError("hunter 500 retries exhausted"),
+    serpapi = AsyncMock()
+    serpapi.search_firm = AsyncMock(
+        side_effect=SerpAPIError("SerpAPI returned 500"),
     )
 
     website, source, reason = await resolve_website(
-        _FIRM_NAME, None, apollo, hunter,
+        _FIRM_NAME, None, apollo, serpapi=serpapi,
     )
 
     assert website is None
     assert source is None
     assert reason is not None and reason.startswith("all_providers_errored")
-    assert "apollo" in reason and "hunter" in reason
+    assert "apollo" in reason and "serpapi" in reason
 
 
 # ─────────────────────────── validation gates ────────────────────────────
@@ -150,9 +121,6 @@ async def test_all_providers_errored_when_both_raise() -> None:
 async def test_head_non_200_rejects_candidate() -> None:
     apollo = AsyncMock()
     apollo.search_organization = AsyncMock(return_value=_apollo_org())
-    hunter = AsyncMock()
-    hunter.find_company = AsyncMock(return_value=None)
-
     respx.head(_CANDIDATE_URL).mock(
         return_value=httpx.Response(
             404, request=httpx.Request("HEAD", _CANDIDATE_URL)
@@ -160,7 +128,7 @@ async def test_head_non_200_rejects_candidate() -> None:
     )
 
     website, source, reason = await resolve_website(
-        _FIRM_NAME, None, apollo, hunter,
+        _FIRM_NAME, None, apollo,
     )
 
     assert website is None
@@ -176,11 +144,9 @@ async def test_blocklisted_domain_is_rejected_pre_head() -> None:
             domain="linkedin.com",
         )
     )
-    hunter = AsyncMock()
-    hunter.find_company = AsyncMock(return_value=None)
 
     website, source, reason = await resolve_website(
-        _FIRM_NAME, None, apollo, hunter,
+        _FIRM_NAME, None, apollo,
     )
 
     assert website is None
@@ -202,8 +168,6 @@ async def test_title_without_firm_token_rejects_candidate() -> None:
             domain="unrelated-firm.example.test",
         ),
     )
-    hunter = AsyncMock()
-    hunter.find_company = AsyncMock(return_value=None)
 
     respx.head(unrelated_url).mock(
         return_value=httpx.Response(
@@ -218,7 +182,7 @@ async def test_title_without_firm_token_rejects_candidate() -> None:
     )
 
     website, source, reason = await resolve_website(
-        _FIRM_NAME, None, apollo, hunter,
+        _FIRM_NAME, None, apollo,
     )
 
     assert website is None
@@ -229,8 +193,6 @@ async def test_title_without_firm_token_rejects_candidate() -> None:
 async def test_no_title_passes_when_head_and_blocklist_clear() -> None:
     apollo = AsyncMock()
     apollo.search_organization = AsyncMock(return_value=_apollo_org())
-    hunter = AsyncMock()
-    hunter.find_company = AsyncMock(return_value=None)
 
     respx.head(_CANDIDATE_URL).mock(
         return_value=httpx.Response(
@@ -242,7 +204,7 @@ async def test_no_title_passes_when_head_and_blocklist_clear() -> None:
     )
 
     website, source, reason = await resolve_website(
-        _FIRM_NAME, None, apollo, hunter,
+        _FIRM_NAME, None, apollo,
     )
 
     assert website == _CANDIDATE_URL
@@ -264,9 +226,6 @@ async def test_domain_match_accepts_when_title_unrelated_but_hostname_starts_wit
     apollo.search_organization = AsyncMock(
         return_value=ApolloOrganization(name=firm, website_url=candidate, domain="acme-securities.brand.example.test"),
     )
-    hunter = AsyncMock()
-    hunter.find_company = AsyncMock(return_value=None)
-
     respx.head(candidate).mock(
         return_value=httpx.Response(200, request=httpx.Request("HEAD", candidate)),
     )
@@ -277,7 +236,7 @@ async def test_domain_match_accepts_when_title_unrelated_but_hostname_starts_wit
         ),
     )
 
-    website, source, reason = await resolve_website(firm, None, apollo, hunter)
+    website, source, reason = await resolve_website(firm, None, apollo)
     assert website == candidate
     assert source == "apollo"
     assert reason is None
@@ -294,9 +253,6 @@ async def test_domain_match_accepts_subdomain_when_segment_starts_with_firm_toke
     apollo.search_organization = AsyncMock(
         return_value=ApolloOrganization(name=firm, website_url=candidate, domain="trade.smithcapital.example.test"),
     )
-    hunter = AsyncMock()
-    hunter.find_company = AsyncMock(return_value=None)
-
     respx.head(candidate).mock(
         return_value=httpx.Response(200, request=httpx.Request("HEAD", candidate)),
     )
@@ -307,7 +263,7 @@ async def test_domain_match_accepts_subdomain_when_segment_starts_with_firm_toke
         ),
     )
 
-    website, source, reason = await resolve_website(firm, None, apollo, hunter)
+    website, source, reason = await resolve_website(firm, None, apollo)
     assert website == candidate
     assert source == "apollo"
     assert reason is None
@@ -326,9 +282,6 @@ async def test_domain_match_rejects_substring_in_middle_of_segment() -> None:
     apollo.search_organization = AsyncMock(
         return_value=ApolloOrganization(name=firm, website_url=candidate, domain="blackabcsecurities.example.test"),
     )
-    hunter = AsyncMock()
-    hunter.find_company = AsyncMock(return_value=None)
-
     respx.head(candidate).mock(
         return_value=httpx.Response(200, request=httpx.Request("HEAD", candidate)),
     )
@@ -339,36 +292,38 @@ async def test_domain_match_rejects_substring_in_middle_of_segment() -> None:
         ),
     )
 
-    website, source, reason = await resolve_website(firm, None, apollo, hunter)
+    website, source, reason = await resolve_website(firm, None, apollo)
     assert website is None
     assert reason == "no_valid_candidate"
 
 
-# ─────────────────────────── hunter is None ────────────────────────────
+# ─────────────────────────── search-tier optional skip ────────────────────
 
 
 @respx.mock
-async def test_hunter_none_falls_through_to_clean_miss() -> None:
+async def test_search_tiers_unset_falls_through_to_clean_miss() -> None:
+    """Apollo misses and neither serper.dev nor SerpAPI keys are
+    configured (clients passed as None / omitted). The chain falls
+    through to ``no_valid_candidate`` cleanly."""
     apollo = AsyncMock()
     apollo.search_organization = AsyncMock(return_value=None)
 
-    website, source, reason = await resolve_website(
-        _FIRM_NAME, None, apollo, None,
-    )
+    website, source, reason = await resolve_website(_FIRM_NAME, None, apollo)
 
     assert (website, source, reason) == (None, None, "no_valid_candidate")
 
 
 @respx.mock
-async def test_hunter_none_apollo_errored_returns_provider_error() -> None:
+async def test_apollo_errored_only_provider_returns_provider_error() -> None:
+    """Apollo errors and the search tiers are unset → the chain has
+    one attempted provider and one error, so it returns
+    ``all_providers_errored`` instead of swallowing as a clean miss."""
     apollo = AsyncMock()
     apollo.search_organization = AsyncMock(
         side_effect=ApolloError("apollo 503"),
     )
 
-    website, source, reason = await resolve_website(
-        _FIRM_NAME, None, apollo, None,
-    )
+    website, source, reason = await resolve_website(_FIRM_NAME, None, apollo)
 
     assert website is None
     assert source is None
@@ -387,13 +342,11 @@ def _serp_results(*urls: str) -> list[SerpResult]:
 
 
 @respx.mock
-async def test_apollo_none_hunter_none_serpapi_valid_wins() -> None:
-    """Apollo + Hunter both produce no candidate; SerpAPI returns one
-    that passes _validate() — chain returns ('<url>', 'serpapi', None)."""
+async def test_apollo_none_serpapi_valid_wins() -> None:
+    """Apollo produces no candidate; SerpAPI returns one that passes
+    ``_validate()`` — chain returns ``('<url>', 'serpapi', None)``."""
     apollo = AsyncMock()
     apollo.search_organization = AsyncMock(return_value=None)
-    hunter = AsyncMock()
-    hunter.find_company = AsyncMock(return_value=None)
     serpapi = AsyncMock()
     serpapi.search_firm = AsyncMock(
         return_value=_serp_results(_SERPAPI_URL),
@@ -401,7 +354,7 @@ async def test_apollo_none_hunter_none_serpapi_valid_wins() -> None:
     _mock_validate_pass(_SERPAPI_URL)
 
     website, source, reason = await resolve_website(
-        _FIRM_NAME, None, apollo, hunter, serpapi,
+        _FIRM_NAME, None, apollo, serpapi=serpapi,
     )
 
     assert (website, source, reason) == (_SERPAPI_URL, "serpapi", None)
@@ -409,13 +362,11 @@ async def test_apollo_none_hunter_none_serpapi_valid_wins() -> None:
 
 
 @respx.mock
-async def test_apollo_none_hunter_none_serpapi_all_blocklist_clean_miss() -> None:
+async def test_apollo_none_serpapi_all_blocklist_clean_miss() -> None:
     """Every SerpAPI hit is on the domain blocklist — chain falls
     through to ``no_valid_candidate`` (clean miss, NOT provider error)."""
     apollo = AsyncMock()
     apollo.search_organization = AsyncMock(return_value=None)
-    hunter = AsyncMock()
-    hunter.find_company = AsyncMock(return_value=None)
     serpapi = AsyncMock()
     serpapi.search_firm = AsyncMock(
         return_value=_serp_results(
@@ -426,7 +377,7 @@ async def test_apollo_none_hunter_none_serpapi_all_blocklist_clean_miss() -> Non
     )
 
     website, source, reason = await resolve_website(
-        _FIRM_NAME, None, apollo, hunter, serpapi,
+        _FIRM_NAME, None, apollo, serpapi=serpapi,
     )
 
     assert website is None
@@ -435,14 +386,10 @@ async def test_apollo_none_hunter_none_serpapi_all_blocklist_clean_miss() -> Non
 
 
 @respx.mock
-async def test_all_three_providers_errored_returns_provider_error() -> None:
+async def test_apollo_and_serpapi_errored_returns_provider_error() -> None:
     apollo = AsyncMock()
     apollo.search_organization = AsyncMock(
         side_effect=ApolloError("apollo 503 retries exhausted"),
-    )
-    hunter = AsyncMock()
-    hunter.find_company = AsyncMock(
-        side_effect=HunterError("hunter 500 retries exhausted"),
     )
     serpapi = AsyncMock()
     serpapi.search_firm = AsyncMock(
@@ -450,14 +397,13 @@ async def test_all_three_providers_errored_returns_provider_error() -> None:
     )
 
     website, source, reason = await resolve_website(
-        _FIRM_NAME, None, apollo, hunter, serpapi,
+        _FIRM_NAME, None, apollo, serpapi=serpapi,
     )
 
     assert website is None
     assert source is None
     assert reason is not None and reason.startswith("all_providers_errored")
     assert "apollo" in reason
-    assert "hunter" in reason
     assert "serpapi" in reason
 
 
@@ -472,8 +418,6 @@ async def test_serpapi_walks_past_top_5_when_earlier_results_rejected() -> None:
     the 6th is the firm's real site."""
     apollo = AsyncMock()
     apollo.search_organization = AsyncMock(return_value=None)
-    hunter = AsyncMock()
-    hunter.find_company = AsyncMock(return_value=None)
     serpapi = AsyncMock()
     serpapi.search_firm = AsyncMock(
         return_value=[
@@ -488,7 +432,7 @@ async def test_serpapi_walks_past_top_5_when_earlier_results_rejected() -> None:
     _mock_validate_pass(_SERPAPI_URL)
 
     website, source, reason = await resolve_website(
-        _FIRM_NAME, None, apollo, hunter, serpapi,
+        _FIRM_NAME, None, apollo, serpapi=serpapi,
     )
 
     assert (website, source, reason) == (_SERPAPI_URL, "serpapi", None)
@@ -500,36 +444,31 @@ async def test_apollo_wins_serpapi_not_called() -> None:
     SerpAPI quota — search_firm is never awaited."""
     apollo = AsyncMock()
     apollo.search_organization = AsyncMock(return_value=_apollo_org())
-    hunter = AsyncMock()
-    hunter.find_company = AsyncMock(return_value=_hunter_company())
     serpapi = AsyncMock()
     serpapi.search_firm = AsyncMock(return_value=_serp_results(_SERPAPI_URL))
     _mock_validate_pass(_CANDIDATE_URL)
 
     website, source, reason = await resolve_website(
-        _FIRM_NAME, "1234", apollo, hunter, serpapi,
+        _FIRM_NAME, "1234", apollo, serpapi=serpapi,
     )
 
     assert (website, source, reason) == (_CANDIDATE_URL, "apollo", None)
-    hunter.find_company.assert_not_awaited()
     serpapi.search_firm.assert_not_awaited()
 
 
-# ─────────────────────────── serper.dev tier 3 ─────────────────────────────
+# ─────────────────────────── serper.dev tier 2 ─────────────────────────────
 
 
 _SERPER_URL = "https://acme-from-serper.example.test"
 
 
 @respx.mock
-async def test_serper_runs_before_serpapi_when_apollo_hunter_miss() -> None:
-    """Tier order is Apollo → Hunter → serper.dev → SerpAPI. When
-    Apollo + Hunter both miss and serper.dev returns a valid candidate,
-    SerpAPI must NOT fire (saves the more expensive quota)."""
+async def test_serper_runs_before_serpapi_when_apollo_misses() -> None:
+    """Tier order is Apollo → serper.dev → SerpAPI. When Apollo misses
+    and serper.dev returns a valid candidate, SerpAPI must NOT fire
+    (saves the more expensive quota)."""
     apollo = AsyncMock()
     apollo.search_organization = AsyncMock(return_value=None)
-    hunter = AsyncMock()
-    hunter.find_company = AsyncMock(return_value=None)
     serper = AsyncMock()
     serper.search_firm = AsyncMock(
         return_value=[
@@ -541,7 +480,7 @@ async def test_serper_runs_before_serpapi_when_apollo_hunter_miss() -> None:
     _mock_validate_pass(_SERPER_URL)
 
     website, source, reason = await resolve_website(
-        _FIRM_NAME, None, apollo, hunter, serpapi, serper,
+        _FIRM_NAME, None, apollo, serpapi=serpapi, serper=serper,
     )
 
     assert (website, source, reason) == (_SERPER_URL, "serper", None)
@@ -551,12 +490,9 @@ async def test_serper_runs_before_serpapi_when_apollo_hunter_miss() -> None:
 @respx.mock
 async def test_serper_errors_falls_through_to_serpapi() -> None:
     """When serper.dev errors (e.g., 429 quota burn), the chain must
-    fall through to SerpAPI rather than recording all_providers_errored
-    after just three tiers."""
+    fall through to SerpAPI rather than recording all_providers_errored."""
     apollo = AsyncMock()
     apollo.search_organization = AsyncMock(return_value=None)
-    hunter = AsyncMock()
-    hunter.find_company = AsyncMock(return_value=None)
     serper = AsyncMock()
     serper.search_firm = AsyncMock(side_effect=SerperError("serper.dev returned 429"))
     serpapi = AsyncMock()
@@ -564,7 +500,7 @@ async def test_serper_errors_falls_through_to_serpapi() -> None:
     _mock_validate_pass(_SERPAPI_URL)
 
     website, source, reason = await resolve_website(
-        _FIRM_NAME, None, apollo, hunter, serpapi, serper,
+        _FIRM_NAME, None, apollo, serpapi=serpapi, serper=serper,
     )
 
     assert (website, source, reason) == (_SERPAPI_URL, "serpapi", None)
@@ -573,19 +509,17 @@ async def test_serper_errors_falls_through_to_serpapi() -> None:
 @respx.mock
 async def test_serper_none_falls_through_to_serpapi() -> None:
     """When serper.dev key is unset (client passed as None), the chain
-    skips Tier 3 silently and uses SerpAPI as before. This is the
-    no-config-change path so existing deployments without SERPER_API_KEY
-    keep working."""
+    skips that tier silently and uses SerpAPI as before. This is the
+    no-config-change path so existing deployments without
+    SERPER_API_KEY keep working."""
     apollo = AsyncMock()
     apollo.search_organization = AsyncMock(return_value=None)
-    hunter = AsyncMock()
-    hunter.find_company = AsyncMock(return_value=None)
     serpapi = AsyncMock()
     serpapi.search_firm = AsyncMock(return_value=_serp_results(_SERPAPI_URL))
     _mock_validate_pass(_SERPAPI_URL)
 
     website, source, reason = await resolve_website(
-        _FIRM_NAME, None, apollo, hunter, serpapi, serper=None,
+        _FIRM_NAME, None, apollo, serpapi=serpapi, serper=None,
     )
 
     assert (website, source, reason) == (_SERPAPI_URL, "serpapi", None)
@@ -606,8 +540,6 @@ async def test_serpapi_brokercheck_pdf_subdomain_rejected() -> None:
     the firm's domain."""
     apollo = AsyncMock()
     apollo.search_organization = AsyncMock(return_value=None)
-    hunter = AsyncMock()
-    hunter.find_company = AsyncMock(return_value=None)
     serpapi = AsyncMock()
     serpapi.search_firm = AsyncMock(
         return_value=_serp_results(
@@ -616,7 +548,7 @@ async def test_serpapi_brokercheck_pdf_subdomain_rejected() -> None:
     )
 
     website, source, reason = await resolve_website(
-        _FIRM_NAME, "32119", apollo, hunter, serpapi,
+        _FIRM_NAME, "32119", apollo, serpapi=serpapi,
     )
 
     assert (website, source, reason) == (None, None, "no_valid_candidate")
@@ -634,12 +566,7 @@ async def test_finra_subdomain_rejected_via_suffix_match() -> None:
             domain="reports.brokercheck.finra.org",
         ),
     )
-    hunter = AsyncMock()
-    hunter.find_company = AsyncMock(return_value=None)
-
-    website, source, reason = await resolve_website(
-        _FIRM_NAME, None, apollo, hunter,
-    )
+    website, source, reason = await resolve_website(_FIRM_NAME, None, apollo)
 
     assert (website, source, reason) == (None, None, "no_valid_candidate")
 
@@ -654,11 +581,6 @@ async def test_pdf_path_rejected_on_otherwise_clean_domain() -> None:
     apollo.search_organization = AsyncMock(
         return_value=_apollo_org(website_url=pdf_url, domain="example-cdn.test"),
     )
-    hunter = AsyncMock()
-    hunter.find_company = AsyncMock(return_value=None)
-
-    website, source, reason = await resolve_website(
-        _FIRM_NAME, None, apollo, hunter,
-    )
+    website, source, reason = await resolve_website(_FIRM_NAME, None, apollo)
 
     assert (website, source, reason) == (None, None, "no_valid_candidate")
