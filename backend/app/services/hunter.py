@@ -114,6 +114,21 @@ class HunterClient:
                 # through without provider-error semantics.
                 return None
 
+            if response.status_code == 400:
+                # Hunter's ``/v2/companies/find`` endpoint actually
+                # expects a ``domain`` query param; we send ``company``
+                # because there's no public name-based lookup. Hunter
+                # rejects every name-based request with HTTP 400. Until
+                # we redesign this integration (different endpoint, or
+                # remove from the chain), treat 400 as a clean miss so
+                # the resolver falls through to SerpAPI without
+                # provider-error semantics polluting the result tuple.
+                logger.info(
+                    "Hunter 400 (likely missing-domain-param) for '%s' — clean miss",
+                    firm_name,
+                )
+                return None
+
             if response.status_code == 429 or 500 <= response.status_code < 600:
                 last_error = HunterError(
                     f"Hunter returned {response.status_code}"
