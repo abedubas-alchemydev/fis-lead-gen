@@ -45,7 +45,6 @@ from urllib.parse import urlparse
 import httpx
 
 from app.services.apollo import ApolloClient, ApolloError
-from app.services.hunter import HunterClient, HunterError
 from app.services.serpapi import SerpAPIClient, SerpAPIError
 from app.services.serper import SerperClient, SerperError
 
@@ -125,7 +124,6 @@ async def resolve_website(
     firm_name: str,
     crd: str | None,
     apollo: ApolloClient,
-    hunter: HunterClient | None,
     serpapi: SerpAPIClient | None = None,
     serper: SerperClient | None = None,
 ) -> tuple[str | None, str | None, str | None]:
@@ -134,20 +132,27 @@ async def resolve_website(
     Returns
     -------
     (website, source, reason)
-      - On success: ``(url, 'apollo'|'hunter'|'serper'|'serpapi', None)``
+      - On success: ``(url, 'apollo'|'serper'|'serpapi', None)``
       - On clean miss (chain ran, no valid candidate): ``(None, None, 'no_valid_candidate')``
       - On total provider failure: ``(None, None, 'all_providers_errored: ...')``
 
-    ``hunter``, ``serper`` and ``serpapi`` may be ``None`` when their
-    respective API keys aren't configured; the chain skips that tier and
-    falls through to a clean miss / partial-error case.
+    ``serper`` and ``serpapi`` may be ``None`` when their respective API
+    keys aren't configured; the chain skips that tier and falls through
+    to a clean miss / partial-error case.
 
     Tier order
     ----------
-    Apollo → Hunter → serper.dev → SerpAPI. serper.dev runs ahead of
-    SerpAPI because it's ~50× cheaper per query and shipped with a
-    2,500-query free credit; SerpAPI stays as the final fallback so a
-    transient serper.dev outage or quota cap doesn't lose firms.
+    Apollo → serper.dev (optional) → SerpAPI. Hunter's company-find
+    endpoint was previously Tier 2 but its ``/v2/companies/find``
+    endpoint expects ``domain`` not ``company`` name; every
+    name-based call returns 400 and we swallowed it as a clean miss.
+    Removing it from the chain saves an HTTP roundtrip per firm without
+    losing any signal (the contact-discovery module's separate Hunter
+    integration is unaffected — that one uses different endpoints).
+
+    serper.dev runs ahead of SerpAPI when configured because it's ~50×
+    cheaper per query; SerpAPI is the canonical fallback (and is the
+    primary search tier when serper.dev is unset).
     """
     firm_token = _firm_token(firm_name)
     errors: list[str] = []
@@ -166,26 +171,12 @@ async def resolve_website(
     except Exception as exc:  # pragma: no cover - belt + braces
         errors.append(f"apollo: {exc}")
 
-    # Tier 2 — Hunter companies/find
-    if hunter is not None:
-        providers_attempted += 1
-        try:
-            company = await hunter.find_company(firm_name)
-            if company is not None and company.domain:
-                candidate = f"https://{company.domain}"
-                if await _validate(candidate, firm_token):
-                    return (candidate, "hunter", None)
-        except HunterError as exc:
-            errors.append(f"hunter: {exc}")
-        except Exception as exc:  # pragma: no cover - belt + braces
-            errors.append(f"hunter: {exc}")
-
-    # Tier 3 — serper.dev Google search (primary search provider)
+    # Tier 2 — serper.dev Google search (optional, ahead of SerpAPI)
     # Walks ALL organic results returned by the client (already capped at
     # 10). serper.dev is structurally identical to SerpAPI for our
     # purposes (same Google organic results, same SerpResult dataclass)
     # but ~50× cheaper, so we hit it first to keep SerpAPI quota for the
-    # genuine fallback case.
+    # genuine fallback case. Skipped when ``SERPER_API_KEY`` is unset.
     if serper is not None:
         providers_attempted += 1
         try:
@@ -198,7 +189,7 @@ async def resolve_website(
         except Exception as exc:  # pragma: no cover - belt + braces
             errors.append(f"serper: {exc}")
 
-    # Tier 4 — SerpAPI Google search (last-resort fallback)
+    # Tier 3 — SerpAPI Google search (canonical fallback)
     # Walks ALL organic results returned by the client (already capped at
     # 10) so a strong-but-not-first hit can still win once the earlier
     # ones get rejected by blocklist / content-type / title checks. The
