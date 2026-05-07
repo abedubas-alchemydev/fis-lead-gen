@@ -82,6 +82,25 @@ async def test_find_company_404_is_clean_miss(hunter: HunterClient) -> None:
 
 
 @respx.mock
+async def test_find_company_400_is_clean_miss_not_provider_error(
+    hunter: HunterClient,
+) -> None:
+    """Hunter's ``/v2/companies/find`` rejects every name-based query
+    with HTTP 400 because it actually expects ``domain``, not
+    ``company``. Until the integration is reworked, the client must
+    treat 400 as a clean miss so the resolver falls through to SerpAPI
+    instead of stamping the result with ``all_providers_errored``."""
+    route = respx.get(_HUNTER_URL).mock(
+        return_value=httpx.Response(400, json={"errors": [{"id": "fake"}]}),
+    )
+
+    result = await hunter.find_company("Acme Securities LLC")
+
+    assert result is None
+    assert route.call_count == 1
+
+
+@respx.mock
 async def test_find_company_empty_payload_returns_none(
     hunter: HunterClient,
 ) -> None:
