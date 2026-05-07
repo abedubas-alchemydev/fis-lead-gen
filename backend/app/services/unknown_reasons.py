@@ -146,6 +146,21 @@ _EXEMPTION_PATTERNS = (
     re.compile(r"footnote\s*74", re.IGNORECASE),
     re.compile(r"\(k\)\s*\(2\)\s*\(ii\)", re.IGNORECASE),
     re.compile(r"on\s+a\s+fully[-_ ]disclosed\s+basis", re.IGNORECASE),
+    # "fully disclosed arrangement / agreement / clearing" — common
+    # phrasing in JBO firms that don't cite Rule 15c3-3 or Footnote 74
+    # explicitly but describe the same exemption shape ("its clearing
+    # firm carries the accounts on a fully disclosed arrangement"). The
+    # narrow noun list keeps the match anchored on a clearing-context
+    # word so we don't over-fire on filings that just happen to use
+    # "fully disclosed" in some other context.
+    re.compile(r"fully[-_ ]disclosed\s+(?:arrangement|agreement|clearing|relationship|basis)", re.IGNORECASE),
+    # Joint Back Office / JBO arrangement language. JBO participants are
+    # always fully disclosed — the BD clears via a JBO partner that
+    # carries the accounts. The two patterns cover the spelled-out form
+    # and the abbreviation; both are common in FOCUS report notes that
+    # acknowledge the clearer without naming them.
+    re.compile(r"joint\s+back\s+office", re.IGNORECASE),
+    re.compile(r"\bJBO\b\s+(?:participant|clearing|agreement|arrangement|firm|partner)", re.IGNORECASE),
 )
 
 
