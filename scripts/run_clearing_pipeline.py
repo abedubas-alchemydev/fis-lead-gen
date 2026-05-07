@@ -149,7 +149,7 @@ async def main() -> None:
     logging.basicConfig(
         level=logging.INFO,
         format="%(asctime)s %(levelname)s %(name)s: %(message)s",
-        stream=sys.stderr,
+        stream=sys.stdout,
     )
 
     args = _parse_args()
