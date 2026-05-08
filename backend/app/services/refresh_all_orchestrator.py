@@ -445,6 +445,33 @@ async def _run_health_check(parent_run_id: int, bd_id: int, trigger_source: str)
                         broker_dealer.dba_names = enriched_record.dba_names
                         changes.append("dba_names")
 
+                # ``branch_count`` and ``business_type`` come off the FINRA
+                # *search* payload, not the Form BD PDF that
+                # ``enrich_with_detail`` parses. Without this extra fetch the
+                # two fields are stuck at whatever ``initial_load`` captured
+                # — sometimes never, for firms FINRA's keyword/alpha sweep
+                # missed. One free HTTP call (FINRA-only, no LLM) closes the
+                # gap so the master-list and detail page reflect current
+                # firm metadata.
+                search_meta = await finra_service.fetch_firm_search_metadata(
+                    broker_dealer.crd_number
+                )
+                if search_meta is not None:
+                    new_branch_count = search_meta.get("branch_count")
+                    if (
+                        new_branch_count is not None
+                        and new_branch_count != broker_dealer.branch_count
+                    ):
+                        broker_dealer.branch_count = new_branch_count
+                        changes.append("branch_count")
+                    new_business_type = search_meta.get("business_type")
+                    if (
+                        new_business_type
+                        and new_business_type != broker_dealer.business_type
+                    ):
+                        broker_dealer.business_type = new_business_type
+                        changes.append("business_type")
+
             new_classification = determine_clearing_classification(broker_dealer.firm_operations_text)
             if broker_dealer.clearing_classification != new_classification:
                 broker_dealer.clearing_classification = new_classification

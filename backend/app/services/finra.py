@@ -232,6 +232,71 @@ class FinraService:
         if detail.formation_date:
             record.formation_date = detail.formation_date
 
+    async def fetch_firm_search_metadata(
+        self,
+        crd_number: str,
+    ) -> dict[str, object] | None:
+        """Fetch fresh ``branch_count`` + ``business_type`` for a single firm.
+
+        These two fields come off FINRA's BrokerCheck *search* payload —
+        not the Form BD PDF that ``enrich_with_detail`` parses, and not
+        the substitute ``/search/firm/{crd}`` endpoint
+        :meth:`fetch_website_by_crd` uses (Cloudflare-era replacement
+        which dropped the Form BD fields). The original keyword/alpha
+        search endpoint :meth:`_search` still surfaces ``firm_branches_count``
+        and ``firm_type``, so this method runs a CRD-targeted search and
+        builds a fresh metadata dict from the matching hit.
+
+        Returns a ``{"branch_count": int|None, "business_type": str|None}``
+        dict on success, or ``None`` if FINRA has no active hit for the
+        CRD or the call fails after retries. Either entry value can be
+        ``None`` when the source field is missing — caller should apply
+        only truthy / non-None values to avoid overwriting a present
+        BD column with a transient miss.
+
+        Free + cheap (~1 HTTP call, FINRA rate-limited at 2 req/s).
+        Opens its own ``httpx.AsyncClient`` so the orchestrator's
+        per-firm runner can call it without managing a client.
+        """
+        async with httpx.AsyncClient(
+            timeout=settings.finra_request_timeout_seconds,
+            follow_redirects=True,
+            headers=BROKERCHECK_HEADERS,
+        ) as client:
+            try:
+                hits, _ = await self._search(
+                    client, query=str(crd_number), start=0, rows=20
+                )
+            except (RuntimeError, httpx.HTTPError):
+                return None
+
+            for hit in hits:
+                source = hit.get("_source") or hit.get("source")
+                if not isinstance(source, dict):
+                    continue
+                if str(source.get("firm_source_id") or "").strip() != str(crd_number).strip():
+                    continue
+
+                branch_count_raw = source.get("firm_branches_count")
+                try:
+                    branch_count: int | None = (
+                        int(branch_count_raw) if branch_count_raw is not None else None
+                    )
+                except (TypeError, ValueError):
+                    branch_count = None
+
+                business_type = self._clean_text(
+                    source.get("firm_ia_full_sec_number")
+                    or source.get("firm_type")
+                )
+
+                return {
+                    "branch_count": branch_count,
+                    "business_type": business_type,
+                }
+
+            return None
+
     async def fetch_website_by_crd(
         self,
         client: httpx.AsyncClient,
