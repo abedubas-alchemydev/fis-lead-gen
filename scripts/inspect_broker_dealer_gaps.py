@@ -37,7 +37,7 @@ TARGET_COLUMNS: list[tuple[str, str, str]] = [
     ("executive_officers", "executive_officers", ""),
     ("direct_owners", "direct_owners", ""),
     ("types_of_business", "types_of_business", ""),
-    ("website", "website", "[owned by separate backfill]"),
+    ("website", "website", ""),
 ]
 
 
@@ -62,6 +62,7 @@ async def main() -> None:
     from app.services.refresh_all_orchestrator import (
         SUB_ENRICH,
         SUB_HEALTH_CHECK,
+        SUB_REFRESH_CLEARING,
         SUB_REFRESH_FILINGS,
         SUB_REFRESH_FINANCIALS,
         SUB_RESOLVE_WEBSITE,
@@ -96,14 +97,16 @@ async def main() -> None:
     SUB_LABELS = {
         SUB_REFRESH_FINANCIALS: "refresh-financials",
         SUB_HEALTH_CHECK: "health-check",
+        SUB_REFRESH_CLEARING: "refresh-clearing",
         SUB_ENRICH: "enrich (Apollo contacts)",
         SUB_REFRESH_FILINGS: "refresh-filings",
+        SUB_RESOLVE_WEBSITE: "resolve-website",
     }
 
     for bd in bd_rows:
         has_contacts = bd.id in contact_ids
         decision = decide_pipelines(bd, has_contacts, scope="all")
-        to_run = tuple(p for p in decision.to_run if p != SUB_RESOLVE_WEBSITE)
+        to_run = decision.to_run
         for sub in to_run:
             if sub in SUB_LABELS:
                 fire_counts[sub] += 1
@@ -153,7 +156,6 @@ async def main() -> None:
     print("---- Sub-pipelines the bulk gap-fill would fire ----")
     for sub, label in SUB_LABELS.items():
         print(f"  {label:<28} {fire_counts[sub]:>6,} BDs")
-    print(f"  {'resolve-website':<28} [excluded - owned by parallel backfill]")
     print()
     print("---- Coverage by lead priority ----")
     for prio in ["hot", "warm", "cold", None]:

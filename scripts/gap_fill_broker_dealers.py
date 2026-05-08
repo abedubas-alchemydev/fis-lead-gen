@@ -7,8 +7,11 @@ NULL, and fires the corresponding sub-pipelines via the existing
 ``last_gap_fill_attempt_at`` is within the last ``COOLDOWN_DAYS`` so
 sources that genuinely have no value aren't re-queried every pass.
 
-``resolve-website`` is excluded unconditionally — a separate website
-backfill owns that pipeline.
+All six sub-pipelines participate — financials, health-check
+(FINRA Form BD + search metadata), clearing extraction, contact
+enrichment, filings refresh, and website resolution. ``decide_pipelines``
+gates each on its target field being NULL, so a sub-pipeline only
+fires when there's actually something for it to fill.
 
 Designed to run unattended for hours. Interruptible with Ctrl+C; the
 cooldown stamp is set per-BD so a rerun resumes automatically.
@@ -55,6 +58,7 @@ async def main() -> None:
     from app.services.refresh_all_orchestrator import (
         SUB_ENRICH,
         SUB_HEALTH_CHECK,
+        SUB_REFRESH_CLEARING,
         SUB_REFRESH_FILINGS,
         SUB_REFRESH_FINANCIALS,
         SUB_RESOLVE_WEBSITE,
@@ -66,8 +70,10 @@ async def main() -> None:
     sub_label = {
         SUB_REFRESH_FINANCIALS: "financials",
         SUB_HEALTH_CHECK: "health-check",
+        SUB_REFRESH_CLEARING: "clearing",
         SUB_ENRICH: "enrich",
         SUB_REFRESH_FILINGS: "filings",
+        SUB_RESOLVE_WEBSITE: "website",
     }
 
     cutoff = datetime.now(timezone.utc) - timedelta(days=COOLDOWN_DAYS)
@@ -104,7 +110,7 @@ async def main() -> None:
         print("No eligible broker-dealers (all stamped within cooldown).")
         return
 
-    print(f"Gap-fill: {total_eligible:,} eligible BDs (cooldown = {COOLDOWN_DAYS}d, website excluded).")
+    print(f"Gap-fill: {total_eligible:,} eligible BDs (cooldown = {COOLDOWN_DAYS}d, all sub-pipelines included).")
     print()
 
     processed = 0
@@ -118,10 +124,8 @@ async def main() -> None:
         for idx, bd in enumerate(eligible, start=1):
             has_contacts = bd.id in contact_ids
             decision = decide_pipelines(bd, has_contacts, scope="all")
-            to_run = tuple(p for p in decision.to_run if p != SUB_RESOLVE_WEBSITE)
-            to_skip = tuple(decision.to_skip) + (
-                (SUB_RESOLVE_WEBSITE,) if SUB_RESOLVE_WEBSITE in decision.to_run else ()
-            )
+            to_run = decision.to_run
+            to_skip = decision.to_skip
 
             tag = f"[{idx:>5}/{total_eligible:>5}]"
             name_short = (bd.name or "")[:38]
@@ -134,7 +138,7 @@ async def main() -> None:
                         fresh.last_gap_fill_attempt_at = datetime.now(timezone.utc)
                         await db.commit()
                 skipped_noop += 1
-                print(f"{tag} BD {bd.id:<6} {name_short:<38}  noop (all targets present or excluded)")
+                print(f"{tag} BD {bd.id:<6} {name_short:<38}  noop (all targets already present)")
                 continue
 
             # Create parent PipelineRun (status=queued).
