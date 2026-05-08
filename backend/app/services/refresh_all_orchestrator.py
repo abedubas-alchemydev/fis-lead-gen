@@ -435,6 +435,15 @@ async def _run_health_check(parent_run_id: int, bd_id: int, trigger_source: str)
                     if enriched_record.formation_date and enriched_record.formation_date != broker_dealer.formation_date:
                         broker_dealer.formation_date = enriched_record.formation_date
                         changes.append("formation_date")
+                    # ``dba_names`` was wired through FinraService.enrich_with_detail
+                    # in commit 4c658f8 but never applied here, so per-firm
+                    # refresh-all couldn't backfill firms whose initial_load
+                    # missed their ``firm_other_names``. Same truthiness gate
+                    # the rest of the block uses — empty list / None won't
+                    # overwrite a present value.
+                    if enriched_record.dba_names and enriched_record.dba_names != broker_dealer.dba_names:
+                        broker_dealer.dba_names = enriched_record.dba_names
+                        changes.append("dba_names")
 
             new_classification = determine_clearing_classification(broker_dealer.firm_operations_text)
             if broker_dealer.clearing_classification != new_classification:
