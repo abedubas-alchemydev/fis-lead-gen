@@ -267,7 +267,7 @@ async def test_all_gates_open_returns_202_with_all_four_pipelines(
     assert parent.status == "queued"
     assert f'"bd_id": {bd.id}' in parent.notes
 
-    # Background task scheduled with all 4 sub-pipelines. Filings is
+    # Background task scheduled with all open sub-pipelines. Filings is
     # skipped because the fixture has no cik — without one we have no
     # way to query EDGAR.
     assert len(stub_background) == 1
@@ -277,6 +277,7 @@ async def test_all_gates_open_returns_202_with_all_four_pipelines(
         "financial_pdf_pipeline_single",
         "broker_dealer_resolve_website",
         "broker_dealer_health_check",
+        "broker_dealer_refresh_clearing",
         "broker_dealer_enrich_contacts",
     }
     assert set(scheduled["pipelines_to_skip"]) == {"broker_dealer_refresh_filings"}
@@ -326,6 +327,7 @@ async def test_only_website_missing_runs_only_resolve_website(
     assert set(scheduled["pipelines_to_skip"]) == {
         "financial_pdf_pipeline_single",
         "broker_dealer_health_check",
+        "broker_dealer_refresh_clearing",
         "broker_dealer_enrich_contacts",
         "broker_dealer_refresh_filings",
     }

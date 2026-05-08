@@ -75,6 +75,33 @@ DOMAIN_BLOCKLIST: Final = frozenset(
         "reuters.com",
         "wsj.com",
         "nytimes.com",
+        # Aggregators / blog hosts that rank above small-firm sites and
+        # pass the title-token check because the firm's name appears on
+        # the profile page. Each frequently shows up as a SerpAPI top
+        # result for small/obscure broker-dealers and is never a firm's
+        # primary website.
+        "builtin.com",          # tech jobs aggregator (firm profiles)
+        "wordpress.com",        # subdomain match: ``*.wordpress.com``
+        "zoominfo.com",         # B2B contact/company aggregator
+        "crunchbase.com",       # company directory
+        "pitchbook.com",        # company directory
+        "dnb.com",              # Dun & Bradstreet directory
+        "sifma.org",            # SIFMA member directory
+        "smartadvisormatch.com",  # advisor aggregator
+        "glassdoor.com",        # employer/jobs review aggregator
+        "indeed.com",           # jobs aggregator
+        "yelp.com",             # local-business directory
+        "mapquest.com",         # business directory
+        "yellowpages.com",      # business directory
+        "bbb.org",              # Better Business Bureau directory
+        "opencorporates.com",   # corporate-records directory
+        "lei-lookup.com",       # LEI registry lookup
+        "cbinsights.com",       # market-intel directory
+        "buzzfile.com",         # business directory
+        "manta.com",            # business directory
+        "leadiq.com",           # B2B contact aggregator
+        "advisor.investedbetter.com",  # advisor aggregator
+        "getprospect.com",      # B2B contact aggregator
     }
 )
 
@@ -116,12 +143,149 @@ _NON_HOMEPAGE_PATH_KEYWORDS: Final = (
     "/record/",
     "/records/",
     "/profile/",
+    # Aggregator / directory URL shapes — these patterns are how
+    # third-party sites slot a firm-named profile under a parent
+    # domain. The parent domain may not itself be on the blocklist
+    # (e.g., a smaller advisor-network site), but a path of this shape
+    # makes clear the URL isn't the firm's homepage. Concrete repros:
+    # ``getprospect.com/business-directory/<slug>``,
+    # ``advisor.investedbetter.com/firm/<slug>-<id>``,
+    # ``flaia.org/companies/<slug>``,
+    # ``thegalbreathgroup.com/alden`` (not caught here — needs a
+    # different signal — but listed for awareness).
+    "/firm/",
+    "/firms/",
+    "/company/",
+    "/companies/",
+    "/business/",
+    "/business-directory/",
+    "/listing/",
+    "/listings/",
+    "/leadership/",
+    "/team/",
+    "/people/",
+    "/directory/",
 )
 
 
 _VALIDATE_TIMEOUT_S: Final = 5.0
 _FIRM_TOKEN_LEN: Final = 8
 _NON_ALPHA_RE: Final = re.compile(r"[^a-z]")
+_WORD_RE: Final = re.compile(r"[A-Za-z]+")
+
+# Words ignored when generating acronym + per-word tokens. Mirrors
+# ``normalization._ENTITY_NOISE_TOKENS`` and adds the BD-specific
+# corporate-suffix tokens (``group``, ``associates``, ``advisors``, etc.)
+# that would otherwise pollute acronyms — e.g., for ``ATLAS STRATEGIC
+# ADVISORS, LLC`` we want acronym ``"as"`` rejected (too short / too
+# generic) rather than ``"asa"`` which the suffix word would otherwise
+# generate. Kept as a local constant to avoid coupling resolver
+# heuristics to the entity-normalization module's noise list.
+_ENTITY_NOISE: Final = frozenset({
+    "inc", "llc", "lp", "lp.", "corp", "corporation", "company", "co",
+    "ltd", "limited", "plc", "the", "of", "and", "a", "an",
+    "group", "associates", "partners", "holdings",
+    "capital", "securities", "advisors", "advisory",
+    "services", "management", "investments", "investment",
+    "financial", "trading",
+})
+
+# Minimum length for an acronym to be eligible as a domain-anchor
+# token. Two-letter acronyms (e.g., ``"AC"`` for ``ANTA CAPITAL``) are
+# too generic — they trivially match the start of any segment beginning
+# with those letters. Three+ chars meaningfully constrain the anchor.
+_MIN_ACRONYM_LEN: Final = 3
+
+# Minimum length for a single significant-word prefix to be eligible
+# as a domain-anchor token. ``ATLAS`` is 5 chars → eligible; ``IT`` /
+# ``MA`` / common 2-3 char fillers are not.
+_MIN_WORD_LEN: Final = 5
+
+# Browser User-Agent for the validator's HEAD/GET reachability check.
+# Many firm sites sit behind Cloudflare / WAFs that 403 the default
+# ``python-httpx/X.X`` UA on the assumption it's a bot. Concrete
+# observed: ``austinatlantic.com`` 403'd on python-httpx but 200'd on
+# Chrome's UA. Identifying as a real browser is a legitimate
+# reachability check — the validator only inspects HTTP status, not
+# page content, so there's no "scrape" semantic at play.
+_BROWSER_USER_AGENT: Final = (
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+    "AppleWebKit/537.36 (KHTML, like Gecko) "
+    "Chrome/120.0.0.0 Safari/537.36"
+)
+
+# Maximum body bytes to read when extracting a page <title> for the
+# title-soft-match fallback. The tag is essentially always within the
+# first few KB; cap to avoid pulling multi-MB pages when validating.
+_TITLE_FETCH_BODY_CAP: Final = 65_536
+
+# Compiled extractor for the first ``<title>`` element. Permissive on
+# attributes (e.g., ``<title lang="en">``) and case (HTML allows any
+# combination). Multiline since real pages wrap the body across lines.
+_TITLE_RE: Final = re.compile(
+    r"<title[^>]*>([^<]+)</title>", re.IGNORECASE | re.DOTALL
+)
+
+# URL paths that count as "homepage-like" for the title-soft-match
+# fallback admit gate. Matches ``/``, ``/about``, ``/home``, ``/index``,
+# ``/welcome``, etc. — single-segment, alphabetic, ≤16 chars. Anything
+# more specific is rejected: a page at ``/firm/123`` or
+# ``/news/<slug>`` is by definition not the firm's homepage and so
+# title-mention of the firm name doesn't make it the firm's site.
+_HOMEPAGE_PATH_RE: Final = re.compile(r"^/?[a-z]{0,16}/?$", re.IGNORECASE)
+
+
+def _is_homepage_like_path(url: str) -> bool:
+    """Return True when ``url``'s path is the homepage or a single
+    short alphabetic segment (``/``, ``/about``, ``/home``, etc.).
+
+    Used by the title-soft-match validator path. Critical guard against
+    the historical false-positive cohort: news articles, deal-
+    announcement pages, LEI registries, and aggregator profile pages
+    that mention the firm by name in their ``<title>`` but whose path
+    has slugs / ids / multi-segment depth.
+    """
+    parsed = urlparse(url)
+    path = parsed.path or "/"
+    if parsed.query or parsed.fragment:
+        return False
+    return bool(_HOMEPAGE_PATH_RE.match(path))
+
+
+async def _title_matches_firm(
+    client: httpx.AsyncClient,
+    url: str,
+    significant_words: list[str],
+) -> bool:
+    """GET ``url``, parse the ``<title>`` tag, and return True when it
+    contains any significant firm word.
+
+    Body is capped at ``_TITLE_FETCH_BODY_CAP`` bytes — the title tag
+    is essentially always within the first few KB and we don't need
+    the rest. Uses the same client as the HEAD check so the browser
+    UA / redirect / timeout settings are inherited.
+
+    Significant-word match is alpha-stripped + lowercased on both
+    sides. Avoids false matches on punctuation but doesn't try fuzzy
+    matching — the caller's word list is already filtered to ≥5 chars
+    for the same reason (under 5 chars is over-loose).
+    """
+    if not significant_words:
+        return False
+    try:
+        resp = await client.get(url)
+        if resp.status_code != 200:
+            return False
+        body = resp.text[:_TITLE_FETCH_BODY_CAP]
+    except httpx.HTTPError:
+        return False
+    match = _TITLE_RE.search(body)
+    if not match:
+        return False
+    title = _NON_ALPHA_RE.sub("", match.group(1).lower())
+    if not title:
+        return False
+    return any(word in title for word in significant_words)
 
 
 def is_blocklisted_host(url: str | None) -> bool:
@@ -156,7 +320,7 @@ def is_blocklisted_host(url: str | None) -> bool:
 async def resolve_website(
     firm_name: str,
     crd: str | None,
-    apollo: ApolloClient,
+    apollo: ApolloClient | None,
     serpapi: SerpAPIClient | None = None,
     serper: SerperClient | None = None,
     dba_names: list[str] | None = None,
@@ -199,21 +363,39 @@ async def resolve_website(
     primary search tier when serper.dev is unset).
     """
     firm_tokens = _firm_tokens(firm_name, dba_names)
+    # Significant-word list used by the validator's title-soft-match
+    # fallback path: any word from the legal name (or any DBA) of length
+    # ≥ ``_MIN_WORD_LEN``, dropping corporate-suffix stop-words. Empty
+    # for very short / suffix-heavy firm names — those firms simply
+    # can't get the title-match safety net.
+    significant_words: list[str] = []
+    for name in (firm_name, *(dba_names or [])):
+        if not name:
+            continue
+        for word in _significant_words(name):
+            if len(word) >= _MIN_WORD_LEN and word not in significant_words:
+                significant_words.append(word)
     errors: list[str] = []
     providers_attempted = 0
 
-    # Tier 1 — Apollo organizations/search
-    providers_attempted += 1
-    try:
-        org = await apollo.search_organization(firm_name, crd)
-        if org is not None:
-            candidate = _candidate_from_apollo(org)
-            if candidate and await _validate(candidate, firm_tokens):
-                return (candidate, "apollo", None)
-    except ApolloError as exc:
-        errors.append(f"apollo: {exc}")
-    except Exception as exc:  # pragma: no cover - belt + braces
-        errors.append(f"apollo: {exc}")
+    # Tier 1 — Apollo organizations/search (skipped when ``apollo`` is None
+    # — bulk backfills can opt out via ``--no-apollo`` to run SerpAPI-only).
+    if apollo is not None:
+        providers_attempted += 1
+        try:
+            org = await apollo.search_organization(firm_name, crd)
+            if org is not None:
+                candidate = _candidate_from_apollo(org)
+                if candidate and await _validate(
+                    candidate,
+                    firm_tokens,
+                    significant_words=significant_words,
+                ):
+                    return (candidate, "apollo", None)
+        except ApolloError as exc:
+            errors.append(f"apollo: {exc}")
+        except Exception as exc:  # pragma: no cover - belt + braces
+            errors.append(f"apollo: {exc}")
 
     # Tier 2 — serper.dev Google search (optional, ahead of SerpAPI)
     # Walks ALL organic results returned by the client (already capped at
@@ -226,7 +408,14 @@ async def resolve_website(
         try:
             results = await serper.search_firm(firm_name)
             for result in results:
-                if await _validate(result.url, firm_tokens):
+                if await _validate(
+                    result.url,
+                    firm_tokens,
+                    high_confidence=getattr(
+                        result, "is_high_confidence", False
+                    ),
+                    significant_words=significant_words,
+                ):
                     return (result.url, "serper", None)
         except SerperError as exc:
             errors.append(f"serper: {exc}")
@@ -248,7 +437,14 @@ async def resolve_website(
         try:
             results = await serpapi.search_firm(firm_name)
             for result in results:
-                if await _validate(result.url, firm_tokens):
+                if await _validate(
+                    result.url,
+                    firm_tokens,
+                    high_confidence=getattr(
+                        result, "is_high_confidence", False
+                    ),
+                    significant_words=significant_words,
+                ):
                     return (result.url, "serpapi", None)
         except SerpAPIError as exc:
             errors.append(f"serpapi: {exc}")
@@ -294,13 +490,77 @@ def _firm_token(firm_name: str) -> str:
     return _NON_ALPHA_RE.sub("", firm_name.lower())[:_FIRM_TOKEN_LEN]
 
 
+def _significant_words(firm_name: str) -> list[str]:
+    """Return the alphabetic words in ``firm_name`` minus stop-words /
+    corporate suffixes. Used by the acronym + per-word token generators."""
+    return [
+        w.lower()
+        for w in _WORD_RE.findall(firm_name)
+        if w.lower() not in _ENTITY_NOISE
+    ]
+
+
+def _firm_acronym_token(firm_name: str) -> str | None:
+    """Generate a brand-acronym token from the firm's significant words.
+
+    Catches firms operating at brand-domain abbreviations that don't
+    share a prefix with the legal name. Concrete repro:
+    ``INTERNATIONAL ASSETS ADVISORY, LLC`` → significant words
+    ``[international, assets, advisory]`` → acronym ``"iaa"`` → matches
+    domain segment ``"iaac"`` of the firm's actual site ``iaac.com``,
+    which the legal-name token ``"internat"`` could never anchor on.
+
+    Requires:
+    - 3+ significant words (otherwise the acronym derives from too thin
+      a signal — a 2-word firm produces a 2-char acronym).
+    - Final acronym length >= ``_MIN_ACRONYM_LEN`` to bar trivially
+      short matches.
+    """
+    significant = _significant_words(firm_name)
+    if len(significant) < _MIN_ACRONYM_LEN:
+        return None
+    acronym = "".join(w[0] for w in significant)
+    return acronym if len(acronym) >= _MIN_ACRONYM_LEN else None
+
+
+def _firm_word_tokens(firm_name: str) -> list[str]:
+    """Generate per-significant-word tokens (each truncated to 8 chars).
+
+    Catches firms whose brand domain matches a single word from the
+    firm name even when the legal-name 8-char prefix doesn't anchor.
+    Concrete repro: ``ATLAS STRATEGIC ADVISORS, LLC`` → words
+    ``[atlas, strategic, advisors]`` (advisors filtered out as a
+    corporate suffix) → tokens ``["atlas", "strategi"]`` — the
+    ``"atlas"`` token anchors against ``atlas.com`` or
+    ``atlas-advisors.com``.
+
+    Each word must be ``_MIN_WORD_LEN`` characters or longer to skip
+    fillers (``of``, ``and``, ``the``) and 3-4 char strings that would
+    over-match.
+    """
+    return [
+        word[:_FIRM_TOKEN_LEN]
+        for word in _significant_words(firm_name)
+        if len(word) >= _MIN_WORD_LEN
+    ]
+
+
 def _firm_tokens(
     firm_name: str, dba_names: list[str] | None
 ) -> list[str]:
     """Build the candidate-token set from the firm's legal name and any
     "doing business as" trade names.
 
-    Returns a deduplicated list of non-empty 8-char tokens. The validator
+    Combines THREE generators per name to widen the domain-anchor net:
+    1. The 8-char alpha prefix of the full name (``_firm_token``).
+    2. The acronym of the significant words (``_firm_acronym_token``)
+       — catches brand-acronym domains like ``iaac.com`` for
+       ``INTERNATIONAL ASSETS ADVISORY``.
+    3. Per-significant-word prefixes (``_firm_word_tokens``) — catches
+       single-word brand domains like ``atlas.com`` for ``ATLAS
+       STRATEGIC ADVISORS``.
+
+    Returns a deduplicated list of non-empty tokens. The validator
     admits a candidate if its domain anchors on **any** of these tokens,
     so a firm registered as ``303 ALTERNATIVES, LLC`` (legal-name token
     ``"alternat"``) operating at ``303capitalmarkets.com`` (DBA "303Capital
@@ -310,49 +570,71 @@ def _firm_tokens(
     candidates = [firm_name, *(dba_names or [])]
     tokens: list[str] = []
     seen: set[str] = set()
-    for name in candidates:
-        if not name:
-            continue
-        token = _firm_token(name)
+
+    def _add(token: str | None) -> None:
         if token and token not in seen:
             seen.add(token)
             tokens.append(token)
+
+    for name in candidates:
+        if not name:
+            continue
+        _add(_firm_token(name))
+        _add(_firm_acronym_token(name))
+        for word_token in _firm_word_tokens(name):
+            _add(word_token)
     return tokens
 
 
-async def _validate(url: str, firm_tokens: list[str]) -> bool:
-    """Domain-anchor + reachability + content-type validation.
+async def _validate(
+    url: str,
+    firm_tokens: list[str],
+    *,
+    high_confidence: bool = False,
+    significant_words: list[str] | None = None,
+) -> bool:
+    """Reachability + blocklist + (domain-anchor OR title-soft-match) gate.
 
-    The single admit gate is the **domain anchor**: at least one
-    ``.``- / ``-``-delimited segment of the candidate's final
-    (post-redirect) hostname must align to **any** of the firm's tokens
-    via ``_domain_segment_anchors_on_firm`` (forward or truncated-brand
-    direction). The token list typically combines the firm's legal name
-    and any "doing business as" trade names, so a firm registered as
-    ``303 ALTERNATIVES, LLC`` and operating at ``303capitalmarkets.com``
-    can admit on the DBA token even when the legal-name token misses.
+    Three admit paths, evaluated in order after the pre-domain gates
+    (blocklist / path-keyword / HEAD non-2xx) all clear:
 
-    Title-match-only used to be an admit path on its own but it admitted
-    news articles, deal-announcement pages, LEI registries, and third-
-    party advisor directories that happened to mention the firm by name
-    — concretely it stamped ``cfo.com/news/...`` on 777 SECURITIES,
-    ``hl.com/about-us/transactions/...`` on 3WIRE ADVISORY,
-    ``lei-lookup.com/record/...`` on 4170 SECURITIES, and
-    ``retirementplanning.net/.../<slug>/<id>`` on ACA/PRUDENT INVESTORS.
-    With the title-only admit gone, the page's content / title is
-    informational only — it can't grant admission without a matching
-    domain.
+    1. **High-confidence bypass** — when ``high_confidence`` is True the
+       caller is asserting Google's own entity resolution has identified
+       the URL as the firm's site (knowledge-graph or answer-box panel).
+       Reachability + blocklist + path-guard still apply, but the
+       domain-anchor heuristic is skipped: we trust Google to have done
+       the firm-to-site mapping better than our 8-char prefix could.
 
-    Pre-domain gates that still apply (reject before the domain
-    check ever runs): host blocklist (suffix-match on
+    2. **Domain anchor** — the regular path. The candidate's final
+       (post-redirect) hostname must align to **any** of the firm's
+       tokens via ``_domain_segment_anchors_on_firm`` (forward or
+       truncated-brand direction). Tokens combine legal name + DBA names
+       + acronym + per-significant-word prefixes.
+
+    3. **Title-soft-match fallback** — only runs when (1) is False, (2)
+       missed, **and** ``significant_words`` is non-empty. Re-fetches
+       the page (GET; HEAD doesn't carry a body), parses the ``<title>``
+       tag, and admits if the title contains any significant word ≥5
+       chars. The candidate's URL path must also be "homepage-like"
+       (root or single short alphabetic segment) — this guards against
+       the historical false-positive class where news / transaction /
+       LEI-record pages mentioned the firm by name in their title.
+
+    Pre-domain gates that always apply: host blocklist (suffix-match on
     ``DOMAIN_BLOCKLIST``), file-download path (``.pdf``/``.doc``/etc.),
     content-page path (``/news/``, ``/transactions/``, ``/lookup/``,
-    etc.), HEAD non-2xx.
+    ``/firm/``, etc.), HEAD non-2xx (with 403/405 → GET fallback).
 
-    Returns ``False`` on any network error or any of the above gate
-    rejections, including an empty ``firm_tokens`` list.
+    Returns ``False`` on any network error or any gate rejection. Also
+    returns ``False`` when neither ``firm_tokens`` nor ``high_confidence``
+    nor ``significant_words`` would let the candidate be admitted.
     """
-    if not url or not firm_tokens:
+    if not url:
+        return False
+    # Fast reject before any HTTP I/O when there's no admission path
+    # possible: not high-confidence, no domain-anchor tokens, and no
+    # significant-word list for the title fallback.
+    if not high_confidence and not firm_tokens and not significant_words:
         return False
 
     if (
@@ -369,8 +651,14 @@ async def _validate(url: str, firm_tokens: list[str]) -> bool:
         async with httpx.AsyncClient(
             timeout=_VALIDATE_TIMEOUT_S,
             follow_redirects=True,
+            headers={"User-Agent": _BROWSER_USER_AGENT},
         ) as client:
             head = await client.head(url)
+            # Some servers reject HEAD (405 Method Not Allowed) or block
+            # bot-like HEAD with 403 even when GET goes through. Retry
+            # with GET in those cases so we don't reject reachable sites.
+            if head.status_code in (403, 405):
+                head = await client.get(url)
             if head.status_code not in (200, 301, 302):
                 return False
 
@@ -386,25 +674,37 @@ async def _validate(url: str, firm_tokens: list[str]) -> bool:
             ):
                 return False
             final_host = _hostname(final_url)
-
-            # The single admit gate: the candidate's final
-            # (post-redirect) hostname must anchor on at least one of
-            # the firm's tokens (legal name + any DBA names). The
-            # earlier title-only admit path was the loose one — any
-            # page whose ``<title>`` mentioned the firm by name passed
-            # it, including news articles (``cfo.com/news/...``),
-            # deal-announcement pages (``hl.com/about-us/
-            # transactions/...``), LEI-registry records (``lei-lookup.com/
-            # record/...``), and third-party advisor directories
-            # (``retirementplanning.net/.../firm-slug/<id>``). With
-            # title parsing dropped, the GET request is unnecessary —
-            # HEAD + blocklist + path-keyword + domain-anchor is the
-            # full chain.
             host_to_check = final_host or domain
-            return any(
+
+            # Path 1: high-confidence (Google entity-resolved). Skip the
+            # domain-anchor heuristic — the candidate's source already
+            # encoded the firm-to-site mapping.
+            if high_confidence:
+                return True
+
+            # Path 2: domain anchor on any of the firm tokens.
+            if firm_tokens and any(
                 _domain_segment_anchors_on_firm(host_to_check, token)
                 for token in firm_tokens
-            )
+            ):
+                return True
+
+            # Path 3: title-soft-match. Only when the caller passed a
+            # significant-word list AND the URL path is homepage-like.
+            # Guards against the news/transactions/LEI false-positive
+            # cohort that originally caused title-only admit to be
+            # removed. We re-fetch with GET to read the page body —
+            # HEAD doesn't carry a title.
+            if (
+                significant_words
+                and _is_homepage_like_path(final_url)
+                and await _title_matches_firm(
+                    client, final_url, significant_words
+                )
+            ):
+                return True
+
+            return False
     except httpx.HTTPError as exc:
         logger.info("Website validate failed for %s: %s", url, exc)
         return False

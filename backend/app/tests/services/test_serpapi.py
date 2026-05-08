@@ -130,9 +130,15 @@ async def test_response_trimming_no_api_key_leak() -> None:
 
     assert len(results) == 1
     result = results[0]
-    assert {f for f in result.__dataclass_fields__} == {"url", "domain", "title"}
+    assert {f for f in result.__dataclass_fields__} == {
+        "url",
+        "domain",
+        "title",
+        "is_high_confidence",
+    }
     for field_value in (result.url, result.domain, result.title):
         assert _API_KEY not in field_value
+    assert result.is_high_confidence is False
 
 
 @respx.mock
@@ -179,3 +185,92 @@ async def test_query_string_is_firm_name_only_no_qualifier() -> None:
     sent_query = route.calls[0].request.url.params.get("q")
     assert sent_query == "BANKERS LIFE SECURITIES, INC"
     assert "broker-dealer" not in (sent_query or "")
+
+
+# ──────────────────── knowledge_graph + answer_box parsing ─────────────────
+
+
+@respx.mock
+async def test_knowledge_graph_website_emitted_as_high_confidence() -> None:
+    """Google's knowledge_graph carries an entity-resolved ``website``
+    when the search resolves to a known company. The client must
+    extract it and tag it ``is_high_confidence=True`` so the resolver's
+    validator can skip its domain-anchor heuristic for this candidate.
+    Place at the FRONT of the result list — the high-confidence
+    candidate should be tried before walking organic results."""
+    payload: dict[str, object] = {
+        "knowledge_graph": {
+            "title": "International Assets Advisory, LLC",
+            "website": "https://iaac.com",
+            "type": "Investment service",
+        },
+        "organic_results": [
+            _organic("https://iaac.com/", "International Assets Advisory, LLC"),
+            _organic("https://www.linkedin.com/company/iaac", "LinkedIn"),
+        ],
+    }
+    respx.get(_SEARCH_URL).mock(
+        return_value=httpx.Response(200, json=payload),
+    )
+    client = SerpAPIClient(_API_KEY)
+
+    results = await client.search_firm("International Assets Advisory")
+
+    # Knowledge graph result first.
+    assert results[0].is_high_confidence is True
+    assert results[0].url == "https://iaac.com"
+    assert results[0].domain == "iaac.com"
+    # Organic results follow, tagged is_high_confidence=False.
+    assert all(r.is_high_confidence is False for r in results[1:])
+
+
+@respx.mock
+async def test_answer_box_link_emitted_as_high_confidence() -> None:
+    """Google's answer_box panel carries a direct-answer ``link`` for
+    some queries. Tag as high-confidence (entity-resolved). Place at
+    the front of the list (after knowledge_graph if both present)."""
+    payload: dict[str, object] = {
+        "answer_box": {
+            "title": "Some Firm Inc.",
+            "link": "https://somefirm.example.test/",
+        },
+        "organic_results": [
+            _organic("https://somefirm.example.test/", "Some Firm Inc."),
+        ],
+    }
+    respx.get(_SEARCH_URL).mock(
+        return_value=httpx.Response(200, json=payload),
+    )
+    client = SerpAPIClient(_API_KEY)
+
+    results = await client.search_firm("Some Firm Inc.")
+
+    # Answer box first, marked high-confidence.
+    assert results[0].is_high_confidence is True
+    assert results[0].url == "https://somefirm.example.test/"
+
+
+@respx.mock
+async def test_knowledge_graph_missing_website_skipped() -> None:
+    """A knowledge_graph block without a ``website`` field shouldn't
+    emit a SerpResult — fall through to organic_results only."""
+    payload: dict[str, object] = {
+        "knowledge_graph": {
+            "title": "Some Firm",
+            "type": "Investment service",
+            # No "website" key.
+        },
+        "organic_results": [
+            _organic("https://www.example.test/", "Some Firm"),
+        ],
+    }
+    respx.get(_SEARCH_URL).mock(
+        return_value=httpx.Response(200, json=payload),
+    )
+    client = SerpAPIClient(_API_KEY)
+
+    results = await client.search_firm("Some Firm")
+
+    assert len(results) == 1
+    assert results[0].is_high_confidence is False
+    assert results[0].url == "https://www.example.test/"

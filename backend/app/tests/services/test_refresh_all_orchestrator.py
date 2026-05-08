@@ -23,6 +23,7 @@ from app.models.broker_dealer import BrokerDealer
 from app.services.refresh_all_orchestrator import (
     SUB_ENRICH,
     SUB_HEALTH_CHECK,
+    SUB_REFRESH_CLEARING,
     SUB_REFRESH_FILINGS,
     SUB_REFRESH_FINANCIALS,
     SUB_RESOLVE_WEBSITE,
@@ -56,7 +57,7 @@ def _bd(**fields: Any) -> BrokerDealer:
 
 
 def test_default_scope_all_gates_open_no_cik_filings_skipped() -> None:
-    """Fully-empty firm with no CIK → 4 originals open, filings skipped
+    """Fully-empty firm with no CIK → all open gates run, filings skipped
     (no CIK = nothing to query EDGAR with)."""
     bd = _bd()
     decision = decide_pipelines(bd, has_contacts=False)
@@ -65,6 +66,7 @@ def test_default_scope_all_gates_open_no_cik_filings_skipped() -> None:
         SUB_REFRESH_FINANCIALS,
         SUB_RESOLVE_WEBSITE,
         SUB_HEALTH_CHECK,
+        SUB_REFRESH_CLEARING,
         SUB_ENRICH,
     }
     assert set(decision.to_skip) == {SUB_REFRESH_FILINGS}
@@ -79,6 +81,7 @@ def test_default_scope_all_gates_open_with_cik_filings_included() -> None:
         SUB_REFRESH_FINANCIALS,
         SUB_RESOLVE_WEBSITE,
         SUB_HEALTH_CHECK,
+        SUB_REFRESH_CLEARING,
         SUB_ENRICH,
         SUB_REFRESH_FILINGS,
     }
@@ -105,6 +108,7 @@ def test_default_scope_already_complete_returns_empty_to_run() -> None:
         SUB_REFRESH_FINANCIALS,
         SUB_RESOLVE_WEBSITE,
         SUB_HEALTH_CHECK,
+        SUB_REFRESH_CLEARING,
         SUB_ENRICH,
         SUB_REFRESH_FILINGS,
     }
@@ -123,10 +127,11 @@ def test_list_only_force_skips_website_and_contacts() -> None:
     assert SUB_RESOLVE_WEBSITE in decision.to_skip
     assert SUB_ENRICH not in decision.to_run
     assert SUB_ENRICH in decision.to_skip
-    # Three list-view gates should still be open.
+    # All list-view gates should still be open.
     assert set(decision.to_run) == {
         SUB_REFRESH_FINANCIALS,
         SUB_HEALTH_CHECK,
+        SUB_REFRESH_CLEARING,
         SUB_REFRESH_FILINGS,
     }
 
@@ -149,11 +154,12 @@ def test_list_only_respects_closed_list_gates() -> None:
 
     # No list-view work to do.
     assert decision.to_run == ()
-    # Website + contacts force-skipped; the three list gates closed naturally.
+    # Website + contacts force-skipped; the list gates closed naturally.
     assert set(decision.to_skip) == {
         SUB_REFRESH_FINANCIALS,
         SUB_RESOLVE_WEBSITE,
         SUB_HEALTH_CHECK,
+        SUB_REFRESH_CLEARING,
         SUB_ENRICH,
         SUB_REFRESH_FILINGS,
     }
