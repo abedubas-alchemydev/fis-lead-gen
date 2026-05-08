@@ -293,41 +293,19 @@ class InvestmentAdvisorRepository:
     ) -> int:
         """Idempotent CRD-keyed upsert (insert-or-update by ``crd_number``).
 
-        ``crd_number`` is indexed but not uniquely-constrained (see
-        migration 0030 — kept loose so bulk imports tolerate occasional
-        duplicate rows mid-flight). That rules out
-        ``ON CONFLICT (crd_number) DO UPDATE``; instead we mirror BD's
-        ``upsert_many`` no-CIK path: select existing CRDs in one query,
-        then INSERT or UPDATE per record. Caller is responsible for
-        ``await db.commit()``.
+        Migration 0035 promoted ``ix_investment_advisors_crd_number`` to
+        a partial unique index (``WHERE crd_number IS NOT NULL``) so a
+        single ``INSERT ... ON CONFLICT (crd_number) DO UPDATE`` covers
+        both branches in one round trip per batch. ``id`` and
+        ``created_at`` are excluded from the UPDATE set so an upsert
+        cannot rewrite the surrogate key or the original-insertion
+        timestamp. Caller commits.
         """
 
         if not records:
             return 0
 
-        crds = [r["crd_number"] for r in records if r.get("crd_number")]
-        existing_stmt = select(InvestmentAdvisor.crd_number).where(
-            InvestmentAdvisor.crd_number.in_(crds)
-        )
-        existing = set((await db.execute(existing_stmt)).scalars().all())
-
-        for record in records:
-            crd = record.get("crd_number")
-            if crd and crd in existing:
-                update_fields = {
-                    k: v
-                    for k, v in record.items()
-                    if k not in {"crd_number", "id", "created_at"}
-                }
-                await db.execute(
-                    InvestmentAdvisor.__table__.update()
-                    .where(InvestmentAdvisor.crd_number == crd)
-                    .values(**update_fields)
-                )
-            else:
-                await db.execute(insert(InvestmentAdvisor).values(record))
-
-        return len(records)
+        return await _bulk_upsert_by_crd(db, records)
 
     async def upsert_many(
         self,
@@ -336,11 +314,11 @@ class InvestmentAdvisorRepository:
     ) -> int:
         """Bulk CRD-keyed upsert from the IAPD ingestion pipeline.
 
-        Mirrors ``BrokerDealerRepository.upsert_many``'s no-CIK path
-        (select existing keys → branch insert vs update per record)
-        because ``crd_number`` is non-unique-indexed and can't drive
-        ``ON CONFLICT``. Splits the input into batches of 500 to keep
-        the existing-CRD set query bounded.
+        Single ``INSERT ... ON CONFLICT (crd_number) DO UPDATE`` per
+        batch of 500, matching the partial unique index added in
+        migration 0035. Records without a ``crd_number`` are dropped
+        upstream by ``advisor_merge.py``, so the conflict target is
+        always populated for rows that reach this path.
 
         Caller commits.
         """
@@ -348,35 +326,57 @@ class InvestmentAdvisorRepository:
         if not records:
             return 0
 
-        total = 0
-        batch_size = 500
-        for start in range(0, len(records), batch_size):
-            batch = records[start : start + batch_size]
-            crds = [r.crd_number for r in batch if r.crd_number]
-            if not crds:
-                continue
+        return await _bulk_upsert_by_crd(
+            db, [_record_to_columns(record) for record in records]
+        )
 
-            existing_stmt = select(InvestmentAdvisor.crd_number).where(
-                InvestmentAdvisor.crd_number.in_(crds)
-            )
-            existing = set((await db.execute(existing_stmt)).scalars().all())
 
-            for record in batch:
-                values = _record_to_columns(record)
-                if record.crd_number in existing:
-                    update_fields = {
-                        k: v for k, v in values.items() if k != "crd_number"
-                    }
-                    await db.execute(
-                        InvestmentAdvisor.__table__.update()
-                        .where(InvestmentAdvisor.crd_number == record.crd_number)
-                        .values(**update_fields)
-                    )
-                else:
-                    await db.execute(insert(InvestmentAdvisor).values(**values))
-                total += 1
+# Columns excluded from the ``ON CONFLICT DO UPDATE`` ``set_`` clause: the
+# surrogate key (``id``) must never change once assigned, and the original
+# insertion timestamp (``created_at``) must survive subsequent re-imports.
+# Every other column gets refreshed from EXCLUDED on each upsert pass.
+_UPSERT_PROTECTED_COLUMNS = frozenset({"id", "created_at"})
 
-        return total
+# Match the partial unique index from migration 0035.
+_UPSERT_BATCH_SIZE = 500
+
+
+async def _bulk_upsert_by_crd(
+    db: AsyncSession,
+    rows: list[dict[str, object]],
+) -> int:
+    """Single-statement ``INSERT ... ON CONFLICT (crd_number) DO UPDATE``.
+
+    Chunks the input to avoid pathological prepared-statement blow-up
+    on tens of thousands of rows. The conflict target's ``index_where``
+    matches the partial unique index from migration 0035 so SQLAlchemy
+    inferences the right arbiter without us spelling out a constraint
+    name.
+    """
+
+    total = 0
+    for start in range(0, len(rows), _UPSERT_BATCH_SIZE):
+        batch = [
+            row for row in rows[start : start + _UPSERT_BATCH_SIZE] if row.get("crd_number")
+        ]
+        if not batch:
+            continue
+
+        stmt = insert(InvestmentAdvisor).values(batch)
+        update_set = {
+            column: getattr(stmt.excluded, column)
+            for column in batch[0]
+            if column != "crd_number" and column not in _UPSERT_PROTECTED_COLUMNS
+        }
+        upsert_stmt = stmt.on_conflict_do_update(
+            index_elements=[InvestmentAdvisor.crd_number],
+            index_where=InvestmentAdvisor.crd_number.is_not(None),
+            set_=update_set,
+        )
+        await db.execute(upsert_stmt)
+        total += len(batch)
+
+    return total
 
 
 def _record_to_columns(record: MergedInvestmentAdvisorRecord) -> dict[str, object]:
