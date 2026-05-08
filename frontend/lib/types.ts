@@ -385,6 +385,40 @@ export type CompetitorProviderUpdate = {
   is_active: boolean;
 };
 
+export type ClearingPartnerMergeSuggestionStatus =
+  | "pending"
+  | "accepted"
+  | "rejected";
+
+export type ClearingPartnerMergeSuggestionItem = {
+  id: number;
+  cluster_signature: string;
+  variants: string[];
+  suggested_name: string;
+  min_score: number;
+  status: ClearingPartnerMergeSuggestionStatus;
+  accepted_provider_id: number | null;
+  created_at: string;
+  resolved_at: string | null;
+};
+
+export type ClearingPartnerMergeSuggestionList = {
+  items: ClearingPartnerMergeSuggestionItem[];
+  pending_count: number;
+};
+
+export type ClearingPartnerClusteringRunResponse = {
+  new_pending_count: number;
+  total_pending_count: number;
+};
+
+export type ClearingPartnerMergeSuggestionAccept = {
+  canonical_name: string;
+  display_name: string | null;
+  variants: string[];
+  priority: number;
+};
+
 export type DataRefreshResponse = {
   filing_monitor_run_id: number;
   clearing_pipeline_run_id: number;

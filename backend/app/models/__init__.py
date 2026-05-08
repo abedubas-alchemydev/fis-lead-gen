@@ -4,6 +4,7 @@ from app.models.audit_log import AuditLog
 from app.models.auth import Account, AuthSession, AuthUser, Verification
 from app.models.broker_dealer import BrokerDealer
 from app.models.clearing_arrangement import ClearingArrangement
+from app.models.clearing_partner_merge_suggestion import ClearingPartnerMergeSuggestion
 from app.models.competitor_provider import CompetitorProvider
 from app.models.discovered_email import DiscoveredEmail
 from app.models.email_verification import EmailVerification
@@ -32,6 +33,7 @@ __all__ = [
     "AuthUser",
     "BrokerDealer",
     "ClearingArrangement",
+    "ClearingPartnerMergeSuggestion",
     "CompetitorProvider",
     "DiscoveredEmail",
     "EmailVerification",

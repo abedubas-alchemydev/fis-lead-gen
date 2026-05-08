@@ -76,6 +76,25 @@ def _match_provider(raw: str, providers: list[ProviderEntry]) -> ProviderEntry |
     return None
 
 
+def is_unmatched(raw: str | None, providers: list[ProviderEntry]) -> bool:
+    """True iff `raw` is non-empty and matches no provider in `providers`.
+
+    Companion to ``consolidate_partner`` for callers that need to know
+    whether a value would fall into the "long tail" branch (returned as
+    its own raw text). The clearing-partner clustering pass uses this to
+    skip values that the registry already merges so re-runs don't keep
+    re-suggesting clusters that admin already covered with explicit
+    aliases.
+    """
+
+    if not raw:
+        return False
+    cleaned = raw.strip()
+    if not cleaned:
+        return False
+    return _match_provider(cleaned, providers) is None
+
+
 def consolidate_partner(
     raw: str | None,
     providers: list[ProviderEntry],
