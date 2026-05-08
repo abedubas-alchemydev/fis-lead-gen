@@ -23,6 +23,8 @@ import type {
   ScoringSettingsItem
 } from "@/lib/types";
 
+import { SuggestedMergesCard } from "./suggested-merges-card";
+
 // ── Design tokens — match /dashboard + /master-list + /alerts. ──────────────
 // Soft-card surface uses the same CSS-var palette as kpi-card / alert-feed-card,
 // so light + dark themes both read clean. Fallbacks keep components viewable
@@ -486,6 +488,11 @@ export function PipelineAdminClient() {
           </div>
         </div>
       </div>
+
+      {/* Suggested merges — clusters of long-tail clearing-partner
+          variants that the BE clustering pass found. Accepting a row
+          appends to the Competitors list above. */}
+      <SuggestedMergesCard onAccepted={() => void loadData()} />
     </section>
   );
 }
