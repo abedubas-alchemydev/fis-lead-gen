@@ -1,5 +1,7 @@
 "use client";
 
+import { useEffect, useState } from "react";
+
 interface RegistrationDateRangeFilterProps {
   // ISO `YYYY-MM-DD` strings, or null when the filter is unset.
   registeredAfter: string | null;
@@ -12,15 +14,50 @@ interface RegistrationDateRangeFilterProps {
 
 // Two native <input type="date"> pickers. The browser emits `YYYY-MM-DD`
 // directly, which is what FastAPI's date validator on the BE accepts —
-// no parsing or formatting needed. Empty string from the picker means
-// the user cleared the field, so we forward null to the parent.
+// no parsing or formatting needed.
+//
+// Inputs use local state and commit on blur instead of forwarding every
+// keystroke to the parent. Reason: the parent commits to the URL via
+// router.push, which re-renders this component with a new `value` prop.
+// While the user is typing the YYYY segment, the date is intermediately
+// invalid and `event.target.value` is the empty string — that propagates
+// to null, the URL re-renders the input with `value=""`, and the
+// browser's visible MM/DD segments get cleared along with it. Holding
+// the typed value locally and committing on blur breaks that loop.
 export function RegistrationDateRangeFilter({
   registeredAfter,
   registeredBefore,
   onChange,
 }: RegistrationDateRangeFilterProps) {
+  const [afterRaw, setAfterRaw] = useState<string>(registeredAfter ?? "");
+  const [beforeRaw, setBeforeRaw] = useState<string>(registeredBefore ?? "");
+
+  // Re-seed local state when the URL changes from outside (back-nav,
+  // share-link landing, Clear filters). Compare against the local raw
+  // value rather than blindly setting so we don't fight the user mid-type.
+  useEffect(() => {
+    setAfterRaw(registeredAfter ?? "");
+  }, [registeredAfter]);
+  useEffect(() => {
+    setBeforeRaw(registeredBefore ?? "");
+  }, [registeredBefore]);
+
   const inputClass =
     "h-[38px] w-full min-w-0 rounded-[10px] border border-[var(--border,rgba(30,64,175,0.1))] bg-[var(--surface,#ffffff)] px-3 text-[13px] tabular-nums text-[var(--text,#0f172a)] outline-none transition focus:border-[var(--accent,#6366f1)] focus:shadow-[0_0_0_3px_rgba(99,102,241,0.15)]";
+
+  function commitAfter() {
+    const next = afterRaw || null;
+    if (next !== registeredAfter) {
+      onChange({ registeredAfter: next });
+    }
+  }
+
+  function commitBefore() {
+    const next = beforeRaw || null;
+    if (next !== registeredBefore) {
+      onChange({ registeredBefore: next });
+    }
+  }
 
   return (
     <div>
@@ -30,13 +67,13 @@ export function RegistrationDateRangeFilter({
       <div className="flex items-center gap-2">
         <input
           type="date"
-          value={registeredAfter ?? ""}
-          onChange={(event) =>
-            onChange({ registeredAfter: event.target.value || null })
-          }
+          value={afterRaw}
+          onChange={(event) => setAfterRaw(event.target.value)}
+          onBlur={commitAfter}
           // Block picking an after-date later than the before-date. Native
-          // pickers honor max= when present.
-          max={registeredBefore ?? undefined}
+          // pickers honor max= when present. Use the local raw value so
+          // the constraint tracks unsaved edits in the sibling input.
+          max={beforeRaw || undefined}
           aria-label="Registered on or after"
           className={inputClass}
         />
@@ -48,11 +85,10 @@ export function RegistrationDateRangeFilter({
         </span>
         <input
           type="date"
-          value={registeredBefore ?? ""}
-          onChange={(event) =>
-            onChange({ registeredBefore: event.target.value || null })
-          }
-          min={registeredAfter ?? undefined}
+          value={beforeRaw}
+          onChange={(event) => setBeforeRaw(event.target.value)}
+          onBlur={commitBefore}
+          min={afterRaw || undefined}
           aria-label="Registered on or before"
           className={inputClass}
         />
