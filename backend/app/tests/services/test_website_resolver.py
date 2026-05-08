@@ -19,7 +19,12 @@ import respx
 from app.services.apollo import ApolloError, ApolloOrganization
 from app.services.serpapi import SerpAPIError, SerpResult
 from app.services.serper import SerperError
-from app.services.website_resolver import resolve_website
+from app.services.website_resolver import (
+    _firm_acronym_token,
+    _firm_tokens,
+    _firm_word_tokens,
+    resolve_website,
+)
 
 
 _FIRM_NAME = "Acme Securities LLC"
@@ -829,3 +834,344 @@ async def test_press_release_path_rejected() -> None:
     )
 
     assert (website, source, reason) == (None, None, "no_valid_candidate")
+
+
+# ──────────────────── new token generators (B1, B2) ────────────────────────
+
+
+def test_acronym_token_iaa_for_international_assets_advisory() -> None:
+    """``INTERNATIONAL ASSETS ADVISORY, LLC`` → significant words
+    ``[international, assets, advisory]`` after dropping ``LLC``. The
+    final word ``advisory`` is also dropped as a corporate-suffix
+    stop-word, but min-3-significant-word + min-3-acronym-len gates
+    are evaluated BEFORE the suffix-word filter on words... actually
+    the filter drops it, leaving ``[international, assets]`` — that's
+    only 2 significant words. Verify: callers can trust the public
+    contract that 2-significant-word firms produce no acronym (avoids
+    spurious 2-char tokens)."""
+    # Drop ``advisory`` as a stop-word → only 2 significant words →
+    # below minimum, returns None. The IAAC case is rescued by word-
+    # prefix tokens (``international``, ``advisor``) instead.
+    assert _firm_acronym_token("INTERNATIONAL ASSETS ADVISORY, LLC") is None
+
+
+def test_acronym_token_handles_three_unfiltered_words() -> None:
+    """Firms with three+ significant words that aren't corporate-suffix
+    stop-words generate an acronym. ``ATLAS STRATEGIC MILITARY`` →
+    ``"asm"`` (3 chars, eligible)."""
+    assert _firm_acronym_token("ATLAS STRATEGIC MILITARY") == "asm"
+
+
+def test_acronym_token_none_for_two_significant_words() -> None:
+    """``MOSAIC ATS, LLC`` has only 2 significant words after dropping
+    ``LLC`` (``mosaic``, ``ats``). Min 3 significant words required
+    → returns None."""
+    assert _firm_acronym_token("MOSAIC ATS, LLC") is None
+
+
+def test_acronym_token_none_when_only_stop_words() -> None:
+    """Firms whose significant words are entirely corporate suffixes
+    produce no acronym."""
+    assert _firm_acronym_token("CAPITAL GROUP, LLC") is None
+
+
+def test_word_tokens_atlas_strategic_advisors() -> None:
+    """Per-significant-word tokens drop stop-words (LLC, ADVISORS) and
+    short fillers, keeping each remaining word's 8-char prefix."""
+    tokens = _firm_word_tokens("ATLAS STRATEGIC ADVISORS, LLC")
+    assert "atlas" in tokens
+    assert "strategi" in tokens
+    # ``advisors`` filtered as a corporate suffix.
+    assert "advisors" not in tokens
+    # ``LLC`` filtered as a stop-word.
+    assert "llc" not in tokens
+
+
+def test_word_tokens_skips_words_below_min_length() -> None:
+    """Words shorter than _MIN_WORD_LEN (5 chars) are skipped to avoid
+    over-matching on common 3-4 char fragments. ``ABG SECURITIES`` →
+    only ``securities`` is filtered (corporate suffix); ``ABG`` is
+    too short to be a token."""
+    tokens = _firm_word_tokens("ABG SECURITIES, LLC")
+    # ``abg`` (3 chars) is below 5-char minimum → not in tokens.
+    assert "abg" not in tokens
+    # ``securities`` is dropped as a corporate suffix → not in tokens.
+    assert "securiti" not in tokens
+    assert tokens == []
+
+
+def test_firm_tokens_combines_all_three_generators() -> None:
+    """``_firm_tokens`` combines (1) full-name 8-char prefix,
+    (2) acronym, (3) per-word prefixes — all three for the legal
+    name and for each DBA — deduplicated."""
+    tokens = _firm_tokens("ATLAS STRATEGIC MILITARY", dba_names=None)
+    # Full-name 8-char prefix.
+    assert "atlasstr" in tokens
+    # Acronym.
+    assert "asm" in tokens
+    # Per-word tokens (each ≥5 chars after stop-word filter).
+    assert "atlas" in tokens
+    assert "strategi" in tokens
+    assert "military" in tokens
+
+
+def test_firm_tokens_includes_dba_acronym_and_words() -> None:
+    """DBAs go through all three generators too, so a firm with a
+    multi-word DBA contributes its acronym + word tokens to the
+    anchor-candidate pool."""
+    tokens = _firm_tokens(
+        "303 ALTERNATIVES, LLC",
+        dba_names=["303Capital Markets, LLC"],
+    )
+    # Legal-name full prefix.
+    assert "alternat" in tokens
+    # DBA full prefix (alpha-stripped: ``capitalmarketsllc``[:8]).
+    assert "capitalm" in tokens
+
+
+# ──────────────────── high-confidence (knowledge_graph) bypass ─────────────
+
+
+@respx.mock
+async def test_knowledge_graph_high_confidence_bypasses_domain_anchor() -> None:
+    """A SerpResult with ``is_high_confidence=True`` (sourced from
+    Google's knowledge_graph) admits even when the candidate URL's
+    domain doesn't anchor on any firm token. Concrete repro:
+    ``INTERNATIONAL ASSETS ADVISORY, LLC`` legal-name token is
+    ``"internat"``; their actual brand domain ``iaac.com`` shares
+    zero overlap. Pre-fix, this firm fell through to no_valid_candidate
+    even though Google's knowledge graph correctly identified the site."""
+    firm = "INTERNATIONAL ASSETS ADVISORY, LLC"
+    candidate = "https://iaac.com/"
+    apollo = AsyncMock()
+    apollo.search_organization = AsyncMock(return_value=None)
+    serpapi = AsyncMock()
+    serpapi.search_firm = AsyncMock(
+        return_value=[
+            SerpResult(
+                url=candidate,
+                domain="iaac.com",
+                title="International Assets Advisory, LLC",
+                is_high_confidence=True,
+            ),
+        ],
+    )
+    respx.head(candidate).mock(
+        return_value=httpx.Response(
+            200, request=httpx.Request("HEAD", candidate),
+        ),
+    )
+
+    website, source, reason = await resolve_website(
+        firm, None, apollo, serpapi=serpapi,
+    )
+
+    assert (website, source, reason) == (candidate, "serpapi", None)
+
+
+@respx.mock
+async def test_high_confidence_still_rejected_by_blocklist() -> None:
+    """High-confidence candidates still go through pre-domain gates —
+    a blocklisted host returns False even when the candidate is flagged
+    as Google-entity-resolved. Defense in depth: if Google ever returns
+    a knowledge graph for an aggregator (unlikely but possible), the
+    blocklist still wins."""
+    firm = "FAKE FIRM"
+    candidate = "https://www.linkedin.com/company/fake-firm"
+    apollo = AsyncMock()
+    apollo.search_organization = AsyncMock(return_value=None)
+    serpapi = AsyncMock()
+    serpapi.search_firm = AsyncMock(
+        return_value=[
+            SerpResult(
+                url=candidate,
+                domain="www.linkedin.com",
+                title="Fake Firm",
+                is_high_confidence=True,
+            ),
+        ],
+    )
+
+    website, source, reason = await resolve_website(
+        firm, None, apollo, serpapi=serpapi,
+    )
+
+    assert (website, source, reason) == (None, None, "no_valid_candidate")
+
+
+# ──────────────────── title-soft-match secondary admit (C1) ────────────────
+
+
+@respx.mock
+async def test_title_soft_match_admits_homepage_with_matching_title() -> None:
+    """When domain-anchor misses, a homepage-like URL whose ``<title>``
+    contains a significant firm word admits via the title-soft-match
+    fallback. Concrete: firm ``CONTOSO BROKERAGE`` (token ``"contosob"``)
+    on domain ``contoso.example.test`` — segment ``contoso`` doesn't
+    forward-anchor (length 7 < token 8) and 8-char token reverse-anchor
+    requires the segment to be ≥5 chars (it is, but the prefix check
+    fails since ``"contosob"`` doesn't start with ``"contoso"``... it
+    does! So this would domain-anchor.) Use a clearly non-anchoring
+    domain instead."""
+    firm = "CONTOSO BROKERAGE LLC"
+    # Domain that genuinely doesn't share any prefix with the firm
+    # tokens — title-soft-match is the only admit path.
+    candidate = "https://example.test/"
+    apollo = AsyncMock()
+    apollo.search_organization = AsyncMock(return_value=None)
+    serpapi = AsyncMock()
+    serpapi.search_firm = AsyncMock(
+        return_value=_serp_results(candidate),
+    )
+    respx.head(candidate).mock(
+        return_value=httpx.Response(
+            200, request=httpx.Request("HEAD", candidate),
+        ),
+    )
+    respx.get(candidate).mock(
+        return_value=httpx.Response(
+            200,
+            text="<html><head><title>Contoso Brokerage — Home</title></head></html>",
+        ),
+    )
+
+    website, source, reason = await resolve_website(
+        firm, None, apollo, serpapi=serpapi,
+    )
+
+    assert (website, source, reason) == (candidate, "serpapi", None)
+
+
+@respx.mock
+async def test_title_soft_match_rejected_when_path_not_homepage() -> None:
+    """A page whose title matches the firm name but whose URL path
+    isn't homepage-like (``/firm/...``, ``/news/...``, etc.) does NOT
+    admit via title-soft-match. Guards the historical false-positive
+    cohort that originally caused title-only admit to be removed."""
+    firm = "CONTOSO BROKERAGE LLC"
+    # /firm/ path is on the blocklist of non-homepage paths (D2).
+    candidate = "https://example.test/firm/contoso-brokerage-12345"
+    apollo = AsyncMock()
+    apollo.search_organization = AsyncMock(return_value=None)
+    serpapi = AsyncMock()
+    serpapi.search_firm = AsyncMock(
+        return_value=_serp_results(candidate),
+    )
+
+    website, source, reason = await resolve_website(
+        firm, None, apollo, serpapi=serpapi,
+    )
+
+    # /firm/ path-keyword guard rejects pre-HEAD; never even reaches
+    # the title check.
+    assert (website, source, reason) == (None, None, "no_valid_candidate")
+
+
+@respx.mock
+async def test_title_soft_match_rejected_when_title_doesnt_match() -> None:
+    """Homepage path + title that does NOT contain a significant firm
+    word → reject. The title check is the load-bearing guard against
+    admitting random homepage URLs that happen to be unrelated firms."""
+    firm = "CONTOSO BROKERAGE LLC"
+    candidate = "https://example.test/"
+    apollo = AsyncMock()
+    apollo.search_organization = AsyncMock(return_value=None)
+    serpapi = AsyncMock()
+    serpapi.search_firm = AsyncMock(
+        return_value=_serp_results(candidate),
+    )
+    respx.head(candidate).mock(
+        return_value=httpx.Response(
+            200, request=httpx.Request("HEAD", candidate),
+        ),
+    )
+    respx.get(candidate).mock(
+        return_value=httpx.Response(
+            200,
+            text="<html><head><title>Some Other Random Site</title></head></html>",
+        ),
+    )
+
+    website, source, reason = await resolve_website(
+        firm, None, apollo, serpapi=serpapi,
+    )
+
+    assert (website, source, reason) == (None, None, "no_valid_candidate")
+
+
+# ──────────────────── extended blocklist (D1) ──────────────────────────────
+
+
+@respx.mock
+async def test_zoominfo_in_blocklist() -> None:
+    """ZoomInfo profile pages frequently rank high for small broker-
+    dealers and pass title-token checks. Blocklist suffix-match
+    rejects every ``zoominfo.com`` subdomain pre-HEAD."""
+    apollo = AsyncMock()
+    apollo.search_organization = AsyncMock(return_value=None)
+    serpapi = AsyncMock()
+    serpapi.search_firm = AsyncMock(
+        return_value=_serp_results(
+            "https://www.zoominfo.com/c/acme-securities/12345",
+        ),
+    )
+
+    website, source, reason = await resolve_website(
+        _FIRM_NAME, None, apollo, serpapi=serpapi,
+    )
+
+    assert (website, source, reason) == (None, None, "no_valid_candidate")
+
+
+@respx.mock
+async def test_crunchbase_in_blocklist() -> None:
+    """Same shape as ZoomInfo: company directory rejected by suffix-match."""
+    apollo = AsyncMock()
+    apollo.search_organization = AsyncMock(return_value=None)
+    serpapi = AsyncMock()
+    serpapi.search_firm = AsyncMock(
+        return_value=_serp_results(
+            "https://www.crunchbase.com/organization/acme-securities",
+        ),
+    )
+
+    website, source, reason = await resolve_website(
+        _FIRM_NAME, None, apollo, serpapi=serpapi,
+    )
+
+    assert (website, source, reason) == (None, None, "no_valid_candidate")
+
+
+# ──────────────────── HEAD 403/405 → GET fallback (E2) ─────────────────────
+
+
+@respx.mock
+async def test_head_403_falls_back_to_get() -> None:
+    """Some Cloudflare-protected sites 403 HEAD even with the browser
+    UA but allow GET. The validator retries with GET; if GET returns
+    200 and the domain anchors, the candidate admits."""
+    apollo = AsyncMock()
+    candidate = "https://acme-securities.example.test/"
+    apollo.search_organization = AsyncMock(
+        return_value=ApolloOrganization(
+            name=_FIRM_NAME,
+            website_url=candidate,
+            domain="acme-securities.example.test",
+        ),
+    )
+    respx.head(candidate).mock(
+        return_value=httpx.Response(
+            403, request=httpx.Request("HEAD", candidate),
+        ),
+    )
+    respx.get(candidate).mock(
+        return_value=httpx.Response(
+            200,
+            text="<html><head><title>Acme</title></head></html>",
+            request=httpx.Request("GET", candidate),
+        ),
+    )
+
+    website, source, reason = await resolve_website(_FIRM_NAME, None, apollo)
+
+    assert (website, source, reason) == (candidate, "apollo", None)
