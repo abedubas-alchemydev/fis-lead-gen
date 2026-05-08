@@ -18,8 +18,14 @@ Sub-pipelines and their gate predicates:
   :func:`resolve_website` directly (NOT the HTTP handler, which is
   admin-gated; the orchestrator-driven path is open to any
   authenticated user per the plan).
-- ``health-check``        — runs when ``current_clearing_type`` OR
-  ``current_clearing_partner`` is NULL. Free (FINRA only).
+- ``health-check``        — runs when ``registration_date`` OR
+  ``formation_date`` is NULL. FINRA Form BD enrichment (free, no
+  LLM). Also re-derives ``clearing_classification`` and
+  ``is_niche_restricted`` from the FINRA-side text fields.
+- ``refresh-clearing``    — runs when ``current_clearing_partner``
+  OR ``current_clearing_type`` is NULL. Cost: ~1 Gemini call on the
+  X-17A-5 PDF. Reuses
+  :meth:`ClearingPipelineService.extract_clearing_for_broker_dealer`.
 - ``enrich``              — runs when no ``executive_contacts`` rows
   exist for this BD. Cost: ~2 Apollo + ~1 Hunter via the company-only
   search (no per-officer fan-out — that has its own dedicated FE
@@ -78,14 +84,20 @@ SUB_RESOLVE_WEBSITE = "broker_dealer_resolve_website"
 SUB_HEALTH_CHECK = "broker_dealer_health_check"
 SUB_ENRICH = "broker_dealer_enrich_contacts"
 SUB_REFRESH_FILINGS = "broker_dealer_refresh_filings"
+# Per-firm wrapper around ClearingPipelineService.extract_clearing_for_broker_dealer
+# (X-17A-5 PDF + Gemini → clearing_partner / clearing_type + clearing_arrangements
+# row). Pre-existing health-check gated on these fields but didn't fill them —
+# this sub-pipeline closes that gap so per-firm gap-fill is truly self-contained.
+SUB_REFRESH_CLEARING = "broker_dealer_refresh_clearing"
 
 # Display labels used in the parent's notes.summary toast string.
 _SUB_LABEL = {
     SUB_REFRESH_FINANCIALS: "financials",
     SUB_RESOLVE_WEBSITE: "website",
-    SUB_HEALTH_CHECK: "clearing",
+    SUB_HEALTH_CHECK: "finra",
     SUB_ENRICH: "contacts",
     SUB_REFRESH_FILINGS: "filings",
+    SUB_REFRESH_CLEARING: "clearing",
 }
 
 # Sub-pipelines whose target fields drive a column the user can see in the
@@ -93,7 +105,7 @@ _SUB_LABEL = {
 # so it doesn't burn website + contacts calls fixing data the list view
 # can't even render. The detail-page button still uses scope="all".
 _LIST_ONLY_PIPELINES: frozenset[str] = frozenset(
-    {SUB_REFRESH_FINANCIALS, SUB_HEALTH_CHECK, SUB_REFRESH_FILINGS}
+    {SUB_REFRESH_FINANCIALS, SUB_HEALTH_CHECK, SUB_REFRESH_FILINGS, SUB_REFRESH_CLEARING}
 )
 
 
@@ -140,22 +152,32 @@ def decide_pipelines(
     else:
         (to_run if needs_website else to_skip).append(SUB_RESOLVE_WEBSITE)
 
-    # health-check is the catch-all for *any* FINRA Form BD-derived field
-    # that's still missing. Firing on clearing-partner-or-type-null alone
-    # was too narrow: firms that already had a clearing partner extracted
-    # would skip the FINRA enrichment entirely, which left derived fields
-    # like ``registration_date`` / ``formation_date`` permanently NULL even
-    # though they're free to fetch. Cost is bounded — health-check is
-    # FINRA-only (no LLM), so a perpetual fire on a firm whose Form BD
-    # genuinely doesn't disclose one of these fields is cheap noise, not a
-    # money sink. The trade favors completeness over idempotency.
+    # health-check is the catch-all for FINRA Form BD-derived fields that
+    # are still missing. Cost is bounded — health-check is FINRA-only (no
+    # LLM), so a perpetual fire on a firm whose Form BD genuinely doesn't
+    # disclose one of these fields is cheap noise, not a money sink. The
+    # trade favors completeness over idempotency.
+    #
+    # Note: this gate previously included current_clearing_partner /
+    # current_clearing_type, but health-check doesn't actually fill those
+    # fields (only FINRA-side fields). Clearing extraction now has its
+    # own SUB_REFRESH_CLEARING sub-pipeline below.
     needs_health = (
-        broker_dealer.current_clearing_type is None
-        or broker_dealer.current_clearing_partner is None
-        or broker_dealer.registration_date is None
+        broker_dealer.registration_date is None
         or broker_dealer.formation_date is None
     )
     (to_run if needs_health else to_skip).append(SUB_HEALTH_CHECK)
+
+    # Clearing extraction (X-17A-5 PDF + Gemini → clearing_partner /
+    # clearing_type + clearing_arrangements row). Closes the long-standing
+    # gap where decide_pipelines gated on these fields but no sub-pipeline
+    # actually filled them — they were being filled only by the standalone
+    # scripts/run_clearing_pipeline.py batch script.
+    needs_clearing = (
+        broker_dealer.current_clearing_partner is None
+        or broker_dealer.current_clearing_type is None
+    )
+    (to_run if needs_clearing else to_skip).append(SUB_REFRESH_CLEARING)
 
     needs_contacts = not has_contacts
     if scope == "list_only":
@@ -179,7 +201,11 @@ def required_provider_keys(pipelines: Iterable[str]) -> list[str]:
     pipelines = set(pipelines)
     missing: list[str] = []
 
-    if SUB_REFRESH_FINANCIALS in pipelines:
+    if SUB_REFRESH_FINANCIALS in pipelines or SUB_REFRESH_CLEARING in pipelines:
+        # Both sub-pipelines drive the X-17A-5 PDF extraction stack and need
+        # whichever LLM provider is configured. Reported once even when
+        # both sub-pipelines need the same key, so the toast doesn't double
+        # up on "Gemini" / "OpenAI".
         if settings.llm_provider == "openai":
             if not settings.openai_api_key:
                 missing.append("OpenAI")
@@ -516,6 +542,45 @@ async def _run_refresh_financials(parent_run_id: int, bd_id: int, trigger_source
         return child.status, summary[:500]
 
 
+async def _run_refresh_clearing(parent_run_id: int, bd_id: int, trigger_source: str) -> tuple[str, str]:
+    """Wrap ``ClearingPipelineService.extract_clearing_for_broker_dealer``
+    so its self-managed PipelineRun row becomes a child of the
+    orchestrator's parent. Mirror of ``_run_refresh_financials``.
+    """
+    from app.services.pipeline import ClearingPipelineService
+
+    async with SessionLocal() as db:
+        child_id = await _create_child_run(
+            db,
+            pipeline_name=SUB_REFRESH_CLEARING,
+            parent_run_id=parent_run_id,
+            bd_id=bd_id,
+            trigger_source=trigger_source,
+        )
+
+    service = ClearingPipelineService()
+    try:
+        await service.extract_clearing_for_broker_dealer(
+            bd_id,
+            pipeline_run_id=child_id,
+            trigger_source=trigger_source,
+        )
+    except Exception as exc:
+        logger.exception("refresh-all/refresh-clearing failed for bd %s", bd_id)
+        return "failed", f"{type(exc).__name__}: {str(exc)[:200]}"
+
+    async with SessionLocal() as db:
+        child = await db.get(PipelineRun, child_id)
+        if child is None:
+            return "failed", "Child run row disappeared after extraction."
+        try:
+            payload = json.loads(child.notes or "{}")
+            summary = payload.get("summary") or "Clearing extraction complete."
+        except (TypeError, ValueError):
+            summary = "Clearing extraction complete."
+        return child.status, summary[:500]
+
+
 async def _run_refresh_filings(parent_run_id: int, bd_id: int, trigger_source: str) -> tuple[str, str]:
     """Re-query EDGAR submissions for the BD's CIK and update
     ``BrokerDealer.last_filing_date`` if a more recent filing exists.
@@ -597,6 +662,7 @@ _RUNNERS = {
     SUB_HEALTH_CHECK: _run_health_check,
     SUB_ENRICH: _run_enrich,
     SUB_REFRESH_FILINGS: _run_refresh_filings,
+    SUB_REFRESH_CLEARING: _run_refresh_clearing,
 }
 
 
@@ -712,6 +778,7 @@ __all__ = [
     "RefreshScope",
     "SUB_ENRICH",
     "SUB_HEALTH_CHECK",
+    "SUB_REFRESH_CLEARING",
     "SUB_REFRESH_FILINGS",
     "SUB_REFRESH_FINANCIALS",
     "SUB_RESOLVE_WEBSITE",

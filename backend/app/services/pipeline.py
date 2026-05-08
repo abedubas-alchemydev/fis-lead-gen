@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-import asyncio
+import json
 from datetime import datetime, timezone
 import logging
 
@@ -94,96 +94,12 @@ class ClearingPipelineService:
                     "Clearing pipeline progress: %d/%d (success: %d, failed: %d)",
                     bd_index + 1, total_bds, pipeline_run.success_count, pipeline_run.failure_count,
                 )
-            try:
-                # Per-iteration tempdir replaces the persistent PDF cache.
-                # Download + LLM parse both happen inside this block; on exit
-                # the PDF is wiped so the container footprint stays flat.
-                # Re-extraction re-downloads (the extracted values are
-                # already persisted to the DB).
-                with pdf_tempdir(prefix="clearing_extract_") as tmp_dir:
-                    pdf_record = await self.downloader.download_latest_x17a5_pdf(
-                        broker_dealer, tmp_dir
-                    )
-                    if pdf_record is None:
-                        extraction_results.append(
-                            {
-                                "bd_id": broker_dealer.id,
-                                "pipeline_run_id": pipeline_run.id,
-                                "filing_year": datetime.now(timezone.utc).year,
-                                "report_date": broker_dealer.last_filing_date,
-                                "source_filing_url": broker_dealer.filings_index_url,
-                                "source_pdf_url": None,
-                                "local_document_path": None,
-                                "clearing_partner": None,
-                                "normalized_partner": None,
-                                "clearing_type": "unknown",
-                                "agreement_date": None,
-                                "extraction_confidence": 0.0,
-                                "extraction_status": "missing_pdf",
-                                "extraction_notes": "No X-17A-5 PDF available for this broker-dealer.",
-                                "is_competitor": False,
-                                "is_verified": False,
-                                "extracted_at": datetime.now(timezone.utc),
-                                "clearing_statement_text": None,
-                            }
-                        )
-                        pipeline_run.processed_items += 1
-                        pipeline_run.failure_count += 1
-                        continue
-
-                    parsed = await self.processor.process_downloaded_pdf(pdf_record)
-                    extraction_results.append(
-                        {
-                            "bd_id": parsed.bd_id,
-                            "pipeline_run_id": pipeline_run.id,
-                            "filing_year": parsed.filing_year,
-                            "report_date": parsed.report_date,
-                            "source_filing_url": parsed.source_filing_url,
-                            "source_pdf_url": parsed.source_pdf_url,
-                            "local_document_path": parsed.local_document_path,
-                            "clearing_partner": parsed.clearing_partner,
-                            "normalized_partner": self.repository.normalize_partner_name(parsed.clearing_partner),
-                            "clearing_type": parsed.clearing_type,
-                            "agreement_date": parsed.agreement_date,
-                            "extraction_confidence": parsed.extraction_confidence,
-                            "extraction_status": parsed.extraction_status,
-                            "extraction_notes": parsed.extraction_notes,
-                            "is_competitor": self.repository.match_competitor(parsed.clearing_partner, competitors),
-                            "is_verified": False,
-                            "extracted_at": parsed.extracted_at,
-                            "clearing_statement_text": parsed.clearing_statement_text,
-                        }
-                    )
-                    pipeline_run.processed_items += 1
-                    if parsed.extraction_status == "parsed":
-                        pipeline_run.success_count += 1
-                    else:
-                        pipeline_run.failure_count += 1
-            except Exception as exc:
-                logger.exception("Clearing extraction failed for broker-dealer %s", broker_dealer.id)
-                extraction_results.append(
-                    {
-                        "bd_id": broker_dealer.id,
-                        "pipeline_run_id": pipeline_run.id,
-                        "filing_year": datetime.now(timezone.utc).year,
-                        "report_date": broker_dealer.last_filing_date,
-                        "source_filing_url": broker_dealer.filings_index_url,
-                        "source_pdf_url": None,
-                        "local_document_path": None,
-                        "clearing_partner": None,
-                        "normalized_partner": None,
-                        "clearing_type": "unknown",
-                        "agreement_date": None,
-                        "extraction_confidence": 0.0,
-                        "extraction_status": "pipeline_error",
-                        "extraction_notes": str(exc)[:1000],
-                        "is_competitor": False,
-                        "is_verified": False,
-                        "extracted_at": datetime.now(timezone.utc),
-                        "clearing_statement_text": None,
-                    }
-                )
-                pipeline_run.processed_items += 1
+            result = await self._extract_one_bd(broker_dealer, pipeline_run.id, competitors)
+            extraction_results.append(result)
+            pipeline_run.processed_items += 1
+            if result["extraction_status"] == "parsed":
+                pipeline_run.success_count += 1
+            else:
                 pipeline_run.failure_count += 1
 
         pipeline_run.status = "completed_with_errors" if pipeline_run.failure_count else "completed"
@@ -217,6 +133,226 @@ class ClearingPipelineService:
             await write_db.commit()
             await write_db.refresh(persisted_run)
             return persisted_run
+
+    async def _extract_one_bd(
+        self,
+        broker_dealer: BrokerDealer,
+        pipeline_run_id: int,
+        competitors: list,
+    ) -> dict[str, object]:
+        """Run clearing extraction for a single BD and return an upsert-ready
+        dict. Always returns a dict — failures land as ``missing_pdf`` /
+        ``pipeline_error`` records that the caller upserts the same way as
+        successes. Caller is responsible for incrementing pipeline_run
+        counters based on ``result["extraction_status"]``.
+        """
+        try:
+            with pdf_tempdir(prefix="clearing_extract_") as tmp_dir:
+                pdf_record = await self.downloader.download_latest_x17a5_pdf(
+                    broker_dealer, tmp_dir
+                )
+                if pdf_record is None:
+                    return {
+                        "bd_id": broker_dealer.id,
+                        "pipeline_run_id": pipeline_run_id,
+                        "filing_year": datetime.now(timezone.utc).year,
+                        "report_date": broker_dealer.last_filing_date,
+                        "source_filing_url": broker_dealer.filings_index_url,
+                        "source_pdf_url": None,
+                        "local_document_path": None,
+                        "clearing_partner": None,
+                        "normalized_partner": None,
+                        "clearing_type": "unknown",
+                        "agreement_date": None,
+                        "extraction_confidence": 0.0,
+                        "extraction_status": "missing_pdf",
+                        "extraction_notes": "No X-17A-5 PDF available for this broker-dealer.",
+                        "is_competitor": False,
+                        "is_verified": False,
+                        "extracted_at": datetime.now(timezone.utc),
+                        "clearing_statement_text": None,
+                    }
+
+                parsed = await self.processor.process_downloaded_pdf(pdf_record)
+                return {
+                    "bd_id": parsed.bd_id,
+                    "pipeline_run_id": pipeline_run_id,
+                    "filing_year": parsed.filing_year,
+                    "report_date": parsed.report_date,
+                    "source_filing_url": parsed.source_filing_url,
+                    "source_pdf_url": parsed.source_pdf_url,
+                    "local_document_path": parsed.local_document_path,
+                    "clearing_partner": parsed.clearing_partner,
+                    "normalized_partner": self.repository.normalize_partner_name(parsed.clearing_partner),
+                    "clearing_type": parsed.clearing_type,
+                    "agreement_date": parsed.agreement_date,
+                    "extraction_confidence": parsed.extraction_confidence,
+                    "extraction_status": parsed.extraction_status,
+                    "extraction_notes": parsed.extraction_notes,
+                    "is_competitor": self.repository.match_competitor(parsed.clearing_partner, competitors),
+                    "is_verified": False,
+                    "extracted_at": parsed.extracted_at,
+                    "clearing_statement_text": parsed.clearing_statement_text,
+                }
+        except Exception as exc:
+            logger.exception("Clearing extraction failed for broker-dealer %s", broker_dealer.id)
+            return {
+                "bd_id": broker_dealer.id,
+                "pipeline_run_id": pipeline_run_id,
+                "filing_year": datetime.now(timezone.utc).year,
+                "report_date": broker_dealer.last_filing_date,
+                "source_filing_url": broker_dealer.filings_index_url,
+                "source_pdf_url": None,
+                "local_document_path": None,
+                "clearing_partner": None,
+                "normalized_partner": None,
+                "clearing_type": "unknown",
+                "agreement_date": None,
+                "extraction_confidence": 0.0,
+                "extraction_status": "pipeline_error",
+                "extraction_notes": str(exc)[:1000],
+                "is_competitor": False,
+                "is_verified": False,
+                "extracted_at": datetime.now(timezone.utc),
+                "clearing_statement_text": None,
+            }
+
+    async def extract_clearing_for_broker_dealer(
+        self,
+        bd_id: int,
+        *,
+        pipeline_run_id: int,
+        trigger_source: str = "manual_single",
+    ) -> None:
+        """Single-firm clearing extraction. Mirrors
+        ``FocusReportService.load_financial_metrics_for_broker_dealer`` so the
+        refresh-all orchestrator can wrap it as a child sub-pipeline (see
+        ``_run_refresh_clearing`` in ``refresh_all_orchestrator.py``).
+
+        Caller creates the ``PipelineRun`` row in 'queued' status and passes
+        its id. This method drives it through 'running' to a terminal state
+        and writes a structured ``notes`` JSON the parent can summarize.
+
+        Skips the global side-effects ``run()`` performs at the end of the
+        batch path (``apply_classification_to_all`` + ``refresh_lead_scores``)
+        — those are wasteful per-firm. The orchestrator's health-check
+        sub-pipeline already re-derives ``clearing_classification`` per BD,
+        and the bulk gap-fill runner re-scores once at the end.
+        """
+        async with SessionLocal() as db:
+            run = await db.get(PipelineRun, pipeline_run_id)
+            if run is not None:
+                run.status = "running"
+                await db.commit()
+
+        async with SessionLocal() as db:
+            bd = await db.get(BrokerDealer, bd_id)
+            if bd is None:
+                async with SessionLocal() as fail_db:
+                    run = await fail_db.get(PipelineRun, pipeline_run_id)
+                    if run is not None:
+                        run.status = "failed"
+                        run.processed_items = 1
+                        run.failure_count = 1
+                        run.completed_at = datetime.now(timezone.utc)
+                        run.notes = json.dumps(
+                            {"summary": f"Broker-dealer {bd_id} not found."}
+                        )
+                        await fail_db.commit()
+                return
+            await self.competitors.seed_defaults(db)
+            competitors = await self.competitors.list_active(db)
+
+        extraction_result = await self._extract_one_bd(bd, pipeline_run_id, competitors)
+
+        async with SessionLocal() as write_db:
+            await self.repository.upsert_clearing_arrangements(
+                write_db, [extraction_result]
+            )
+            await write_db.commit()
+            await self._refresh_clearing_rollup_for_bd(write_db, bd_id)
+            await write_db.commit()
+
+            run = await write_db.get(PipelineRun, pipeline_run_id)
+            if run is None:
+                return
+            status = extraction_result["extraction_status"]
+            partner = extraction_result.get("clearing_partner")
+            ctype = extraction_result.get("clearing_type")
+            if status == "parsed":
+                run.status = "completed"
+                run.success_count = 1
+                run.failure_count = 0
+                if partner:
+                    summary = f"Clearing partner: {partner} ({ctype})."
+                else:
+                    summary = f"Clearing type: {ctype} (no third-party partner)."
+            elif status == "missing_pdf":
+                run.status = "completed_with_errors"
+                run.success_count = 0
+                run.failure_count = 1
+                summary = "No X-17A-5 PDF available."
+            elif status == "needs_review":
+                run.status = "completed_with_errors"
+                run.success_count = 0
+                run.failure_count = 1
+                notes = str(extraction_result.get("extraction_notes") or "")[:200]
+                summary = f"Needs review: {notes}"
+            elif status == "pipeline_error":
+                run.status = "failed"
+                run.success_count = 0
+                run.failure_count = 1
+                notes = str(extraction_result.get("extraction_notes") or "")[:200]
+                summary = f"Pipeline error: {notes}"
+            else:
+                run.status = "completed_with_errors"
+                run.success_count = 0
+                run.failure_count = 1
+                summary = f"Status: {status}."
+            run.processed_items = 1
+            run.completed_at = datetime.now(timezone.utc)
+            run.notes = json.dumps({"summary": summary[:500]})
+            await write_db.commit()
+
+    async def _refresh_clearing_rollup_for_bd(
+        self, db: AsyncSession, bd_id: int
+    ) -> None:
+        """Per-BD version of ``BrokerDealerRepository.refresh_clearing_rollups``.
+
+        The repository's method scans every BD + every clearing_arrangement —
+        wasteful for a single-firm refresh. This picks the latest arrangement
+        for ``bd_id`` (filing_year DESC) and updates that one BD's
+        ``current_clearing_*`` fields.
+        """
+        bd = await db.get(BrokerDealer, bd_id)
+        if bd is None:
+            return
+        latest_stmt = (
+            select(ClearingArrangement)
+            .where(ClearingArrangement.bd_id == bd_id)
+            .order_by(ClearingArrangement.filing_year.desc())
+            .limit(1)
+        )
+        latest = (await db.execute(latest_stmt)).scalar_one_or_none()
+        if latest is None:
+            bd.current_clearing_partner = None
+            bd.current_clearing_type = None
+            bd.current_clearing_is_competitor = False
+            bd.current_clearing_source_filing_url = None
+            bd.current_clearing_extraction_confidence = None
+            bd.last_audit_report_date = None
+        else:
+            bd.current_clearing_partner = latest.clearing_partner
+            bd.current_clearing_type = latest.clearing_type
+            bd.current_clearing_is_competitor = bool(latest.is_competitor)
+            bd.current_clearing_source_filing_url = latest.source_filing_url
+            bd.current_clearing_extraction_confidence = (
+                float(latest.extraction_confidence)
+                if latest.extraction_confidence is not None
+                else None
+            )
+            bd.last_audit_report_date = latest.report_date
+        await db.flush()
 
     async def _select_null_partner_targets(self, db: AsyncSession) -> list[BrokerDealer]:
         # Backfill mode: target firms whose ``current_clearing_partner`` is
