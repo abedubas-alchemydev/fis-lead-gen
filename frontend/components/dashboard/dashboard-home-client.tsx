@@ -8,6 +8,7 @@ import { DashboardErrorCard } from "@/components/dashboard/dashboard-error-card"
 import { KpiCard } from "@/components/dashboard/kpi-card";
 import type { KpiIconProps } from "@/components/dashboard/kpi-card";
 import { KpiCardSkeleton } from "@/components/dashboard/kpi-card-skeleton";
+import { NewBdsModal } from "@/components/dashboard/new-bds-modal";
 import { ProspectVolumeTrendCard } from "@/components/dashboard/prospect-volume-trend-card";
 import { TopProspectsCard } from "@/components/dashboard/top-prospects-card";
 import { TopActions } from "@/components/layout/top-actions";
@@ -88,6 +89,8 @@ export function DashboardHomeClient() {
   const [alertsLoadError, setAlertsLoadError] = useState<string | null>(null);
   const [alertsActionError, setAlertsActionError] = useState<string | null>(null);
   const [alertsReloadKey, setAlertsReloadKey] = useState(0);
+
+  const [showNewBdsModal, setShowNewBdsModal] = useState(false);
 
   const handleStatsRetry = useCallback(() => {
     setStatsReloadKey((k) => k + 1);
@@ -241,7 +244,7 @@ export function DashboardHomeClient() {
               tone="purple"
               icon={KpiIconPulse}
               helper="Recent registrations from filing activity"
-              href="/master-list?list=all"
+              onClick={() => setShowNewBdsModal(true)}
             />
           </div>
           <div className="animate-fade-in delay-150">
@@ -331,6 +334,8 @@ export function DashboardHomeClient() {
           )}
         </div>
       </div>
+
+      {showNewBdsModal ? <NewBdsModal onClose={() => setShowNewBdsModal(false)} /> : null}
     </div>
   );
 }
