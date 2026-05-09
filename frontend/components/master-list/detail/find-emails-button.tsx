@@ -1,32 +1,26 @@
 "use client";
 
 import { useState } from "react";
-import { useRouter, useSearchParams } from "next/navigation";
-import type { Route } from "next";
 import { Search } from "lucide-react";
 
 import { apiRequest } from "@/lib/api";
 
-// "Find emails" button rendered in the firm-detail PDF action strip. Resolves
-// the firm's domain (firm website preferred, falling back to a contact-email
-// domain), kicks off a scan via
+// "Find emails" button rendered in the firm-detail PDF action strip.
+// Resolves the firm's domain (firm website preferred, falling back to a
+// contact-email domain), kicks off a scan via
 //   POST /api/v1/email-extractor/scans
-// and routes to the resulting scan detail page on success. Disabled when no
-// domain can be resolved or while a scan creation is in flight.
-//
-// Threads the firm-detail page's `?return=` envelope (originating on
-// the master list) through to the scan-detail URL so the email-
-// extractor breadcrumb can land the user back on the exact filtered/
-// sorted master-list state they came from.
+// and notifies the parent via `onScanCreated` so the inline scan-results
+// section on the same page can render the new scan in place. Disabled when
+// no domain can be resolved or while a scan creation is in flight.
 export function FindEmailsButton({
   brokerDealerId,
   resolvedDomain,
+  onScanCreated,
 }: {
   brokerDealerId: string;
   resolvedDomain: string | null;
+  onScanCreated: (scanId: number) => void;
 }) {
-  const router = useRouter();
-  const searchParams = useSearchParams();
   const [isStarting, setIsStarting] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
@@ -37,20 +31,20 @@ export function FindEmailsButton({
     setIsStarting(true);
     setError(null);
     try {
-      const created = await apiRequest<{ id: number }>("/api/v1/email-extractor/scans", {
-        method: "POST",
-        body: JSON.stringify({
-          domain: resolvedDomain,
-          bd_id: Number(brokerDealerId),
-        }),
-      });
-      const returnRaw = searchParams.get("return");
-      const destination = returnRaw
-        ? `/email-extractor/${created.id}?return=${returnRaw}`
-        : `/email-extractor/${created.id}`;
-      router.push(destination as Route);
+      const created = await apiRequest<{ id: number }>(
+        "/api/v1/email-extractor/scans",
+        {
+          method: "POST",
+          body: JSON.stringify({
+            domain: resolvedDomain,
+            bd_id: Number(brokerDealerId),
+          }),
+        }
+      );
+      onScanCreated(created.id);
     } catch (err) {
       setError(err instanceof Error ? err.message : "Could not start scan");
+    } finally {
       setIsStarting(false);
     }
   }
@@ -72,7 +66,9 @@ export function FindEmailsButton({
         {isStarting ? "Starting…" : "Find emails"}
       </button>
       {error ? (
-        <span className="text-xs text-[var(--pill-red-text,#b91c1c)]">{error}</span>
+        <span className="text-xs text-[var(--pill-red-text,#b91c1c)]">
+          {error}
+        </span>
       ) : null}
     </div>
   );

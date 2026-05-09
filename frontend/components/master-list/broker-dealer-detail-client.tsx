@@ -18,6 +18,7 @@ import {
 import { AlertPriorityBadge } from "@/components/alerts/alert-priority-badge";
 import { ArrangementFields } from "@/components/master-list/detail/arrangement-fields";
 import { ContactRow } from "@/components/master-list/detail/contact-row";
+import { EmailScansSection } from "@/components/master-list/detail/email-scans-section";
 import { FinancialTrendChart } from "@/components/master-list/detail/financial-trend-chart";
 import { FindEmailsButton } from "@/components/master-list/detail/find-emails-button";
 import { FirmWebsiteLink } from "@/components/master-list/detail/firm-website-link";
@@ -43,6 +44,7 @@ import { SourceBadge } from "@/components/master-list/source-badge";
 import { UnknownCell } from "@/components/master-list/unknown-cell";
 import { apiRequest, buildApiPath } from "@/lib/api";
 import { parseArrangementBlob } from "@/lib/arrangements";
+import { listScansForBrokerDealer } from "@/lib/email-extractor";
 import {
   recordVisit,
   type FavoriteListResponse,
@@ -163,6 +165,12 @@ export function BrokerDealerDetailClient({ brokerDealerId }: { brokerDealerId: s
   const [healthCheckResult, setHealthCheckResult] = useState<string | null>(null);
   const [prevId, setPrevId] = useState<number | null>(null);
   const [nextId, setNextId] = useState<number | null>(null);
+  // Inline "Discovered Emails" section state. `currentScanId` is the
+  // single source of truth — seeded from `?scanId=` (deep-link) or the
+  // most-recent scan for this BD on mount, then mutated by the
+  // FindEmailsButton callback when the user kicks off a new scan.
+  const [currentScanId, setCurrentScanId] = useState<number | null>(null);
+  const [isHydratingScan, setIsHydratingScan] = useState(true);
 
   // Resolve adjacent firm IDs.
   //
@@ -337,6 +345,70 @@ export function BrokerDealerDetailClient({ brokerDealerId }: { brokerDealerId: s
       active = false;
     };
   }, [brokerDealerId]);
+
+  // Hydrate the inline "Discovered Emails" section. Two sources, in
+  // precedence order:
+  //   1. `?scanId=` in the URL — wins, so deep-links and post-Find-Emails
+  //      refreshes re-open the same scan.
+  //   2. Most-recent scan for this BD via list-scans-by-bd_id — so the
+  //      user sees prior emails on first load without re-running.
+  // Reads `window.location.search` directly so this effect doesn't have
+  // to depend on the reactive `searchParams` (the URL-sync effect below
+  // would otherwise feed back into this and re-fetch on every change).
+  useEffect(() => {
+    const numericId = Number(brokerDealerId);
+    if (!Number.isFinite(numericId)) {
+      setIsHydratingScan(false);
+      return;
+    }
+
+    const urlScanId = new URLSearchParams(window.location.search).get(
+      "scanId",
+    );
+    if (urlScanId) {
+      const parsed = Number(urlScanId);
+      if (Number.isFinite(parsed)) {
+        setCurrentScanId(parsed);
+        setIsHydratingScan(false);
+        return;
+      }
+    }
+
+    let active = true;
+    setIsHydratingScan(true);
+    setCurrentScanId(null);
+    listScansForBrokerDealer(numericId, 1)
+      .then((scans) => {
+        if (!active) return;
+        if (scans.length > 0) {
+          setCurrentScanId(scans[0].id);
+        }
+      })
+      .catch(() => {
+        /* swallow — empty state will render */
+      })
+      .finally(() => {
+        if (active) setIsHydratingScan(false);
+      });
+
+    return () => {
+      active = false;
+    };
+  }, [brokerDealerId]);
+
+  // Persist the active scan in the URL so a refresh re-opens the same
+  // scan inside the inline section. Guards against a feedback loop by
+  // checking whether `?scanId=` already matches before replacing.
+  useEffect(() => {
+    if (currentScanId === null) return;
+    const desired = String(currentScanId);
+    if (searchParams.get("scanId") === desired) return;
+    const params = new URLSearchParams(searchParams.toString());
+    params.set("scanId", desired);
+    router.replace(
+      `/master-list/${brokerDealerId}?${params.toString()}` as Route,
+    );
+  }, [currentScanId, brokerDealerId, searchParams, router]);
 
   async function runHealthCheck() {
     setIsHealthChecking(true);
@@ -707,7 +779,11 @@ export function BrokerDealerDetailClient({ brokerDealerId }: { brokerDealerId: s
                 FINRA BrokerCheck (PDF)
               </a>
             ) : null}
-            <FindEmailsButton brokerDealerId={brokerDealerId} resolvedDomain={resolvedDomain} />
+            <FindEmailsButton
+              brokerDealerId={brokerDealerId}
+              resolvedDomain={resolvedDomain}
+              onScanCreated={setCurrentScanId}
+            />
           </div>
 
           <FocusReportSection brokerDealerId={brokerDealerId} onProfileRefresh={reloadProfile} />
@@ -1025,6 +1101,15 @@ export function BrokerDealerDetailClient({ brokerDealerId }: { brokerDealerId: s
             )}
           </div>
         </SectionPanel>
+      </div>
+
+      {/* ── Discovered emails (full width) ── */}
+      <div className="mt-4">
+        <EmailScansSection
+          currentScanId={currentScanId}
+          resolvedDomain={resolvedDomain}
+          isHydrating={isHydratingScan}
+        />
       </div>
     </div>
   );
