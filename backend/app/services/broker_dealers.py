@@ -731,12 +731,18 @@ class BrokerDealerRepository:
         vs ``RBC Correspondent Services``).
 
         Match each competitor name and alias as a whole word
-        (``\\b<alias>\\b``, case-insensitive) against the original
+        (``(?<!\\w)<alias>(?!\\w)``, case-insensitive) against the original
         un-normalized partner string. Whitespace inside multi-word aliases
         is treated as ``\\s+`` so commas-and-spaces variants ("BNY Pershing"
         vs "BNY  Pershing") still match. Bare-prefix aliases that collide
         with sibling brands have been removed from ``DEFAULT_COMPETITORS``
         in tandem with this change.
+
+        Uses ``(?<!\\w)`` / ``(?!\\w)`` lookarounds instead of ``\\b`` so
+        aliases ending in non-word chars (``"BofA Securities, Inc."``,
+        ``"Mirae Asset Securities (USA)"``) still match their own raw
+        value — see ``clearing_consolidation._whole_word_pattern`` for
+        the full rationale.
         """
         if not partner_name:
             return False
@@ -745,7 +751,8 @@ class BrokerDealerRepository:
             for candidate in [competitor.name, *competitor.aliases]:
                 if not candidate:
                     continue
-                pattern = r"\b" + r"\s+".join(re.escape(token) for token in candidate.split()) + r"\b"
+                body = r"\s+".join(re.escape(token) for token in candidate.split())
+                pattern = rf"(?<!\w){body}(?!\w)"
                 if re.search(pattern, partner_name, re.IGNORECASE):
                     return True
         return False
