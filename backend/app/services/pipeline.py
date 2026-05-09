@@ -90,8 +90,16 @@ class ClearingPipelineService:
 
         for bd_index, broker_dealer in enumerate(broker_dealers):
             if (bd_index + 1) % 10 == 0 or bd_index == 0:
+                # ``no-extract`` aggregates non-"parsed" outcomes — primarily
+                # source-side absences (``missing_pdf``: firm has no X-17A-5
+                # on EDGAR) and low-confidence extractions
+                # (``needs_review``). Real script crashes show up as
+                # ``Clearing extraction failed for broker-dealer X`` lines via
+                # ``logger.exception`` in ``_extract_one_bd``; they are NOT
+                # counted here as "no-extract" without also leaving a stack
+                # trace for the operator to inspect.
                 logger.info(
-                    "Clearing pipeline progress: %d/%d (success: %d, failed: %d)",
+                    "Clearing pipeline progress: %d/%d (parsed: %d, no-extract: %d)",
                     bd_index + 1, total_bds, pipeline_run.success_count, pipeline_run.failure_count,
                 )
             result = await self._extract_one_bd(broker_dealer, pipeline_run.id, competitors)
@@ -109,7 +117,8 @@ class ClearingPipelineService:
             provider_descriptor = f"openai:{settings.openai_pdf_model}"
         pipeline_run.notes = (
             f"Processed {pipeline_run.processed_items} filings via {provider_descriptor}. "
-            f"Successful extractions: {pipeline_run.success_count}. Flagged or failed: {pipeline_run.failure_count}."
+            f"Parsed: {pipeline_run.success_count}. "
+            f"No-extract (missing_pdf / needs_review / pipeline_error): {pipeline_run.failure_count}."
         )
 
         async with SessionLocal() as write_db:
