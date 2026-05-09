@@ -23,6 +23,17 @@ logger = logging.getLogger(__name__)
 # Cached bulk ZIP is considered stale after this many seconds (7 days).
 _BULK_ZIP_TTL_SECONDS = 7 * 24 * 60 * 60
 
+# In-process cache for the per-CIK submissions JSON. SEC EDGAR rate-limits
+# Cloud Run egress IPs aggressively (10 req/s shared across the whole
+# project), so the request-path filing-history endpoint can't hit SEC on
+# every page view — bursts get 429'd, my retry loop exhausts after ~15s,
+# and the user sees an empty EDGAR list. Caching successful responses for
+# an hour keeps the FE snappy and stays well under SEC's daily-update
+# cadence. Keyed by the 10-digit zero-padded CIK; values are
+# (monotonic-stamped-at, parsed-filings) tuples. Per Cloud Run instance.
+_FILINGS_CACHE: dict[str, tuple[float, list[dict[str, object]]]] = {}
+_FILINGS_CACHE_TTL_SECONDS = 60 * 60
+
 
 class CikLookupTarget(Protocol):
     """Structural type for ``EdgarService.lookup_cik_for_bd``.
@@ -363,11 +374,22 @@ class EdgarService:
         malformed response. Only inspects ``filings.recent`` — firms with
         more than ~1000 lifetime filings overflow into ``filings.files``;
         those older entries are not loaded.
+
+        Successful (non-empty) responses are cached in-process for
+        ``_FILINGS_CACHE_TTL_SECONDS`` to stay under SEC's 10 req/s/IP
+        ceiling. Failures are not cached so the next click can retry.
         """
         normalized = (cik or "").strip().lstrip("0")
         if not normalized:
             return []
         padded = normalized.zfill(10)
+
+        cached = _FILINGS_CACHE.get(padded)
+        if cached is not None:
+            cached_at, cached_filings = cached
+            if time.monotonic() - cached_at < _FILINGS_CACHE_TTL_SECONDS:
+                return cached_filings
+
         url = f"{settings.sec_submissions_base_url}/CIK{padded}.json"
         headers = {
             "User-Agent": settings.sec_user_agent,
@@ -461,6 +483,8 @@ class EdgarService:
                     key=lambda f: f["filing_date"] or date.min,
                     reverse=True,
                 )
+                if filings:
+                    _FILINGS_CACHE[padded] = (time.monotonic(), filings)
                 return filings
 
         return []
