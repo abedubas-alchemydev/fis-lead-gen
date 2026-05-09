@@ -61,6 +61,13 @@ class BrokerDealerListItem(BaseModel):
     total_assets_yoy: float | None = None
     types_of_business_total: int | None = None
     types_of_business_other: str | None = None
+    # Firm-filed alternate trade names from FINRA's BrokerCheck
+    # ``firm_other_names`` payload (parsed by ``FinraService._parse_dba_names``).
+    # Includes Form BD Item 1.B "Other Names of this Firm" entries plus
+    # historical predecessor / acquired firm names. Surfaced on the firm
+    # detail page so users can see every name a firm has been or is doing
+    # business as.
+    dba_names: list[str] | None = None
     # Stamped server-side on every Apollo /enrich attempt the API "owns"
     # (success or no-result). NULL = never attempted. Surfaced here so a
     # follow-up FE PR can use it to gate the detail-page enrich call.

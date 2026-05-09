@@ -725,6 +725,28 @@ export function BrokerDealerDetailClient({ brokerDealerId }: { brokerDealerId: s
             />
           </div>
 
+          {/* Alternate Names — firm-filed DBAs / historical predecessor names
+              from FINRA's firm_other_names. Hidden when the firm has no
+              alternates so the card stays compact for single-name firms. */}
+          {bd.dba_names && bd.dba_names.length > 0 ? (
+            <div className="mt-4">
+              <div className="flex items-center gap-2">
+                <p className="text-[13px] font-semibold text-[var(--text,#0f172a)]">Alternate Names</p>
+                <Pill variant="info">{bd.dba_names.length} names</Pill>
+              </div>
+              <div className="mt-2 flex flex-wrap gap-2">
+                {bd.dba_names.map((name) => (
+                  <span
+                    key={name}
+                    className="rounded-full border border-[var(--border,rgba(30,64,175,0.1))] bg-[var(--surface-2,#f1f6fd)] px-3 py-1 text-[11px] text-[var(--text-dim,#475569)]"
+                  >
+                    {name}
+                  </span>
+                ))}
+              </div>
+            </div>
+          ) : null}
+
           {/* Types of Business */}
           <div className="mt-4">
             <div className="flex items-center gap-2">

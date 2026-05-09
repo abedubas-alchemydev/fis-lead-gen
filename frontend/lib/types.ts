@@ -84,6 +84,7 @@ export type BrokerDealerListItem = {
   total_assets_yoy: number | null;
   types_of_business_total: number | null;
   types_of_business_other: string | null;
+  dba_names: string[] | null;
   created_at: string;
 };
 
