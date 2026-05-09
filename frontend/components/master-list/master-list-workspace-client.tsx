@@ -178,9 +178,14 @@ export function MasterListWorkspaceClient() {
 
   const updateState = useCallback(
     (patch: Partial<MasterListQueryState>) => {
-      commit({ ...queryState, ...patch });
+      // Re-parse the URL at call time instead of closing over queryState.
+      // Belt-and-suspenders against any stale-closure regression where a
+      // pagination/sort/filter handler captured an older queryState ref —
+      // every patch is now applied on top of the live URL.
+      const current = fromSearchParams(searchParams);
+      commit({ ...current, ...patch });
     },
-    [commit, queryState],
+    [commit, searchParams],
   );
 
   const stateFilter = queryState.state;
