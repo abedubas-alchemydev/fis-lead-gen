@@ -5,9 +5,9 @@ import { Search } from "lucide-react";
 
 import { apiRequest } from "@/lib/api";
 
-// "Find emails" button rendered in the firm-detail PDF action strip.
-// Resolves the firm's domain (firm website preferred, falling back to a
-// contact-email domain), kicks off a scan via
+// "Find emails" button rendered in the firm-detail Discovered Emails
+// section header. Resolves the firm's domain (firm website preferred,
+// falling back to a contact-email domain), kicks off a scan via
 //   POST /api/v1/email-extractor/scans
 // and notifies the parent via `onScanCreated` so the inline scan-results
 // section on the same page can render the new scan in place. Disabled when
