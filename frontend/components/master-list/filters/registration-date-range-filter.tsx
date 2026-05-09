@@ -12,6 +12,24 @@ interface RegistrationDateRangeFilterProps {
   }) => void;
 }
 
+const PRESET_DAYS = [30, 60, 90] as const;
+
+// Local-zone YYYY-MM-DD. Native <input type="date"> reads/writes in the
+// user's local zone, so going through .toISOString() can shift the result
+// by up to a day around midnight UTC.
+function toLocalIsoDate(date: Date): string {
+  const year = date.getFullYear();
+  const month = String(date.getMonth() + 1).padStart(2, "0");
+  const day = String(date.getDate()).padStart(2, "0");
+  return `${year}-${month}-${day}`;
+}
+
+function daysAgoIso(days: number): string {
+  const date = new Date();
+  date.setDate(date.getDate() - days);
+  return toLocalIsoDate(date);
+}
+
 // Two native <input type="date"> pickers. The browser emits `YYYY-MM-DD`
 // directly, which is what FastAPI's date validator on the BE accepts —
 // no parsing or formatting needed.
@@ -45,6 +63,9 @@ export function RegistrationDateRangeFilter({
   const inputClass =
     "h-[38px] w-full min-w-0 rounded-[10px] border border-[var(--border,rgba(30,64,175,0.1))] bg-[var(--surface,#ffffff)] px-3 text-[13px] tabular-nums text-[var(--text,#0f172a)] outline-none transition focus:border-[var(--accent,#6366f1)] focus:shadow-[0_0_0_3px_rgba(99,102,241,0.15)]";
 
+  const presetClass =
+    "inline-flex items-center rounded-[6px] border border-[var(--border-2,rgba(30,64,175,0.16))] bg-transparent px-2.5 py-1 text-[11px] font-semibold text-[var(--text-dim,#475569)] transition hover:bg-[var(--surface-2,#f1f6fd)] hover:text-[var(--text,#0f172a)]";
+
   function commitAfter() {
     const next = afterRaw || null;
     if (next !== registeredAfter) {
@@ -59,11 +80,33 @@ export function RegistrationDateRangeFilter({
     }
   }
 
+  // Presets short-circuit the type-and-blur flow: set local state and
+  // commit to the parent in one click. Clearing the upper bound matches
+  // the "registered in the last N days" intent.
+  function applyPreset(days: number) {
+    const iso = daysAgoIso(days);
+    setAfterRaw(iso);
+    setBeforeRaw("");
+    onChange({ registeredAfter: iso, registeredBefore: null });
+  }
+
   return (
     <div>
       <label className="mb-1.5 block text-[11px] font-semibold uppercase tracking-[0.08em] text-[var(--text-muted,#94a3b8)]">
         Registration Date Range
       </label>
+      <div className="mb-2 flex flex-wrap gap-1.5">
+        {PRESET_DAYS.map((days) => (
+          <button
+            key={days}
+            type="button"
+            onClick={() => applyPreset(days)}
+            className={presetClass}
+          >
+            Last {days} days
+          </button>
+        ))}
+      </div>
       <div className="flex items-center gap-2">
         <input
           type="date"
