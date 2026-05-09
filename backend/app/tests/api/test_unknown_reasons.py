@@ -45,6 +45,7 @@ from app.services.unknown_reasons import (
 def _arrangement(
     *,
     clearing_partner: str | None = None,
+    clearing_type: str | None = None,
     extraction_status: str = STATUS_PENDING,
     extraction_notes: str | None = None,
     extraction_confidence: float | None = None,
@@ -52,6 +53,7 @@ def _arrangement(
 ) -> SimpleNamespace:
     return SimpleNamespace(
         clearing_partner=clearing_partner,
+        clearing_type=clearing_type,
         extraction_status=extraction_status,
         extraction_notes=extraction_notes,
         extraction_confidence=extraction_confidence,
@@ -129,6 +131,53 @@ def test_clearing_needs_review_without_exemption_is_low_confidence() -> None:
     assert result is not None
     assert result.category == "low_confidence_extraction"
     assert result.note == notes
+
+
+def test_clearing_self_clearing_with_null_partner_returns_none() -> None:
+    """clearing_type=self_clearing + null partner => no tooltip.
+
+    Self-clearing firms have no external partner by definition, so the
+    null ``clearing_partner`` is the correct final state. The deriver
+    must short-circuit before falling into the needs_review →
+    ``low_confidence_extraction`` branch (which is the misleading
+    "Extraction needs review — value pending" badge that BOFA-class
+    self-clearing rows used to render).
+    """
+    result = derive_clearing_unknown_reason(
+        _arrangement(
+            clearing_partner=None,
+            clearing_type="self_clearing",
+            extraction_status=STATUS_NEEDS_REVIEW,
+            extraction_notes="Document is a compliance report; no partner named.",
+            extraction_confidence=0.30,
+        )
+    )
+
+    assert result is None
+
+
+def test_clearing_self_clearing_overrides_other_statuses() -> None:
+    """Self-clearing wins regardless of extraction_status.
+
+    Gemini's status doesn't matter for a self-clearing row — there's no
+    partner to extract, so any status (parsed / pending / provider_error)
+    paired with ``clearing_type="self_clearing"`` and a null partner must
+    suppress the tooltip.
+    """
+    for status in (
+        STATUS_PARSED,
+        STATUS_PENDING,
+        STATUS_PROVIDER_ERROR,
+        STATUS_PIPELINE_ERROR,
+    ):
+        result = derive_clearing_unknown_reason(
+            _arrangement(
+                clearing_partner=None,
+                clearing_type="self_clearing",
+                extraction_status=status,
+            )
+        )
+        assert result is None, f"expected None for status={status!r}, got {result!r}"
 
 
 def test_clearing_needs_review_with_fully_disclosed_basis_is_disclosed() -> None:
@@ -532,6 +581,22 @@ def test_clearing_trigger_fields_returns_empty_when_cluster_populated() -> None:
     item = SimpleNamespace(
         current_clearing_partner="Pershing LLC",
         current_clearing_type="introducing",
+    )
+    assert clearing_trigger_fields(item) == ()
+
+
+def test_clearing_trigger_fields_skips_partner_when_self_clearing() -> None:
+    """Self-clearing firms shouldn't trigger on a null ``clearing_partner``.
+
+    Without this carve-out, ``with_trigger_fields`` synthesizes a
+    ``data_not_present`` reason ("Source filing doesn't include this
+    field") for a partner that is correctly absent. Pairs with the
+    ``derive_clearing_unknown_reason`` short-circuit so self-clearing
+    rows render plainly — no amber badge, no misleading tooltip.
+    """
+    item = SimpleNamespace(
+        current_clearing_partner=None,
+        current_clearing_type="self_clearing",
     )
     assert clearing_trigger_fields(item) == ()
 

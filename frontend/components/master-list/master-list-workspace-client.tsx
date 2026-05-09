@@ -1109,6 +1109,8 @@ export function MasterListWorkspaceClient() {
                             >
                               {item.current_clearing_partner}
                             </span>
+                          ) : item.current_clearing_type === "self_clearing" ? (
+                            <span className="text-[var(--text-muted,#94a3b8)]">—</span>
                           ) : (
                             <UnknownCell
                               reason={item.current_clearing_unknown_reason}

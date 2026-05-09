@@ -101,8 +101,18 @@ def clearing_trigger_fields(item: BrokerDealer) -> tuple[str, ...]:
 
     Empty tuple ⇒ every clearing-cluster field has a value, so the FE
     renders the block normally and no unknown_reason is needed.
+
+    Self-clearing firms get a special carve-out: ``current_clearing_partner``
+    is correctly null (they clear their own trades — there is no third
+    party to name) and the "Self-Clearing" pill in the next column already
+    explains the absence. Skip the partner field in that case so
+    ``with_trigger_fields`` doesn't synthesize a ``data_not_present``
+    reason for a row whose state is actually fine.
     """
-    return _null_fields(item, CLEARING_CLUSTER_FIELDS)
+    fields = _null_fields(item, CLEARING_CLUSTER_FIELDS)
+    if getattr(item, "current_clearing_type", None) == "self_clearing":
+        fields = tuple(f for f in fields if f != "current_clearing_partner")
+    return fields
 
 
 def financial_trigger_fields(item: BrokerDealer) -> tuple[str, ...]:
@@ -193,6 +203,17 @@ def derive_clearing_unknown_reason(
         return UnknownReasonResult(category="not_yet_extracted")
 
     if arrangement.clearing_partner:
+        return None
+
+    # Self-clearing firms have no external clearing partner by definition —
+    # the null ``clearing_partner`` is the correct, final state, not a low-
+    # confidence extraction. Suppress the tooltip so these rows don't carry
+    # the misleading "Extraction needs review — value pending" amber badge
+    # (false-positive review-queue entries on every self-clearing row).
+    # Fires regardless of ``extraction_status`` because Gemini routinely
+    # returns ``needs_review`` on self-clearing X-17A-5s — there's no
+    # partner name to find, so confidence stays low.
+    if getattr(arrangement, "clearing_type", None) == "self_clearing":
         return None
 
     status = arrangement.extraction_status or STATUS_PENDING
