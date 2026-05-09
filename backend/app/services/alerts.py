@@ -95,7 +95,10 @@ class AlertRepository:
                 bd_id=alert.bd_id,
                 firm_name=firm_name,
                 form_type=alert.form_type,
-                priority=alert.priority,
+                # Form BD = new-registration filing → surface as "high" priority
+                # in the activity feed regardless of the stored value, per the
+                # "new registrants flagged as priority by default" rule.
+                priority="high" if alert.form_type == "Form BD" else alert.priority,
                 filed_at=alert.filed_at,
                 summary=alert.summary,
                 source_filing_url=alert.source_filing_url,

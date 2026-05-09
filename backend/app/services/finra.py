@@ -15,6 +15,7 @@ from app.services.brokercheck_pdf import (
 )
 from app.services.normalization import normalize_sec_file_number
 from app.services.service_models import FinraBrokerDealerRecord
+from app.services.website_resolver import is_blocklisted_host
 
 logger = logging.getLogger(__name__)
 
@@ -217,7 +218,11 @@ class FinraService:
             record.executive_officers = detail.executive_officers
         if detail.firm_operations_text:
             record.firm_operations_text = detail.firm_operations_text
-        if detail.web_address and not record.website:
+        if (
+            detail.web_address
+            and not record.website
+            and not is_blocklisted_host(detail.web_address)
+        ):
             record.website = detail.web_address
             record.website_source = "finra"
         if detail.types_of_business_other:
@@ -226,6 +231,71 @@ class FinraService:
             record.registration_date = detail.registration_date
         if detail.formation_date:
             record.formation_date = detail.formation_date
+
+    async def fetch_firm_search_metadata(
+        self,
+        crd_number: str,
+    ) -> dict[str, object] | None:
+        """Fetch fresh ``branch_count`` + ``business_type`` for a single firm.
+
+        These two fields come off FINRA's BrokerCheck *search* payload —
+        not the Form BD PDF that ``enrich_with_detail`` parses, and not
+        the substitute ``/search/firm/{crd}`` endpoint
+        :meth:`fetch_website_by_crd` uses (Cloudflare-era replacement
+        which dropped the Form BD fields). The original keyword/alpha
+        search endpoint :meth:`_search` still surfaces ``firm_branches_count``
+        and ``firm_type``, so this method runs a CRD-targeted search and
+        builds a fresh metadata dict from the matching hit.
+
+        Returns a ``{"branch_count": int|None, "business_type": str|None}``
+        dict on success, or ``None`` if FINRA has no active hit for the
+        CRD or the call fails after retries. Either entry value can be
+        ``None`` when the source field is missing — caller should apply
+        only truthy / non-None values to avoid overwriting a present
+        BD column with a transient miss.
+
+        Free + cheap (~1 HTTP call, FINRA rate-limited at 2 req/s).
+        Opens its own ``httpx.AsyncClient`` so the orchestrator's
+        per-firm runner can call it without managing a client.
+        """
+        async with httpx.AsyncClient(
+            timeout=settings.finra_request_timeout_seconds,
+            follow_redirects=True,
+            headers=BROKERCHECK_HEADERS,
+        ) as client:
+            try:
+                hits, _ = await self._search(
+                    client, query=str(crd_number), start=0, rows=20
+                )
+            except (RuntimeError, httpx.HTTPError):
+                return None
+
+            for hit in hits:
+                source = hit.get("_source") or hit.get("source")
+                if not isinstance(source, dict):
+                    continue
+                if str(source.get("firm_source_id") or "").strip() != str(crd_number).strip():
+                    continue
+
+                branch_count_raw = source.get("firm_branches_count")
+                try:
+                    branch_count: int | None = (
+                        int(branch_count_raw) if branch_count_raw is not None else None
+                    )
+                except (TypeError, ValueError):
+                    branch_count = None
+
+                business_type = self._clean_text(
+                    source.get("firm_ia_full_sec_number")
+                    or source.get("firm_type")
+                )
+
+                return {
+                    "branch_count": branch_count,
+                    "business_type": business_type,
+                }
+
+            return None
 
     async def fetch_website_by_crd(
         self,
@@ -248,13 +318,15 @@ class FinraService:
         source = self._extract_detail_source(detail)
         if source is None:
             return None
-        return self._clean_text(
+        website = self._clean_text(
             source.get("firm_ia_main_web_address")
             or source.get("firm_main_web_address")
             or source.get("firm_web_address")
             or source.get("firm_website")
-            or source.get("firm_bc_scope_url")
         )
+        if website and is_blocklisted_host(website):
+            return None
+        return website
 
     async def _fetch_firm_detail(
         self,
@@ -298,19 +370,25 @@ class FinraService:
         # Website. The BrokerCheck Form BD "Web Address" field surfaces under
         # several keys depending on the search vs. detail endpoint and how the
         # firm filed Form BD: ``firm_ia_main_web_address`` is the canonical
-        # snake-cased Form BD field, ``firm_main_web_address`` /
-        # ``firm_web_address`` show up on some firms, and ``firm_website`` /
-        # ``firm_bc_scope_url`` were the original keys we plucked. Try the
-        # Form-BD-canonical ones first so production rows are mostly populated
-        # straight from FINRA without needing the Apollo fallback.
+        # snake-cased Form BD field; ``firm_main_web_address`` /
+        # ``firm_web_address`` / ``firm_website`` show up as legacy variants.
+        # ``firm_bc_scope_url`` is intentionally NOT in the chain — that field
+        # is FINRA's pointer to the firm's own BrokerCheck profile/PDF (e.g.
+        # ``files.brokercheck.finra.org/firm/firm_<CRD>.pdf``), not a website
+        # the firm filed. Persisting it short-circuits the on-demand resolver
+        # (which only fires when ``website IS NULL``) and renders as a
+        # FINRA URL on the firm-detail page.
         website = self._clean_text(
             source.get("firm_ia_main_web_address")
             or source.get("firm_main_web_address")
             or source.get("firm_web_address")
             or source.get("firm_website")
-            or source.get("firm_bc_scope_url")
         )
-        if website:
+        # Defensive: even the canonical Form BD key occasionally carries a
+        # FINRA/SEC self-reference for firms that didn't file a real website.
+        # Blocklisted hosts are never persisted; the lazy
+        # Apollo→Hunter→SerpAPI resolver runs on first visit instead.
+        if website and not is_blocklisted_host(website):
             record.website = website
             record.website_source = "finra"
 
@@ -548,9 +626,20 @@ class FinraService:
         if sec_file_number is None:
             return None
 
+        # ``firm_other_names`` is the FINRA "doing business as" / alternate
+        # trade-name field. It used to be conflated with ``business_type``
+        # as a fallback alongside ``firm_ia_full_sec_number`` / ``firm_type``,
+        # which discarded DBA data entirely. Parse it on its own so the
+        # website resolver can anchor candidate URLs on the trade name when
+        # the legal LLC name doesn't match the firm's brand domain
+        # (canonical case: ``303 ALTERNATIVES, LLC`` operating at
+        # ``303capitalmarkets.com``).
+        dba_names = self._parse_dba_names(
+            source.get("firm_other_names"), legal_name=name,
+        )
+
         business_type = self._clean_text(
             source.get("firm_ia_full_sec_number")
-            or source.get("firm_other_names")
             or source.get("firm_type")
         )
 
@@ -563,7 +652,138 @@ class FinraService:
             address_city=self._clean_text(address_source.get("city")),
             address_state=self._clean_text(address_source.get("state")),
             business_type=business_type,
+            dba_names=dba_names,
         )
+
+    @staticmethod
+    def _parse_dba_names(
+        raw: object, *, legal_name: str
+    ) -> list[str] | None:
+        """Normalize FINRA's "other names" payload into a list of DBAs.
+
+        FINRA exposes the same DBA data under two different shapes
+        depending on which endpoint surfaced it:
+
+        - **Search endpoint** (``_search`` → ``_build_record``): a
+          string at top-level ``firm_other_names``. Format varies:
+          single name, semicolon-delimited, newline-delimited, or
+          ``"d/b/a <trade-name>"`` markers. Comma split is avoided
+          because legitimate LLC suffixes carry internal commas.
+        - **Detail endpoint** (``_fetch_firm_detail`` →
+          ``content.basicInformation.otherNames``): already a list of
+          strings, one entry per name. The list typically includes the
+          firm's own legal name as the first entry.
+
+        Both shapes pass through here. Returns ``None`` when nothing
+        usable remains. Drops items that match the firm's legal name
+        (case- and whitespace-insensitive) and de-dupes (same
+        normalization).
+        """
+        if raw is None:
+            return None
+
+        # Build the raw item list, regardless of input shape.
+        items: list[str]
+        if isinstance(raw, list):
+            items = [str(x).strip() for x in raw if str(x).strip()]
+        else:
+            text = str(raw).strip()
+            if not text:
+                return None
+            # Split on the unambiguous delimiters (semicolons and
+            # newlines). Comma split is intentionally avoided — many
+            # legitimate firm names carry an internal ``, LLC`` /
+            # ``, INC`` / ``, L.P.`` suffix.
+            items = []
+            for chunk in text.replace("\r", "\n").split("\n"):
+                for sub in chunk.split(";"):
+                    cleaned = sub.strip()
+                    if cleaned:
+                        items.append(cleaned)
+
+        # Per-item: strip a leading ``d/b/a`` / ``DBA`` prefix.
+        cleaned_items: list[str] = []
+        for item in items:
+            lower = item.lower()
+            for marker in ("d/b/a ", "dba "):
+                if lower.startswith(marker):
+                    item = item[len(marker):].strip()
+                    break
+            if item:
+                cleaned_items.append(item)
+
+        # De-dupe (case-insensitive) and drop legal-name matches.
+        legal_norm = " ".join(legal_name.lower().split())
+        seen: set[str] = set()
+        out: list[str] = []
+        for p in cleaned_items:
+            norm = " ".join(p.lower().split())
+            if not norm or norm == legal_norm or norm in seen:
+                continue
+            seen.add(norm)
+            out.append(p)
+        return out or None
+
+    @staticmethod
+    def extract_dba_names_from_detail(
+        detail: dict[str, object] | None, *, legal_name: str
+    ) -> list[str] | None:
+        """Parse DBA names out of a ``_fetch_firm_detail`` response.
+
+        The detail endpoint nests trade names inside a JSON-encoded
+        ``content`` string at ``content.basicInformation.otherNames``.
+        Concretely for CRD 166675 (303 ALTERNATIVES, LLC):
+
+            {
+              "_source": {
+                "content": "{\"basicInformation\": {\"firmName\":
+                  \"303 ALTERNATIVES, LLC\", \"otherNames\": [\"303
+                  ALTERNATIVES, LLC\", \"303 CAPITAL MARKETS, LLC\"]}}"
+              }
+            }
+
+        Returns the DBA list (with legal name dropped + dedupe) or
+        ``None`` when the path is absent / empty / unparseable.
+        """
+        if not detail:
+            return None
+        source = FinraService._extract_detail_source_static(detail)
+        if not isinstance(source, dict):
+            return None
+        content_raw = source.get("content")
+        if not isinstance(content_raw, str) or not content_raw.strip():
+            return None
+        try:
+            content = json.loads(content_raw)
+        except json.JSONDecodeError:
+            return None
+        if not isinstance(content, dict):
+            return None
+        basic_info = content.get("basicInformation")
+        if not isinstance(basic_info, dict):
+            return None
+        other_names = basic_info.get("otherNames")
+        return FinraService._parse_dba_names(other_names, legal_name=legal_name)
+
+    @staticmethod
+    def _extract_detail_source_static(
+        detail: dict[str, object],
+    ) -> dict[str, object] | None:
+        """Static mirror of ``_extract_detail_source`` so the static
+        ``extract_dba_names_from_detail`` helper doesn't need an
+        instance to navigate the ``hits.hits[0]._source`` envelope."""
+        if "firm_name" in detail or "firm_source_id" in detail or "content" in detail:
+            return detail  # type: ignore[return-value]
+        hits_container = detail.get("hits")
+        if isinstance(hits_container, dict):
+            hits = hits_container.get("hits", [])
+            if isinstance(hits, list) and hits:
+                first = hits[0]
+                if isinstance(first, dict):
+                    source = first.get("_source") or first.get("source")
+                    if isinstance(source, dict):
+                        return source
+        return None
 
     def _parse_address_details(self, value: object) -> dict[str, object]:
         if isinstance(value, dict):

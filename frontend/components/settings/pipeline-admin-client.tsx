@@ -23,6 +23,8 @@ import type {
   ScoringSettingsItem
 } from "@/lib/types";
 
+import { SuggestedMergesCard } from "./suggested-merges-card";
+
 // ── Design tokens — match /dashboard + /master-list + /alerts. ──────────────
 // Soft-card surface uses the same CSS-var palette as kpi-card / alert-feed-card,
 // so light + dark themes both read clean. Fallbacks keep components viewable
@@ -229,7 +231,7 @@ export function PipelineAdminClient() {
             Settings and controlled refresh
           </h1>
           <p className="mt-2 max-w-3xl text-[13px] leading-5 text-[var(--text-dim,#475569)]">
-            Adjust the weighted lead-scoring model, maintain the competitor provider list, and trigger a controlled refresh of the alert and clearing pipelines.
+            Adjust the weighted prospect-scoring model, maintain the competitor provider list, and trigger a controlled refresh of the alert and clearing pipelines.
           </p>
         </div>
       </div>
@@ -361,7 +363,7 @@ export function PipelineAdminClient() {
 
         <div className={CARD}>
           <p className={EYEBROW}>Scoring Weights</p>
-          <h2 className={CARD_TITLE}>Lead-priority weighting</h2>
+          <h2 className={CARD_TITLE}>Prospect-priority weighting</h2>
           {scoring ? (
             <div className="mt-4 space-y-4">
               {SCORING_FIELDS.map(([label, key]) => {
@@ -486,6 +488,11 @@ export function PipelineAdminClient() {
           </div>
         </div>
       </div>
+
+      {/* Suggested merges — clusters of long-tail clearing-partner
+          variants that the BE clustering pass found. Accepting a row
+          appends to the Competitors list above. */}
+      <SuggestedMergesCard onAccepted={() => void loadData()} />
     </section>
   );
 }

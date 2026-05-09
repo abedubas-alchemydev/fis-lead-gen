@@ -5,13 +5,18 @@ import type { ExecutiveContactItem } from "@/lib/types";
 
 // Inline contact summary rendered under each owner/officer card on the
 // firm-detail panel. Email/phone open via mailto: / tel:; LinkedIn opens in
-// a new tab. The Outreach button is a coming-soon stub (see OutreachButton).
-// Returns null when the contact has neither email nor phone so the parent
-// doesn't render an empty trailing line.
+// a new tab. The Outreach button opens the cold-email draft modal (Gemini
+// Flash) when the contact has an email — without one there's nothing to
+// address, so we hide the button. Returns null when the contact has
+// neither email nor phone so the parent doesn't render an empty line.
 export function ContactRow({
+  brokerDealerId,
+  brokerDealerName,
   contact,
 }: {
-  contact: Pick<ExecutiveContactItem, "email" | "phone" | "linkedin_url">;
+  brokerDealerId: number;
+  brokerDealerName: string;
+  contact: ExecutiveContactItem;
 }) {
   if (!contact.email && !contact.phone) return null;
   return (
@@ -42,7 +47,13 @@ export function ContactRow({
           LinkedIn
         </a>
       ) : null}
-      <OutreachButton contact={contact} disabled />
+      {contact.email ? (
+        <OutreachButton
+          brokerDealerId={brokerDealerId}
+          brokerDealerName={brokerDealerName}
+          contact={contact}
+        />
+      ) : null}
     </div>
   );
 }

@@ -1,16 +1,27 @@
 "use client";
 
-import { Check, ChevronDown, Heart, Loader2 } from "lucide-react";
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { Check, ChevronDown, Heart, Loader2, Plus } from "lucide-react";
+import {
+  useCallback,
+  useEffect,
+  useMemo,
+  useRef,
+  useState,
+  type FormEvent,
+} from "react";
 import { createPortal } from "react-dom";
 
 import { useToast } from "@/components/ui/use-toast";
 import {
+  ApiError,
   addFirmToList,
+  createFavoriteList,
   getListsForFirm,
   removeFirmFromList,
 } from "@/lib/api";
 import type { FavoriteListWithMembership } from "@/types/favorite-list";
+
+const MAX_NEW_LIST_NAME_LENGTH = 80;
 
 // #17 phase 3 — picker dropdown that lets a user add/remove a firm
 // to/from any of their favorite lists from anywhere they encounter
@@ -58,6 +69,16 @@ export function ListPicker({
   const [pendingIds, setPendingIds] = useState<ReadonlySet<number>>(
     () => new Set(),
   );
+  // Inline "+ New list" footer state. Mirrors the create form in
+  // my-favorites/new-list-button.tsx so users don't have to bounce
+  // back to /my-favorites just to create a list before saving a firm
+  // into it. On submit: createFavoriteList → addFirmToList → append
+  // the new list with is_member=true so the checkbox renders ticked.
+  const [creatingList, setCreatingList] = useState(false);
+  const [newListValue, setNewListValue] = useState("");
+  const [newListError, setNewListError] = useState<string | null>(null);
+  const [newListSubmitting, setNewListSubmitting] = useState(false);
+  const newListInputRef = useRef<HTMLInputElement | null>(null);
   const rootRef = useRef<HTMLDivElement | null>(null);
   const popoverRef = useRef<HTMLDivElement | null>(null);
   const toast = useToast();
@@ -230,6 +251,93 @@ export function ListPicker({
     [firmId, pendingIds, toast],
   );
 
+  // Auto-focus the input the moment the inline form expands.
+  useEffect(() => {
+    if (creatingList) newListInputRef.current?.focus();
+  }, [creatingList]);
+
+  // Reset the inline form whenever the popover closes so reopening
+  // never lands on a half-typed name from a prior session.
+  useEffect(() => {
+    if (open) return;
+    setCreatingList(false);
+    setNewListValue("");
+    setNewListError(null);
+    setNewListSubmitting(false);
+  }, [open]);
+
+  const closeNewListForm = useCallback(() => {
+    setCreatingList(false);
+    setNewListValue("");
+    setNewListError(null);
+    setNewListSubmitting(false);
+  }, []);
+
+  const handleCreateList = useCallback(
+    async (event: FormEvent) => {
+      event.preventDefault();
+      if (newListSubmitting) return;
+
+      const trimmed = newListValue.trim();
+      if (trimmed.length === 0) {
+        setNewListError("Name can't be empty.");
+        return;
+      }
+      if (trimmed.length > MAX_NEW_LIST_NAME_LENGTH) {
+        setNewListError(
+          `Name must be ${MAX_NEW_LIST_NAME_LENGTH} characters or fewer.`,
+        );
+        return;
+      }
+
+      setNewListSubmitting(true);
+      setNewListError(null);
+      try {
+        const created = await createFavoriteList(trimmed);
+        // Auto-add the current firm to the freshly created list — the
+        // user opened this picker to save THIS firm somewhere, so
+        // creating a list and not adding the firm would be a confusing
+        // extra click. If the add fails after the list itself was
+        // created, fall back to surfacing the list unchecked + a toast
+        // so the user can retry the membership manually.
+        let isMember = false;
+        try {
+          await addFirmToList(created.id, firmId);
+          isMember = true;
+        } catch (err) {
+          const message =
+            err instanceof Error
+              ? err.message
+              : "List created, but couldn't add this firm — try the checkbox.";
+          toast.error(message);
+        }
+        setLists((current) => {
+          const newList: FavoriteListWithMembership = {
+            ...created,
+            is_member: isMember,
+            item_count: created.item_count + (isMember ? 1 : 0),
+          };
+          if (current === null) return [newList];
+          return [...current, newList];
+        });
+        toast.success(`Created '${created.name}'.`);
+        setNewListValue("");
+        setCreatingList(false);
+      } catch (err) {
+        const message =
+          err instanceof ApiError
+            ? err.detail
+            : err instanceof Error
+              ? err.message
+              : null;
+        setNewListError(message || "Couldn't create list.");
+      } finally {
+        setNewListSubmitting(false);
+      }
+    },
+    [firmId, newListSubmitting, newListValue, toast],
+  );
+
   const triggerLabel = useMemo(() => {
     if (variant === "detail") {
       return defaultIsMember
@@ -278,7 +386,7 @@ export function ListPicker({
 
         {lists !== null && lists.length === 0 ? (
           <div className="px-3 py-4 text-[12px] text-[var(--text-muted,#94a3b8)]">
-            You have no favorite lists yet. Create one in My Favorites.
+            You have no favorite lists yet — create one below.
           </div>
         ) : null}
 
@@ -331,6 +439,74 @@ export function ListPicker({
             })}
           </ul>
         ) : null}
+
+        <div className="border-t border-[var(--border,rgba(30,64,175,0.1))]">
+          {creatingList ? (
+            <form
+              onSubmit={handleCreateList}
+              className="space-y-1.5 px-3 py-2.5"
+              noValidate
+            >
+              <input
+                ref={newListInputRef}
+                type="text"
+                value={newListValue}
+                onChange={(event) => {
+                  setNewListValue(event.target.value);
+                  if (newListError) setNewListError(null);
+                }}
+                onKeyDown={(event) => {
+                  if (event.key === "Escape") {
+                    event.preventDefault();
+                    closeNewListForm();
+                  }
+                }}
+                placeholder="New list name"
+                maxLength={MAX_NEW_LIST_NAME_LENGTH}
+                aria-label="New list name"
+                aria-invalid={newListError ? true : undefined}
+                disabled={newListSubmitting}
+                className="block w-full rounded-md border border-[var(--border-2,rgba(30,64,175,0.16))] bg-[var(--surface,#ffffff)] px-2.5 py-1.5 text-[13px] text-[var(--text,#0f172a)] placeholder:text-[var(--text-muted,#94a3b8)] focus:border-[var(--accent,#6366f1)] focus:outline-none focus:ring-2 focus:ring-[rgba(99,102,241,0.2)] disabled:opacity-60"
+              />
+              <div className="flex items-center justify-end gap-1.5">
+                <button
+                  type="button"
+                  onClick={closeNewListForm}
+                  disabled={newListSubmitting}
+                  className="inline-flex h-[26px] items-center rounded-md border border-transparent px-2 text-[11px] font-semibold text-[var(--text-dim,#475569)] transition hover:bg-[var(--surface-2,#f1f6fd)] disabled:cursor-not-allowed disabled:opacity-60"
+                >
+                  Cancel
+                </button>
+                <button
+                  type="submit"
+                  disabled={
+                    newListSubmitting || newListValue.trim().length === 0
+                  }
+                  className="inline-flex h-[26px] items-center rounded-md border border-[rgba(99,102,241,0.4)] bg-[rgba(99,102,241,0.08)] px-2.5 text-[11px] font-semibold text-[#4338ca] transition hover:bg-[rgba(99,102,241,0.14)] disabled:cursor-not-allowed disabled:opacity-50"
+                >
+                  {newListSubmitting ? "Saving…" : "Save"}
+                </button>
+              </div>
+              {newListError ? (
+                <p
+                  role="alert"
+                  className="text-[11px] leading-4 text-[var(--red,#dc2626)]"
+                >
+                  {newListError}
+                </p>
+              ) : null}
+            </form>
+          ) : (
+            <button
+              type="button"
+              onClick={() => setCreatingList(true)}
+              className="flex w-full items-center gap-2 px-3 py-2.5 text-[13px] font-medium text-[var(--text-dim,#475569)] transition hover:bg-[var(--surface-2,#f1f6fd)] hover:text-[var(--text,#0f172a)]"
+            >
+              <Plus className="h-3.5 w-3.5 shrink-0" strokeWidth={2.5} aria-hidden />
+              New list
+            </button>
+          )}
+        </div>
       </div>
     ) : null;
 
