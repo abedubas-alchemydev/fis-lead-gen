@@ -161,6 +161,7 @@ export function BrokerDealerDetailClient({ brokerDealerId }: { brokerDealerId: s
   const [profile, setProfile] = useState<BrokerDealerProfileResponse | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [enrichError, setEnrichError] = useState<string | null>(null);
+  const [enrichNotice, setEnrichNotice] = useState<string | null>(null);
   const [isEnriching, setIsEnriching] = useState(false);
   const [isHealthChecking, setIsHealthChecking] = useState(false);
   const [healthCheckResult, setHealthCheckResult] = useState<string | null>(null);
@@ -478,6 +479,7 @@ export function BrokerDealerDetailClient({ brokerDealerId }: { brokerDealerId: s
   async function enrichContacts() {
     setIsEnriching(true);
     setEnrichError(null);
+    setEnrichNotice(null);
     try {
       const directOwners = profile?.broker_dealer.direct_owners ?? [];
       const executiveOfficers = profile?.broker_dealer.executive_officers ?? [];
@@ -485,11 +487,25 @@ export function BrokerDealerDetailClient({ brokerDealerId }: { brokerDealerId: s
         ...directOwners.map(toOfficerEntity),
         ...executiveOfficers.map(toOfficerEntity),
       ]);
+      const previousNames = new Set(
+        (profile?.executive_contacts ?? []).map((c) => c.name.trim().toLowerCase()),
+      );
       const contacts = await apiRequest<BrokerDealerProfileResponse["executive_contacts"]>(
         `/api/v1/broker-dealers/${brokerDealerId}/enrich`,
         { method: "POST", body: JSON.stringify({ officers }) },
       );
       setProfile((c) => (c ? { ...c, executive_contacts: contacts } : c));
+      // BE returns the existing list verbatim when the discovery chain
+      // didn't find any new officers (90-day cooldown short-circuits the
+      // company-level Apollo path; per-officer fan-out can also return zero
+      // matches). Without this notice the button just stops spinning and
+      // the panel looks identical, so the click reads as a no-op.
+      const hasNewContact = contacts.some(
+        (c) => !previousNames.has(c.name.trim().toLowerCase()),
+      );
+      if (!hasNewContact) {
+        setEnrichNotice("No new contacts found for these officers.");
+      }
     } catch (err) {
       setEnrichError(err instanceof Error ? err.message : "Unable to enrich contacts.");
     } finally {
@@ -871,6 +887,12 @@ export function BrokerDealerDetailClient({ brokerDealerId }: { brokerDealerId: s
           {enrichError ? (
             <div className="mb-3 rounded-2xl border border-[rgba(245,158,11,0.25)] bg-[rgba(245,158,11,0.08)] px-4 py-3 text-sm text-[var(--pill-amber-text,#b45309)]">
               {enrichError}
+            </div>
+          ) : null}
+
+          {enrichNotice ? (
+            <div className="mb-3 rounded-2xl border border-[rgba(59,130,246,0.25)] bg-[rgba(59,130,246,0.08)] px-4 py-3 text-sm text-[var(--pill-blue-text,#1d4ed8)]">
+              {enrichNotice}
             </div>
           ) : null}
 
