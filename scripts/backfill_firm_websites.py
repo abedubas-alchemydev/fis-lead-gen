@@ -133,13 +133,17 @@ async def _db_retry(coro_factory, *, what: str):
 
 async def _select_targets(
     limit: int | None,
-) -> list[tuple[int, str, str | None, list[str] | None]]:
-    """Return (id, name, crd_number, dba_names) tuples for firms missing a website.
+) -> list[tuple[int, str, str | None, list[str] | None, list[str] | None]]:
+    """Return (id, name, crd_number, dba_names, resolver_aliases) tuples
+    for firms missing a website.
 
     Ordered by id so a partial run + resumption walks the same firms in
     the same order. ``crd_number`` may be None on legacy ``finra_only``
     rows that never had one — those firms still get the Apollo lookup,
-    just without the CRD hint passed to Apollo.
+    just without the CRD hint passed to Apollo. ``resolver_aliases``
+    is the LLM-augmented alternate-name pool; pre-populate it via
+    ``scripts/enrich_firm_aliases.py`` before this run for the widest
+    recall on short-acronym brand names (BOFA / TD / RBC etc.).
     """
     stmt = (
         select(
@@ -147,6 +151,7 @@ async def _select_targets(
             BrokerDealer.name,
             BrokerDealer.crd_number,
             BrokerDealer.dba_names,
+            BrokerDealer.resolver_aliases,
         )
         .where(BrokerDealer.website.is_(None))
         .order_by(BrokerDealer.id.asc())
@@ -156,7 +161,7 @@ async def _select_targets(
     async with SessionLocal() as db:
         rows = (await db.execute(stmt)).all()
     return [
-        (int(row.id), row.name, row.crd_number, row.dba_names)
+        (int(row.id), row.name, row.crd_number, row.dba_names, row.resolver_aliases)
         for row in rows
     ]
 
@@ -241,7 +246,7 @@ async def run(
 
     for batch_start in range(0, total, _BATCH_SIZE):
         batch = targets[batch_start : batch_start + _BATCH_SIZE]
-        for bd_id, name, crd_number, dba_names in batch:
+        for bd_id, name, crd_number, dba_names, resolver_aliases in batch:
             counts["scanned"] += 1
             print(
                 f"[{counts['scanned']}/{total}] BD {bd_id} {name!r} ...",
@@ -278,6 +283,7 @@ async def run(
                 serpapi,
                 None,  # serper.dev intentionally skipped — Apollo -> SerpAPI only
                 dba_names=dba_names,
+                resolver_aliases=resolver_aliases,
             )
 
             if website and source:

@@ -324,6 +324,7 @@ async def resolve_website(
     serpapi: SerpAPIClient | None = None,
     serper: SerperClient | None = None,
     dba_names: list[str] | None = None,
+    resolver_aliases: list[str] | None = None,
 ) -> tuple[str | None, str | None, str | None]:
     """Run the resolver chain for ``firm_name``.
 
@@ -348,6 +349,18 @@ async def resolve_website(
     (DBA "303Capital Markets") would always miss because the legal-name
     token doesn't share characters with the brand domain.
 
+    ``resolver_aliases`` is the LLM-generated alias pool sourced from
+    ``broker_dealers.resolver_aliases`` (populated by
+    ``services/firm_alias_enricher.py``). Treated equivalently to
+    ``dba_names`` for token generation -- both feed the same
+    ``_firm_tokens`` pool. Kept as a separate parameter so callers can
+    distinguish provenance (FINRA-supplied trade names vs. LLM-supplied
+    parent/brand expansions) when logging or auditing. Concrete repro
+    this admits: ``BOFA SECURITIES, INC.`` operating at
+    ``bankofamerica.com`` -- the FINRA dba_names list is empty/sparse,
+    but resolver_aliases ``["Bank of America Securities"]`` produces
+    token ``"bankofam"`` which anchors the parent-company hostname.
+
     Tier order
     ----------
     Apollo → serper.dev (optional) → SerpAPI. Hunter's company-find
@@ -362,14 +375,20 @@ async def resolve_website(
     cheaper per query; SerpAPI is the canonical fallback (and is the
     primary search tier when serper.dev is unset).
     """
-    firm_tokens = _firm_tokens(firm_name, dba_names)
+    # Merge FINRA-supplied DBAs and LLM-supplied aliases into the same
+    # token pool. Provenance is preserved at the column level on the BD
+    # row; the resolver itself treats both as equivalent token sources
+    # because the validator's domain-anchor check only cares about the
+    # final token set.
+    combined_aliases = [*(dba_names or []), *(resolver_aliases or [])]
+    firm_tokens = _firm_tokens(firm_name, combined_aliases)
     # Significant-word list used by the validator's title-soft-match
-    # fallback path: any word from the legal name (or any DBA) of length
-    # ≥ ``_MIN_WORD_LEN``, dropping corporate-suffix stop-words. Empty
-    # for very short / suffix-heavy firm names — those firms simply
+    # fallback path: any word from the legal name (or any DBA / alias)
+    # of length ≥ ``_MIN_WORD_LEN``, dropping corporate-suffix stop-words.
+    # Empty for very short / suffix-heavy firm names — those firms simply
     # can't get the title-match safety net.
     significant_words: list[str] = []
-    for name in (firm_name, *(dba_names or [])):
+    for name in (firm_name, *combined_aliases):
         if not name:
             continue
         for word in _significant_words(name):

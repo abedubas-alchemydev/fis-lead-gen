@@ -770,6 +770,115 @@ async def test_dba_anchor_admits_when_legal_name_misses() -> None:
 
 
 @respx.mock
+async def test_resolver_aliases_admits_parent_domain_for_short_acronym_brand() -> None:
+    """BOFA SECURITIES, INC. regression: legal name produces only one
+    weak token (``"bofasecu"``) because "BOFA" is below the per-word
+    minimum and "SECURITIES" / "INC" are stop-words. Apollo returns
+    ``bankofamerica.com`` (the parent's primary digital surface, where
+    BofA Securities's contact emails actually live) but the legal-name
+    token can't anchor that host so the validator rejects it.
+
+    Passing ``resolver_aliases=["Bank of America Securities"]`` adds
+    the 8-char prefix token ``"bankofam"``, which anchors cleanly on
+    ``bankofamerica.com`` and lets the candidate through. This is the
+    exact scenario the LLM enricher (``firm_alias_enricher``) addresses.
+    """
+    candidate = "https://www.bankofamerica.com"
+    apollo = AsyncMock()
+    apollo.search_organization = AsyncMock(
+        return_value=ApolloOrganization(
+            name="BOFA SECURITIES, INC.",
+            website_url=candidate,
+            domain="bankofamerica.com",
+        ),
+    )
+
+    respx.head(candidate).mock(
+        return_value=httpx.Response(200, request=httpx.Request("HEAD", candidate)),
+    )
+
+    website, source, reason = await resolve_website(
+        "BOFA SECURITIES, INC.",
+        "283942",
+        apollo,
+        resolver_aliases=["Bank of America Securities"],
+    )
+
+    assert (website, source, reason) == (candidate, "apollo", None)
+
+
+@respx.mock
+async def test_resolver_aliases_without_alias_still_misses_short_acronym_brand() -> None:
+    """Negative control: same BOFA setup as the test above but WITHOUT
+    ``resolver_aliases``. The legal-name token ``"bofasecu"`` can't
+    anchor ``bankofamerica.com`` and there are no stop-word-free words
+    of length >= 5 to feed the title-soft-match fallback, so the
+    validator rejects the Apollo candidate. Confirms the alias is the
+    decisive factor in the previous test, not some other gate."""
+    candidate = "https://www.bankofamerica.com"
+    apollo = AsyncMock()
+    apollo.search_organization = AsyncMock(
+        return_value=ApolloOrganization(
+            name="BOFA SECURITIES, INC.",
+            website_url=candidate,
+            domain="bankofamerica.com",
+        ),
+    )
+
+    respx.head(candidate).mock(
+        return_value=httpx.Response(200, request=httpx.Request("HEAD", candidate)),
+    )
+
+    website, source, reason = await resolve_website(
+        "BOFA SECURITIES, INC.",
+        "283942",
+        apollo,
+        # Crucially: no resolver_aliases -> token pool is just ["bofasecu"]
+    )
+
+    assert website is None
+    assert source is None
+    assert reason == "no_valid_candidate"
+
+
+@respx.mock
+async def test_resolver_aliases_merges_with_dba_names() -> None:
+    """Both alias sources (FINRA-supplied dba_names + LLM-generated
+    resolver_aliases) feed the same token pool. A firm whose dba_names
+    is empty but whose resolver_aliases anchors a candidate must admit;
+    likewise a firm whose dba_names anchors must admit even when the
+    resolver_aliases list is empty.
+
+    This test passes both at once and confirms the union covers a host
+    that anchors only on the LLM-supplied alias's token."""
+    candidate = "https://www.bankofamerica.com"
+    apollo = AsyncMock()
+    apollo.search_organization = AsyncMock(
+        return_value=ApolloOrganization(
+            name="BOFA SECURITIES, INC.",
+            website_url=candidate,
+            domain="bankofamerica.com",
+        ),
+    )
+
+    respx.head(candidate).mock(
+        return_value=httpx.Response(200, request=httpx.Request("HEAD", candidate)),
+    )
+
+    website, source, reason = await resolve_website(
+        "BOFA SECURITIES, INC.",
+        "283942",
+        apollo,
+        # FINRA gave us a useless DBA (basically the legal name again).
+        dba_names=["BofA Securities"],
+        # LLM gave us the parent-brand expansion that actually anchors.
+        resolver_aliases=["Bank of America Securities"],
+    )
+
+    assert (website, source, reason) == (candidate, "apollo", None)
+
+
+@respx.mock
 async def test_dba_names_none_preserves_legacy_legal_name_path() -> None:
     """Sanity: callers that don't yet pass ``dba_names`` (or pass None)
     still get the legal-name-only behavior. No regression on firms whose
