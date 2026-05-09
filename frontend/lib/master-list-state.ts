@@ -283,12 +283,15 @@ export function parseReturnParam(raw: string | null): MasterListQueryState | nul
 
 // Encodes a state object as the value of a `return` query param so the
 // caller can append `?return=<encodeReturnParam(state)>` to any
-// destination URL. Returns an empty string when the state is at its
-// defaults so we don't pollute outbound URLs with a no-op envelope.
+// destination URL. Always emits a non-empty envelope — even when state
+// is at defaults — so the detail page never falls through to its bare
+// "/master-list" fallback (broker-dealer-detail-client.tsx). The cost is
+// ~22 extra bytes on row hrefs at the default state; the win is no
+// silent filter-loss when the user round-trips through a firm detail.
 export function encodeReturnParam(state: MasterListQueryState): string {
   const query = toSearchParams(state).toString();
-  if (!query) return "";
-  return encodeURIComponent(`/master-list?${query}`);
+  const path = query ? `/master-list?${query}` : "/master-list";
+  return encodeURIComponent(path);
 }
 
 // True when at least one filter key differs from its default. Filter
