@@ -142,6 +142,7 @@ async def main(*, top: int | None, dry_run: bool) -> None:
                 serpapi=serpapi,
                 serper=serper,
                 dba_names=bd.dba_names,
+                resolver_aliases=bd.resolver_aliases,
             )
         except Exception as exc:
             counts["error"] += 1

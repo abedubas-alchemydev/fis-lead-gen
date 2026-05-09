@@ -71,6 +71,15 @@ class BrokerDealer(Base):
     # LLC`` but operating at ``303capitalmarkets.com`` (DBA "303Capital
     # Markets") can still anchor a candidate URL on the trade-name token.
     dba_names: Mapped[list | None] = mapped_column(JSONB(none_as_null=True), nullable=True)
+    # LLM-generated alias list — parent-company brand expansions, acronym
+    # expansions, and common stylized variants that FINRA's ``firm_other_names``
+    # rarely captures. Augments the resolver's token pool so subsidiary firms
+    # whose web presence lives on a parent domain (e.g., ``BOFA SECURITIES,
+    # INC.`` operating at ``bankofamerica.com``) can anchor a candidate via
+    # an LLM-supplied alias like "Bank of America Securities". Kept separate
+    # from ``dba_names`` to preserve provenance — FINRA-sourced trade names
+    # stay in their authoritative column.
+    resolver_aliases: Mapped[list | None] = mapped_column(JSONB(none_as_null=True), nullable=True)
 
     status: Mapped[str] = mapped_column(String(64), default="pending", nullable=False)
     # Stamped on every Apollo /enrich attempt that the API "owns" (success or

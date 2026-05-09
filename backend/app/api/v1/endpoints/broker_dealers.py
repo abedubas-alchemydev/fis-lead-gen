@@ -78,6 +78,7 @@ from app.services.refresh_all_orchestrator import (
 from app.services.serpapi import SerpAPIClient
 from app.services.serper import SerperClient
 from app.services.service_models import FinraBrokerDealerRecord
+from app.services.firm_alias_enricher import ensure_resolver_aliases
 from app.services.website_resolver import resolve_website
 
 logger = logging.getLogger(__name__)
@@ -962,6 +963,15 @@ async def resolve_broker_dealer_website(
         else None
     )
 
+    # Lazy alias enrichment: populate ``resolver_aliases`` via Gemini if
+    # this is the firm's first resolution attempt. The enricher writes
+    # ``[]`` (not NULL) on a successful-but-empty response so the call
+    # doesn't re-fire on every page mount for firms with no useful
+    # parent/brand alternates. On Gemini failure we get ``[]`` here and
+    # the column stays NULL for retry on the next visit; the resolver
+    # chain still runs without the augmented tokens (graceful degrade).
+    aliases = await ensure_resolver_aliases(db, broker_dealer)
+
     website, source, reason = await resolve_website(
         broker_dealer.name,
         broker_dealer.crd_number,
@@ -969,6 +979,7 @@ async def resolve_broker_dealer_website(
         serpapi,
         serper,
         dba_names=broker_dealer.dba_names,
+        resolver_aliases=aliases,
     )
 
     if website and source:

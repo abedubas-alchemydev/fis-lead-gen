@@ -61,6 +61,7 @@ from app.services.contacts import (
 )
 from app.services.edgar import EdgarService
 from app.services.finra import FinraService
+from app.services.firm_alias_enricher import ensure_resolver_aliases
 from app.services.focus_reports import FocusReportService
 from app.services.serpapi import SerpAPIClient
 from app.services.serper import SerperClient
@@ -326,6 +327,12 @@ async def _run_resolve_website(parent_run_id: int, bd_id: int, trigger_source: s
                 await _finalize_child(child_id, status="failed", success=0, failure=1, summary=summary)
                 return "failed", summary
 
+            # Populate resolver_aliases lazily — same contract as the
+            # /resolve-website endpoint. ``[]`` on Gemini failure leaves
+            # the column NULL for retry on the next request; resolver
+            # still runs without the augmented tokens.
+            aliases = await ensure_resolver_aliases(db, broker_dealer)
+
             website, source, reason = await resolve_website(
                 broker_dealer.name,
                 broker_dealer.crd_number,
@@ -333,6 +340,7 @@ async def _run_resolve_website(parent_run_id: int, bd_id: int, trigger_source: s
                 serpapi,
                 serper,
                 dba_names=broker_dealer.dba_names,
+                resolver_aliases=aliases,
             )
 
             if website and source:
