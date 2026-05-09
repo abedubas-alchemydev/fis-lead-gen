@@ -20,7 +20,6 @@ import { ArrangementFields } from "@/components/master-list/detail/arrangement-f
 import { ContactRow } from "@/components/master-list/detail/contact-row";
 import { EmailScansSection } from "@/components/master-list/detail/email-scans-section";
 import { FinancialTrendChart } from "@/components/master-list/detail/financial-trend-chart";
-import { FindEmailsButton } from "@/components/master-list/detail/find-emails-button";
 import { FirmWebsiteLink } from "@/components/master-list/detail/firm-website-link";
 import { FocusReportSection } from "@/components/master-list/detail/focus-report-section";
 import {
@@ -779,7 +778,7 @@ export function BrokerDealerDetailClient({ brokerDealerId }: { brokerDealerId: s
             ) : null}
           </div>
 
-          {/* PDF + Find emails action strip */}
+          {/* PDF action strip */}
           <div className="mt-4 flex flex-wrap items-start gap-2">
             <a
               href={`/api/backend/api/v1/broker-dealers/${brokerDealerId}/focus-report.pdf`}
@@ -801,11 +800,6 @@ export function BrokerDealerDetailClient({ brokerDealerId }: { brokerDealerId: s
                 FINRA BrokerCheck (PDF)
               </a>
             ) : null}
-            <FindEmailsButton
-              brokerDealerId={brokerDealerId}
-              resolvedDomain={resolvedDomain}
-              onScanCreated={setCurrentScanId}
-            />
           </div>
 
           <FocusReportSection brokerDealerId={brokerDealerId} onProfileRefresh={reloadProfile} />
@@ -1128,9 +1122,11 @@ export function BrokerDealerDetailClient({ brokerDealerId }: { brokerDealerId: s
       {/* ── Discovered emails (full width) ── */}
       <div className="mt-4">
         <EmailScansSection
+          brokerDealerId={brokerDealerId}
           currentScanId={currentScanId}
           resolvedDomain={resolvedDomain}
           isHydrating={isHydratingScan}
+          onScanCreated={setCurrentScanId}
         />
       </div>
     </div>
