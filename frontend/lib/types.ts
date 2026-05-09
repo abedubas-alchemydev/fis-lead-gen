@@ -229,6 +229,14 @@ export type FilingHistoryItem = {
   priority: string | null;
 };
 
+export type FilingHistoryPageResponse = {
+  items: FilingHistoryItem[];
+  total: number;
+  page: number;
+  limit: number;
+  total_pages: number;
+};
+
 // Where the executive_contact record was sourced from. Mirrors the cli01 BE
 // contract for `feature/be-apollo-executive-enrichment`:
 //   - "sec"    — name pulled directly from the firm's FOCUS / SEC filing

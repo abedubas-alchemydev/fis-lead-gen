@@ -349,6 +349,122 @@ class EdgarService:
 
         return None
 
+    async def list_all_filings_for_cik(self, cik: str) -> list[dict[str, object]]:
+        """Fetch every filing for a CIK from the SEC submissions JSON.
+
+        Returns a list of dicts (sorted newest first) with keys:
+          - form: str
+          - filing_date: date | None
+          - accession_number: str | None  (e.g., "0001234567-25-000123")
+          - primary_document: str | None
+          - primary_doc_description: str | None
+
+        Returns [] on empty/invalid CIK, HTTP errors after retries, or a
+        malformed response. Only inspects ``filings.recent`` — firms with
+        more than ~1000 lifetime filings overflow into ``filings.files``;
+        those older entries are not loaded.
+        """
+        normalized = (cik or "").strip().lstrip("0")
+        if not normalized:
+            return []
+        padded = normalized.zfill(10)
+        url = f"{settings.sec_submissions_base_url}/CIK{padded}.json"
+        headers = {
+            "User-Agent": settings.sec_user_agent,
+            "Accept": "application/json",
+            "Accept-Encoding": "identity",
+        }
+        async with httpx.AsyncClient(
+            timeout=settings.sec_request_timeout_seconds,
+            headers=headers,
+            follow_redirects=True,
+        ) as client:
+            for attempt in range(1, settings.sec_request_max_retries + 1):
+                try:
+                    response = await client.get(url)
+                except httpx.HTTPError as exc:
+                    if attempt == settings.sec_request_max_retries:
+                        logger.warning("EDGAR submissions fetch failed for CIK %s: %s", padded, exc)
+                        return []
+                    await asyncio.sleep(min(2**attempt, 30))
+                    continue
+
+                if response.status_code == 429:
+                    retry_after = response.headers.get("retry-after")
+                    try:
+                        wait_seconds = float(retry_after) if retry_after else min(2**attempt, 60)
+                    except ValueError:
+                        wait_seconds = min(2**attempt, 60)
+                    await asyncio.sleep(wait_seconds)
+                    continue
+
+                if response.status_code == 404:
+                    return []
+
+                try:
+                    response.raise_for_status()
+                except httpx.HTTPStatusError as exc:
+                    if attempt == settings.sec_request_max_retries:
+                        logger.warning("EDGAR submissions fetch failed for CIK %s: %s", padded, exc)
+                        return []
+                    await asyncio.sleep(min(2**attempt, 8))
+                    continue
+
+                try:
+                    payload = response.json()
+                except (json.JSONDecodeError, ValueError) as exc:
+                    logger.warning("EDGAR submissions JSON parse failed for CIK %s: %s", padded, exc)
+                    return []
+
+                if not isinstance(payload, dict):
+                    return []
+                recent = self._get_recent_filings(payload)
+                forms = recent.get("form", []) or []
+                filing_dates = recent.get("filingDate", []) or []
+                accession_numbers = recent.get("accessionNumber", []) or []
+                primary_docs = recent.get("primaryDocument", []) or []
+                primary_doc_descs = recent.get("primaryDocDescription", []) or []
+
+                filings: list[dict[str, object]] = []
+                for idx, form_value in enumerate(forms):
+                    form = str(form_value).strip() if form_value else ""
+                    if not form:
+                        continue
+                    raw_date = filing_dates[idx] if idx < len(filing_dates) else None
+                    parsed_date = self._parse_date(str(raw_date) if raw_date else None)
+                    accession = (
+                        str(accession_numbers[idx]).strip()
+                        if idx < len(accession_numbers) and accession_numbers[idx]
+                        else None
+                    )
+                    primary_doc = (
+                        str(primary_docs[idx]).strip()
+                        if idx < len(primary_docs) and primary_docs[idx]
+                        else None
+                    )
+                    primary_desc = (
+                        str(primary_doc_descs[idx]).strip()
+                        if idx < len(primary_doc_descs) and primary_doc_descs[idx]
+                        else None
+                    )
+                    filings.append(
+                        {
+                            "form": form,
+                            "filing_date": parsed_date,
+                            "accession_number": accession,
+                            "primary_document": primary_doc,
+                            "primary_doc_description": primary_desc,
+                        }
+                    )
+
+                filings.sort(
+                    key=lambda f: f["filing_date"] or date.min,
+                    reverse=True,
+                )
+                return filings
+
+        return []
+
     async def _ensure_bulk_submissions_zip(self, *, force_refresh: bool) -> Path:
         zip_path = self._resolve_project_path(settings.sec_bulk_submissions_zip_path)
         zip_path.parent.mkdir(parents=True, exist_ok=True)

@@ -148,6 +148,19 @@ class FilingHistoryItem(BaseModel):
     priority: str | None
 
 
+class FilingHistoryPage(BaseModel):
+    """Paginated filing-history response. Merges every SEC EDGAR filing
+    for the firm with our enriched alert / FOCUS / X-17A-5 entries, sorted
+    newest first.
+    """
+
+    items: list[FilingHistoryItem]
+    total: int
+    page: int
+    limit: int
+    total_pages: int
+
+
 class ExecutiveContactItem(BaseModel):
     model_config = ConfigDict(from_attributes=True)
 
