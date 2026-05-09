@@ -62,6 +62,8 @@ import type {
   BrokerDealerListResponse,
   BrokerDealerProfileResponse,
   ExecutiveContactItem,
+  FilingHistoryItem,
+  FilingHistoryPageResponse,
 } from "@/lib/types";
 
 // Sprint 6 task #29: workspace-aware breadcrumb labels keyed by the
@@ -170,6 +172,12 @@ export function BrokerDealerDetailClient({ brokerDealerId }: { brokerDealerId: s
   // FindEmailsButton callback when the user kicks off a new scan.
   const [currentScanId, setCurrentScanId] = useState<number | null>(null);
   const [isHydratingScan, setIsHydratingScan] = useState(true);
+  const FILING_PAGE_SIZE = 10;
+  const [filingPage, setFilingPage] = useState(1);
+  const [filingItems, setFilingItems] = useState<FilingHistoryItem[]>([]);
+  const [filingTotal, setFilingTotal] = useState(0);
+  const [filingTotalPages, setFilingTotalPages] = useState(0);
+  const [filingLoading, setFilingLoading] = useState(false);
 
   // Resolve adjacent firm IDs.
   //
@@ -408,6 +416,41 @@ export function BrokerDealerDetailClient({ brokerDealerId }: { brokerDealerId: s
       `/master-list/${brokerDealerId}?${params.toString()}` as Route,
     );
   }, [currentScanId, brokerDealerId, searchParams, router]);
+
+  // Reset to page 1 whenever the user navigates to a different firm.
+  useEffect(() => {
+    setFilingPage(1);
+  }, [brokerDealerId]);
+
+  // Fetch the merged EDGAR + internal filing history for the current page.
+  useEffect(() => {
+    let active = true;
+    setFilingLoading(true);
+    apiRequest<FilingHistoryPageResponse>(
+      buildApiPath(`/api/v1/broker-dealers/${brokerDealerId}/filing-history`, {
+        page: filingPage,
+        limit: FILING_PAGE_SIZE,
+      }),
+    )
+      .then((response) => {
+        if (!active) return;
+        setFilingItems(response.items);
+        setFilingTotal(response.total);
+        setFilingTotalPages(response.total_pages);
+      })
+      .catch(() => {
+        if (!active) return;
+        setFilingItems([]);
+        setFilingTotal(0);
+        setFilingTotalPages(0);
+      })
+      .finally(() => {
+        if (active) setFilingLoading(false);
+      });
+    return () => {
+      active = false;
+    };
+  }, [brokerDealerId, filingPage]);
 
   async function runHealthCheck() {
     setIsHealthChecking(true);
@@ -1081,14 +1124,19 @@ export function BrokerDealerDetailClient({ brokerDealerId }: { brokerDealerId: s
       <div className="mt-4">
         <SectionPanel eyebrow="Filing History" title="Chronological filing timeline">
           <div className="space-y-3">
-            {profile.filing_history.length === 0 ? (
+            {filingLoading && filingItems.length === 0 ? (
+              <div className="flex items-center justify-center rounded-2xl bg-[var(--surface-2,#f1f6fd)] px-4 py-8 text-sm text-[var(--text-muted,#94a3b8)]">
+                <Loader2 className="mr-2 h-4 w-4 animate-spin" />
+                Loading filings…
+              </div>
+            ) : filingItems.length === 0 ? (
               <div className="rounded-2xl bg-[var(--surface-2,#f1f6fd)] px-4 py-8 text-center text-sm text-[var(--text-muted,#94a3b8)]">
                 No filing history is available yet.
               </div>
             ) : (
-              profile.filing_history.map((item, index) => (
+              filingItems.map((item, index) => (
                 <div
-                  key={`${item.label}-${index}`}
+                  key={`${item.label}-${item.filed_at}-${index}`}
                   className="rounded-2xl border border-[var(--border,rgba(30,64,175,0.1))] px-4 py-4"
                 >
                   <div className="flex flex-wrap items-start justify-between gap-3">
@@ -1116,6 +1164,34 @@ export function BrokerDealerDetailClient({ brokerDealerId }: { brokerDealerId: s
               ))
             )}
           </div>
+          {filingTotal > 0 ? (
+            <div className="mt-4 flex flex-wrap items-center justify-between gap-3 text-sm text-[var(--text-muted,#94a3b8)]">
+              <span>
+                Page {filingPage} of {Math.max(filingTotalPages, 1)} · {filingTotal} total filing
+                {filingTotal === 1 ? "" : "s"}
+              </span>
+              <div className="flex items-center gap-2">
+                <button
+                  type="button"
+                  onClick={() => setFilingPage((p) => Math.max(1, p - 1))}
+                  disabled={filingPage <= 1 || filingLoading}
+                  className={SECONDARY_BTN}
+                >
+                  <ArrowLeft className="h-4 w-4" />
+                  Previous
+                </button>
+                <button
+                  type="button"
+                  onClick={() => setFilingPage((p) => p + 1)}
+                  disabled={filingPage >= filingTotalPages || filingLoading}
+                  className={SECONDARY_BTN}
+                >
+                  Next
+                  <ArrowRight className="h-4 w-4" />
+                </button>
+              </div>
+            </div>
+          ) : null}
         </SectionPanel>
       </div>
 

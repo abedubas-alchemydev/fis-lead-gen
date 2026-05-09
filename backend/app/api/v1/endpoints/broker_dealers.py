@@ -3,6 +3,7 @@ from __future__ import annotations
 import base64
 import json
 import logging
+import re
 from datetime import date, datetime, time, timedelta, timezone
 
 from fastapi import APIRouter, BackgroundTasks, Body, Depends, HTTPException, Query, status
@@ -26,6 +27,7 @@ from app.schemas.broker_dealer import (
     FocusCeoExtractionResponse,
     IntroducingArrangementItem,
     FilingHistoryItem,
+    FilingHistoryPage,
     FinancialMetricItem,
     FinancialMetricsResponse,
     RefreshAllRequest,
@@ -37,6 +39,7 @@ from app.schemas.broker_dealer import (
 from app.schemas.favorite_list import FavoriteListWithMembership
 from app.schemas.favorites import FavoriteResponse
 from app.services.contacts import ExecutiveContactService
+from app.services.edgar import EdgarService
 from app.schemas.pipeline import ClearingArrangementItem, ClearingArrangementsResponse
 from app.services.alerts import AlertRepository
 from app.services.auth import get_current_user
@@ -89,6 +92,7 @@ alert_repository = AlertRepository()
 contact_service = ExecutiveContactService()
 finra_service = FinraService()
 focus_ceo_service = FocusCeoExtractionService()
+edgar_service = EdgarService()
 
 
 def _parse_states(state: list[str] | None) -> list[str]:
@@ -99,6 +103,94 @@ def _parse_states(state: list[str] | None) -> list[str]:
     for value in state:
         parsed.extend(part.strip() for part in value.split(",") if part.strip())
     return parsed
+
+
+def _build_internal_filing_history(
+    *,
+    recent_alerts,
+    financials,
+    clearing_arrangements,
+) -> list[FilingHistoryItem]:
+    """Compose the alert / FOCUS / X-17A-5 entries the FE renders in the
+    FILING HISTORY card. Returns items unsorted — callers merge with EDGAR
+    rows and sort once at the end.
+    """
+    items: list[FilingHistoryItem] = []
+    for alert in recent_alerts:
+        items.append(
+            FilingHistoryItem(
+                label=alert.form_type,
+                filed_at=alert.filed_at,
+                summary=alert.summary,
+                source_filing_url=alert.source_filing_url,
+                priority=alert.priority,
+            )
+        )
+    for metric in financials:
+        items.append(
+            FilingHistoryItem(
+                label="FOCUS Report",
+                filed_at=datetime.combine(metric.report_date, time(hour=17), tzinfo=timezone.utc),
+                summary="Financial report used for net capital and YoY growth calculations.",
+                source_filing_url=metric.source_filing_url,
+                priority="medium",
+            )
+        )
+    for arrangement in clearing_arrangements:
+        report_date = arrangement.report_date
+        if report_date is None:
+            continue
+        items.append(
+            FilingHistoryItem(
+                label="X-17A-5 Annual Report",
+                filed_at=datetime.combine(report_date, time(hour=16), tzinfo=timezone.utc),
+                summary=(
+                    f"Clearing arrangement extracted as {arrangement.clearing_partner or 'Unknown'} "
+                    f"({arrangement.clearing_type or 'unknown'})."
+                ),
+                source_filing_url=arrangement.source_filing_url,
+                priority="medium",
+            )
+        )
+    return items
+
+
+_ACCESSION_PATTERN = re.compile(r"(\d{10}-\d{2}-\d{6})")
+
+
+def _extract_accession_from_url(url: str | None) -> str | None:
+    """Pull a SEC accession number (e.g., 0001234567-25-000123) out of a
+    filing URL when one is present. Returns ``None`` when the URL has no
+    embedded accession (FOCUS report URLs that point at a primary doc
+    inside an accession folder do; clearing-arrangement URLs sometimes
+    don't).
+    """
+    if not url:
+        return None
+    match = _ACCESSION_PATTERN.search(url)
+    if match:
+        return match.group(1)
+    # SEC archive URLs sometimes use the no-dash form: /000123456725000123/
+    no_dash = re.search(r"/(\d{18})/", url)
+    if no_dash:
+        raw = no_dash.group(1)
+        return f"{raw[:10]}-{raw[10:12]}-{raw[12:]}"
+    return None
+
+
+def _edgar_filing_url(cik: str | None, accession: str | None, primary_document: str | None) -> str | None:
+    """Build a deep link to an EDGAR filing's primary document. Falls back
+    to the accession folder index when ``primary_document`` is missing.
+    Returns ``None`` if we don't have enough to construct any URL.
+    """
+    if not cik or not accession:
+        return None
+    cik_no_pad = cik.lstrip("0") or "0"
+    accession_no_dash = accession.replace("-", "")
+    base = f"https://www.sec.gov/Archives/edgar/data/{cik_no_pad}/{accession_no_dash}"
+    if primary_document:
+        return f"{base}/{primary_document}"
+    return f"{base}/"
 
 
 @router.get("", response_model=BrokerDealerListResponse)
@@ -711,46 +803,11 @@ async def get_broker_dealer_profile(
         )
     ).items
 
-    filing_history: list[FilingHistoryItem] = []
-    for alert in recent_alerts:
-        filing_history.append(
-            FilingHistoryItem(
-                label=alert.form_type,
-                filed_at=alert.filed_at,
-                summary=alert.summary,
-                source_filing_url=alert.source_filing_url,
-                priority=alert.priority,
-            )
-        )
-
-    for metric in financials:
-        filing_history.append(
-            FilingHistoryItem(
-                label="FOCUS Report",
-                filed_at=datetime.combine(metric.report_date, time(hour=17), tzinfo=timezone.utc),
-                summary="Financial report used for net capital and YoY growth calculations.",
-                source_filing_url=metric.source_filing_url,
-                priority="medium",
-            )
-        )
-
-    for arrangement in clearing_arrangements:
-        report_date = arrangement.report_date
-        if report_date is None:
-            continue
-        filing_history.append(
-            FilingHistoryItem(
-                label="X-17A-5 Annual Report",
-                filed_at=datetime.combine(report_date, time(hour=16), tzinfo=timezone.utc),
-                summary=(
-                    f"Clearing arrangement extracted as {arrangement.clearing_partner or 'Unknown'} "
-                    f"({arrangement.clearing_type or 'unknown'})."
-                ),
-                source_filing_url=arrangement.source_filing_url,
-                priority="medium",
-            )
-        )
-
+    filing_history = _build_internal_filing_history(
+        recent_alerts=recent_alerts,
+        financials=financials,
+        clearing_arrangements=clearing_arrangements,
+    )
     filing_history.sort(key=lambda item: item.filed_at, reverse=True)
 
     favorited, favorited_at = await is_favorited(db, current_user.id, broker_dealer_id)
@@ -799,7 +856,7 @@ async def get_broker_dealer_profile(
         introducing_arrangements=introducing_arrangements,
         industry_arrangements=industry_arrangements,
         recent_alerts=recent_alerts,
-        filing_history=filing_history[:20],
+        filing_history=filing_history[:10],
         executive_contacts=executive_items,
         executive_contacts_unknown_reason=executive_contacts_unknown_reason,
         is_favorited=favorited,
@@ -822,6 +879,92 @@ async def get_broker_dealer_profile(
                 else "No active Form 17a-11 deficiency notice is currently tracked."
             ),
         ),
+    )
+
+
+@router.get("/{broker_dealer_id}/filing-history", response_model=FilingHistoryPage)
+async def get_filing_history(
+    broker_dealer_id: int,
+    page: int = Query(default=1, ge=1),
+    limit: int = Query(default=10, ge=1, le=100),
+    _: AuthenticatedUser = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db_session),
+) -> FilingHistoryPage:
+    """Paginated filing history for the firm. Merges every SEC EDGAR filing
+    (when a CIK is on file) with our enriched alert / FOCUS / X-17A-5 entries,
+    dedupes by accession number, and sorts newest first.
+    """
+    broker_dealer = await repository.get_broker_dealer(db, broker_dealer_id)
+    if broker_dealer is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Broker-dealer not found.")
+
+    financials = await repository.get_financial_metrics(db, broker_dealer_id)
+    clearing_arrangements = await repository.list_clearing_arrangements(db, broker_dealer_id)
+    alert_response = await alert_repository.list_alerts(
+        db,
+        form_types=[],
+        priorities=[],
+        is_read=None,
+        broker_dealer_id=broker_dealer_id,
+        page=1,
+        limit=100,
+    )
+
+    internal_items = _build_internal_filing_history(
+        recent_alerts=alert_response.items,
+        financials=financials,
+        clearing_arrangements=clearing_arrangements,
+    )
+
+    edgar_pairs: list[tuple[str | None, FilingHistoryItem]] = []
+    if broker_dealer.cik:
+        raw_filings = await edgar_service.list_all_filings_for_cik(broker_dealer.cik)
+        for filing in raw_filings:
+            filing_date = filing.get("filing_date")
+            if filing_date is None:
+                continue
+            accession = filing.get("accession_number")
+            primary_doc = filing.get("primary_document")
+            primary_desc = filing.get("primary_doc_description")
+            url = (
+                _edgar_filing_url(broker_dealer.cik, str(accession) if accession else None,
+                                  str(primary_doc) if primary_doc else None)
+                or broker_dealer.filings_index_url
+            )
+            item = FilingHistoryItem(
+                label=str(filing.get("form") or "Filing"),
+                filed_at=datetime.combine(filing_date, time(hour=12), tzinfo=timezone.utc),
+                summary=str(primary_desc) if primary_desc else "Filed with SEC.",
+                source_filing_url=url,
+                priority=None,
+            )
+            edgar_pairs.append((str(accession) if accession else None, item))
+
+    internal_accessions: set[str] = set()
+    for item in internal_items:
+        accession = _extract_accession_from_url(item.source_filing_url)
+        if accession:
+            internal_accessions.add(accession)
+
+    deduped_edgar = [
+        item for accession, item in edgar_pairs
+        if not accession or accession not in internal_accessions
+    ]
+
+    merged = internal_items + deduped_edgar
+    merged.sort(key=lambda item: item.filed_at, reverse=True)
+
+    total = len(merged)
+    total_pages = max(1, (total + limit - 1) // limit) if total else 0
+    start = (page - 1) * limit
+    end = start + limit
+
+    return FilingHistoryPage(
+        items=merged[start:end],
+        total=total,
+        page=page,
+        limit=limit,
+        total_pages=total_pages,
     )
 
 
