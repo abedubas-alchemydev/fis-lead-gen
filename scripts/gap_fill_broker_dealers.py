@@ -42,6 +42,12 @@ if sys.platform == "win32" and sys.version_info < (3, 14):
 COOLDOWN_DAYS = 30
 GAP_FILL_PIPELINE_NAME = "broker_dealer_gap_fill"
 TRIGGER_SOURCE = "gap_fill_script"
+# Number of BDs processed concurrently. Each BD's sub-pipelines already run
+# in parallel via asyncio.gather inside run_refresh_all; this controls how
+# many *BDs* the bulk loop has in flight at once. Defaults to 2 (≈ 2× the
+# sequential pace). Override with GAP_FILL_CONCURRENCY=N for higher throughput
+# if Gemini's per-key rate limit allows; drop to 1 to revert to sequential.
+MAX_CONCURRENCY = int(os.environ.get("GAP_FILL_CONCURRENCY", "2"))
 
 
 async def main() -> None:
@@ -110,18 +116,25 @@ async def main() -> None:
         print("No eligible broker-dealers (all stamped within cooldown).")
         return
 
-    print(f"Gap-fill: {total_eligible:,} eligible BDs (cooldown = {COOLDOWN_DAYS}d, all sub-pipelines included).")
+    print(
+        f"Gap-fill: {total_eligible:,} eligible BDs (cooldown = {COOLDOWN_DAYS}d, "
+        f"all sub-pipelines included, concurrency = {MAX_CONCURRENCY})."
+    )
     print()
 
-    processed = 0
-    skipped_noop = 0
+    counters: dict[str, int] = {"processed": 0, "skipped_noop": 0}
     sub_success: dict[str, int] = defaultdict(int)
     sub_failure: dict[str, int] = defaultdict(int)
     failures: list[tuple[int, str, str]] = []  # (bd_id, name, summary)
     started_wall = time.monotonic()
+    semaphore = asyncio.Semaphore(MAX_CONCURRENCY)
 
-    try:
-        for idx, bd in enumerate(eligible, start=1):
+    async def _process_bd(idx: int, bd: BrokerDealer) -> None:
+        """Process a single BD end-to-end. Acquires the semaphore so only
+        ``MAX_CONCURRENCY`` BDs are in flight at once. Mutations to the
+        shared counters / dicts / lists are safe under single-threaded
+        asyncio (no preemption between ``+=`` and ``append``)."""
+        async with semaphore:
             has_contacts = bd.id in contact_ids
             decision = decide_pipelines(bd, has_contacts, scope="all")
             to_run = decision.to_run
@@ -137,9 +150,9 @@ async def main() -> None:
                     if fresh is not None:
                         fresh.last_gap_fill_attempt_at = datetime.now(timezone.utc)
                         await db.commit()
-                skipped_noop += 1
+                counters["skipped_noop"] += 1
                 print(f"{tag} BD {bd.id:<6} {name_short:<38}  noop (all targets already present)")
-                continue
+                return
 
             # Create parent PipelineRun (status=queued).
             async with SessionLocal() as db:
@@ -188,8 +201,8 @@ async def main() -> None:
                     if fresh is not None:
                         fresh.last_gap_fill_attempt_at = datetime.now(timezone.utc)
                         await db.commit()
-                processed += 1
-                continue
+                counters["processed"] += 1
+                return
 
             elapsed = time.monotonic() - t0
 
@@ -218,7 +231,7 @@ async def main() -> None:
                     fresh.last_gap_fill_attempt_at = datetime.now(timezone.utc)
                     await db.commit()
 
-            processed += 1
+            counters["processed"] += 1
             ran_str = ",".join(ok_subs) if ok_subs else "-"
             fail_str = (" failed:[" + ",".join(fail_subs) + "]") if fail_subs else ""
             print(
@@ -231,9 +244,18 @@ async def main() -> None:
                     (bd.id, bd.name, f"failed: {','.join(fail_subs)}")
                 )
 
+    try:
+        tasks = [
+            _process_bd(idx, bd)
+            for idx, bd in enumerate(eligible, start=1)
+        ]
+        await asyncio.gather(*tasks, return_exceptions=False)
     except KeyboardInterrupt:
         print()
         print("Interrupted by user. Resuming on next run via the cooldown stamp.")
+
+    processed = counters["processed"]
+    skipped_noop = counters["skipped_noop"]
 
     # Re-score every BD after the gap-fill pass. Newly-filled financials,
     # clearing partners, and competitor flags all change scores; running
