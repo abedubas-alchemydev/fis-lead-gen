@@ -61,11 +61,21 @@ def _whole_word_pattern(candidate: str) -> re.Pattern[str]:
 
     Whitespace inside the candidate becomes ``\\s+`` so " BNY  Pershing "
     and " BNY Pershing " both match.
+
+    Uses ``(?<!\\w)`` / ``(?!\\w)`` lookarounds rather than ``\\b`` because
+    ``\\b`` only fires on a word/non-word transition — when the candidate
+    ends in a non-word char (e.g. ``"BofA Securities, Inc."`` ends in
+    ``.``, ``"Mirae Asset Securities (USA)"`` ends in ``)``), the trailing
+    ``\\b`` sits between two non-word chars (``.``/``)`` and end-of-string
+    or whitespace) and never matches, so the alias silently fails to
+    match its own raw value. The lookarounds check "the surrounding char
+    is not a word char" instead, which is correct on both word and
+    non-word ends.
     """
 
     tokens = candidate.split()
     body = r"\s+".join(re.escape(token) for token in tokens)
-    return re.compile(rf"\b{body}\b", re.IGNORECASE)
+    return re.compile(rf"(?<!\w){body}(?!\w)", re.IGNORECASE)
 
 
 def _match_provider(raw: str, providers: list[ProviderEntry]) -> ProviderEntry | None:

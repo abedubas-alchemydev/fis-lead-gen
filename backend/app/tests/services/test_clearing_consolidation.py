@@ -116,6 +116,55 @@ def test_long_tail_raw_value_passes_through_trimmed(
     assert consolidate_partner(raw, providers) == "Joe's Random Clearing Inc"
 
 
+@pytest.mark.parametrize(
+    "raw,expected",
+    [
+        # Trailing period — `\b` at end-of-string after `.` would not
+        # fire; lookarounds do.
+        ("BofA Securities, Inc.", "BofA Securities"),
+        ("BofA Securities Inc.", "BofA Securities"),
+        # Trailing `)` — same problem class as `.`. Pattern ends in a
+        # non-word char and the next char is whitespace (also non-word).
+        ("Mirae Asset Securities (USA)", "Mirae Asset"),
+        ("Mirae Asset Securities (USA), Inc.", "Mirae Asset"),
+    ],
+)
+def test_alias_ending_in_non_word_char_matches_its_own_raw(
+    raw: str, expected: str
+) -> None:
+    """Regression: aliases ending in ``.`` or ``)`` failed to match their
+    own raw values when the matcher used ``\\b...\\b`` because Python's
+    ``\\b`` doesn't fire between two non-word chars. Switched to
+    ``(?<!\\w)...(?!\\w)`` lookarounds; pin both classes here."""
+
+    providers_with_punctuation = [
+        ProviderEntry(
+            canonical_name="BofA Securities, Inc.",
+            display_label="BofA Securities",
+            aliases=("BofA Securities Inc.", "BofA Securities, Inc."),
+        ),
+        ProviderEntry(
+            canonical_name="Mirae Asset Securities (USA) LLC",
+            display_label="Mirae Asset",
+            aliases=("Mirae Asset Securities (USA)",),
+        ),
+    ]
+    assert consolidate_partner(raw, providers_with_punctuation) == expected
+
+
+def test_lookaround_matcher_does_not_break_existing_word_boundary_guard(
+    providers: list[ProviderEntry],
+) -> None:
+    """Sanity: the ``\\b`` -> lookaround swap must still reject prefix
+    collisions. ``Pershington`` is the canonical example and was the
+    original motivation for whole-word matching."""
+
+    assert consolidate_partner("Pershington Securities", providers) == (
+        "Pershington Securities"
+    )
+    assert consolidate_partner("BNY Pershington", providers) == "BNY Pershington"
+
+
 @pytest.mark.parametrize("raw", [None, "", "   "])
 def test_consolidate_empty_inputs_return_none(
     providers: list[ProviderEntry], raw: str | None
