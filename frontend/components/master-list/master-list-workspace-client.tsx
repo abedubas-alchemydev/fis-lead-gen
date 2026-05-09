@@ -1033,6 +1033,19 @@ export function MasterListWorkspaceClient() {
                 items.map((item) => {
                   const hot = item.lead_priority === "hot";
                   const location = [item.city, item.state].filter(Boolean).join(", ");
+                  // When the search query matched a DBA but NOT the legal
+                  // name, surface the matched alt name so the user can see
+                  // why this row appeared. Suppress when the legal name
+                  // already contains the substring — otherwise the hint is
+                  // noise. Mirrors the BE substring match in
+                  // ``BrokerDealerRepository.list_broker_dealers``.
+                  const searchTerm = search.trim().toLowerCase();
+                  const matchedDba =
+                    searchTerm && !item.name.toLowerCase().includes(searchTerm)
+                      ? item.dba_names?.find((alt) =>
+                          alt.toLowerCase().includes(searchTerm),
+                        ) ?? null
+                      : null;
                   // Hot-row stripe lives on the firm-cell <td> as a
                   // background-image so Chromium doesn't render it as a
                   // phantom <tr>::before cell that shifts every td one
@@ -1060,6 +1073,14 @@ export function MasterListWorkspaceClient() {
                             >
                               {item.name}
                             </Link>
+                            {matchedDba ? (
+                              <div className="mt-0.5 text-[11px] text-[var(--text-muted,#94a3b8)]">
+                                DBA:{" "}
+                                <span className="font-medium text-[var(--text-dim,#475569)]">
+                                  {matchedDba}
+                                </span>
+                              </div>
+                            ) : null}
                             {location ? (
                               <div className="mt-0.5 text-[11px] uppercase tracking-[0.04em] text-[var(--text-muted,#94a3b8)]">
                                 {location}

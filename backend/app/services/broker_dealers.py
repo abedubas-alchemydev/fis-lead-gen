@@ -248,12 +248,32 @@ class BrokerDealerRepository:
         filters = []
         if search:
             like_value = f"%{search.strip()}%"
+            # Match the substring against any element of the JSONB ``dba_names``
+            # array so a search for the public-facing brand ("303Capital
+            # Markets") finds the firm even when the legal name reads
+            # differently ("303 ALTERNATIVES, LLC"). The ``jsonb_typeof =
+            # 'array'`` guard mirrors ``list_advisory_activities`` and protects
+            # against rows whose JSONB happens to be a scalar/object — those
+            # would otherwise crash ``jsonb_array_elements_text``.
+            dba_elem = func.jsonb_array_elements_text(
+                BrokerDealer.dba_names
+            ).table_valued("value")
+            dba_match = (
+                select(1)
+                .select_from(dba_elem)
+                .where(
+                    func.jsonb_typeof(BrokerDealer.dba_names) == "array",
+                    dba_elem.c.value.ilike(like_value),
+                )
+                .exists()
+            )
             filters.append(
                 or_(
                     BrokerDealer.name.ilike(like_value),
                     BrokerDealer.cik.ilike(like_value),
                     cast(BrokerDealer.crd_number, String).ilike(like_value),
                     cast(BrokerDealer.sec_file_number, String).ilike(like_value),
+                    dba_match,
                 )
             )
 
