@@ -19,7 +19,7 @@ export function healthLabel(status: string | null): string {
   if (status === "healthy") return "Healthy";
   if (status === "ok") return "OK";
   if (status === "at_risk") return "At Risk";
-  return "Not assessed";
+  return "Unknown";
 }
 
 export function clearingTypeVariant(value: string | null): PillVariant {
@@ -33,7 +33,7 @@ export function clearingTypeLabel(value: string | null): string {
   if (value === "fully_disclosed") return "Fully Disclosed";
   if (value === "self_clearing") return "Self-Clearing";
   if (value === "omnibus") return "Omnibus";
-  return "Not classified";
+  return "Unknown";
 }
 
 export function priorityVariant(priority: string | null): PillVariant {

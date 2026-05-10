@@ -1,25 +1,77 @@
 import type { ReactNode } from "react";
-import { Lock } from "lucide-react";
+import Image from "next/image";
+import { BarChart3, Shield, Zap } from "lucide-react";
 
-import { AuthHero } from "@/components/auth/auth-hero";
+import { BrandMark } from "@/components/brand/brand-mark";
 
 export default function AuthLayout({ children }: { children: ReactNode }) {
   return (
-    <main className="min-h-screen bg-white">
-      <div className="grid min-h-screen lg:grid-cols-2">
-        {/* ── Hero column (lg only, left) ──────────────────────── */}
-        <AuthHero />
+    <main className="flex min-h-screen items-center justify-center px-4 py-10">
+      <div className="animate-scale-in grid w-full max-w-[1100px] gap-0 overflow-hidden rounded-[36px] border border-white/60 bg-white/40 shadow-2xl shadow-navy/8 backdrop-blur-sm lg:grid-cols-[1.15fr_0.85fr]">
+        {/* ── Left panel: Brand showcase ──────────────────────── */}
+        <section className="relative hidden overflow-hidden bg-gradient-to-br from-navy via-[#0f2d52] to-[#163768] p-12 text-white lg:flex lg:flex-col">
+          {/* Decorative blurs */}
+          <div className="pointer-events-none absolute -right-20 -top-20 h-64 w-64 rounded-full bg-blue/15 blur-3xl" />
+          <div className="pointer-events-none absolute -bottom-16 -left-16 h-48 w-48 rounded-full bg-gold/12 blur-3xl" />
 
-        {/* ── Form column (always visible, right) ──────────────── */}
-        <section className="flex min-h-screen flex-col bg-white">
-          <div className="flex flex-1 items-center justify-center overflow-y-auto px-8 sm:px-14">
-            <div className="w-full max-w-[420px] py-12">{children}</div>
+          <div className="relative">
+            <div className="animate-fade-in flex items-center gap-3">
+              <Image
+                src="/logo.png"
+                alt="DOX"
+                width={140}
+                height={44}
+                priority
+                className="h-11 w-auto"
+              />
+            </div>
+
+            <h1 className="animate-fade-in delay-150 mt-10 text-[2rem] font-bold leading-tight">
+              Institutional Finance
+              <br />
+              <span className="bg-gradient-to-r from-white to-white/70 bg-clip-text text-transparent">
+                Intelligence
+              </span>
+            </h1>
+            <p className="animate-fade-in delay-300 mt-5 max-w-sm text-sm leading-relaxed text-white/65">
+              Enterprise broker-dealer intelligence for surfacing clearing opportunities,
+              tracking risk signals, and managing qualified prospects in one system.
+            </p>
           </div>
 
-          <footer className="flex items-center gap-2 px-8 pb-8 text-xs text-slate-400 sm:px-14">
-            <Lock className="h-3.5 w-3.5" aria-hidden />
-            <span>SOC 2 Type II · TLS 1.3 · Session-bound auth</span>
-          </footer>
+          {/* Feature cards */}
+          <div className="relative mt-auto grid gap-3 pt-12">
+            {[
+              { icon: BarChart3, label: "SEC + FINRA Signals", desc: "Daily new registrations and filings" },
+              { icon: Shield, label: "Competitor Mapping", desc: "Know who clears where" },
+              { icon: Zap, label: "Scored Leads", desc: "Hot, warm, and cold classification" },
+            ].map((item, i) => (
+              <div
+                key={item.label}
+                className={`animate-fade-in-left delay-${(i + 4) * 100} flex items-center gap-4 rounded-2xl border border-white/8 bg-white/5 px-5 py-4 backdrop-blur`}
+              >
+                <div className="flex h-10 w-10 shrink-0 items-center justify-center rounded-xl bg-white/10">
+                  <item.icon className="h-4.5 w-4.5 text-white/80" />
+                </div>
+                <div>
+                  <p className="text-sm font-semibold text-white/90">{item.label}</p>
+                  <p className="mt-0.5 text-xs text-white/50">{item.desc}</p>
+                </div>
+              </div>
+            ))}
+          </div>
+        </section>
+
+        {/* ── Right panel: Auth form ─────────────────────────── */}
+        <section className="flex items-center justify-center bg-white/90 px-8 py-12 backdrop-blur-xl sm:px-12 lg:px-14">
+          <div className="w-full max-w-[380px]">
+            {/* Mobile logo (shown only on small screens) */}
+            <div className="mb-8 flex items-center gap-3 lg:hidden">
+              <BrandMark size={36} />
+              <span className="text-sm font-semibold text-navy">DOX</span>
+            </div>
+            {children}
+          </div>
         </section>
       </div>
     </main>

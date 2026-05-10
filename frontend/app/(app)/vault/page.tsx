@@ -1,5 +1,6 @@
+import { Lock } from "lucide-react";
+
 import { TopActions } from "@/components/layout/top-actions";
-import { VaultClient } from "@/components/vault/vault-client";
 
 export default function VaultPage() {
   return (
@@ -13,9 +14,7 @@ export default function VaultPage() {
             Vault
           </h1>
           <p className="mt-2 max-w-2xl text-sm text-slate-600">
-            Add the services you sell — name plus a short description. The
-            Outreach button on each broker-dealer uses these to compose
-            tailored cold-email drafts.
+            Secure storage for documents and lead artifacts will live here.
           </p>
         </div>
         <div className="ml-auto">
@@ -23,7 +22,17 @@ export default function VaultPage() {
         </div>
       </div>
 
-      <VaultClient />
+      <div className="flex min-h-[340px] items-center justify-center rounded-[30px] border border-white/80 bg-white/88 p-10 shadow-shell backdrop-blur">
+        <div className="flex flex-col items-center text-center">
+          <div className="grid h-14 w-14 place-items-center rounded-full bg-slate-100 text-slate-500">
+            <Lock className="h-6 w-6" strokeWidth={1.75} aria-hidden />
+          </div>
+          <h2 className="mt-5 text-lg font-semibold text-navy">Coming soon</h2>
+          <p className="mt-2 max-w-sm text-sm text-slate-600">
+            Encrypted document storage is on the roadmap — nothing to stash yet.
+          </p>
+        </div>
+      </div>
     </div>
   );
 }

@@ -59,7 +59,6 @@ export function KpiCard({
   tone,
   icon: Icon,
   href,
-  onClick,
   trend
 }: {
   title: string;
@@ -68,7 +67,6 @@ export function KpiCard({
   tone: Tone;
   icon: KpiIconComponent;
   href?: Route;
-  onClick?: () => void;
   trend?: { direction: TrendDirection; label: string };
 }) {
   const spark = sparkGradientMap[tone];
@@ -149,18 +147,6 @@ export function KpiCard({
       </svg>
     </article>
   );
-
-  if (onClick) {
-    return (
-      <button
-        type="button"
-        onClick={onClick}
-        className="block w-full rounded-2xl text-left focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-violet-500 focus-visible:ring-offset-2 focus-visible:ring-offset-white"
-      >
-        {content}
-      </button>
-    );
-  }
 
   if (!href) {
     return content;

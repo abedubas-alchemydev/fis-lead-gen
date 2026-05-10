@@ -1,23 +1,12 @@
 from __future__ import annotations
 
-from datetime import datetime, timezone
-from typing import Literal
-
-from fastapi import APIRouter, Depends, HTTPException, Query, status
-from sqlalchemy import func, select
+from fastapi import APIRouter, Depends, HTTPException, status
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.db.session import get_db_session
-from app.models.clearing_partner_merge_suggestion import (
-    ClearingPartnerMergeSuggestion,
-)
 from app.schemas.auth import AuthenticatedUser
 from app.schemas.pipeline import CompetitorProviderItem, CompetitorProvidersResponse
 from app.schemas.settings import (
-    ClearingPartnerClusteringRunResponse,
-    ClearingPartnerMergeSuggestionAccept,
-    ClearingPartnerMergeSuggestionItem,
-    ClearingPartnerMergeSuggestionList,
     CompetitorProviderCreate,
     CompetitorProviderUpdate,
     DataRefreshResponse,
@@ -27,7 +16,6 @@ from app.schemas.settings import (
 from app.services.auth import get_current_user
 from app.services.broker_dealers import BrokerDealerRepository
 from app.services.classification import apply_classification_to_all
-from app.services.clearing_partner_clustering import run_clustering_pass
 from app.services.competitors import CompetitorProviderService
 from app.services.filing_monitor import FilingMonitorService
 from app.services.finra import FinraService
@@ -237,139 +225,3 @@ async def refresh_finra_details(
         "firms_updated": updated_count,
         "firms_reclassified": classified_count,
     }
-
-
-# ── Clearing-partner merge suggestions (admin) ────────────────────────
-# Surfaces the clusters that ``clearing_partner_clustering`` found among
-# unmatched ``broker_dealers.current_clearing_partner`` values. Admin
-# either accepts (creates a CompetitorProvider with the cluster as its
-# alias list) or rejects. See plans/be-clearing-partner-suggested-merges-2026-05-08.md.
-
-
-SuggestionStatus = Literal["pending", "accepted", "rejected"]
-
-
-async def _pending_count(db: AsyncSession) -> int:
-    stmt = select(func.count(ClearingPartnerMergeSuggestion.id)).where(
-        ClearingPartnerMergeSuggestion.status == "pending"
-    )
-    return int((await db.execute(stmt)).scalar_one())
-
-
-@router.get(
-    "/clearing-partner-suggestions",
-    response_model=ClearingPartnerMergeSuggestionList,
-)
-async def list_clearing_partner_suggestions(
-    suggestion_status: SuggestionStatus | None = Query(None, alias="status"),
-    page: int = Query(1, ge=1),
-    page_size: int = Query(50, ge=1, le=200),
-    current_user: AuthenticatedUser = Depends(get_current_user),
-    db: AsyncSession = Depends(get_db_session),
-) -> ClearingPartnerMergeSuggestionList:
-    stmt = select(ClearingPartnerMergeSuggestion)
-    if suggestion_status is not None:
-        stmt = stmt.where(ClearingPartnerMergeSuggestion.status == suggestion_status)
-    stmt = (
-        stmt.order_by(
-            # Pending first (so the admin's review queue surfaces at the
-            # top), then newest first within a status group.
-            ClearingPartnerMergeSuggestion.status.asc(),
-            ClearingPartnerMergeSuggestion.created_at.desc(),
-        )
-        .offset((page - 1) * page_size)
-        .limit(page_size)
-    )
-    rows = (await db.execute(stmt)).scalars().all()
-    return ClearingPartnerMergeSuggestionList(
-        items=[ClearingPartnerMergeSuggestionItem.model_validate(row) for row in rows],
-        pending_count=await _pending_count(db),
-    )
-
-
-@router.post(
-    "/clearing-partner-suggestions/run",
-    response_model=ClearingPartnerClusteringRunResponse,
-)
-async def run_clearing_partner_clustering(
-    current_user: AuthenticatedUser = Depends(get_current_user),
-    db: AsyncSession = Depends(get_db_session),
-) -> ClearingPartnerClusteringRunResponse:
-    _ensure_admin(current_user)
-    new_count = await run_clustering_pass(db)
-    await db.commit()
-    return ClearingPartnerClusteringRunResponse(
-        new_pending_count=new_count,
-        total_pending_count=await _pending_count(db),
-    )
-
-
-@router.post(
-    "/clearing-partner-suggestions/{suggestion_id}/accept",
-    response_model=CompetitorProviderItem,
-)
-async def accept_clearing_partner_suggestion(
-    suggestion_id: int,
-    payload: ClearingPartnerMergeSuggestionAccept,
-    current_user: AuthenticatedUser = Depends(get_current_user),
-    db: AsyncSession = Depends(get_db_session),
-) -> CompetitorProviderItem:
-    _ensure_admin(current_user)
-    suggestion = await db.get(ClearingPartnerMergeSuggestion, suggestion_id)
-    if suggestion is None:
-        raise HTTPException(
-            status_code=status.HTTP_404_NOT_FOUND,
-            detail="Suggestion not found.",
-        )
-    if suggestion.status != "pending":
-        raise HTTPException(
-            status_code=status.HTTP_409_CONFLICT,
-            detail=f"Suggestion is already {suggestion.status}.",
-        )
-
-    # ``create_competitor`` upserts on name conflict, so editing the
-    # canonical name to match an existing provider merges the new
-    # aliases into that provider rather than 500-ing on the unique
-    # constraint.
-    competitor = await settings_service.create_competitor(
-        db,
-        name=payload.canonical_name,
-        aliases=payload.variants,
-        priority=payload.priority,
-        display_name=payload.display_name,
-    )
-    suggestion.status = "accepted"
-    suggestion.accepted_provider_id = competitor.id
-    suggestion.resolved_at = datetime.now(timezone.utc)
-    await db.flush()
-    await repository.refresh_competitor_flags(db)
-    await repository.refresh_lead_scores(db)
-    await db.commit()
-    return CompetitorProviderItem.model_validate(competitor)
-
-
-@router.post(
-    "/clearing-partner-suggestions/{suggestion_id}/reject",
-    response_model=ClearingPartnerMergeSuggestionItem,
-)
-async def reject_clearing_partner_suggestion(
-    suggestion_id: int,
-    current_user: AuthenticatedUser = Depends(get_current_user),
-    db: AsyncSession = Depends(get_db_session),
-) -> ClearingPartnerMergeSuggestionItem:
-    _ensure_admin(current_user)
-    suggestion = await db.get(ClearingPartnerMergeSuggestion, suggestion_id)
-    if suggestion is None:
-        raise HTTPException(
-            status_code=status.HTTP_404_NOT_FOUND,
-            detail="Suggestion not found.",
-        )
-    if suggestion.status != "pending":
-        raise HTTPException(
-            status_code=status.HTTP_409_CONFLICT,
-            detail=f"Suggestion is already {suggestion.status}.",
-        )
-    suggestion.status = "rejected"
-    suggestion.resolved_at = datetime.now(timezone.utc)
-    await db.commit()
-    return ClearingPartnerMergeSuggestionItem.model_validate(suggestion)

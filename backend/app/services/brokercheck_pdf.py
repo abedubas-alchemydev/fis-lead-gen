@@ -35,7 +35,6 @@ the migration is straightforward when that day comes.
 
 from __future__ import annotations
 
-import asyncio
 import io
 import logging
 import re
@@ -164,10 +163,7 @@ async def fetch_form_bd_detail(crd: str) -> Optional[FormBdDetail]:
     except FinraPdfNotFound:
         logger.info("FINRA has no Form BD PDF on file for CRD %s", crd)
         return None
-    # pdfplumber + pypdf are CPU-bound and synchronous; ~4-5s per PDF after
-    # slicing (see _extract_text). Offload to a worker thread so concurrent
-    # FINRA enrichment doesn't stall the event loop.
-    return await asyncio.to_thread(_parse_form_bd_pdf, crd, pdf_bytes)
+    return _parse_form_bd_pdf(crd, pdf_bytes)
 
 
 def _parse_form_bd_pdf(crd: str, pdf_bytes: bytes) -> FormBdDetail:
@@ -475,21 +471,6 @@ _OTHER_TYPES_TERMINATORS = {
     "Registrations",
 }
 
-# Body-line fingerprints of FINRA per-page boilerplate that survives the
-# ``_normalize`` pass when pdfplumber kerns the page header/footer
-# char-by-char into a content line at a page boundary. ``User Guidance``
-# is the right-hand half of the page banner ``www.finra.org/brokercheck
-# User Guidance`` — the URL portion scrambles under kerning but this
-# trailing literal stays intact. ``©`` is the leading glyph of the
-# page footer ``©2026 FINRA. All rights reserved. Report about <FIRM>.
-# <pageno>``; on multi-page Item 12B sections pdfplumber kerns it into
-# the first content line a few characters in (e.g. ``T©h20is2 6fi…``
-# observed on CRD 8174 UBS and CRD 31194 RBC, 2026-05-06). Form BD
-# Item 12B is regulator-filed prose about a firm's non-standard business
-# types — neither fingerprint appears in legitimate content, so a
-# substring hit anywhere in a line marks it as boilerplate.
-_OTHER_TYPES_BOILERPLATE_FINGERPRINTS = ("User Guidance", "©")
-
 
 def _parse_types_of_business_other(section_text: str) -> Optional[str]:
     """Extract the free-text "Other - Describe" body from the section.
@@ -518,12 +499,6 @@ def _parse_types_of_business_other(section_text: str) -> Optional[str]:
         if ln in _OTHER_TYPES_TERMINATORS:
             break
         if ln.startswith("©") or ln.startswith("www.finra.org"):
-            continue
-        # Multi-page sections re-emit the section header at the top of
-        # the next page; drop it so it doesn't end up prefixing the body.
-        if ln.lower() == "other types of business":
-            continue
-        if any(fp in ln for fp in _OTHER_TYPES_BOILERPLATE_FINGERPRINTS):
             continue
         lines.append(ln)
     if not lines:

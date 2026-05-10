@@ -13,10 +13,6 @@ class CompetitorProvider(Base):
 
     id: Mapped[int] = mapped_column(primary_key=True, autoincrement=True)
     name: Mapped[str] = mapped_column(String(255), nullable=False, unique=True, index=True)
-    # Short label for the clearing-partner filter dropdown (e.g. "Pershing"
-    # for canonical "Pershing LLC"). Nullable so the registered `name` can
-    # serve as the display when no short form is curated.
-    display_name: Mapped[str | None] = mapped_column(String(50), nullable=True)
     aliases: Mapped[list[str]] = mapped_column(JSON, default=list, nullable=False)
     priority: Mapped[int] = mapped_column(Integer, default=100, nullable=False)
     is_active: Mapped[bool] = mapped_column(Boolean, default=True, nullable=False)

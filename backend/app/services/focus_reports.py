@@ -86,103 +86,6 @@ class FocusReportService:
             limit=settings.financial_pipeline_limit,
         )
 
-        # Default-path narrowing rule (preserved): when a batch limit is in
-        # effect AND the CSV path isn't bulk-loading the full universe, key
-        # the DELETE on (bd_id, report_date) pairs so prior years for OTHER
-        # firms survive. The bare ``DELETE FROM financial_metrics`` fallback
-        # remains the no-limit, no-CSV behavior for full-table refreshes.
-        narrow_delete = bool(
-            settings.financial_pipeline_limit and not settings.focus_reports_csv_path
-        )
-        extraction, _run_id = await self._run_extraction_pipeline(
-            db,
-            target_broker_dealers,
-            trigger_source=trigger_source,
-            narrow_delete=narrow_delete,
-        )
-        return len(extraction.records)
-
-    async def load_financial_metrics_for_null_health(
-        self,
-        db: AsyncSession,
-        *,
-        trigger_source: str = "manual_backfill",
-        limit: int | None = None,
-    ) -> FinancialExtractionResult:
-        """Backfill mode: re-run the financial extraction against only the
-        broker-dealers whose ``health_status`` is still NULL (i.e. firms
-        the default pipeline never reached). Only rows we can actually
-        reach (``filings_index_url IS NOT NULL``) are considered, so we
-        don't burn Gemini calls on firms missing the prerequisite filings
-        index.
-
-        Returns the full :class:`FinancialExtractionResult` so a CLI
-        caller can print the structured ``target_null_health=X,
-        attempted=Y, populated=Z, needs_review=W, errors=V`` summary
-        without re-running the selector. Always uses the narrowed
-        ``(bd_id, report_date)`` DELETE — a backfill is by definition a
-        subset run and must never wipe other firms' fiscal-year history.
-
-        ``limit`` from a CLI flag overrides
-        ``settings.financial_pipeline_limit`` for this run; offset still
-        comes from settings so the chunked-backfill knob behaves the same
-        as the default path.
-        """
-        universe = await self._select_null_health_targets(db)
-        target_broker_dealers = self._apply_batch_window(
-            universe,
-            offset=settings.financial_pipeline_offset,
-            limit=limit if limit is not None else settings.financial_pipeline_limit,
-        )
-        extraction, _run_id = await self._run_extraction_pipeline(
-            db,
-            target_broker_dealers,
-            trigger_source=trigger_source,
-            narrow_delete=True,
-        )
-        return extraction
-
-    async def _select_null_health_targets(self, db: AsyncSession) -> list[BrokerDealer]:
-        """Return every broker-dealer whose ``health_status`` is NULL but
-        for which an X-17A-5 filing is reachable (``filings_index_url IS
-        NOT NULL``). The list is unbounded — callers (the script's
-        dry-run path; ``load_financial_metrics_for_null_health``) decide
-        how to slice it via offset/limit so a single SELECT serves both
-        the ``target_null_health=X`` universe count and the
-        ``would_attempt=Y`` canary slice.
-        """
-        broker_dealers = (await db.execute(
-            select(BrokerDealer)
-            .where(
-                BrokerDealer.health_status.is_(None),
-                BrokerDealer.filings_index_url.is_not(None),
-            )
-            .order_by(BrokerDealer.id.asc())
-        )).scalars().all()
-        return list(broker_dealers)
-
-    async def _run_extraction_pipeline(
-        self,
-        db: AsyncSession,
-        target_broker_dealers: list[BrokerDealer],
-        *,
-        trigger_source: str,
-        narrow_delete: bool,
-    ) -> tuple[FinancialExtractionResult, int]:
-        """Run ``PipelineRun`` insert → live extraction → DELETE+INSERT
-        into ``financial_metrics`` → BD rollup refresh → finalize, for an
-        arbitrary target set. Both the default ``load_financial_metrics``
-        and the NULL-health backfill path delegate here so the extraction
-        body is single-sourced.
-
-        ``narrow_delete=True`` keys the DELETE on ``(bd_id, report_date)``
-        tuples instead of wiping the full table — required for any subset
-        run so other firms' fiscal-year history survives.
-
-        Returns the :class:`FinancialExtractionResult` and the persisted
-        ``pipeline_run.id`` so the caller can correlate audit rows with
-        downstream work.
-        """
         # Commit the pipeline_run row in its own transaction before any
         # extraction work begins, so a crash mid-loop still leaves a
         # discoverable audit row in status='running'.
@@ -210,11 +113,14 @@ class FocusReportService:
         await db.commit()
 
         try:
+            incremental_target_ids: list[int] | None = None
             extraction = await self._load_live_records(target_broker_dealers)
             records = extraction.records
+            if settings.financial_pipeline_limit and not settings.focus_reports_csv_path:
+                incremental_target_ids = [broker_dealer.id for broker_dealer in target_broker_dealers]
 
             async with SessionLocal() as write_db:
-                if narrow_delete:
+                if incremental_target_ids is not None:
                     # Narrow the DELETE to the (bd_id, report_date) pairs the
                     # current run is about to re-insert. Prevents wiping prior
                     # fiscal-year history for the same bd once the multi-year
@@ -252,7 +158,7 @@ class FocusReportService:
                 await write_db.commit()
 
                 await self._finalize_pipeline_run(write_db, run_id, extraction)
-            return extraction, run_id
+            return len(records)
         except Exception as exc:
             logger.exception("Financial extraction pipeline failed for run %s", run_id)
             await self._mark_pipeline_run_failed(run_id, exc, len(target_broker_dealers))

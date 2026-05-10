@@ -12,22 +12,7 @@ import { createPortal } from "react-dom";
 import { Info } from "lucide-react";
 
 import { unknownReasonShort } from "@/lib/format";
-import type { UnknownReason, UnknownReasonCategory } from "@/lib/types";
-
-// Categories where the cell may still change on a future re-run — the
-// pipeline either failed (provider_error / pdf_unparseable), came back
-// low-confidence (low_confidence_extraction), or hasn't reached this firm
-// yet (not_yet_extracted). The info icon picks an amber tone for these so
-// the user can scan the grid and tell which empties are actively pending
-// vs settled. The final-state categories (firm_does_not_disclose,
-// no_filing_available, data_not_present) keep the neutral gray tone —
-// re-running won't change them.
-const PENDING_CATEGORIES: ReadonlySet<UnknownReasonCategory> = new Set([
-  "low_confidence_extraction",
-  "provider_error",
-  "pdf_unparseable",
-  "not_yet_extracted",
-]);
+import type { UnknownReason } from "@/lib/types";
 
 // Notes can run long when the BE captures the full extraction narrative.
 // 240 chars keeps the tooltip readable inside a table cell without
@@ -144,12 +129,12 @@ export function UnknownCell({
   }
 
   const shortLabel = unknownReasonShort(reason);
-  // BE prepends ``[Triggered by missing: <field>]`` (or comma-separated
-  // for multi-field clusters) to ``note``. Strip the prefix from the
-  // body so the raw marker doesn't leak into the tooltip; the rendered
-  // tooltip is just header + body, no separate trigger-field line.
+  // BE prepends `[Triggered by missing: <field>]` to `note` so the tooltip
+  // can lead with the specific column that triggered the cluster-level
+  // reason. Strip it from the note body and surface it as a separate line.
   const triggerMatch =
     reason.note?.match(/^\[Triggered by missing:\s*([^\]]+)\]\s*/) ?? null;
+  const triggerField = triggerMatch ? triggerMatch[1].trim() : null;
   const rawNote = triggerMatch
     ? reason.note!.slice(triggerMatch[0].length)
     : reason.note;
@@ -164,13 +149,6 @@ export function UnknownCell({
   // tell there was anything clickable. Keep full opacity in compact;
   // larger contexts already have room to breathe and stay at 70%.
   const iconOpacity = compact ? "opacity-100" : "opacity-70";
-  // Tone the trigger button by reason category so the grid reads at a
-  // glance — amber for pending categories that may still change on a
-  // future pipeline run, neutral gray for final categories that won't.
-  const isPending = PENDING_CATEGORIES.has(reason.category);
-  const buttonToneClass = isPending
-    ? "text-[var(--warning,#d97706)] hover:text-[var(--warning-strong,#b45309)]"
-    : "text-[var(--text-muted,#94a3b8)] hover:text-[var(--text-dim,#475569)]";
 
   const tooltipNode =
     open && mounted && coords
@@ -188,6 +166,11 @@ export function UnknownCell({
             className="pointer-events-none w-max rounded-lg border border-[var(--border,rgba(30,64,175,0.1))] bg-[var(--surface,#ffffff)] px-3 py-2 text-left text-[12px] leading-5 text-[var(--text,#0f172a)] shadow-[0_10px_28px_rgba(15,23,42,0.18)]"
           >
             <span className="block font-semibold">{shortLabel}</span>
+            {triggerField ? (
+              <span className="mt-1 block text-[11px] font-medium text-[var(--text-dim,#475569)]">
+                Missing field: <span className="font-mono">{triggerField}</span>
+              </span>
+            ) : null}
             {note ? (
               <span className="mt-1 block text-[11px] text-[var(--text-dim,#475569)]">
                 {note}
@@ -209,7 +192,7 @@ export function UnknownCell({
         onMouseLeave={() => setOpen(false)}
         onFocus={() => setOpen(true)}
         onBlur={() => setOpen(false)}
-        className={`inline-flex cursor-help items-center rounded-full p-0.5 outline-none transition focus-visible:ring-2 focus-visible:ring-[var(--accent,#6366f1)] ${buttonToneClass}`}
+        className="inline-flex cursor-help items-center rounded-full p-0.5 text-[var(--text-muted,#94a3b8)] outline-none transition hover:text-[var(--text-dim,#475569)] focus-visible:ring-2 focus-visible:ring-[var(--accent,#6366f1)]"
       >
         <Info className={`${iconSize} ${iconOpacity}`} strokeWidth={2} aria-hidden />
       </button>

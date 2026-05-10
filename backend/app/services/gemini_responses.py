@@ -143,30 +143,6 @@ class GeminiClassificationExtraction(BaseModel):
     rationale: str = Field(min_length=1, max_length=1000)
 
 
-class GeminiFirmAliasExtraction(BaseModel):
-    """LLM-generated alternate-name list for a broker-dealer firm.
-
-    Backs ``services/firm_alias_enricher.py``. The website resolver
-    treats these as augmenting tokens alongside FINRA-supplied
-    ``dba_names`` so subsidiary firms whose web presence lives on a
-    parent-company domain (BOFA SECURITIES on bankofamerica.com) can
-    anchor a candidate URL via an LLM-supplied alias.
-    """
-    model_config = ConfigDict(extra="forbid")
-
-    aliases: list[str] = Field(
-        default_factory=list,
-        max_length=20,
-        description=(
-            "Brand variants, parent-company names, and acronym "
-            "expansions for the firm. Empty list is acceptable when "
-            "the firm has no commonly-known alternate names."
-        ),
-    )
-    confidence_score: float = Field(ge=0.0, le=1.0)
-    rationale: str = Field(min_length=1, max_length=1000)
-
-
 class GeminiFocusCeoExtraction(BaseModel):
     """Structured extraction of CEO contact info + net capital from a FOCUS Report PDF."""
     model_config = ConfigDict(extra="forbid")
@@ -330,58 +306,6 @@ class GeminiResponsesClient:
             raise GeminiExtractionError("Gemini returned invalid JSON for clearing classification.") from exc
 
         return GeminiClassificationExtraction.model_validate(self._normalize_text_fields(parsed))
-
-    async def extract_firm_aliases(self, *, prompt: str) -> GeminiFirmAliasExtraction:
-        """Run a text-only Gemini call that returns brand/parent-company aliases.
-
-        Used by ``services/firm_alias_enricher.py``. The prompt embeds
-        the firm's legal name and CRD; the response is constrained to
-        a JSON schema with an ``aliases`` array of strings. No PDF /
-        Files API path -- the prompt is short enough to live entirely
-        in inline text.
-        """
-        if not settings.gemini_api_key:
-            raise GeminiConfigurationError("GEMINI_API_KEY is not configured.")
-
-        schema = {
-            "type": "OBJECT",
-            "properties": {
-                "aliases": {
-                    "type": "ARRAY",
-                    "items": {"type": "STRING"},
-                },
-                "confidence_score": {"type": "NUMBER"},
-                "rationale": {"type": "STRING"},
-            },
-            "required": ["aliases", "confidence_score", "rationale"],
-            "propertyOrdering": ["aliases", "confidence_score", "rationale"],
-        }
-
-        payload: dict[str, object] = {
-            "contents": [
-                {
-                    "role": "user",
-                    "parts": [{"text": prompt}],
-                }
-            ],
-            "generationConfig": {
-                "responseMimeType": "application/json",
-                "responseJsonSchema": schema,
-                "temperature": 0.1,
-                "topP": 0.95,
-            },
-        }
-        response_payload = await self._post_with_retries(payload)
-        response_text = self._extract_response_text(response_payload)
-
-        try:
-            parsed = json.loads(response_text)
-        except json.JSONDecodeError as exc:
-            raise GeminiExtractionError(
-                "Gemini returned invalid JSON for firm-alias extraction."
-            ) from exc
-
-        return GeminiFirmAliasExtraction.model_validate(self._normalize_text_fields(parsed))
 
     async def extract_financial_data(self, *, pdf_bytes_base64: str, prompt: str) -> GeminiFinancialExtraction:
         if not settings.gemini_api_key:

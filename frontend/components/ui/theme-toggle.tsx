@@ -6,11 +6,9 @@ import { Moon, Sun } from "lucide-react";
 
 // Light/dark toggle for the topbar. Theme is driven by `data-theme="dark"`
 // on <html> (matches the :root + [data-theme="dark"] scopes in globals.css)
-// and persisted to localStorage under "prospectEngineTheme". The key was
-// renamed from "leadEngineTheme" alongside the FE-only lead→prospect
-// rename — existing user preferences fall back to the "light" default
-// on the first load post-rename and re-persist under the new key on
-// the next toggle.
+// and persisted to localStorage under "leadEngineTheme" — the same key the
+// pre-refactor dashboard useEffect used, so existing user preferences
+// carry through.
 type Theme = "light" | "dark";
 
 export function ThemeToggle({ className = "" }: { className?: string }) {
@@ -23,7 +21,7 @@ export function ThemeToggle({ className = "" }: { className?: string }) {
   useEffect(() => {
     let stored: string | null = null;
     try {
-      stored = localStorage.getItem("prospectEngineTheme");
+      stored = localStorage.getItem("leadEngineTheme");
     } catch {
       /* localStorage may be blocked */
     }
@@ -46,7 +44,7 @@ export function ThemeToggle({ className = "" }: { className?: string }) {
       document.documentElement.removeAttribute("data-theme");
     }
     try {
-      localStorage.setItem("prospectEngineTheme", next);
+      localStorage.setItem("leadEngineTheme", next);
     } catch {
       /* localStorage may be blocked */
     }

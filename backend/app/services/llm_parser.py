@@ -32,28 +32,7 @@ class LlmParserService:
             "Read the broker-dealer annual audit PDF (X-17A-5 Part III filing) and extract the firm's "
             "current clearing arrangement. Focus on the Notes to Financial Statements section, which "
             "typically contains a sentence such as 'The Company has a clearing agreement with [Partner Name] "
-            "on a fully disclosed basis.' Clearing language can also appear in the Statement of Financial "
-            "Condition narrative, the description-of-business section, or supplementary schedules — scan "
-            "those if the Notes are silent.\n\n"
-            "## Search hints — scan for these literal phrases first\n"
-            "Before reading the document end-to-end, search for any of the following anchor phrases. "
-            "When one matches, the surrounding sentence is almost always the evidence_excerpt:\n"
-            '- "clearing agreement with"\n'
-            '- "clears all transactions through"\n'
-            '- "introducing broker"\n'
-            '- "carries customer accounts on a fully disclosed basis"\n'
-            '- "self-clearing"\n'
-            '- "executes and clears"\n'
-            '- "prime broker"\n'
-            '- "omnibus account"\n\n'
-            "## Special-case rule — firms that do not carry customer accounts\n"
-            "If the firm explicitly states it does not carry customer accounts, does not hold customer "
-            "funds or securities, is limited to M&A advisory or other non-custodial activity, or operates "
-            "under a Section 15(c)(3)-1 (or (k)(2)(i) / (k)(2)(ii)) exemption, return "
-            "clearing_type='self_clearing' with confidence_score >= 0.85. Do NOT return 'unknown' and do "
-            "NOT set clearing_partner to null with low confidence in this case — the firm's regulatory "
-            "status (no customer accounts → no clearing relationship needed) IS the answer. "
-            "clearing_partner should be null because there is no third-party clearing firm to name.\n\n"
+            "on a fully disclosed basis.'\n\n"
             "Return a JSON object with these fields:\n"
             "- clearing_partner: The name of the clearing firm (e.g. 'Pershing LLC', 'Apex Clearing Corporation'). "
             "Use null only if no clearing partner is mentioned or the firm is self-clearing.\n"
@@ -84,91 +63,8 @@ class LlmParserService:
             '{"clearing_partner": null, "clearing_type": "unknown", "agreement_date": null, '
             '"confidence_score": 0.4, "rationale": "The document references clearing brokers but does not '
             'name them.", "evidence_excerpt": "The Company conducts business through several clearing brokers."}\n\n'
-            "Example 4 — Introducing Broker (named partner):\n"
-            'Document says: "The Company operates as an introducing broker and clears its securities '
-            'transactions through National Financial Services LLC on a fully disclosed basis."\n'
-            "Expected output:\n"
-            '{"clearing_partner": "National Financial Services LLC", "clearing_type": "fully_disclosed", '
-            '"agreement_date": null, "confidence_score": 0.95, "rationale": "Firm describes itself as an '
-            'introducing broker with NFS named as the clearing partner on a fully disclosed basis.", '
-            '"evidence_excerpt": "The Company operates as an introducing broker and clears its securities '
-            'transactions through National Financial Services LLC on a fully disclosed basis."}\n\n'
-            "Example 5 — Omnibus / multiple clearing relationships:\n"
-            'Document says: "The Company maintains an omnibus account with BNY Mellon Capital Markets, LLC '
-            'through which it clears institutional fixed-income transactions."\n'
-            "Expected output:\n"
-            '{"clearing_partner": "BNY Mellon Capital Markets, LLC", "clearing_type": "omnibus", '
-            '"agreement_date": null, "confidence_score": 0.9, "rationale": "Firm explicitly maintains an '
-            'omnibus account with BNY Mellon Capital Markets for clearing.", "evidence_excerpt": "The Company '
-            'maintains an omnibus account with BNY Mellon Capital Markets, LLC through which it clears '
-            'institutional fixed-income transactions."}\n\n'
-            "Example 6 — Foreign clearing partner:\n"
-            'Document says: "Pursuant to a clearing agreement with TD Securities (USA) LLC, the Company '
-            'introduces its customer accounts on a fully disclosed basis."\n'
-            "Expected output:\n"
-            '{"clearing_partner": "TD Securities (USA) LLC", "clearing_type": "fully_disclosed", '
-            '"agreement_date": null, "confidence_score": 0.95, "rationale": "Clearing agreement explicitly '
-            'with TD Securities (USA) LLC on a fully disclosed basis.", "evidence_excerpt": "Pursuant to a '
-            'clearing agreement with TD Securities (USA) LLC, the Company introduces its customer accounts '
-            'on a fully disclosed basis."}\n\n'
-            "Example 7 — Prime brokerage relationship:\n"
-            'Document says: "The Company\'s prime broker is Goldman Sachs & Co. LLC, which provides custody, '
-            'clearance and financing services for the Company\'s proprietary trading activities."\n'
-            "Expected output:\n"
-            '{"clearing_partner": "Goldman Sachs & Co. LLC", "clearing_type": "fully_disclosed", '
-            '"agreement_date": null, "confidence_score": 0.85, "rationale": "Goldman Sachs & Co. LLC is '
-            "named as the firm's prime broker providing custody, clearance, and financing — treat as "
-            'fully_disclosed since the prime broker carries the accounts.", "evidence_excerpt": "The '
-            "Company's prime broker is Goldman Sachs & Co. LLC, which provides custody, clearance and "
-            'financing services for the Company\'s proprietary trading activities."}\n\n'
-            'Example 8 — "Executes and clears" phrasing (often outside Notes):\n'
-            'Document says: "RBC Capital Markets, LLC executes and clears all securities transactions for '
-            "the Company's customers under a written clearing agreement.\"\n"
-            "Expected output:\n"
-            '{"clearing_partner": "RBC Capital Markets, LLC", "clearing_type": "fully_disclosed", '
-            '"agreement_date": null, "confidence_score": 0.95, "rationale": "RBC Capital Markets executes '
-            'and clears under a written clearing agreement — fully disclosed arrangement.", '
-            '"evidence_excerpt": "RBC Capital Markets, LLC executes and clears all securities transactions '
-            "for the Company's customers under a written clearing agreement.\"}\n\n"
-            "Example 9 — M&A advisory only (no customer accounts):\n"
-            'Document says: "The Company\'s business is limited to mergers-and-acquisitions advisory '
-            "services. The Company does not carry accounts of or for customers and does not hold customer "
-            'funds or securities."\n'
-            "Expected output:\n"
-            '{"clearing_partner": null, "clearing_type": "self_clearing", "agreement_date": null, '
-            '"confidence_score": 0.95, "rationale": "Firm is limited to M&A advisory and explicitly does '
-            'not carry customer accounts, so no clearing relationship is required — treat as '
-            'self_clearing with null partner per the special-case rule.", "evidence_excerpt": "The '
-            "Company's business is limited to mergers-and-acquisitions advisory services. The Company "
-            'does not carry accounts of or for customers and does not hold customer funds or securities."}\n\n'
-            "Example 10 — Section 15(c)(3)-1 / (k)(2)(i) exemption report:\n"
-            'Document says: "The Company claims exemption from Rule 15c3-3 under paragraph (k)(2)(i) of '
-            'the Rule, as it does not carry customer accounts and all customer transactions are cleared '
-            'through another broker-dealer on a fully disclosed basis."\n'
-            "Expected output:\n"
-            '{"clearing_partner": null, "clearing_type": "self_clearing", "agreement_date": null, '
-            '"confidence_score": 0.9, "rationale": "Exemption Report cites Rule 15c3-3(k)(2)(i) and the '
-            'firm does not carry customer accounts. The (k)(2)(i) exemption itself IS the regulatory '
-            'answer — return self_clearing with null partner per the special-case rule, even though the '
-            'document mentions transactions are cleared through an unnamed broker-dealer.", '
-            '"evidence_excerpt": "The Company claims exemption from Rule 15c3-3 under paragraph (k)(2)(i) '
-            'of the Rule, as it does not carry customer accounts and all customer transactions are '
-            'cleared through another broker-dealer on a fully disclosed basis."}\n\n'
-            'Example 11 — "Does not carry customer accounts" boilerplate:\n'
-            'Document says: "The Notes to Financial Statements explicitly state that the Company does not '
-            'carry customer accounts or hold customer funds or securities. No clearing partner or clearing '
-            'agreement is mentioned anywhere in the filing."\n'
-            "Expected output:\n"
-            '{"clearing_partner": null, "clearing_type": "self_clearing", "agreement_date": null, '
-            '"confidence_score": 0.85, "rationale": "Firm explicitly does not carry customer accounts and '
-            'does not hold customer funds — no clearing relationship is required. Return self_clearing '
-            'with null partner per the special-case rule rather than unknown.", "evidence_excerpt": "The '
-            'Company does not carry customer accounts or hold customer funds or securities."}\n\n'
             "Now analyze the attached PDF and extract the clearing arrangement data. Use only evidence from "
-            "the document. Treat uncertain or conflicting references conservatively. If the firm names "
-            "multiple clearing relationships (e.g. an introducing partner plus a separate omnibus or prime "
-            "broker), pick the one that carries the firm's customer accounts; if no single relationship is "
-            "primary, return clearing_type 'unknown' with the lower-confidence rationale."
+            "the document. Treat uncertain or conflicting references conservatively."
         )
 
     def build_prompt_with_ocr_text(self, ocr_text: str) -> str:
@@ -270,7 +166,6 @@ class LlmParserService:
             extraction_status=status,
             extraction_notes=notes,
             extracted_at=datetime.now(timezone.utc),
-            clearing_statement_text=extraction.evidence_excerpt,
         )
 
     async def extract_structured_data(self, pdf_record: DownloadedPdfRecord) -> ClearingExtractionResult:
@@ -326,7 +221,6 @@ class LlmParserService:
             extraction_status=status,
             extraction_notes=notes,
             extracted_at=datetime.now(timezone.utc),
-            clearing_statement_text=extraction.evidence_excerpt,
         )
 
     def _build_filename(self, pdf_record: DownloadedPdfRecord) -> str:

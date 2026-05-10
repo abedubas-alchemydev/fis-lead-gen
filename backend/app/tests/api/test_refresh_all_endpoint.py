@@ -25,7 +25,7 @@ Coverage:
 
 from __future__ import annotations
 
-from datetime import date, datetime, timedelta, timezone
+from datetime import datetime, timedelta, timezone
 from typing import Any
 
 import httpx
@@ -193,11 +193,6 @@ async def test_skipped_already_complete_returns_200_no_writes(
         health_status="healthy",
         current_clearing_type="self_clearing",
         current_clearing_partner="Acme Self Clearing",
-        # FINRA-derived date fields gate the health-check pipeline since
-        # PR #333 — populate them so the "already complete" assertion
-        # holds for every gate, not just the original four.
-        registration_date=date(2010, 1, 1),
-        formation_date=date(2010, 1, 1),
     )
 
     async def _fake_get(_db: Any, _firm_id: int) -> BrokerDealer | None:
@@ -267,9 +262,7 @@ async def test_all_gates_open_returns_202_with_all_four_pipelines(
     assert parent.status == "queued"
     assert f'"bd_id": {bd.id}' in parent.notes
 
-    # Background task scheduled with all open sub-pipelines. Filings is
-    # skipped because the fixture has no cik — without one we have no
-    # way to query EDGAR.
+    # Background task scheduled with all 4 sub-pipelines.
     assert len(stub_background) == 1
     scheduled = stub_background[0]
     assert scheduled["bd_id"] == bd.id
@@ -277,10 +270,9 @@ async def test_all_gates_open_returns_202_with_all_four_pipelines(
         "financial_pdf_pipeline_single",
         "broker_dealer_resolve_website",
         "broker_dealer_health_check",
-        "broker_dealer_refresh_clearing",
         "broker_dealer_enrich_contacts",
     }
-    assert set(scheduled["pipelines_to_skip"]) == {"broker_dealer_refresh_filings"}
+    assert scheduled["pipelines_to_skip"] == ()
 
 
 async def test_only_website_missing_runs_only_resolve_website(
@@ -294,13 +286,6 @@ async def test_only_website_missing_runs_only_resolve_website(
         health_status="ok",
         current_clearing_type="introducing",
         current_clearing_partner="Pershing",
-        # PR #333 widened the health-check gate to also fire when these
-        # FINRA-derived dates are NULL. Populate them so this test's
-        # "only resolve_website is scheduled" assertion stays accurate
-        # — without this the health-check gate would also open, and the
-        # tuple would carry both pipelines.
-        registration_date=date(2015, 6, 30),
-        formation_date=date(2015, 6, 30),
     )
 
     async def _fake_get(_db: Any, _firm_id: int) -> BrokerDealer | None:
@@ -327,9 +312,7 @@ async def test_only_website_missing_runs_only_resolve_website(
     assert set(scheduled["pipelines_to_skip"]) == {
         "financial_pdf_pipeline_single",
         "broker_dealer_health_check",
-        "broker_dealer_refresh_clearing",
         "broker_dealer_enrich_contacts",
-        "broker_dealer_refresh_filings",
     }
 
 
