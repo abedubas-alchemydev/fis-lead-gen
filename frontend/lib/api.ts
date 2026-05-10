@@ -185,6 +185,29 @@ export async function removeFirmFromList(
   );
 }
 
+// Bulk-add for the master-list multi-select picker. Idempotent — already-
+// present ids land in `skipped_existing`; non-existent firm ids in
+// `skipped_unknown` rather than aborting the batch. Capped server-side at
+// 200 ids per call.
+export interface AddFirmsToListBatchResponse {
+  added: number;
+  skipped_existing: number;
+  skipped_unknown: number[];
+}
+
+export async function addFirmsToListBatch(
+  listId: number,
+  firmIds: number[]
+): Promise<AddFirmsToListBatchResponse> {
+  return apiRequest<AddFirmsToListBatchResponse>(
+    `/api/v1/favorite-lists/${listId}/items/batch`,
+    {
+      method: "POST",
+      body: JSON.stringify({ broker_dealer_ids: firmIds }),
+    }
+  );
+}
+
 // ── Tier 2 pipeline triggers ──────────────────────────────────────────────
 // Pairs with cli01 BE PR feature/be-pipeline-endpoints-tier2 which exposes
 // admin-OR-SA-OIDC trigger endpoints for the three long-running pipelines.

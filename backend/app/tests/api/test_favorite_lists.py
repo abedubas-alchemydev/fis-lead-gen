@@ -652,3 +652,228 @@ async def test_remove_item_404_for_foreign_list() -> None:
     finally:
         app.dependency_overrides.clear()
         await _cleanup([owner, intruder], [bd_id])
+
+
+# ── Batch-add endpoint ────────────────────────────────────────────────────
+
+
+async def _count_items(list_id: int) -> int:
+    async with SessionLocal() as session:
+        result = await session.execute(
+            select(FavoriteListItem).where(FavoriteListItem.list_id == list_id)
+        )
+        return len(result.fetchall())
+
+
+async def test_batch_add_401_without_session_cookie() -> None:
+    async with _client() as client:
+        response = await client.post(
+            "/api/v1/favorite-lists/1/items/batch",
+            json={"broker_dealer_ids": [1]},
+        )
+    assert response.status_code == 401
+
+
+async def test_batch_add_inserts_all_when_none_existing() -> None:
+    user_id = await _seed_user()
+    list_id = await _seed_default_list(user_id)
+    bd_a = await _seed_bd(name="BD-Batch-A")
+    bd_b = await _seed_bd(name="BD-Batch-B")
+    bd_c = await _seed_bd(name="BD-Batch-C")
+
+    app.dependency_overrides[get_current_user] = lambda: _override_user(user_id)
+    try:
+        async with _client() as client:
+            response = await client.post(
+                f"/api/v1/favorite-lists/{list_id}/items/batch",
+                json={"broker_dealer_ids": [bd_a, bd_b, bd_c]},
+            )
+        assert response.status_code == 200
+        body = response.json()
+        assert body == {
+            "added": 3,
+            "skipped_existing": 0,
+            "skipped_unknown": [],
+        }
+        assert await _count_items(list_id) == 3
+    finally:
+        app.dependency_overrides.clear()
+        await _cleanup([user_id], [bd_a, bd_b, bd_c])
+
+
+async def test_batch_add_skips_existing() -> None:
+    user_id = await _seed_user()
+    list_id = await _seed_default_list(user_id)
+    bd_a = await _seed_bd(name="BD-Batch-Skip-A")
+    bd_b = await _seed_bd(name="BD-Batch-Skip-B")
+    bd_c = await _seed_bd(name="BD-Batch-Skip-C")
+    await _seed_list_item(list_id, bd_a)
+
+    app.dependency_overrides[get_current_user] = lambda: _override_user(user_id)
+    try:
+        async with _client() as client:
+            response = await client.post(
+                f"/api/v1/favorite-lists/{list_id}/items/batch",
+                json={"broker_dealer_ids": [bd_a, bd_b, bd_c]},
+            )
+        assert response.status_code == 200
+        body = response.json()
+        assert body["added"] == 2
+        assert body["skipped_existing"] == 1
+        assert body["skipped_unknown"] == []
+        assert await _count_items(list_id) == 3
+    finally:
+        app.dependency_overrides.clear()
+        await _cleanup([user_id], [bd_a, bd_b, bd_c])
+
+
+async def test_batch_add_idempotent_on_repeat() -> None:
+    user_id = await _seed_user()
+    list_id = await _seed_default_list(user_id)
+    bd_a = await _seed_bd(name="BD-Batch-Idem-A")
+    bd_b = await _seed_bd(name="BD-Batch-Idem-B")
+
+    app.dependency_overrides[get_current_user] = lambda: _override_user(user_id)
+    try:
+        async with _client() as client:
+            first = await client.post(
+                f"/api/v1/favorite-lists/{list_id}/items/batch",
+                json={"broker_dealer_ids": [bd_a, bd_b]},
+            )
+            second = await client.post(
+                f"/api/v1/favorite-lists/{list_id}/items/batch",
+                json={"broker_dealer_ids": [bd_a, bd_b]},
+            )
+        assert first.status_code == 200
+        assert first.json()["added"] == 2
+        assert second.status_code == 200
+        assert second.json() == {
+            "added": 0,
+            "skipped_existing": 2,
+            "skipped_unknown": [],
+        }
+        assert await _count_items(list_id) == 2
+    finally:
+        app.dependency_overrides.clear()
+        await _cleanup([user_id], [bd_a, bd_b])
+
+
+async def test_batch_add_reports_unknown_firms() -> None:
+    user_id = await _seed_user()
+    list_id = await _seed_default_list(user_id)
+    bd_a = await _seed_bd(name="BD-Batch-Unknown-A")
+    bd_b = await _seed_bd(name="BD-Batch-Unknown-B")
+
+    fake_a = 9_999_999
+    fake_b = 9_999_998
+
+    app.dependency_overrides[get_current_user] = lambda: _override_user(user_id)
+    try:
+        async with _client() as client:
+            response = await client.post(
+                f"/api/v1/favorite-lists/{list_id}/items/batch",
+                json={"broker_dealer_ids": [bd_a, fake_a, bd_b, fake_b]},
+            )
+        assert response.status_code == 200
+        body = response.json()
+        assert body["added"] == 2
+        assert body["skipped_existing"] == 0
+        assert sorted(body["skipped_unknown"]) == sorted([fake_a, fake_b])
+        assert await _count_items(list_id) == 2
+    finally:
+        app.dependency_overrides.clear()
+        await _cleanup([user_id], [bd_a, bd_b])
+
+
+async def test_batch_add_404_for_foreign_list() -> None:
+    owner = await _seed_user()
+    intruder = await _seed_user()
+    list_id = await _seed_default_list(owner)
+    bd_id = await _seed_bd(name="BD-Batch-Foreign")
+
+    app.dependency_overrides[get_current_user] = lambda: _override_user(intruder)
+    try:
+        async with _client() as client:
+            response = await client.post(
+                f"/api/v1/favorite-lists/{list_id}/items/batch",
+                json={"broker_dealer_ids": [bd_id]},
+            )
+        assert response.status_code == 404
+    finally:
+        app.dependency_overrides.clear()
+        await _cleanup([owner, intruder], [bd_id])
+
+
+async def test_batch_add_404_for_missing_list() -> None:
+    user_id = await _seed_user()
+    bd_id = await _seed_bd(name="BD-Batch-MissingList")
+
+    app.dependency_overrides[get_current_user] = lambda: _override_user(user_id)
+    try:
+        async with _client() as client:
+            response = await client.post(
+                "/api/v1/favorite-lists/99999999/items/batch",
+                json={"broker_dealer_ids": [bd_id]},
+            )
+        assert response.status_code == 404
+    finally:
+        app.dependency_overrides.clear()
+        await _cleanup([user_id], [bd_id])
+
+
+async def test_batch_add_422_for_empty_list() -> None:
+    user_id = await _seed_user()
+    list_id = await _seed_default_list(user_id)
+
+    app.dependency_overrides[get_current_user] = lambda: _override_user(user_id)
+    try:
+        async with _client() as client:
+            response = await client.post(
+                f"/api/v1/favorite-lists/{list_id}/items/batch",
+                json={"broker_dealer_ids": []},
+            )
+        assert response.status_code == 422
+    finally:
+        app.dependency_overrides.clear()
+        await _cleanup([user_id], [])
+
+
+async def test_batch_add_422_for_oversize_payload() -> None:
+    user_id = await _seed_user()
+    list_id = await _seed_default_list(user_id)
+
+    app.dependency_overrides[get_current_user] = lambda: _override_user(user_id)
+    try:
+        async with _client() as client:
+            response = await client.post(
+                f"/api/v1/favorite-lists/{list_id}/items/batch",
+                json={"broker_dealer_ids": list(range(1, 202))},
+            )
+        assert response.status_code == 422
+    finally:
+        app.dependency_overrides.clear()
+        await _cleanup([user_id], [])
+
+
+async def test_batch_add_dedupes_request() -> None:
+    user_id = await _seed_user()
+    list_id = await _seed_default_list(user_id)
+    bd_a = await _seed_bd(name="BD-Batch-Dedupe-A")
+    bd_b = await _seed_bd(name="BD-Batch-Dedupe-B")
+
+    app.dependency_overrides[get_current_user] = lambda: _override_user(user_id)
+    try:
+        async with _client() as client:
+            response = await client.post(
+                f"/api/v1/favorite-lists/{list_id}/items/batch",
+                json={"broker_dealer_ids": [bd_a, bd_a, bd_b, bd_b, bd_a]},
+            )
+        assert response.status_code == 200
+        body = response.json()
+        assert body["added"] == 2
+        assert body["skipped_existing"] == 0
+        assert body["skipped_unknown"] == []
+        assert await _count_items(list_id) == 2
+    finally:
+        app.dependency_overrides.clear()
+        await _cleanup([user_id], [bd_a, bd_b])

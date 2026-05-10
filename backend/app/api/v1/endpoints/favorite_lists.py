@@ -23,6 +23,8 @@ from app.models.favorite_list import FavoriteList, FavoriteListItem
 from app.schemas.auth import AuthenticatedUser
 from app.schemas.favorite_list import (
     FavoriteListCreate,
+    FavoriteListItemBatchCreate,
+    FavoriteListItemBatchResponse,
     FavoriteListItemCreate,
     FavoriteListItemResponse,
     FavoriteListResponse,
@@ -278,6 +280,61 @@ async def add_item_to_favorite_list(
         broker_dealer_id=bd_id,
         broker_dealer_name=bd_name,
         added_at=added_at,
+    )
+
+
+@router.post(
+    "/{list_id}/items/batch",
+    response_model=FavoriteListItemBatchResponse,
+)
+async def batch_add_items_to_favorite_list(
+    payload: FavoriteListItemBatchCreate,
+    list_id: int = Path(..., ge=1),
+    current_user: AuthenticatedUser = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db_session),
+) -> FavoriteListItemBatchResponse:
+    """Add many broker-dealers to a list in one transaction.
+
+    Idempotent — already-present ids land in ``skipped_existing``; non-existent
+    firm ids land in ``skipped_unknown`` rather than aborting the batch. Capped
+    at 200 ids/call by the request schema. ``advisor_id`` is set explicitly so
+    the polymorphic XOR check (``ck_favorite_list_item_exactly_one_target``)
+    is satisfied.
+    """
+    await _get_owned_list(db, list_id, current_user.id)
+
+    requested_ids = payload.broker_dealer_ids
+    known_rows = await db.execute(
+        select(BrokerDealer.id).where(BrokerDealer.id.in_(requested_ids))
+    )
+    known_ids = {row[0] for row in known_rows}
+    skipped_unknown = [bd_id for bd_id in requested_ids if bd_id not in known_ids]
+
+    added_count = 0
+    if known_ids:
+        upsert = (
+            pg_insert(FavoriteListItem)
+            .values(
+                [
+                    {
+                        "list_id": list_id,
+                        "broker_dealer_id": bd_id,
+                        "advisor_id": None,
+                    }
+                    for bd_id in known_ids
+                ]
+            )
+            .on_conflict_do_nothing(index_elements=["list_id", "broker_dealer_id"])
+            .returning(FavoriteListItem.id)
+        )
+        result = await db.execute(upsert)
+        added_count = len(result.fetchall())
+
+    await db.commit()
+    return FavoriteListItemBatchResponse(
+        added=added_count,
+        skipped_existing=len(known_ids) - added_count,
+        skipped_unknown=skipped_unknown,
     )
 
 
