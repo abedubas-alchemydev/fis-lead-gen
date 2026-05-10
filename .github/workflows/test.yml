@@ -132,7 +132,6 @@ jobs:
       NEXT_PUBLIC_APP_URL: "http://localhost:3000"
       BETTER_AUTH_SECRET: "ci-dummy-secret-padding-xxxxxxxxxxxxxxxx"
       DATABASE_URL: "postgresql://ci:ci@localhost:5432/ci"
-      RESEND_API_KEY: "re_ci_dummy_key_placeholder"
       NEXT_TELEMETRY_DISABLED: "1"
     steps:
       - uses: actions/checkout@v4
@@ -218,8 +217,14 @@ jobs:
 
       - name: Deploy frontend to Cloud Run
         run: |
+          # Re-establish SMTP env on every staging deploy so an accidental clear can't silently break better-auth emails.
+          EXTRA=""
+          if [[ "${{ env.ENV }}" == "staging" ]]; then
+            EXTRA="--update-env-vars=SMTP_HOST=${{ vars.SMTP_HOST }},SMTP_PORT=587,SMTP_USER=${{ vars.SMTP_USER }},EMAIL_FROM=${{ vars.EMAIL_FROM }} --update-secrets=SMTP_PASSWORD=SMTP_PASSWORD:latest"
+          fi
           gcloud run deploy ${{ env.FRONTEND_SERVICE }} \
             --image=${{ vars.GCP_REGISTRY }}/frontend:${{ env.SHORT_SHA }} \
             --region=${{ vars.GCP_REGION }} \
             --project=${{ vars.GCP_PROJECT_ID }} \
-            --labels=commit-sha=${{ env.SHORT_SHA }},environment=${{ env.ENV }}
+            --labels=commit-sha=${{ env.SHORT_SHA }},environment=${{ env.ENV }} \
+            $EXTRA
