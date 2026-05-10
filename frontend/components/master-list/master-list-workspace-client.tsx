@@ -1,11 +1,21 @@
 "use client";
 
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import Link from "next/link";
 import type { Route } from "next";
 import { useRouter, useSearchParams } from "next/navigation";
 
-import { ArrowDown, ArrowUp, Bell, Search, TrendingDown, TrendingUp, X } from "lucide-react";
+import {
+  ArrowDown,
+  ArrowUp,
+  Bell,
+  ChevronDown,
+  Heart,
+  Search,
+  TrendingDown,
+  TrendingUp,
+  X,
+} from "lucide-react";
 
 import { apiRequest, buildApiPath } from "@/lib/api";
 import { formatCurrency, formatRelativeTime } from "@/lib/format";
@@ -19,6 +29,7 @@ import {
 } from "@/lib/master-list-state";
 import { STATE_NAMES, stateCodeFromName } from "@/lib/states";
 import { Combo } from "@/components/ui/combo";
+import { BulkListPicker } from "@/components/list-picker/bulk-list-picker";
 import { ListPicker } from "@/components/list-picker/list-picker";
 import { NetCapitalRangeFilter } from "@/components/master-list/filters/net-capital-range-filter";
 import { RegistrationDateRangeFilter } from "@/components/master-list/filters/registration-date-range-filter";
@@ -240,6 +251,17 @@ export function MasterListWorkspaceClient() {
   });
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
+
+  // ── Bulk-select state (page-scoped) ─────────────────────────────────────
+  // selectedIds is intentionally NOT URL-backed — URL mutations re-fire the
+  // items effect (which clears the set), so URL-backing would create a
+  // feedback loop. Selection is ephemeral and resolves on bulk-action.
+  const [selectedIds, setSelectedIds] = useState<ReadonlySet<number>>(
+    () => new Set(),
+  );
+  const [bulkPickerOpen, setBulkPickerOpen] = useState(false);
+  const headerCheckboxRef = useRef<HTMLInputElement | null>(null);
+  const bulkActionTriggerRef = useRef<HTMLButtonElement | null>(null);
   // Mirrors the sidebar's Alerts badge — drives the topbar bell's red pip
   // when unread deficiency alerts exist. Same `/api/v1/stats` endpoint the
   // sidebar hits; one extra GET per page-load, no per-render refetches.
@@ -319,6 +341,49 @@ export function MasterListWorkspaceClient() {
       active = false;
     };
   }, [queryPath]);
+
+  // ── Bulk-select effects ────────────────────────────────────────────────
+  // Selection scope is "current page only" — every items refetch (page,
+  // sort, filter, list-mode, search) clears the set so the user never
+  // bulk-acts on off-page rows they can't see.
+  useEffect(() => {
+    setSelectedIds(new Set());
+  }, [items]);
+
+  // Auto-dismiss the popover when there's nothing left to act on.
+  useEffect(() => {
+    if (selectedIds.size === 0) setBulkPickerOpen(false);
+  }, [selectedIds]);
+
+  const allOnPageSelected =
+    items.length > 0 && selectedIds.size === items.length;
+  const someOnPageSelected =
+    selectedIds.size > 0 && selectedIds.size < items.length;
+
+  // Indeterminate must be set imperatively — React doesn't expose it as a
+  // prop on <input>. checked={true} + indeterminate=true reads as
+  // "indeterminate" in the browser; setting one without the other is fine.
+  useEffect(() => {
+    if (headerCheckboxRef.current) {
+      headerCheckboxRef.current.indeterminate = someOnPageSelected;
+    }
+  }, [someOnPageSelected]);
+
+  const toggleRow = useCallback((id: number) => {
+    setSelectedIds((current) => {
+      const next = new Set(current);
+      if (next.has(id)) next.delete(id);
+      else next.add(id);
+      return next;
+    });
+  }, []);
+
+  const toggleAllOnPage = useCallback(() => {
+    setSelectedIds((current) => {
+      if (current.size === items.length) return new Set();
+      return new Set(items.map((item) => item.id));
+    });
+  }, [items]);
 
   // One-shot filter-metadata fetch. Pulls clearing-partners +
   // types-of-business + per-list totals (for the tab-count badges).
@@ -976,15 +1041,78 @@ export function MasterListWorkspaceClient() {
               Broker-dealer list
             </h3>
           </div>
-          <span className="text-[12px] text-[var(--text-muted,#94a3b8)]">
-            {meta.total.toLocaleString()} firm{meta.total === 1 ? "" : "s"}
-          </span>
+          {selectedIds.size > 0 ? (
+            <div className="flex items-center gap-3">
+              <span
+                className="text-[12px] font-semibold text-[var(--text-dim,#475569)]"
+                aria-live="polite"
+              >
+                {selectedIds.size} selected
+              </span>
+              <button
+                type="button"
+                onClick={() => setSelectedIds(new Set())}
+                className="rounded-[6px] border border-[var(--border-2,rgba(30,64,175,0.16))] bg-transparent px-2.5 py-1 text-[11px] font-semibold text-[var(--text-dim,#475569)] transition hover:bg-[var(--surface-2,#f1f6fd)]"
+              >
+                Clear
+              </button>
+              <button
+                ref={bulkActionTriggerRef}
+                type="button"
+                onClick={() => setBulkPickerOpen((v) => !v)}
+                aria-haspopup="dialog"
+                aria-expanded={bulkPickerOpen}
+                className="inline-flex items-center gap-1.5 rounded-[8px] border border-[rgba(99,102,241,0.4)] bg-gradient-to-br from-[#6366f1] to-[#8b5cf6] px-3 py-1.5 text-[12px] font-semibold text-white shadow-[0_6px_16px_rgba(99,102,241,0.35)]"
+              >
+                <Heart className="h-3.5 w-3.5" strokeWidth={2.5} aria-hidden />
+                Save to list
+                <ChevronDown
+                  className="h-3.5 w-3.5"
+                  strokeWidth={2.5}
+                  aria-hidden
+                />
+              </button>
+              {bulkPickerOpen ? (
+                <BulkListPicker
+                  selectedIds={Array.from(selectedIds)}
+                  anchorRef={bulkActionTriggerRef}
+                  onAdded={() => {
+                    setBulkPickerOpen(false);
+                    setSelectedIds(new Set());
+                  }}
+                  onDismiss={() => setBulkPickerOpen(false)}
+                />
+              ) : null}
+            </div>
+          ) : (
+            <span className="text-[12px] text-[var(--text-muted,#94a3b8)]">
+              {meta.total.toLocaleString()} firm{meta.total === 1 ? "" : "s"}
+            </span>
+          )}
         </div>
 
         <div className="overflow-x-auto">
-          <table className="w-full min-w-[1080px] text-left">
+          <table className="w-full min-w-[1124px] text-left">
             <thead>
               <tr>
+                <th
+                  scope="col"
+                  className="w-[44px] whitespace-nowrap border-b border-[var(--border,rgba(30,64,175,0.1))] bg-[var(--surface-2,#f1f6fd)] px-5 py-3"
+                >
+                  <input
+                    ref={headerCheckboxRef}
+                    type="checkbox"
+                    aria-label={
+                      allOnPageSelected
+                        ? "Deselect all firms on this page"
+                        : "Select all firms on this page"
+                    }
+                    checked={allOnPageSelected}
+                    onChange={toggleAllOnPage}
+                    disabled={loading || items.length === 0}
+                    className="h-4 w-4 rounded border-[var(--border-2,rgba(30,64,175,0.16))] text-[var(--accent,#6366f1)] focus:ring-[var(--accent,#6366f1)]"
+                  />
+                </th>
                 {columns.map((column) => {
                   const isSorted = sortBy === column.key;
                   return (
@@ -1018,6 +1146,9 @@ export function MasterListWorkspaceClient() {
                     key={`loading-${index}`}
                     className="border-t border-[var(--border,rgba(30,64,175,0.1))]"
                   >
+                    <td className="w-[44px] px-5 py-3.5">
+                      <div className="h-4 w-4 animate-pulse rounded bg-[var(--surface-2,#f1f6fd)]" />
+                    </td>
                     {columns.map((column) => (
                       <td key={column.key} className="px-5 py-3.5">
                         <div className="h-4 w-full animate-pulse rounded bg-[var(--surface-2,#f1f6fd)]" />
@@ -1028,7 +1159,7 @@ export function MasterListWorkspaceClient() {
               ) : items.length === 0 ? (
                 <tr>
                   <td
-                    colSpan={columns.length}
+                    colSpan={columns.length + 1}
                     className="px-5 py-12 text-center text-sm text-[var(--text-muted,#94a3b8)]"
                   >
                     No broker-dealers matched the current filters.
@@ -1069,6 +1200,16 @@ export function MasterListWorkspaceClient() {
                       key={item.id}
                       className="border-t border-[var(--border,rgba(30,64,175,0.1))] align-top transition hover:bg-[var(--row-hover,rgba(99,102,241,0.04))]"
                     >
+                      <td className="w-[44px] px-5 py-3.5 align-top">
+                        <input
+                          type="checkbox"
+                          aria-label={`Select ${item.name}`}
+                          checked={selectedIds.has(item.id)}
+                          onChange={() => toggleRow(item.id)}
+                          onClick={(e) => e.stopPropagation()}
+                          className="mt-0.5 h-4 w-4 rounded border-[var(--border-2,rgba(30,64,175,0.16))] text-[var(--accent,#6366f1)] focus:ring-[var(--accent,#6366f1)]"
+                        />
+                      </td>
                       <td className="min-w-[220px] px-5 py-3.5" style={firmCellStyle}>
                         <div className="flex items-start justify-between gap-3">
                           <div className="min-w-0 flex-1">
