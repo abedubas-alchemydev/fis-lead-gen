@@ -167,7 +167,7 @@ gcloud run deploy lead-gen-frontend \
   --set-env-vars="NODE_ENV=production" \
   --set-env-vars="NEXT_PUBLIC_APP_URL=https://yourdomain.com" \
   --set-env-vars="INTERNAL_API_URL=$BACKEND_URL" \
-  --set-env-vars="SMTP_HOST=smtp-relay.gmail.com,SMTP_PORT=587,SMTP_USER=noreply@alchemydev.io,EMAIL_FROM=noreply@alchemydev.io" \
+  --set-env-vars="SMTP_HOST=smtp.gmail.com,SMTP_PORT=587,SMTP_USER=noreply@alchemydev.io,EMAIL_FROM=noreply@alchemydev.io" \
   --set-secrets="DATABASE_URL=DATABASE_URL:latest" \
   --set-secrets="BETTER_AUTH_SECRET=BETTER_AUTH_SECRET:latest" \
   --set-secrets="SMTP_PASSWORD=SMTP_PASSWORD:latest"
