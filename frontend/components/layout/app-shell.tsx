@@ -132,6 +132,17 @@ function VaultIcon(props: IconProps) {
   );
 }
 
+function UsersIcon(props: IconProps) {
+  return (
+    <IconBase {...props}>
+      <circle cx="9" cy="8" r="3.5" />
+      <path d="M2 21c0-3.5 3.1-6 7-6s7 2.5 7 6" />
+      <circle cx="17" cy="8" r="2.5" />
+      <path d="M16 14c2.8 0 5 1.8 5 4" />
+    </IconBase>
+  );
+}
+
 type SessionUser = {
   name?: string | null;
   email?: string | null;
@@ -152,6 +163,7 @@ type NavEntry = {
   label: string;
   icon: NavIconComponent;
   badgeKey: BadgeKey;
+  adminOnly?: boolean;
 };
 
 const workspaceNav: ReadonlyArray<NavEntry> = [
@@ -171,6 +183,7 @@ const workspaceNav: ReadonlyArray<NavEntry> = [
 
 const accountNav: ReadonlyArray<NavEntry> = [
   { href: "/settings", label: "Settings", icon: SettingsIcon, badgeKey: null },
+  { href: "/settings/users" as Route, label: "Users", icon: UsersIcon, badgeKey: null, adminOnly: true },
   { href: "/vault", label: "Vault", icon: VaultIcon, badgeKey: null }
 ];
 
@@ -246,12 +259,26 @@ export function AppShell({
 
   const initials = initialsFromName(session.user.name ?? session.user.email);
 
-  function isActivePath(href: string) {
-    return pathname === href || pathname.startsWith(`${href}/`);
-  }
-
   const role = session.user.role ?? "viewer";
   const displayRole = role.charAt(0).toUpperCase() + role.slice(1);
+  const isAdmin = role === "admin";
+
+  const visibleWorkspaceNav = workspaceNav.filter((e) => !e.adminOnly || isAdmin);
+  const visibleAccountNav = accountNav.filter((e) => !e.adminOnly || isAdmin);
+
+  function isActivePath(href: string) {
+    if (pathname === href) return true;
+    if (!pathname.startsWith(`${href}/`)) return false;
+    // If a sibling nav entry has a longer matching href, defer to it. Stops
+    // /settings from staying highlighted while on /settings/users.
+    const all = [...visibleWorkspaceNav, ...visibleAccountNav];
+    return !all.some(
+      (e) =>
+        e.href !== href &&
+        e.href.length > href.length &&
+        (pathname === e.href || pathname.startsWith(`${e.href}/`))
+    );
+  }
 
   return (
     <div className="h-screen overflow-hidden">
@@ -288,7 +315,7 @@ export function AppShell({
           {/* Workspace section */}
           <SidebarSectionLabel>Workspace</SidebarSectionLabel>
           <nav className="flex flex-col" aria-label="Workspace">
-            {workspaceNav.map((entry) => {
+            {visibleWorkspaceNav.map((entry) => {
               const live =
                 entry.href === "/master-list"
                   ? { ...entry, href: masterListHref }
@@ -307,7 +334,7 @@ export function AppShell({
           {/* Account section */}
           <SidebarSectionLabel>Account</SidebarSectionLabel>
           <nav className="flex flex-col" aria-label="Account">
-            {accountNav.map((entry) => (
+            {visibleAccountNav.map((entry) => (
               <SidebarNavLink
                 key={entry.href}
                 entry={entry}
@@ -372,7 +399,7 @@ export function AppShell({
             className="flex shrink-0 gap-2 overflow-x-auto border-b border-slate-200/70 bg-white/80 px-4 py-3 lg:hidden"
             aria-label="Primary mobile"
           >
-            {[...workspaceNav, ...accountNav].map(({ href, label }) => {
+            {[...visibleWorkspaceNav, ...visibleAccountNav].map(({ href, label }) => {
               const active = isActivePath(href);
               const liveHref = href === "/master-list" ? masterListHref : href;
               return (
