@@ -65,7 +65,7 @@ export function FavoriteListItemsPane({
     };
   }, [activeList.id, page, pageSize, reloadKey]);
 
-  // Source param so the firm-detail Next-Prospect button walks favorites,
+  // Source param so the firm-detail Next-Lead button walks favorites,
   // matching the existing single-list behavior pre-#17.
   const detailHrefSuffix = useMemo(() => {
     const env = encodeReturnParam({

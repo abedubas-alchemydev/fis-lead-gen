@@ -65,7 +65,7 @@ export function ExportClient({
   initialListMode?: ListMode;
 }) {
   const [listMode, setListMode] = useState<ListMode>(initialListMode);
-  const [prospectPriority, setProspectPriority] = useState("All");
+  const [leadPriority, setLeadPriority] = useState("All");
   const [health, setHealth] = useState("All");
   const [preview, setPreview] = useState<ExportPreviewResponse | null>(null);
   const [failure, setFailure] = useState<ExportFailure | null>(null);
@@ -76,10 +76,10 @@ export function ExportClient({
     () =>
       buildApiPath("/api/v1/export/preview", {
         list: listMode,
-        lead_priority: prospectPriority === "All" ? undefined : [prospectPriority],
+        lead_priority: leadPriority === "All" ? undefined : [leadPriority],
         health: health === "All" ? undefined : [health],
       }),
-    [listMode, prospectPriority, health],
+    [listMode, leadPriority, health],
   );
 
   async function loadPreview() {
@@ -113,7 +113,7 @@ export function ExportClient({
       const response = await apiRequest<ExportCsvResponse>(
         buildApiPath("/api/v1/export", {
           list: listMode,
-          lead_priority: prospectPriority === "All" ? undefined : [prospectPriority],
+          lead_priority: leadPriority === "All" ? undefined : [leadPriority],
           health: health === "All" ? undefined : [health],
         }),
         { method: "POST" },
@@ -143,17 +143,17 @@ export function ExportClient({
 
   function clearFilters() {
     setListMode("primary");
-    setProspectPriority("All");
+    setLeadPriority("All");
     setHealth("All");
   }
 
   const activeFilterCount = useMemo(() => {
     let count = 0;
     if (listMode !== "primary") count += 1;
-    if (prospectPriority !== "All") count += 1;
+    if (leadPriority !== "All") count += 1;
     if (health !== "All") count += 1;
     return count;
-  }, [listMode, prospectPriority, health]);
+  }, [listMode, leadPriority, health]);
 
   const remainingExports = preview?.remaining_exports_today ?? null;
   const matchingRecords = preview?.matching_records ?? null;
@@ -247,13 +247,13 @@ export function ExportClient({
           </div>
           <div>
             <p className="mb-1.5 text-[11px] font-semibold uppercase tracking-[0.08em] text-[var(--text-muted,#94a3b8)]">
-              Prospect Priority
+              Lead Priority
             </p>
             <Segmented
-              value={prospectPriority}
-              onChange={setProspectPriority}
+              value={leadPriority}
+              onChange={setLeadPriority}
               items={PRIORITY_ITEMS}
-              ariaLabel="Prospect priority"
+              ariaLabel="Lead priority"
             />
           </div>
           <div>

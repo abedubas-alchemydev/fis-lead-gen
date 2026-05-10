@@ -44,13 +44,6 @@ class FinraBrokerDealerRecord:
     registration_date: date | None = None
     formation_date: date | None = None
     types_of_business_other: str | None = None
-    # ── DBA / "doing business as" trade names (added 2026-05-07) ──
-    # Parsed from FINRA's ``firm_other_names`` payload field. Used by the
-    # website resolver's domain-anchor check so a firm registered as
-    # ``303 ALTERNATIVES, LLC`` but operating at ``303capitalmarkets.com``
-    # (DBA "303Capital Markets") can still anchor a candidate URL on the
-    # trade-name token. ``None`` when FINRA returned nothing parseable.
-    dba_names: list[str] | None = None
 
 
 @dataclass(slots=True)
@@ -77,12 +70,6 @@ class MergedBrokerDealerRecord:
     direct_owners: list[dict[str, str]] | None = None
     executive_officers: list[dict[str, str]] | None = None
     firm_operations_text: str | None = None
-    # Trade names parsed from FINRA's ``firm_other_names``. Carried
-    # through the merge step and persisted to ``broker_dealers.dba_names``
-    # so the website resolver can anchor on either the legal name or any
-    # DBA when the firm operates under a brand that doesn't share tokens
-    # with its registered LLC name.
-    dba_names: list[str] | None = None
 
 
 # ──────────────────────────────────────────────────────────────
@@ -246,13 +233,6 @@ class ClearingExtractionResult:
     extraction_status: str
     extraction_notes: str | None
     extracted_at: datetime | None
-    # The LLM's verbatim ``evidence_excerpt`` — the FOCUS-report sentence(s)
-    # that named the clearing partner. Populated on success; None on error /
-    # missing-PDF paths. Read by services/classification.py to give the
-    # classifier the audited FOCUS text alongside the (self-declared) FINRA
-    # operations text. Has a default so synthetic test fixtures that omit it
-    # keep working unchanged.
-    clearing_statement_text: str | None = None
 
 
 @dataclass(slots=True)
@@ -261,83 +241,3 @@ class ProviderDistributionRecord:
     count: int
     percentage: float
     is_competitor: bool
-
-
-# ──────────────────────────────────────────────────────────────
-# IAPD Investment Adviser ingestion (PR 2 of advisor-list rollout)
-# ──────────────────────────────────────────────────────────────
-
-
-@dataclass(slots=True)
-class IapdAdvisorRecord:
-    """One row parsed from the SEC IAPD ``ia{MMDDYY}.zip`` Compilation Report.
-
-    The Compilation Report CSV has 448 columns; this record captures the
-    subset the master-list page renders. Form ADV Item 5 columns are
-    extracted as raw lists of activity codes ("5G(1)", "5D(1)(a)", ...);
-    the merge service maps them to the canonical labels the FE filter
-    dropdown uses. Numeric fields land as ``Decimal`` for safe Numeric(20,2)
-    storage; empty CSV cells become None.
-    """
-
-    crd_number: str
-    sec_file_number: str | None
-    cik: str | None
-    name: str
-    legal_name: str | None
-    city: str | None
-    state: str | None
-    status: str | None
-    last_filing_date: date | None
-    website: str | None
-    # Form ADV Item 5.F.(2) — regulatory AUM and split. (a) discretionary,
-    # (b) non-discretionary, (c) total = a + b. Stored as native float
-    # because pydantic Numeric serialization is happier with floats than
-    # Decimal in the upsert path.
-    discretionary_aum: float | None
-    non_discretionary_aum: float | None
-    regulatory_aum: float | None
-    total_clients: int | None
-    # Item 5.G.(1)..(12) — yes/no checkboxes. We collect just the codes
-    # that are checked ("yes" / "Y") into a list of canonical strings; the
-    # FE renders human-readable labels via a static map.
-    advisory_activities: list[str]
-    # Item 5.D.(1)(a)..(m) — yes/no per client type.
-    client_types: list[str]
-    # Item 5.D.(2)(a)..(m) — count of clients per type. Empty when the
-    # firm did not break out per-type counts.
-    client_counts: dict[str, int]
-
-
-@dataclass(slots=True)
-class MergedInvestmentAdvisorRecord:
-    """Post-13F-merge advisor record ready for ``upsert_many``.
-
-    Same shape as ``IapdAdvisorRecord`` plus the two denormalized 13F
-    flags. ``files_13f`` is True iff the firm's CIK appears in the
-    EFTS 13F-HR result set inside the ``thirteen_f_lookback_days``
-    window; ``latest_13f_filing_date`` carries the most recent filing
-    date EFTS returned for that CIK.
-    """
-
-    crd_number: str
-    sec_file_number: str | None
-    cik: str | None
-    name: str
-    legal_name: str | None
-    city: str | None
-    state: str | None
-    status: str
-    last_filing_date: date | None
-    website: str | None
-    website_source: str | None
-    regulatory_aum: float | None
-    discretionary_aum: float | None
-    non_discretionary_aum: float | None
-    total_clients: int | None
-    advisory_activities: list[str]
-    client_types: list[str]
-    client_counts: dict[str, int]
-    files_13f: bool
-    latest_13f_filing_date: date | None
-    matched_source: str = "iapd"

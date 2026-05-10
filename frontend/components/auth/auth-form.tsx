@@ -2,13 +2,10 @@
 
 import type { FormEvent } from "react";
 import { useState, useTransition } from "react";
-import Link from "next/link";
 import { useRouter } from "next/navigation";
 import { Loader2 } from "lucide-react";
 
 import { Input } from "@/components/ui/input";
-import { Button } from "@/components/ui/button";
-import { PasswordInput } from "@/components/ui/password-input";
 import { authClient } from "@/lib/auth-client";
 
 type AuthFormMode = "login" | "signup";
@@ -73,8 +70,9 @@ export function AuthForm({ mode }: { mode: AuthFormMode }) {
       <Input name="email" type="email" label="Email" placeholder="you@company.com" required autoComplete="email" />
 
       <div>
-        <PasswordInput
+        <Input
           name="password"
+          type="password"
           label="Password"
           placeholder={mode === "signup" ? "Minimum 8 characters" : "Enter your password"}
           required
@@ -86,31 +84,14 @@ export function AuthForm({ mode }: { mode: AuthFormMode }) {
       </div>
 
       {mode === "signup" ? (
-        <PasswordInput
+        <Input
           name="confirmPassword"
+          type="password"
           label="Confirm password"
           placeholder="Re-enter your password"
           required
           autoComplete="new-password"
         />
-      ) : null}
-
-      {mode === "login" ? (
-        // rememberMe is visual-only — better-auth 1.3.6 signIn.email() does not accept this flag.
-        // Session lifetime is controlled server-side via betterAuth({ session: { expiresIn } }).
-        <div className="flex items-center justify-between text-sm">
-          <label className="inline-flex cursor-pointer items-center gap-2 text-slate-600">
-            <input
-              type="checkbox"
-              name="rememberMe"
-              className="h-4 w-4 rounded border-slate-300 text-navy focus:ring-2 focus:ring-blue/20"
-            />
-            Remember me
-          </label>
-          <Link href="/forgot-password" className="font-medium text-slate-500 transition hover:text-blue">
-            Forgot password?
-          </Link>
-        </div>
       ) : null}
 
       {error ? (
@@ -119,7 +100,11 @@ export function AuthForm({ mode }: { mode: AuthFormMode }) {
         </div>
       ) : null}
 
-      <Button type="submit" disabled={isPending} className="group relative w-full overflow-hidden">
+      <button
+        type="submit"
+        disabled={isPending}
+        className="relative w-full overflow-hidden rounded-2xl bg-navy px-4 py-3.5 text-sm font-semibold text-white shadow-lg shadow-navy/15 transition hover:bg-[#112b54] hover:shadow-xl hover:shadow-navy/20 disabled:cursor-not-allowed disabled:opacity-60"
+      >
         {isPending ? (
           <span className="flex items-center justify-center gap-2">
             <Loader2 className="h-4 w-4 animate-spin" />
@@ -130,27 +115,17 @@ export function AuthForm({ mode }: { mode: AuthFormMode }) {
         ) : (
           "Sign in"
         )}
-        <span
-          aria-hidden
-          className="animate-shimmer pointer-events-none absolute inset-0 opacity-0 transition-opacity duration-300 group-hover:opacity-100"
-        />
-      </Button>
+      </button>
 
       {mode === "login" ? (
-        <>
-          <div className="relative pt-2">
-            <div className="absolute inset-x-0 top-1/2 h-px bg-slate-200" aria-hidden />
-            <div className="relative mx-auto w-fit bg-white px-3 text-xs uppercase tracking-[0.2em] text-slate-400">
-              Need access?
-            </div>
-          </div>
-          <Link
-            href="/signup"
-            className="block w-full rounded-xl border border-slate-200 bg-white px-4 py-3 text-center text-sm font-medium text-navy transition hover:border-slate-300 hover:bg-slate-50"
+        <div className="text-center">
+          <a
+            href="/forgot-password"
+            className="text-sm text-slate-500 transition hover:text-blue"
           >
-            Request an invite
-          </Link>
-        </>
+            Forgot your password?
+          </a>
+        </div>
       ) : null}
     </form>
   );

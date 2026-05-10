@@ -9,7 +9,7 @@ const labelMap: Record<string, string> = {
   healthy: "Healthy",
   ok: "OK",
   at_risk: "At Risk",
-  unknown: "Not assessed"
+  unknown: "Unknown"
 };
 
 export function HealthBadge({ status }: { status: string | null }) {

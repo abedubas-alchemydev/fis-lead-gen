@@ -131,35 +131,6 @@ def test_competitor_with_empty_alias_does_not_crash(repository):
     assert repository.match_competitor("Goldman Sachs", [competitor]) is False
 
 
-@pytest.mark.parametrize(
-    "name,aliases,partner",
-    [
-        # Canonical name ending in `.`. Pre-fix, ``\b`` wouldn't fire
-        # after the trailing period, so the matcher missed an exact match.
-        ("BofA Securities, Inc.", [], "BofA Securities, Inc."),
-        ("Wedbush Securities, Inc.", [], "Wedbush Securities, Inc."),
-        # Trailing `)` on alias — same problem class as `.`. The alias
-        # pattern ``(USA)`` is followed by `,` in the partner string,
-        # both non-word; ``\b`` would silently fail.
-        (
-            "Mirae Asset Securities (USA) LLC",
-            ["Mirae Asset Securities (USA)"],
-            "Mirae Asset Securities (USA), Inc.",
-        ),
-    ],
-)
-def test_match_competitor_handles_alias_ending_in_non_word_char(
-    repository, name, aliases, partner
-):
-    """Regression: ``\\b`` would not fire after a trailing ``.`` or ``)`` so
-    ``match_competitor`` silently returned False for a partner that
-    actually equals the canonical/alias. Switched to lookarounds; pin
-    here so the bug stays fixed."""
-
-    competitor = _FakeCompetitor(name=name, aliases=aliases)
-    assert repository.match_competitor(partner, [competitor]) is True
-
-
 # ---------------------------------------------------------------------------
 # Seed-list contract — the bare-prefix aliases known to collide with
 # sibling brands have been removed. Pershing remains because no sibling

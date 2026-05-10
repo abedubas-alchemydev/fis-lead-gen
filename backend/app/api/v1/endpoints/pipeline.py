@@ -24,7 +24,6 @@ from app.schemas.pipeline import (
 )
 from app.services.auth import _ensure_admin_or_scheduler_sa, get_current_user
 from app.services.broker_dealers import BrokerDealerRepository
-from app.services.investment_advisors import InvestmentAdvisorRepository
 from app.services.cloud_run_client import (
     CloudRunUpdateError,
     update_env_var as cloud_run_update_env_var,
@@ -40,7 +39,6 @@ router = APIRouter(prefix="/pipeline/clearing")
 scheduled_router = APIRouter(prefix="/pipeline/run")
 admin_destructive_router = APIRouter(prefix="/pipeline")
 repository = BrokerDealerRepository()
-advisor_repository = InvestmentAdvisorRepository()
 pipeline_service = ClearingPipelineService()
 filing_monitor_service = FilingMonitorService()
 registration_watcher_service = RegistrationWatcherService()
@@ -423,93 +421,6 @@ async def run_initial_load(
         notes="Queued from /pipeline/run/initial-load.",
     )
     background_tasks.add_task(_run_initial_load_background, run.id, caller)
-    return _trigger_response(run)
-
-
-async def _run_initial_load_advisors_background(
-    run_id: int, trigger_source: str
-) -> None:
-    """Background task: SEC IAPD bulk + EDGAR EFTS 13F-HR enumeration.
-
-    Mirrors :mod:`scripts.initial_load_advisors` in-process so a Cloud
-    Scheduler trigger can return 200 immediately while the ~5-15 minute
-    download + parse + 13F walk + upsert finishes server-side.
-    """
-    async with SessionLocal() as db:
-        run = await db.get(PipelineRun, run_id)
-        if run is None:
-            logger.error(
-                "initial-load-advisors background: PipelineRun %d not found.", run_id
-            )
-            return
-        run.status = "running"
-        await db.commit()
-
-    notes_parts: list[str] = []
-    failed = False
-
-    try:
-        # Lazy imports — keeps cold-start of the API process light and
-        # avoids any model-registration circular import surprises during
-        # FastAPI startup.
-        from app.core.config import settings as app_settings
-        from app.services.advisor_merge import AdvisorMergeService
-        from app.services.iapd import IapdService
-        from app.services.thirteen_f_filter import ThirteenFFilterService
-
-        iapd_service = IapdService()
-        thirteen_f_service = ThirteenFFilterService()
-        merge_service = AdvisorMergeService()
-
-        iapd_records = await iapd_service.fetch_compilation_records(
-            limit=app_settings.initial_load_advisors_limit
-        )
-        thirteen_f_ciks = await thirteen_f_service.fetch_recent_filer_ciks()
-        merged, report = merge_service.merge(iapd_records, thirteen_f_ciks)
-
-        async with SessionLocal() as db:
-            await advisor_repository.upsert_many(db, merged)
-            await db.commit()
-
-        notes_parts.append(
-            f"iapd={report.iapd_input_count} "
-            f"13f_filers={report.thirteen_f_filer_count} "
-            f"merged={report.merged_count} "
-            f"files_13f={report.files_13f_count}"
-        )
-    except Exception as exc:
-        failed = True
-        logger.exception("initial-load-advisors background failed: %s", exc)
-        notes_parts.append(f"failed: {exc}")
-
-    async with SessionLocal() as db:
-        run = await db.get(PipelineRun, run_id)
-        if run is None:
-            return
-        run.status = "failed" if failed else "completed"
-        run.completed_at = datetime.now(timezone.utc)
-        run.notes = "; ".join(notes_parts) if notes_parts else run.notes
-        await db.commit()
-
-
-@scheduled_router.post("/initial-load-advisors", response_model=PipelineTriggerResponse)
-async def run_initial_load_advisors(
-    background_tasks: BackgroundTasks,
-    caller: str = Depends(_ensure_admin_or_scheduler_sa),
-    db: AsyncSession = Depends(get_db_session),
-) -> PipelineTriggerResponse:
-    """Trigger the SEC IAPD + EDGAR 13F-HR re-bootstrap for advisors.
-
-    Asynchronous: ~5-15 minutes for a full pass (download + parse 17k
-    rows + walk weekly 13F windows + upsert ~5k rows).
-    """
-    run = await _create_queued_run(
-        db,
-        pipeline_name="initial_load_advisors",
-        trigger_source=f"scheduled:{caller}",
-        notes="Queued from /pipeline/run/initial-load-advisors.",
-    )
-    background_tasks.add_task(_run_initial_load_advisors_background, run.id, caller)
     return _trigger_response(run)
 
 

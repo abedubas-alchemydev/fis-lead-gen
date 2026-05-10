@@ -67,13 +67,7 @@ class FavoriteList(Base):
 
 
 class FavoriteListItem(Base):
-    """A broker-dealer or investment-advisor pinned to a favorite_list.
-
-    Polymorphic via ``broker_dealer_id`` XOR ``advisor_id``: each row
-    points at exactly one of the two — never both, never neither. The
-    DB-side guard is the ``ck_favorite_list_item_exactly_one_target``
-    CHECK constraint added in migration 0031.
-    """
+    """A broker-dealer pinned to a favorite_list."""
 
     __tablename__ = "favorite_list_item"
     __table_args__ = (
@@ -89,16 +83,10 @@ class FavoriteListItem(Base):
         nullable=False,
         index=True,
     )
-    broker_dealer_id: Mapped[int | None] = mapped_column(
+    broker_dealer_id: Mapped[int] = mapped_column(
         Integer,
         ForeignKey("broker_dealers.id", ondelete="CASCADE"),
-        nullable=True,
-        index=True,
-    )
-    advisor_id: Mapped[int | None] = mapped_column(
-        Integer,
-        ForeignKey("investment_advisors.id", ondelete="CASCADE"),
-        nullable=True,
+        nullable=False,
         index=True,
     )
     created_at: Mapped[datetime] = mapped_column(
