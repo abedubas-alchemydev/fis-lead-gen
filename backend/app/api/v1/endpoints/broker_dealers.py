@@ -1188,6 +1188,136 @@ async def _run_refresh_financials_background(
         )
 
 
+async def _in_flight_refresh_financials_run(
+    db: AsyncSession, bd_id: int
+) -> PipelineRun | None:
+    """Return any queued/running refresh-financials PipelineRun for this
+    firm, or ``None`` if none is in flight.
+
+    Returns the full row so the manual endpoint can include ``status``
+    in its 409 response without a second ``db.get()``. The match is
+    keyed on ``pipeline_name`` + status window + a JSON substring on
+    ``notes`` (``"bd_id": <int>``). The substring is bd-specific so we
+    don't false-positive on sibling ids (e.g. bd_id=12 matching
+    ``"bd_id": 123``); the surrounding quotes + space anchor it.
+    """
+    bd_id_marker = f'"bd_id": {bd_id}'
+    stmt = (
+        select(PipelineRun)
+        .where(PipelineRun.pipeline_name == REFRESH_FINANCIALS_PIPELINE_NAME)
+        .where(PipelineRun.status.in_(("queued", "running")))
+        .where(PipelineRun.notes.ilike(f"%{bd_id_marker}%"))
+        .order_by(PipelineRun.id.desc())
+        .limit(1)
+    )
+    return (await db.execute(stmt)).scalar_one_or_none()
+
+
+async def _enqueue_refresh_financials(
+    db: AsyncSession,
+    background_tasks: BackgroundTasks,
+    bd_id: int,
+    *,
+    trigger_source: str,
+) -> int:
+    """Create a queued PipelineRun row + schedule the BackgroundTask.
+
+    Caller is responsible for the in-flight check via
+    :func:`_in_flight_refresh_financials_run_id` BEFORE calling this —
+    the helper does not re-check, so concurrent callers could race a
+    duplicate run if they skip the guard. Returns the new run id.
+    """
+    pipeline_run = PipelineRun(
+        pipeline_name=REFRESH_FINANCIALS_PIPELINE_NAME,
+        trigger_source=trigger_source,
+        status="queued",
+        total_items=1,
+        processed_items=0,
+        success_count=0,
+        failure_count=0,
+        notes=json.dumps({"bd_id": bd_id, "stage": "queued"}),
+    )
+    db.add(pipeline_run)
+    await db.commit()
+    await db.refresh(pipeline_run)
+
+    background_tasks.add_task(
+        _run_refresh_financials_background,
+        pipeline_run.id,
+        bd_id,
+        trigger_source,
+    )
+    return pipeline_run.id
+
+
+def _refresh_financials_provider_available() -> bool:
+    """True if a configured LLM provider key is present.
+
+    Mirrors the gate at the start of the manual endpoint. The auto path
+    uses this to short-circuit the whole batch with a single warning
+    instead of 503-ing on every firm.
+    """
+    if settings.llm_provider == "openai":
+        return bool(settings.openai_api_key)
+    return bool(settings.gemini_api_key)
+
+
+async def schedule_auto_refresh_financials_batch(
+    db: AsyncSession,
+    background_tasks: BackgroundTasks,
+    bd_ids: list[int],
+    *,
+    trigger_source: str,
+) -> int:
+    """Schedule auto re-extraction for each bd_id.
+
+    Best-effort by design: per-firm in-flight runs are silently skipped
+    (not 409'd); the whole batch is skipped with a single warning if no
+    LLM provider key is configured. Returns the count of runs actually
+    queued for log telemetry on the calling endpoint.
+
+    Called from the filing-monitor endpoints after
+    ``FilingMonitorService.run`` returns its ``auto_extract_bd_ids``
+    list. Each ``bd_id`` becomes one ``PipelineRun`` tagged with the
+    auto trigger_source, then handed to the same BackgroundTask worker
+    as the manual /refresh-financials path.
+    """
+    if not bd_ids:
+        return 0
+    if not _refresh_financials_provider_available():
+        logger.warning(
+            "auto refresh-financials skipped: no LLM provider key configured "
+            "(would have queued %d firm(s))",
+            len(bd_ids),
+        )
+        return 0
+
+    scheduled = 0
+    for bd_id in bd_ids:
+        in_flight = await _in_flight_refresh_financials_run(db, bd_id)
+        if in_flight is not None:
+            logger.debug(
+                "auto refresh-financials skipped bd_id=%s; run %s already in flight",
+                bd_id,
+                in_flight.id,
+            )
+            continue
+        new_run_id = await _enqueue_refresh_financials(
+            db,
+            background_tasks,
+            bd_id,
+            trigger_source=trigger_source,
+        )
+        scheduled += 1
+        logger.info(
+            "auto refresh-financials queued run_id=%s bd_id=%s trigger_source=%s",
+            new_run_id,
+            bd_id,
+            trigger_source,
+        )
+    return scheduled
+
+
 @router.post(
     "/{broker_dealer_id}/refresh-financials",
     response_model=RefreshFinancialsResponse,
@@ -1227,35 +1357,17 @@ async def refresh_broker_dealer_financials(
             detail="Broker-dealer not found.",
         )
 
-    # Provider key gate. The extraction defaults to Gemini; OpenAI is the
-    # alternate provider when ``llm_provider="openai"``. Refuse early so
-    # the run never gets queued with no chance of completing.
-    if settings.llm_provider == "openai":
-        provider_key = settings.openai_api_key
-        provider_label = "OpenAI"
-    else:
-        provider_key = settings.gemini_api_key
-        provider_label = "Gemini"
-    if not provider_key:
+    # Provider key gate. Refuse early so the run never gets queued with
+    # no chance of completing.
+    if not _refresh_financials_provider_available():
+        provider_label = "OpenAI" if settings.llm_provider == "openai" else "Gemini"
         raise HTTPException(
             status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
             detail=f"{provider_label} API key is not configured.",
         )
 
-    # 409 concurrency guard. Match the run row by pipeline_name + status
-    # window + a JSON substring on ``notes`` containing this bd_id. The
-    # ``notes`` payload writes ``"bd_id": <int>`` so the substring match
-    # is bd-specific and not a sibling-id false positive.
-    bd_id_marker = f'"bd_id": {broker_dealer_id}'
-    in_flight_stmt = (
-        select(PipelineRun)
-        .where(PipelineRun.pipeline_name == REFRESH_FINANCIALS_PIPELINE_NAME)
-        .where(PipelineRun.status.in_(("queued", "running")))
-        .where(PipelineRun.notes.ilike(f"%{bd_id_marker}%"))
-        .order_by(PipelineRun.id.desc())
-        .limit(1)
-    )
-    in_flight = (await db.execute(in_flight_stmt)).scalar_one_or_none()
+    # 409 concurrency guard for the manual path.
+    in_flight = await _in_flight_refresh_financials_run(db, broker_dealer_id)
     if in_flight is not None:
         raise HTTPException(
             status_code=status.HTTP_409_CONFLICT,
@@ -1268,30 +1380,16 @@ async def refresh_broker_dealer_financials(
         )
 
     trigger_source = f"manual_single:{current_user.email}"
-    pipeline_run = PipelineRun(
-        pipeline_name=REFRESH_FINANCIALS_PIPELINE_NAME,
-        trigger_source=trigger_source,
-        status="queued",
-        total_items=1,
-        processed_items=0,
-        success_count=0,
-        failure_count=0,
-        notes=json.dumps({"bd_id": broker_dealer_id, "stage": "queued"}),
-    )
-    db.add(pipeline_run)
-    await db.commit()
-    await db.refresh(pipeline_run)
-
-    background_tasks.add_task(
-        _run_refresh_financials_background,
-        pipeline_run.id,
+    new_run_id = await _enqueue_refresh_financials(
+        db,
+        background_tasks,
         broker_dealer_id,
-        trigger_source,
+        trigger_source=trigger_source,
     )
 
     return RefreshFinancialsResponse(
-        run_id=pipeline_run.id,
-        status=pipeline_run.status,
+        run_id=new_run_id,
+        status="queued",
         broker_dealer_id=broker_dealer_id,
     )
 

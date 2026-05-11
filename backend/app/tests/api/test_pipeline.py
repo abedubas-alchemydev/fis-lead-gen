@@ -107,8 +107,14 @@ def stub_pipeline_runs(monkeypatch: pytest.MonkeyPatch):
       ``status="queued"`` row created by ``_create_queued_run``.
     """
 
-    async def _fake_filing_run(_db: Any, *, trigger_source: str) -> PipelineRun:
-        return PipelineRun(
+    async def _fake_filing_run(
+        _db: Any, *, trigger_source: str
+    ) -> tuple[PipelineRun, list[int]]:
+        # New signature: returns (run, auto_extract_bd_ids). Empty list
+        # here keeps the schedule_auto_refresh_financials_batch path a
+        # no-op so the test stays scoped to filing-monitor auth + the
+        # response shape, not the auto-extraction hook.
+        run = PipelineRun(
             id=7001,
             pipeline_name="daily_filing_monitor",
             trigger_source=trigger_source,
@@ -119,6 +125,7 @@ def stub_pipeline_runs(monkeypatch: pytest.MonkeyPatch):
             failure_count=2,
             notes="stubbed for tests",
         )
+        return run, []
 
     async def _noop_bg(_run_id: int, _trigger_source: str) -> None:
         return None

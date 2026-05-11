@@ -48,7 +48,8 @@ class _StagedSession:
     happened and the pg_notify text() also ran (or didn't).
     """
 
-    def __init__(self, returning_rows: list[tuple[int, bool]]) -> None:
+    def __init__(self, returning_rows: list[tuple[int, int, str, bool]]) -> None:
+        # rows are (id, bd_id, form_type, is_new) per the RETURNING clause
         self._returning_rows = returning_rows
         self.executed_statements: list[Any] = []
         self.executed_params: list[Any] = []
@@ -59,11 +60,14 @@ class _StagedSession:
         result = MagicMock()
         # Mimic the row tuple shape that .all() returns. SQLAlchemy rows
         # expose named attributes; MagicMock with configured attributes
-        # gives us .id and .is_new without pulling in a real Row class.
+        # gives us .id/.bd_id/.form_type/.is_new without pulling in a
+        # real Row class.
         rows = []
-        for row_id, is_new in self._returning_rows:
+        for row_id, bd_id, form_type, is_new in self._returning_rows:
             row = MagicMock()
             row.id = row_id
+            row.bd_id = bd_id
+            row.form_type = form_type
             row.is_new = is_new
             rows.append(row)
         result.all.return_value = rows
@@ -82,20 +86,28 @@ def repository() -> AlertRepository:
 async def test_upsert_many_publishes_only_new_ids(
     monkeypatch: pytest.MonkeyPatch, repository: AlertRepository
 ) -> None:
-    """Rows with xmax==0 (is_new=True) get broadcast; updates do not."""
+    """Rows with xmax==0 (is_new=True) get broadcast AND get surfaced in
+    the return value; updates do not."""
     publish_mock = AsyncMock()
     monkeypatch.setattr(
         "app.services.alerts.alert_event_bus.publish_via_session", publish_mock
     )
 
-    session = _StagedSession(returning_rows=[(101, True), (102, False), (103, True)])
+    session = _StagedSession(
+        returning_rows=[
+            (101, 1, "Form X-17A-5", True),
+            (102, 2, "Form BD", False),
+            (103, 3, "Form X-17A-5", True),
+        ]
+    )
 
-    count = await repository.upsert_many(
+    inserted = await repository.upsert_many(
         session,
         [_record(1, "a"), _record(2, "b"), _record(3, "c")],
     )
 
-    assert count == 3
+    # Only the is_new=True rows propagate to the caller.
+    assert inserted == [(101, 1, "Form X-17A-5"), (103, 3, "Form X-17A-5")]
     publish_mock.assert_awaited_once()
     awaited_session, awaited_payload = publish_mock.await_args.args
     assert awaited_session is session
@@ -109,16 +121,21 @@ async def test_upsert_many_skips_publish_when_all_are_updates(
 ) -> None:
     """Re-running the filing monitor on already-known filings must not
     re-emit alerts — the publish call must be suppressed when no row
-    landed on the INSERT branch."""
+    landed on the INSERT branch, and the caller receives an empty list."""
     publish_mock = AsyncMock()
     monkeypatch.setattr(
         "app.services.alerts.alert_event_bus.publish_via_session", publish_mock
     )
 
-    session = _StagedSession(returning_rows=[(201, False), (202, False)])
+    session = _StagedSession(
+        returning_rows=[(201, 1, "Form BD", False), (202, 2, "Form BD", False)]
+    )
 
-    await repository.upsert_many(session, [_record(1, "x"), _record(2, "y")])
+    inserted = await repository.upsert_many(
+        session, [_record(1, "x"), _record(2, "y")]
+    )
 
+    assert inserted == []
     publish_mock.assert_not_called()
 
 
@@ -126,7 +143,8 @@ async def test_upsert_many_skips_publish_when_all_are_updates(
 async def test_upsert_many_empty_batch_short_circuits(
     monkeypatch: pytest.MonkeyPatch, repository: AlertRepository
 ) -> None:
-    """An empty batch returns 0 without touching the DB or the bus."""
+    """An empty batch returns an empty list without touching the DB or
+    the bus."""
     publish_mock = AsyncMock()
     monkeypatch.setattr(
         "app.services.alerts.alert_event_bus.publish_via_session", publish_mock
@@ -134,8 +152,8 @@ async def test_upsert_many_empty_batch_short_circuits(
 
     session = _StagedSession(returning_rows=[])
 
-    count = await repository.upsert_many(session, [])
+    inserted = await repository.upsert_many(session, [])
 
-    assert count == 0
+    assert inserted == []
     assert session.executed_statements == []
     publish_mock.assert_not_called()
