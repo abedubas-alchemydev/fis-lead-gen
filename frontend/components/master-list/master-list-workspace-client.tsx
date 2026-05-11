@@ -62,6 +62,7 @@ const columns = [
   { key: "lead_score", label: "Prospect Priority" },
   { key: "latest_net_capital", label: "Net Capital" },
   { key: "yoy_growth", label: "YoY Growth" },
+  { key: "three_year_cagr", label: "3-Yr CAGR" },
   { key: "last_filing_date", label: "Last Filing" },
 ] as const;
 
@@ -1349,6 +1350,31 @@ export function MasterListWorkspaceClient() {
                             reason={item.financial_unknown_reason}
                             fallback="—"
                           />
+                        )}
+                      </td>
+                      <td className="whitespace-nowrap px-5 py-3.5">
+                        {item.three_year_cagr !== null ? (
+                          <span
+                            className={`inline-flex items-center gap-1 font-semibold tabular-nums ${
+                              item.three_year_cagr >= 0 ? "text-[#16a34a]" : "text-[#dc2626]"
+                            }`}
+                            title="3-year compound annual growth rate on net capital"
+                          >
+                            {item.three_year_cagr >= 0 ? (
+                              <TrendingUp className="h-3.5 w-3.5" strokeWidth={2.5} />
+                            ) : (
+                              <TrendingDown className="h-3.5 w-3.5" strokeWidth={2.5} />
+                            )}
+                            {item.three_year_cagr >= 0 ? "+" : ""}
+                            {item.three_year_cagr.toFixed(1)}%
+                          </span>
+                        ) : (
+                          <span
+                            className="text-[var(--text-muted,#94a3b8)]"
+                            title="Needs 3 years of financial history to compute"
+                          >
+                            —
+                          </span>
                         )}
                       </td>
                       <td className="whitespace-nowrap px-5 py-3.5 text-[var(--text-muted,#94a3b8)]">

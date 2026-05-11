@@ -25,6 +25,7 @@ export interface BrokerDealerSummary {
   last_filing_date: string | null;
   latest_net_capital: number | null;
   yoy_growth: number | null;
+  three_year_cagr: number | null;
 }
 
 export interface FavoriteListItem extends BrokerDealerSummary {

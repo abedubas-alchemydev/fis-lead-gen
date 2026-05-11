@@ -31,6 +31,7 @@ class BrokerDealerListItem(BaseModel):
     latest_excess_net_capital: float | None
     latest_total_assets: float | None
     yoy_growth: float | None
+    three_year_cagr: float | None = None
     health_status: str | None
     is_deficient: bool
     latest_deficiency_filed_at: date | None
@@ -266,6 +267,7 @@ class BrokerDealerSummary(BaseModel):
     last_filing_date: date | None
     latest_net_capital: float | None
     yoy_growth: float | None
+    three_year_cagr: float | None = None
 
 
 class BrokerDealerProfileResponse(BaseModel):
