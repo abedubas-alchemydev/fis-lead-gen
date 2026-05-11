@@ -107,8 +107,9 @@ async def _collect_frames(gen, *, count: int, timeout: float = 2.0) -> list[dict
     while buffer.count("\n\n") < count:
         remaining = deadline - asyncio.get_running_loop().time()
         if remaining <= 0:
+            seen = buffer.count("\n\n")
             raise asyncio.TimeoutError(
-                f"only saw {buffer.count('\\n\\n')} frames after {timeout}s: {buffer!r}"
+                f"only saw {seen} frames after {timeout}s: {buffer!r}"
             )
         chunk = await asyncio.wait_for(gen.__anext__(), timeout=remaining)
         buffer += chunk
