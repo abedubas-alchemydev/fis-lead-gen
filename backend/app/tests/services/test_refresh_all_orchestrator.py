@@ -382,6 +382,26 @@ def test_gap_report_returns_column_names() -> None:
     assert "dba_names" in report[SUB_HEALTH_CHECK]
 
 
+def test_aggressive_treats_total_assets_and_required_min_as_gap() -> None:
+    """``latest_total_assets`` + ``required_min_capital`` are detail-page
+    fields filled as a side-effect of refresh-financials. They were
+    initially omitted from the aggressive predicate list, which left
+    BDs with NULL-here-and-everywhere-else-filled invisible to the
+    bulk gap-fill. This test pins the fix."""
+    bd = _fully_filled_bd(latest_total_assets=None)
+    decision = decide_pipelines(bd, has_contacts=True, aggressive=True)
+    assert SUB_REFRESH_FINANCIALS in decision.to_run
+
+    bd2 = _fully_filled_bd(required_min_capital=None)
+    decision2 = decide_pipelines(bd2, has_contacts=True, aggressive=True)
+    assert SUB_REFRESH_FINANCIALS in decision2.to_run
+
+    # Strict mode: both fields are aggressive-only; the legacy gate
+    # closes when net_capital / yoy_growth / health_status are filled.
+    decision_strict = decide_pipelines(bd, has_contacts=True)
+    assert SUB_REFRESH_FINANCIALS in decision_strict.to_skip
+
+
 def test_gap_report_strict_mode_omits_aggressive_only_fields() -> None:
     """The legacy ``gap_report_for(..., aggressive=False)`` must not
     surface sentinel/detail-page fields. Anchors the strict mode for

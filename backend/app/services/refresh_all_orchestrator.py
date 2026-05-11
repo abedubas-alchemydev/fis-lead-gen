@@ -166,6 +166,14 @@ def gap_report_for(
             report[SUB_REFRESH_FINANCIALS].append("three_year_cagr")
         if broker_dealer.total_assets_yoy is None:
             report[SUB_REFRESH_FINANCIALS].append("total_assets_yoy")
+        # latest_total_assets + required_min_capital are filled by the
+        # same refresh-financials pass as a side-effect (rolled up from
+        # financial_metrics rows). Gate on them too so a BD whose other
+        # financials are filled but these two are NULL still re-fires.
+        if broker_dealer.latest_total_assets is None:
+            report[SUB_REFRESH_FINANCIALS].append("latest_total_assets")
+        if broker_dealer.required_min_capital is None:
+            report[SUB_REFRESH_FINANCIALS].append("required_min_capital")
 
     # ── resolve-website ──
     if not broker_dealer.website:
