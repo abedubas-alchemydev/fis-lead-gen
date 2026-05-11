@@ -22,6 +22,7 @@ from app.services.extraction_status import (
     STATUS_PARSED,
     classify_financial_extraction_status,
     is_plausible_net_capital_scale,
+    is_plausible_report_date,
 )
 from app.services.gemini_responses import (
     GeminiConfigurationError,
@@ -652,13 +653,19 @@ class FocusReportService:
                             continue
                         seen_dates.add(date_key)
 
-                        # Tag based on LLM confidence (#56 / Fix G) AND a
-                        # cross-field sanity check on the net_capital scale
-                        # (issue #398). Below-threshold rows or rows whose
-                        # net_capital looks 1000× too small relative to
-                        # total_assets still persist, tagged 'needs_review',
-                        # so the review queue can surface them instead of a
-                        # silent drop. See app.services.extraction_status.
+                        # Tag based on LLM confidence (#56 / Fix G) AND
+                        # cross-field sanity checks:
+                        #   - net_capital scale (issue #398 — RBC,
+                        #     DriveWealth scale-strip).
+                        #   - report_date plausibility (issue #398 —
+                        #     filing-date vs period-end mix-up). A
+                        #     mid-month report_date is almost always a
+                        #     filing-date contamination; legitimate
+                        #     X-17A-5 period-ends fall on a month-end.
+                        # Below-threshold rows still persist tagged
+                        # 'needs_review' so the review queue surfaces
+                        # them instead of a silent drop. See
+                        # app.services.extraction_status.
                         plausible_leverage = is_plausible_net_capital_scale(
                             net_capital=(
                                 float(extraction.net_capital)
@@ -671,19 +678,25 @@ class FocusReportService:
                                 else None
                             ),
                         )
+                        plausible_date = is_plausible_report_date(report_date)
                         extraction_status = classify_financial_extraction_status(
                             confidence_score=extraction.confidence_score,
                             min_confidence=settings.financial_extraction_min_confidence,
                             is_plausible_leverage=plausible_leverage,
+                            is_plausible_date=plausible_date,
                         )
                         if extraction_status == STATUS_NEEDS_REVIEW:
                             logger.warning(
                                 "Financial extraction BD %s tagged needs_review: "
-                                "confidence=%s min_confidence=%s plausible_leverage=%s",
+                                "confidence=%s min_confidence=%s "
+                                "plausible_leverage=%s plausible_date=%s "
+                                "report_date=%s",
                                 broker_dealer.id,
                                 extraction.confidence_score,
                                 settings.financial_extraction_min_confidence,
                                 plausible_leverage,
+                                plausible_date,
+                                report_date.isoformat(),
                             )
 
                         records.append(

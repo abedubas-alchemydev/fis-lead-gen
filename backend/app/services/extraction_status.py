@@ -16,6 +16,9 @@ can grow into the other statuses without re-introducing a string literal.
 
 from __future__ import annotations
 
+import calendar
+from datetime import date
+
 # Column default. Never written by application code today — the DB
 # server_default stamps every insert that omits the column. Retained here so
 # tests can import it instead of hard-coding the literal.
@@ -98,12 +101,40 @@ def is_plausible_net_capital_scale(
     return (total_assets / net_capital) <= PLAUSIBLE_LEVERAGE_RATIO_MAX
 
 
+def is_plausible_report_date(report_date: date | None) -> bool:
+    """``True`` when ``report_date`` looks like a legitimate fiscal
+    period-end, ``False`` when it looks like a filing date.
+
+    Heuristic: every real X-17A-5 (or amendment to a SOFC) reports the
+    period as the last day of a month. Quarter-ends (03/31, 06/30, 09/30,
+    12/31) cover ~97% of US broker-dealer fiscal years; non-Q
+    month-ends (10/31, 01/31, etc.) cover the rest. Filing dates, by
+    contrast, are mid-month and rarely land on a month-end by chance.
+
+    Returns ``True`` (assume sane) when ``report_date`` is ``None`` —
+    the caller's ``has_required_fields`` gate should reject NULL dates
+    directly; this check is only meant to catch the wrong-date-extracted
+    bug shape on otherwise-present rows.
+
+    Background: issue #398. Gemini occasionally returns the filing date
+    instead of the period-end (the two appear side-by-side on the EDGAR
+    submission page). 17 such rows existed on staging before this
+    validator went live, all carrying suspiciously small ``net_capital``
+    and no ``total_assets`` — stub-filing artifacts.
+    """
+    if report_date is None:
+        return True
+    last_day = calendar.monthrange(report_date.year, report_date.month)[1]
+    return report_date.day == last_day
+
+
 def classify_financial_extraction_status(
     *,
     confidence_score: float | None,
     min_confidence: float,
     has_required_fields: bool = True,
     is_plausible_leverage: bool = True,
+    is_plausible_date: bool = True,
 ) -> str:
     """Return the ``extraction_status`` value for a financial extraction row.
 
@@ -127,10 +158,16 @@ def classify_financial_extraction_status(
             net_capital/total_assets ratio as impossible. Defaults to
             True so existing callers that don't yet compute the check
             (or rows that lack total_assets) behave unchanged.
+        is_plausible_date: False when the report_date is not a
+            month-end, suggesting the extractor returned a filing date
+            instead of the fiscal period-end (issue #398). Defaults to
+            True so existing callers behave unchanged.
     """
     if not has_required_fields:
         return STATUS_NEEDS_REVIEW
     if not is_plausible_leverage:
+        return STATUS_NEEDS_REVIEW
+    if not is_plausible_date:
         return STATUS_NEEDS_REVIEW
     if confidence_score is None or confidence_score < min_confidence:
         return STATUS_NEEDS_REVIEW

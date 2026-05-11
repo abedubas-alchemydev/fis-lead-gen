@@ -54,6 +54,7 @@ from app.services.extraction_status import (
     classify_financial_extraction_status,
     classify_pipeline_exception,
     is_plausible_net_capital_scale,
+    is_plausible_report_date,
 )
 from app.services.focus_reports import FocusReportService
 from app.services.service_models import DownloadedPdfRecord
@@ -119,6 +120,26 @@ class TestClassifyFinancialExtractionStatus:
         """Callers that don't compute the leverage check (or for whom
         total_assets is NULL) get the original behaviour — defaulting
         to plausible=True so they're not penalised."""
+        status = classify_financial_extraction_status(
+            confidence_score=0.95,
+            min_confidence=0.65,
+        )
+        assert status == STATUS_PARSED
+
+    def test_implausible_date_routes_to_needs_review(self) -> None:
+        """High confidence + good leverage + everything-but-the-date — a
+        mid-month report_date is still enough to gate the row (issue
+        #398 — filing-date vs period-end mix-up)."""
+        status = classify_financial_extraction_status(
+            confidence_score=0.95,
+            min_confidence=0.65,
+            is_plausible_date=False,
+        )
+        assert status == STATUS_NEEDS_REVIEW
+
+    def test_plausible_date_default_does_not_block(self) -> None:
+        """Callers that don't yet compute the date check get the
+        original behaviour — defaulting to plausible=True."""
         status = classify_financial_extraction_status(
             confidence_score=0.95,
             min_confidence=0.65,
@@ -212,6 +233,77 @@ class TestIsPlausibleNetCapitalScale:
             net_capital=100_000.0,
             total_assets=0.0,
         )
+
+
+# ──────────────────────── report_date plausibility ────────────────────────
+
+
+class TestIsPlausibleReportDate:
+    """report_date must look like a fiscal period-end (last day of a month).
+
+    The bug shape (issue #398): Gemini occasionally returns the filing
+    date instead of the period-end. Filing dates are typically mid-month
+    and never line up with a month-end by chance.
+    """
+
+    def test_calendar_year_end_is_plausible(self) -> None:
+        """12/31 is the dominant fiscal year-end for US broker-dealers."""
+        assert is_plausible_report_date(date(2025, 12, 31))
+
+    def test_q1_end_is_plausible(self) -> None:
+        assert is_plausible_report_date(date(2025, 3, 31))
+
+    def test_q2_end_is_plausible(self) -> None:
+        assert is_plausible_report_date(date(2025, 6, 30))
+
+    def test_q3_end_is_plausible(self) -> None:
+        assert is_plausible_report_date(date(2025, 9, 30))
+
+    def test_non_quarter_month_end_is_plausible(self) -> None:
+        """Non-calendar fiscal years exist — e.g. 01/31, 10/31. The
+        validator must accept any month-end so we don't false-positive
+        legitimate non-Q firms."""
+        assert is_plausible_report_date(date(2025, 1, 31))
+        assert is_plausible_report_date(date(2025, 10, 31))
+
+    def test_february_28_non_leap_is_plausible(self) -> None:
+        """2/28 in a non-leap year IS the month-end."""
+        assert is_plausible_report_date(date(2025, 2, 28))
+
+    def test_february_29_leap_year_is_plausible(self) -> None:
+        """2/29 in a leap year IS the month-end."""
+        assert is_plausible_report_date(date(2024, 2, 29))
+
+    def test_february_28_in_leap_year_is_implausible(self) -> None:
+        """2/28 in a leap year is NOT the month-end (2/29 is)."""
+        assert not is_plausible_report_date(date(2024, 2, 28))
+
+    def test_mid_month_is_implausible(self) -> None:
+        """The DriveWealth bug shape: report_date=2026-02-25, which is
+        a Wednesday in mid-month — almost certainly a filing date."""
+        assert not is_plausible_report_date(date(2026, 2, 25))
+
+    def test_early_month_is_implausible(self) -> None:
+        """A staging row had report_date=2026-04-07 — same bug class."""
+        assert not is_plausible_report_date(date(2026, 4, 7))
+
+    def test_day_before_month_end_is_implausible(self) -> None:
+        """Off-by-one filing-date case — 03/30 (not 03/31)."""
+        assert not is_plausible_report_date(date(2025, 3, 30))
+
+    def test_april_31_is_implausible(self) -> None:
+        """4/30 is the April month-end; date(2025, 4, 30) is plausible,
+        but a Gemini response giving '4/30' for a calendar-year-end BD
+        still triggers the cross-check only at the calendar level. We
+        don't enforce same-quarter-pattern-as-history here; that's a
+        future improvement. Here we just confirm the helper itself
+        treats 4/30 as a month-end."""
+        assert is_plausible_report_date(date(2025, 4, 30))
+
+    def test_none_assumed_plausible(self) -> None:
+        """NULL dates are caught by has_required_fields, not by this
+        check. Returning True here keeps the gate single-purpose."""
+        assert is_plausible_report_date(None)
 
 
 # ──────────────────────── pipeline exception classifier ────────────────────────
