@@ -86,6 +86,35 @@ def test_parse_scopes_handles_space_separated_and_empty() -> None:
     ]
 
 
+def test_parse_scopes_handles_comma_separated() -> None:
+    """Better Auth 1.3.6 actually persists scopes comma-separated in the
+    ``account.scope`` column, not space-separated. Observed on staging
+    after first OAuth signin: ``"https://.../userinfo.profile,...,openid"``.
+    The parser must split on both so the gmail.send membership check
+    works regardless of which version wrote the row."""
+    raw = (
+        "https://www.googleapis.com/auth/userinfo.profile,"
+        "https://www.googleapis.com/auth/userinfo.email,"
+        "openid,"
+        "https://www.googleapis.com/auth/gmail.send"
+    )
+    scopes = _parse_scopes(raw)
+    assert "https://www.googleapis.com/auth/gmail.send" in scopes
+    assert "openid" in scopes
+    assert len(scopes) == 4
+
+
+def test_parse_scopes_handles_mixed_comma_and_space() -> None:
+    """Belt and braces — if a future Better Auth bump flips back to
+    spaces or mixes the two, the parser should still produce a clean
+    list."""
+    assert _parse_scopes("openid email, profile") == [
+        "openid",
+        "email",
+        "profile",
+    ]
+
+
 async def test_get_fresh_token_raises_not_linked_when_no_google_account(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
