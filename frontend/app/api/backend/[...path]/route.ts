@@ -71,6 +71,21 @@ async function proxyRequest(request: NextRequest, { params }: RouteContext) {
     });
   }
 
+  // SSE (and any other text/event-stream endpoint, e.g. /api/v1/alerts/stream)
+  // must NOT be buffered. arrayBuffer() below pulls the whole response into
+  // memory before returning — that breaks streaming entirely. Pass the
+  // upstream ReadableStream through verbatim. The hop-by-hop / content-length
+  // / content-encoding filters in forwardableHeaders() already strip the
+  // headers Next.js will recompute, so streaming the body untouched is safe.
+  const upstreamContentType = upstreamResponse.headers.get("content-type") ?? "";
+  const isEventStream = upstreamContentType.toLowerCase().includes("text/event-stream");
+  if (isEventStream && upstreamResponse.body) {
+    return new NextResponse(upstreamResponse.body, {
+      status: upstreamResponse.status,
+      headers: responseHeaders
+    });
+  }
+
   const responseBody = await upstreamResponse.arrayBuffer();
   return new NextResponse(responseBody, {
     status: upstreamResponse.status,
