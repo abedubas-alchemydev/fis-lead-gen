@@ -36,8 +36,14 @@ STATUS_PROVIDER_ERROR = "provider_error"
 # The filing has no resolvable X-17A-5 PDF on EDGAR.
 STATUS_MISSING_PDF = "missing_pdf"
 
-# Unexpected exception inside the extraction loop.
+# Unexpected exception inside the extraction loop (catch-all for non-
+# network failures: PDF unreadable, parse errors, unexpected shapes).
 STATUS_PIPELINE_ERROR = "pipeline_error"
+
+# Network/DNS/timeout failure before the extraction could read the
+# source PDF. Distinguished from ``pipeline_error`` because these are
+# transient and worth auto-retrying outside the normal cooldown.
+STATUS_NETWORK_ERROR = "network_error"
 
 # Ordered for stable iteration in tests and assertions.
 ALL_EXTRACTION_STATUSES: tuple[str, ...] = (
@@ -47,7 +53,14 @@ ALL_EXTRACTION_STATUSES: tuple[str, ...] = (
     STATUS_PROVIDER_ERROR,
     STATUS_MISSING_PDF,
     STATUS_PIPELINE_ERROR,
+    STATUS_NETWORK_ERROR,
 )
+
+# Status values that mean "extraction did not complete because of a
+# transient infrastructure problem, retry is worthwhile". The bulk
+# gap-fill runner uses this set to bypass the 30-day cooldown — a DNS
+# blip 12 days ago shouldn't gate a re-attempt for the next 18.
+RETRYABLE_TRANSIENT_STATUSES: frozenset[str] = frozenset({STATUS_NETWORK_ERROR})
 
 
 # Upper bound for the total_assets / net_capital ratio on a sane
@@ -122,3 +135,64 @@ def classify_financial_extraction_status(
     if confidence_score is None or confidence_score < min_confidence:
         return STATUS_NEEDS_REVIEW
     return STATUS_PARSED
+
+
+# Substrings (case-insensitive) inside an exception's str() that indicate a
+# transient network-layer failure. Matches both the raw socket error name
+# (``getaddrinfo``, ``gaierror``) and the human-readable phrases httpx /
+# requests / urllib3 surface when DNS or connectivity fails. Errno 11001
+# is the Windows winsock-host-not-found code; the literal "[Errno 11001]"
+# is what the prior incident leaked into 182 staging rows.
+_NETWORK_ERROR_FINGERPRINTS: tuple[str, ...] = (
+    "getaddrinfo failed",
+    "errno 11001",
+    "name or service not known",
+    "temporary failure in name resolution",
+    "connection refused",
+    "connection reset",
+    "network is unreachable",
+    "no route to host",
+    "timed out",
+    "timeout",
+    "connection aborted",
+    "connect call failed",
+    "ssl: wrong_version_number",
+)
+
+
+def classify_pipeline_exception(exc: BaseException) -> tuple[str, str]:
+    """Map an extraction-loop exception to an ``extraction_status`` and a
+    user-safe note string.
+
+    Returns a tuple of ``(status, sanitized_note)``:
+
+    - ``(STATUS_NETWORK_ERROR, "Network failure prevented the FOCUS PDF
+      fetch — pending retry.")`` when the exception text matches one of
+      the transient network fingerprints above. These rows bypass the
+      gap-fill cooldown so a single DNS blip doesn't park the BD for 30
+      days.
+    - ``(STATUS_PIPELINE_ERROR, "<exception class>: <truncated message>")``
+      for any other exception. The raw text is still constrained (200
+      chars) so a stack-trace style payload can't drown the row.
+
+    Crucially, neither path leaks the raw Python exception string verbatim
+    into ``extraction_notes`` the way the pre-PR error handler did. The
+    UI tooltip rendered ``extraction_notes`` directly, so the prior
+    behaviour ended up surfacing ``[Errno 11001] getaddrinfo failed`` to
+    end users across 182 BDs (see #399).
+
+    The exception itself is still logged in full via ``logger.exception``
+    at the call site — this helper only governs what gets persisted.
+    """
+    message = str(exc).strip().lower()
+    if any(needle in message for needle in _NETWORK_ERROR_FINGERPRINTS):
+        return (
+            STATUS_NETWORK_ERROR,
+            "Network failure prevented the FOCUS PDF fetch — pending retry.",
+        )
+    cls = type(exc).__name__
+    short = str(exc).strip().splitlines()[0] if str(exc).strip() else ""
+    if len(short) > 160:
+        short = short[:157] + "..."
+    note = f"Extraction failed ({cls}): {short}" if short else f"Extraction failed ({cls})"
+    return STATUS_PIPELINE_ERROR, note

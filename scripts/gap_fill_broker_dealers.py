@@ -59,8 +59,10 @@ async def main() -> None:
 
     from app.db.session import SessionLocal
     from app.models.broker_dealer import BrokerDealer
+    from app.models.clearing_arrangement import ClearingArrangement
     from app.models.executive_contact import ExecutiveContact
     from app.models.pipeline_run import PipelineRun
+    from app.services.extraction_status import RETRYABLE_TRANSIENT_STATUSES
     from app.services.refresh_all_orchestrator import (
         SUB_ENRICH,
         SUB_HEALTH_CHECK,
@@ -91,6 +93,16 @@ async def main() -> None:
         else_=3,
     )
 
+    # BDs whose last extraction attempt hit a retryable transient failure
+    # (today: network_error from DNS / timeout / connection failures) are
+    # eligible regardless of cooldown — a network blip 12 days ago should
+    # not gate a re-attempt for the next 18. See #399.
+    retryable_bd_ids_subq = (
+        select(ClearingArrangement.bd_id)
+        .where(ClearingArrangement.extraction_status.in_(RETRYABLE_TRANSIENT_STATUSES))
+        .distinct()
+    )
+
     async with SessionLocal() as db:
         eligible_stmt = (
             select(BrokerDealer)
@@ -98,6 +110,7 @@ async def main() -> None:
                 or_(
                     BrokerDealer.last_gap_fill_attempt_at.is_(None),
                     BrokerDealer.last_gap_fill_attempt_at < cutoff,
+                    BrokerDealer.id.in_(retryable_bd_ids_subq),
                 )
             )
             .order_by(
