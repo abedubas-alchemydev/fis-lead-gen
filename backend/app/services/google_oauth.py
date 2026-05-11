@@ -102,14 +102,20 @@ async def get_fresh_google_access_token(
 
 
 def _parse_scopes(raw: str | None) -> list[str]:
-    """Better Auth stores OAuth scopes as a space-separated string.
+    """Parse the ``account.scope`` column into a list of scope URIs.
 
-    Returns ``[]`` for null / empty inputs so callers can use ``in`` checks
-    without worrying about ``None`` casting.
+    Better Auth 1.3.6 stores scopes **comma-separated** in this column
+    (e.g. ``"openid,https://www.googleapis.com/auth/userinfo.email"``)
+    even though the OAuth wire format is space-separated. Older
+    Better Auth versions and some adapters use spaces, so split on
+    both to be liberal in what we accept.
+
+    Returns ``[]`` for null / empty inputs so callers can use ``in``
+    checks without worrying about ``None`` casting.
     """
     if not raw:
         return []
-    return [scope for scope in raw.split() if scope]
+    return [scope.strip() for scope in raw.replace(",", " ").split() if scope.strip()]
 
 
 async def _refresh_access_token(
