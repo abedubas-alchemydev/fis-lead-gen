@@ -221,8 +221,13 @@ def gap_report_for(
             report[SUB_REFRESH_CLEARING].append("current_clearing_type=unknown")
         if broker_dealer.clearing_classification in (None, "needs_review"):
             report[SUB_REFRESH_CLEARING].append("clearing_classification")
-        if broker_dealer.clearing_raw_text is None:
-            report[SUB_REFRESH_CLEARING].append("clearing_raw_text")
+        # Note: clearing_raw_text was previously gated here but no service
+        # in the codebase writes to it -- it's a vestigial column the FE
+        # renders conditionally on the detail page (amber "raw clearing
+        # text" callout when classification is NULL/unknown). Gating on
+        # it IS NULL meant the clearing pipeline re-fired on every BD
+        # forever, wasting Gemini calls. The clearing_classification
+        # check above already covers the "uncertain" case meaningfully.
 
     # ── enrich (executive_contacts) ──
     if not has_contacts:

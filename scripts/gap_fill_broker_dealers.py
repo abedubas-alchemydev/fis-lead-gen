@@ -379,129 +379,168 @@ async def main() -> None:
     started_wall = time.monotonic()
     semaphore = asyncio.Semaphore(MAX_CONCURRENCY)
 
+    async def _safe_stamp_cooldown(bd_id: int) -> None:
+        """Stamp ``last_gap_fill_attempt_at`` on the BD, suppressing any
+        DB error. A transient Neon DNS / pooler blip should not crash
+        the worker -- the BD will be re-evaluated on the next pass."""
+        try:
+            async with SessionLocal() as db:
+                fresh = await db.get(BrokerDealer, bd_id)
+                if fresh is not None:
+                    fresh.last_gap_fill_attempt_at = datetime.now(timezone.utc)
+                    await db.commit()
+        except Exception:
+            pass
+
     async def _process_bd(idx: int, bd: BrokerDealer) -> None:
         """Process a single BD end-to-end. Acquires the semaphore so only
         ``MAX_CONCURRENCY`` BDs are in flight at once. Mutations to the
         shared counters / dicts / lists are safe under single-threaded
-        asyncio (no preemption between ``+=`` and ``append``)."""
+        asyncio (no preemption between ``+=`` and ``append``).
+
+        Entire body is wrapped in try/except so any escape -- DB
+        transient, network DNS blip, anything -- is logged as a worker
+        crash and does NOT propagate to ``asyncio.gather``. Combined
+        with ``return_exceptions=True`` on gather, this means one bad
+        BD never tears down the rest of the batch."""
+        tag = f"[{idx:>5}/{total_eligible:>5}]"
+        name_short = (bd.name or "")[:38]
         async with semaphore:
-            has_contacts = bd.id in contact_ids
-            decision = decide_pipelines(
-                bd, has_contacts, scope="all", aggressive=aggressive
-            )
-            to_run = decision.to_run
-            to_skip = decision.to_skip
-
-            tag = f"[{idx:>5}/{total_eligible:>5}]"
-            name_short = (bd.name or "")[:38]
-
-            if not to_run:
-                # Nothing to do -- still stamp so we don't re-evaluate every pass.
-                async with SessionLocal() as db:
-                    fresh = await db.get(BrokerDealer, bd.id)
-                    if fresh is not None:
-                        fresh.last_gap_fill_attempt_at = datetime.now(timezone.utc)
-                        await db.commit()
-                counters["skipped_noop"] += 1
-                print(f"{tag} BD {bd.id:<6} {name_short:<38}  noop (all targets already present)")
-                return
-
-            # Create parent PipelineRun (status=queued).
-            async with SessionLocal() as db:
-                parent = PipelineRun(
-                    pipeline_name=GAP_FILL_PIPELINE_NAME,
-                    trigger_source=TRIGGER_SOURCE,
-                    status="queued",
-                    total_items=len(to_run),
-                    processed_items=0,
-                    success_count=0,
-                    failure_count=0,
-                    notes=json.dumps(
-                        {
-                            "bd_id": bd.id,
-                            "stage": "queued",
-                            "ran": list(to_run),
-                            "skipped": list(to_skip),
-                        }
-                    ),
-                )
-                db.add(parent)
-                await db.commit()
-                await db.refresh(parent)
-                parent_id = parent.id
-
-            t0 = time.monotonic()
             try:
-                await run_refresh_all(
-                    parent_id,
-                    bd.id,
-                    trigger_source=TRIGGER_SOURCE,
-                    pipelines_to_run=to_run,
-                    pipelines_to_skip=to_skip,
+                has_contacts = bd.id in contact_ids
+                decision = decide_pipelines(
+                    bd, has_contacts, scope="all", aggressive=aggressive
                 )
-            except Exception as exc:
-                # Orchestrator already marks the parent failed on internal errors;
-                # this is a defensive belt for anything that escapes.
+                to_run = decision.to_run
+                to_skip = decision.to_skip
+
+                if not to_run:
+                    # Nothing to do -- still stamp so we don't re-evaluate every pass.
+                    await _safe_stamp_cooldown(bd.id)
+                    counters["skipped_noop"] += 1
+                    print(f"{tag} BD {bd.id:<6} {name_short:<38}  noop (all targets already present)")
+                    return
+
+                # Create parent PipelineRun (status=queued).
+                async with SessionLocal() as db:
+                    parent = PipelineRun(
+                        pipeline_name=GAP_FILL_PIPELINE_NAME,
+                        trigger_source=TRIGGER_SOURCE,
+                        status="queued",
+                        total_items=len(to_run),
+                        processed_items=0,
+                        success_count=0,
+                        failure_count=0,
+                        notes=json.dumps(
+                            {
+                                "bd_id": bd.id,
+                                "stage": "queued",
+                                "ran": list(to_run),
+                                "skipped": list(to_skip),
+                            }
+                        ),
+                    )
+                    db.add(parent)
+                    await db.commit()
+                    await db.refresh(parent)
+                    parent_id = parent.id
+
+                t0 = time.monotonic()
+                try:
+                    await run_refresh_all(
+                        parent_id,
+                        bd.id,
+                        trigger_source=TRIGGER_SOURCE,
+                        pipelines_to_run=to_run,
+                        pipelines_to_skip=to_skip,
+                    )
+                except Exception as exc:
+                    # Orchestrator already marks the parent failed on internal errors;
+                    # this is a defensive belt for anything that escapes.
+                    print(
+                        f"{tag} BD {bd.id:<6} {name_short:<38}  ORCHESTRATOR CRASH: "
+                        f"{type(exc).__name__}: {str(exc)[:120]}"
+                    )
+                    failures.append((bd.id, bd.name, f"{type(exc).__name__}: {exc}"))
+                    # Still stamp -- we tried. Suppress any DB-side error here so
+                    # one bad blip on stamp doesn't escalate to a batch teardown.
+                    await _safe_stamp_cooldown(bd.id)
+                    counters["processed"] += 1
+                    return
+
+                elapsed = time.monotonic() - t0
+
+                # Read parent's notes to surface per-child status.
+                async with SessionLocal() as db:
+                    refreshed_parent = await db.get(PipelineRun, parent_id)
+                    payload = json.loads(refreshed_parent.notes or "{}") if refreshed_parent else {}
+                    children = payload.get("children", {})
+
+                ok_subs: list[str] = []
+                fail_subs: list[str] = []
+                for sub, info in children.items():
+                    label = sub_label.get(sub, sub)
+                    status = info.get("status", "unknown")
+                    if status in ("completed", "completed_with_errors"):
+                        ok_subs.append(label)
+                        sub_success[sub] += 1
+                    else:
+                        fail_subs.append(label)
+                        sub_failure[sub] += 1
+
+                # Stamp the cooldown.
+                await _safe_stamp_cooldown(bd.id)
+
+                counters["processed"] += 1
+                ran_str = ",".join(ok_subs) if ok_subs else "-"
+                fail_str = (" failed:[" + ",".join(fail_subs) + "]") if fail_subs else ""
                 print(
-                    f"{tag} BD {bd.id:<6} {name_short:<38}  ORCHESTRATOR CRASH: "
+                    f"{tag} BD {bd.id:<6} {name_short:<38}  "
+                    f"{elapsed:>5.1f}s  ran:[{ran_str}]{fail_str}"
+                )
+
+                if fail_subs:
+                    failures.append(
+                        (bd.id, bd.name, f"failed: {','.join(fail_subs)}")
+                    )
+
+            except Exception as exc:
+                # Last-resort catch-all. Any escape from the orchestrator-
+                # crash branch's stamp call, the parent-PipelineRun creation,
+                # or the read-children-notes block lands here. Log and move
+                # on; do NOT propagate to gather. The BD stays unstamped so
+                # the next invocation re-attempts it.
+                print(
+                    f"{tag} BD {bd.id:<6} {name_short:<38}  WORKER CRASH: "
                     f"{type(exc).__name__}: {str(exc)[:120]}"
                 )
-                failures.append((bd.id, bd.name, f"{type(exc).__name__}: {exc}"))
-                # Still stamp -- we tried.
-                async with SessionLocal() as db:
-                    fresh = await db.get(BrokerDealer, bd.id)
-                    if fresh is not None:
-                        fresh.last_gap_fill_attempt_at = datetime.now(timezone.utc)
-                        await db.commit()
-                counters["processed"] += 1
-                return
-
-            elapsed = time.monotonic() - t0
-
-            # Read parent's notes to surface per-child status.
-            async with SessionLocal() as db:
-                refreshed_parent = await db.get(PipelineRun, parent_id)
-                payload = json.loads(refreshed_parent.notes or "{}") if refreshed_parent else {}
-                children = payload.get("children", {})
-
-            ok_subs: list[str] = []
-            fail_subs: list[str] = []
-            for sub, info in children.items():
-                label = sub_label.get(sub, sub)
-                status = info.get("status", "unknown")
-                if status in ("completed", "completed_with_errors"):
-                    ok_subs.append(label)
-                    sub_success[sub] += 1
-                else:
-                    fail_subs.append(label)
-                    sub_failure[sub] += 1
-
-            # Stamp the cooldown.
-            async with SessionLocal() as db:
-                fresh = await db.get(BrokerDealer, bd.id)
-                if fresh is not None:
-                    fresh.last_gap_fill_attempt_at = datetime.now(timezone.utc)
-                    await db.commit()
-
-            counters["processed"] += 1
-            ran_str = ",".join(ok_subs) if ok_subs else "-"
-            fail_str = (" failed:[" + ",".join(fail_subs) + "]") if fail_subs else ""
-            print(
-                f"{tag} BD {bd.id:<6} {name_short:<38}  "
-                f"{elapsed:>5.1f}s  ran:[{ran_str}]{fail_str}"
-            )
-
-            if fail_subs:
                 failures.append(
-                    (bd.id, bd.name, f"failed: {','.join(fail_subs)}")
+                    (bd.id, bd.name, f"worker crash: {type(exc).__name__}: {exc}")
                 )
+                counters["processed"] += 1
 
     try:
         tasks = [
             _process_bd(idx, bd)
             for idx, bd in enumerate(eligible, start=1)
         ]
-        await asyncio.gather(*tasks, return_exceptions=False)
+        # return_exceptions=True so one rogue worker that somehow escapes
+        # _process_bd's own try/except doesn't tear down the batch. The
+        # broad inner except already absorbs everything we expect; this is
+        # belt-and-braces for the unexpected.
+        results = await asyncio.gather(*tasks, return_exceptions=True)
+        for idx, result in enumerate(results, start=1):
+            if isinstance(result, BaseException):
+                # Unexpected escape -- log so it's at least visible in the
+                # run output. The corresponding BD stays unstamped.
+                bd = eligible[idx - 1]
+                print(
+                    f"[{idx:>5}/{total_eligible:>5}] BD {bd.id:<6} {(bd.name or '')[:38]:<38}  "
+                    f"GATHER ESCAPE: {type(result).__name__}: {str(result)[:120]}"
+                )
+                failures.append(
+                    (bd.id, bd.name, f"gather escape: {type(result).__name__}: {result}")
+                )
     except KeyboardInterrupt:
         print()
         print("Interrupted by user. Resuming on next run via the cooldown stamp.")
