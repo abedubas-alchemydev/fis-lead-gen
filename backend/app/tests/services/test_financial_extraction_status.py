@@ -45,10 +45,14 @@ from app.models.broker_dealer import BrokerDealer
 from app.models.financial_metric import FinancialMetric
 from app.services.extraction_status import (
     PLAUSIBLE_LEVERAGE_RATIO_MAX,
+    RETRYABLE_TRANSIENT_STATUSES,
     STATUS_NEEDS_REVIEW,
+    STATUS_NETWORK_ERROR,
     STATUS_PARSED,
     STATUS_PENDING,
+    STATUS_PIPELINE_ERROR,
     classify_financial_extraction_status,
+    classify_pipeline_exception,
     is_plausible_net_capital_scale,
 )
 from app.services.focus_reports import FocusReportService
@@ -208,6 +212,122 @@ class TestIsPlausibleNetCapitalScale:
             net_capital=100_000.0,
             total_assets=0.0,
         )
+
+
+# ──────────────────────── pipeline exception classifier ────────────────────────
+
+
+class TestClassifyPipelineException:
+    """Maps an extraction-loop exception to (status, sanitized_note).
+
+    The classifier exists so that transient network failures get their own
+    status (and bypass the gap-fill cooldown) while every other failure mode
+    lands as pipeline_error with a sanitized note that's safe to show in the
+    UI tooltip. Issue #399 — prior behaviour leaked raw OS error strings
+    like ``[Errno 11001] getaddrinfo failed`` to end users on 182 BDs.
+    """
+
+    def test_windows_dns_error_returns_network_status(self) -> None:
+        """The exact RBC-shape DNS message that leaked into 182 staging rows."""
+        exc = OSError("[Errno 11001] getaddrinfo failed")
+        status, note = classify_pipeline_exception(exc)
+        assert status == STATUS_NETWORK_ERROR
+        assert "Network failure" in note
+        # The sanitized note must NOT echo the raw OS error string.
+        assert "11001" not in note
+        assert "getaddrinfo" not in note
+
+    def test_linux_dns_error_returns_network_status(self) -> None:
+        exc = OSError("Name or service not known")
+        status, _ = classify_pipeline_exception(exc)
+        assert status == STATUS_NETWORK_ERROR
+
+    def test_temporary_dns_failure_returns_network_status(self) -> None:
+        exc = OSError("Temporary failure in name resolution")
+        status, _ = classify_pipeline_exception(exc)
+        assert status == STATUS_NETWORK_ERROR
+
+    def test_timeout_returns_network_status(self) -> None:
+        """httpx surfaces ``timed out`` / ``timeout`` on slow upstreams."""
+        exc = TimeoutError("Read operation timed out")
+        status, _ = classify_pipeline_exception(exc)
+        assert status == STATUS_NETWORK_ERROR
+
+    def test_connection_refused_returns_network_status(self) -> None:
+        exc = ConnectionRefusedError("Connection refused")
+        status, _ = classify_pipeline_exception(exc)
+        assert status == STATUS_NETWORK_ERROR
+
+    def test_connection_reset_returns_network_status(self) -> None:
+        exc = ConnectionResetError("Connection reset by peer")
+        status, _ = classify_pipeline_exception(exc)
+        assert status == STATUS_NETWORK_ERROR
+
+    def test_connection_aborted_returns_network_status(self) -> None:
+        """httpx wraps remote-disconnect with 'Connection aborted'."""
+        exc = OSError("Connection aborted.")
+        status, _ = classify_pipeline_exception(exc)
+        assert status == STATUS_NETWORK_ERROR
+
+    def test_classifier_is_case_insensitive(self) -> None:
+        """The fingerprint match folds case — providers vary on capitalisation."""
+        exc = OSError("GETADDRINFO FAILED")
+        status, _ = classify_pipeline_exception(exc)
+        assert status == STATUS_NETWORK_ERROR
+
+    def test_generic_exception_returns_pipeline_error(self) -> None:
+        """Non-network failures fall through to the catch-all category."""
+        exc = ValueError("PDF parse failed: missing /Root xref entry")
+        status, note = classify_pipeline_exception(exc)
+        assert status == STATUS_PIPELINE_ERROR
+        assert note.startswith("Extraction failed (ValueError):")
+        assert "PDF parse failed" in note
+
+    def test_pipeline_error_note_truncates_long_message(self) -> None:
+        """Stack-trace-shaped payloads get capped so a single bad row can't
+        drown the UI tooltip. The 160-char limit leaves room for the
+        ``Extraction failed (Class): `` prefix in the column."""
+        long_msg = "A" * 500
+        exc = ValueError(long_msg)
+        _, note = classify_pipeline_exception(exc)
+        # Note holds the prefix plus a truncated (157 + "...") payload.
+        assert note.endswith("...")
+        # The longest the payload portion can be is 160 chars (157 + "...").
+        prefix = "Extraction failed (ValueError): "
+        assert len(note) <= len(prefix) + 160
+
+    def test_pipeline_error_note_uses_first_line_only(self) -> None:
+        """Multi-line tracebacks collapse to the first line — the rest goes
+        into ``logger.exception`` at the call site, not into the UI."""
+        exc = RuntimeError("first line of trace\nsecond line\nthird line")
+        _, note = classify_pipeline_exception(exc)
+        assert "first line of trace" in note
+        assert "second line" not in note
+        assert "third line" not in note
+
+    def test_pipeline_error_handles_empty_message(self) -> None:
+        """Some exception classes raise with no message — note still parses."""
+        exc = RuntimeError()
+        status, note = classify_pipeline_exception(exc)
+        assert status == STATUS_PIPELINE_ERROR
+        assert note == "Extraction failed (RuntimeError)"
+
+    def test_pipeline_error_includes_class_name(self) -> None:
+        """The class name carries diagnostic value (which library raised
+        it) — keep it visible in the persisted note."""
+        exc = KeyError("net_capital")
+        _, note = classify_pipeline_exception(exc)
+        assert "KeyError" in note
+
+    def test_network_status_is_in_retryable_set(self) -> None:
+        """Lock the contract: gap_fill_broker_dealers.py keys off this set
+        to bypass the 30-day cooldown for transient failures."""
+        assert STATUS_NETWORK_ERROR in RETRYABLE_TRANSIENT_STATUSES
+
+    def test_pipeline_error_is_NOT_in_retryable_set(self) -> None:
+        """pipeline_error is a catch-all for genuine code/data bugs —
+        retrying it on the same input would just reproduce the same failure."""
+        assert STATUS_PIPELINE_ERROR not in RETRYABLE_TRANSIENT_STATUSES
 
 
 # ──────────────────────── migration SQL shim ────────────────────────
