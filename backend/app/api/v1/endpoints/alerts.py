@@ -7,10 +7,12 @@ from collections.abc import AsyncIterator
 from datetime import datetime, timezone
 from typing import Literal
 
-from fastapi import APIRouter, Depends, Header, HTTPException, Query, Request, status
+from fastapi import APIRouter, BackgroundTasks, Depends, Header, HTTPException, Query, Request, status
 from fastapi.responses import StreamingResponse
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
+
+from app.api.v1.endpoints.broker_dealers import schedule_auto_refresh_financials_batch
 
 from app.db.session import SessionLocal, get_db_session
 from app.models.filing_alert import FilingAlert
@@ -107,13 +109,22 @@ async def mark_all_alerts_read(
 
 @router.post("/monitor/run", response_model=FilingMonitorRunResponse)
 async def run_filing_monitor(
+    background_tasks: BackgroundTasks,
     current_user: AuthenticatedUser = Depends(get_current_user),
     db: AsyncSession = Depends(get_db_session),
 ) -> FilingMonitorRunResponse:
     if current_user.role != "admin":
         raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Admin access required.")
 
-    run = await filing_monitor_service.run(db, trigger_source="manual")
+    run, auto_extract_bd_ids = await filing_monitor_service.run(
+        db, trigger_source="manual"
+    )
+    await schedule_auto_refresh_financials_batch(
+        db,
+        background_tasks,
+        auto_extract_bd_ids,
+        trigger_source=f"auto:filing_monitor:{run.id}",
+    )
     return FilingMonitorRunResponse(
         run_id=run.id,
         total_items=run.total_items,

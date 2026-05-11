@@ -14,9 +14,22 @@ from app.services.service_models import FilingAlertRecord
 
 
 class AlertRepository:
-    async def upsert_many(self, db: AsyncSession, records: list[FilingAlertRecord]) -> int:
+    async def upsert_many(
+        self, db: AsyncSession, records: list[FilingAlertRecord]
+    ) -> list[tuple[int, int, str]]:
+        """Bulk-upsert filing alerts. Returns one (id, bd_id, form_type)
+        tuple per row that was actually INSERTED on this call (conflict
+        updates are excluded).
+
+        The newly-inserted set is what downstream consumers care about:
+          - The SSE NOTIFY broadcast (so dashboards don't re-surface
+            alerts they already saw).
+          - The auto re-extraction hook (so the financial pipeline only
+            runs on the first occurrence of a filing, not every time the
+            monitor re-encounters it).
+        """
         if not records:
-            return 0
+            return []
 
         stmt = insert(FilingAlert).values(
             [
@@ -47,15 +60,23 @@ class AlertRepository:
                 "source_filing_url": stmt.excluded.source_filing_url,
                 "updated_at": func.now(),
             },
-        ).returning(FilingAlert.id, (literal_column("xmax") == 0).label("is_new"))
+        ).returning(
+            FilingAlert.id,
+            FilingAlert.bd_id,
+            FilingAlert.form_type,
+            (literal_column("xmax") == 0).label("is_new"),
+        )
         result = await db.execute(upsert_stmt)
-        inserted_ids = [row.id for row in result.all() if row.is_new]
+        inserted_rows: list[tuple[int, int, str]] = [
+            (row.id, row.bd_id, row.form_type) for row in result.all() if row.is_new
+        ]
         await db.flush()
-        if inserted_ids:
+        if inserted_rows:
             await alert_event_bus.publish_via_session(
-                db, make_alert_inserted_payload(inserted_ids)
+                db,
+                make_alert_inserted_payload([row[0] for row in inserted_rows]),
             )
-        return len(records)
+        return inserted_rows
 
     async def list_alerts(
         self,
