@@ -16,6 +16,7 @@ from app.models.filing_alert import FilingAlert
 from app.models.industry_arrangement import IndustryArrangement
 from app.models.introducing_arrangement import IntroducingArrangement
 from app.models.investment_advisor import InvestmentAdvisor
+from app.models.outreach_send import OutreachSend
 from app.models.pipeline_run import PipelineRun
 from app.models.scoring_setting import ScoringSetting
 from app.models.user_visit import UserVisit
@@ -46,6 +47,7 @@ __all__ = [
     "IndustryArrangement",
     "IntroducingArrangement",
     "InvestmentAdvisor",
+    "OutreachSend",
     "PipelineRun",
     "ScoringSetting",
     "UserVisit",

@@ -44,3 +44,22 @@ class OutreachDraftRequest(BaseModel):
 class OutreachDraftResponse(BaseModel):
     subject: str
     body: str
+
+
+class OutreachSendRequest(BaseModel):
+    broker_dealer_id: int = Field(..., gt=0)
+    contact_id: int = Field(..., gt=0)
+    folder_id: int = Field(..., gt=0)
+    # 998 is RFC 5322's hard line limit; subjects practically never get
+    # close to that, but the FE doesn't constrain the field so guard at
+    # the API boundary. The body cap matches outreach-modal's textarea
+    # ceiling — no realistic draft is anywhere near it.
+    subject: str = Field(..., min_length=1, max_length=998)
+    body: str = Field(..., min_length=1, max_length=100_000)
+
+
+class OutreachSendResponse(BaseModel):
+    id: int
+    gmail_message_id: str
+    sent_at: datetime
+    status: str
