@@ -44,10 +44,12 @@ from sqlalchemy import (
 from app.models.broker_dealer import BrokerDealer
 from app.models.financial_metric import FinancialMetric
 from app.services.extraction_status import (
+    PLAUSIBLE_LEVERAGE_RATIO_MAX,
     STATUS_NEEDS_REVIEW,
     STATUS_PARSED,
     STATUS_PENDING,
     classify_financial_extraction_status,
+    is_plausible_net_capital_scale,
 )
 from app.services.focus_reports import FocusReportService
 from app.services.service_models import DownloadedPdfRecord
@@ -97,6 +99,115 @@ class TestClassifyFinancialExtractionStatus:
             has_required_fields=False,
         )
         assert status == STATUS_NEEDS_REVIEW
+
+    def test_implausible_leverage_routes_to_needs_review(self) -> None:
+        """High confidence + required fields are not enough — if the
+        net_capital looks ~1000× too small relative to total_assets,
+        the row is gated to review (issue #398 — scale-strip bug)."""
+        status = classify_financial_extraction_status(
+            confidence_score=0.95,
+            min_confidence=0.65,
+            is_plausible_leverage=False,
+        )
+        assert status == STATUS_NEEDS_REVIEW
+
+    def test_plausible_leverage_default_does_not_block(self) -> None:
+        """Callers that don't compute the leverage check (or for whom
+        total_assets is NULL) get the original behaviour — defaulting
+        to plausible=True so they're not penalised."""
+        status = classify_financial_extraction_status(
+            confidence_score=0.95,
+            min_confidence=0.65,
+        )
+        assert status == STATUS_PARSED
+
+
+class TestIsPlausibleNetCapitalScale:
+    """Cross-field sanity check on the extracted net_capital scale."""
+
+    def test_normal_ratio_is_plausible(self) -> None:
+        """Common range: total_assets ~10-50× net_capital."""
+        assert is_plausible_net_capital_scale(
+            net_capital=100_000_000.0,
+            total_assets=3_000_000_000.0,  # 30×
+        )
+
+    def test_highly_leveraged_dealer_still_plausible(self) -> None:
+        """Heavily leveraged BDs can run ~200×; the threshold has
+        ~5× headroom above that."""
+        assert is_plausible_net_capital_scale(
+            net_capital=10_000_000.0,
+            total_assets=5_000_000_000.0,  # 500×
+        )
+
+    def test_exact_threshold_is_plausible(self) -> None:
+        assert is_plausible_net_capital_scale(
+            net_capital=1.0,
+            total_assets=PLAUSIBLE_LEVERAGE_RATIO_MAX,
+        )
+
+    def test_above_threshold_is_implausible(self) -> None:
+        """The RBC / DriveWealth bug shape: 33,000× ratio means the
+        net_capital extractor dropped the 'in thousands' multiplier."""
+        assert not is_plausible_net_capital_scale(
+            net_capital=103_192.0,
+            total_assets=3_430_043_000.0,  # 33,243×
+        )
+
+    def test_extreme_rbc_shape_is_implausible(self) -> None:
+        """RBC's specific incident: $1.60 vs $70.3B total_assets."""
+        assert not is_plausible_net_capital_scale(
+            net_capital=1.60,
+            total_assets=70_298_944_000.0,
+        )
+
+    def test_null_total_assets_assumed_plausible(self) -> None:
+        """When total_assets is NULL the check cannot be made — assume
+        plausible so the absence of a sibling field doesn't gate the
+        confidence-based path. (The caller knows about total_assets
+        availability and can pass has_required_fields=False if it
+        matters.)"""
+        assert is_plausible_net_capital_scale(
+            net_capital=100_000_000.0,
+            total_assets=None,
+        )
+
+    def test_null_net_capital_assumed_plausible(self) -> None:
+        """has_required_fields=False is the right gate for missing
+        net_capital, not this check."""
+        assert is_plausible_net_capital_scale(
+            net_capital=None,
+            total_assets=1_000_000_000.0,
+        )
+
+    def test_both_null_assumed_plausible(self) -> None:
+        assert is_plausible_net_capital_scale(
+            net_capital=None,
+            total_assets=None,
+        )
+
+    def test_zero_net_capital_assumed_plausible(self) -> None:
+        """Zero/negative net_capital is its own problem (covered by
+        the YoY divide-by-zero and CAGR oldest<=0 guards). Don't
+        double-flag here."""
+        assert is_plausible_net_capital_scale(
+            net_capital=0.0,
+            total_assets=1_000_000_000.0,
+        )
+
+    def test_negative_net_capital_assumed_plausible(self) -> None:
+        assert is_plausible_net_capital_scale(
+            net_capital=-100.0,
+            total_assets=1_000_000_000.0,
+        )
+
+    def test_zero_total_assets_assumed_plausible(self) -> None:
+        """Inverse of the bug shape — possible for a wind-down BD with
+        no remaining assets. Not the scale-strip bug."""
+        assert is_plausible_net_capital_scale(
+            net_capital=100_000.0,
+            total_assets=0.0,
+        )
 
 
 # ──────────────────────── migration SQL shim ────────────────────────

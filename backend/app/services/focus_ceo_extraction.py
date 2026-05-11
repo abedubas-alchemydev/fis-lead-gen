@@ -36,6 +36,7 @@ from app.services.apollo import ApolloClient, ApolloError, ApolloExecutive
 from app.services.extraction_status import (
     STATUS_PARSED,
     classify_financial_extraction_status,
+    is_plausible_net_capital_scale,
 )
 from app.services.gemini_responses import (
     GeminiConfigurationError,
@@ -739,6 +740,10 @@ class FocusCeoExtractionService:
             confidence_score=confidence_score,
             min_confidence=settings.financial_extraction_min_confidence,
             has_required_fields=True,
+            is_plausible_leverage=is_plausible_net_capital_scale(
+                net_capital=float(net_capital) if net_capital is not None else None,
+                total_assets=float(total_assets) if total_assets is not None else None,
+            ),
         )
 
         existing = (

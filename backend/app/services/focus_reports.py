@@ -21,6 +21,7 @@ from app.services.extraction_status import (
     STATUS_NEEDS_REVIEW,
     STATUS_PARSED,
     classify_financial_extraction_status,
+    is_plausible_net_capital_scale,
 )
 from app.services.gemini_responses import (
     GeminiConfigurationError,
@@ -646,20 +647,38 @@ class FocusReportService:
                             continue
                         seen_dates.add(date_key)
 
-                        # Tag based on LLM confidence (#56 / Fix G). Below-threshold
-                        # rows with a valid net_capital still persist, tagged
-                        # 'needs_review', so the review queue can surface them
-                        # instead of a silent drop. See app.services.extraction_status.
+                        # Tag based on LLM confidence (#56 / Fix G) AND a
+                        # cross-field sanity check on the net_capital scale
+                        # (issue #398). Below-threshold rows or rows whose
+                        # net_capital looks 1000× too small relative to
+                        # total_assets still persist, tagged 'needs_review',
+                        # so the review queue can surface them instead of a
+                        # silent drop. See app.services.extraction_status.
+                        plausible_leverage = is_plausible_net_capital_scale(
+                            net_capital=(
+                                float(extraction.net_capital)
+                                if extraction.net_capital is not None
+                                else None
+                            ),
+                            total_assets=(
+                                float(extraction.total_assets)
+                                if extraction.total_assets is not None
+                                else None
+                            ),
+                        )
                         extraction_status = classify_financial_extraction_status(
                             confidence_score=extraction.confidence_score,
                             min_confidence=settings.financial_extraction_min_confidence,
+                            is_plausible_leverage=plausible_leverage,
                         )
                         if extraction_status == STATUS_NEEDS_REVIEW:
                             logger.warning(
-                                "Financial extraction BD %s tagged needs_review: confidence=%s below min_confidence=%s",
+                                "Financial extraction BD %s tagged needs_review: "
+                                "confidence=%s min_confidence=%s plausible_leverage=%s",
                                 broker_dealer.id,
                                 extraction.confidence_score,
                                 settings.financial_extraction_min_confidence,
+                                plausible_leverage,
                             )
 
                         records.append(
