@@ -77,7 +77,12 @@ class Verification(Base):
 
     id: Mapped[str] = mapped_column(String(255), primary_key=True)
     identifier: Mapped[str] = mapped_column(String(320))
-    value: Mapped[str] = mapped_column(String(255))
+    # Better Auth writes a JSON blob here for OAuth PKCE state — code
+    # verifier (43-128 chars) + callback URLs + newUserCallbackURL +
+    # errorCallbackURL. Easily exceeds 255 chars. Better Auth's reference
+    # schema uses TEXT (no length cap); we mirror that to avoid 22001
+    # string-truncation errors on the /api/auth/sign-in/social path.
+    value: Mapped[str] = mapped_column(Text)
     expires_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now(), nullable=False)
     updated_at: Mapped[datetime] = mapped_column(
