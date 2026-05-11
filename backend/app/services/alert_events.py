@@ -18,6 +18,21 @@ NOTIFY_CHANNEL = "filing_alerts_new"
 _SUBSCRIBER_QUEUE_MAXSIZE = 64
 _RECONNECT_BACKOFF_SECONDS = (1.0, 2.0, 5.0, 10.0, 30.0)
 
+# Neon (and intermediate network paths) close idle PG sessions after ~5 min.
+# Two-layer defense keeps the LISTEN session alive:
+#   1. TCP keepalives via libpq — kernel sends probes after 30s of silence,
+#      well before Neon's idle threshold.
+#   2. Application-level heartbeat — a no-op SELECT every ~60s ensures
+#      protocol-level traffic even when the network path swallows TCP
+#      keepalive ACKs (some serverless edges have done so historically).
+_LISTEN_KEEPALIVE_PARAMS: dict[str, int] = {
+    "keepalives": 1,
+    "keepalives_idle": 30,
+    "keepalives_interval": 10,
+    "keepalives_count": 3,
+}
+_LISTEN_HEARTBEAT_SECONDS = 60.0
+
 
 def _raw_psycopg_dsn() -> str:
     """Translate the SQLAlchemy URL into the raw libpq DSN psycopg expects.
@@ -158,16 +173,33 @@ class AlertEventBus:
         # autocommit=True: LISTEN must run outside a transaction or it sees
         # no notifications until COMMIT. psycopg3's `notifies()` then blocks
         # in libpq until a NOTIFY arrives.
-        async with await psycopg.AsyncConnection.connect(dsn, autocommit=True) as conn:
+        async with await psycopg.AsyncConnection.connect(
+            dsn,
+            autocommit=True,
+            **_LISTEN_KEEPALIVE_PARAMS,
+        ) as conn:
             await conn.execute(f"LISTEN {NOTIFY_CHANNEL}")
             logger.info("alert_events listener ready on channel %s", NOTIFY_CHANNEL)
-            async for notify in conn.notifies():
-                try:
-                    payload = json.loads(notify.payload)
-                except json.JSONDecodeError:
-                    logger.warning("alert_events: dropping malformed NOTIFY payload")
-                    continue
-                await self._broadcast(payload)
+            while True:
+                # notifies(timeout=N) yields each NOTIFY as it arrives and
+                # exits the inner iteration once N seconds pass without a
+                # new one. On exit we emit a no-op SELECT to keep the
+                # session active across Neon's idle threshold — TCP
+                # keepalives alone aren't enough when intermediaries drop
+                # silent sockets.
+                saw_notification = False
+                async for notify in conn.notifies(timeout=_LISTEN_HEARTBEAT_SECONDS):
+                    saw_notification = True
+                    try:
+                        payload = json.loads(notify.payload)
+                    except json.JSONDecodeError:
+                        logger.warning(
+                            "alert_events: dropping malformed NOTIFY payload"
+                        )
+                        continue
+                    await self._broadcast(payload)
+                if not saw_notification:
+                    await conn.execute("SELECT 1")
 
 
 alert_event_bus = AlertEventBus()
