@@ -550,10 +550,15 @@ class FocusReportService:
             # Gemini calls don't depend on the file persisting on disk past
             # the ``with`` exit.
             with pdf_tempdir(prefix="financial_extract_") as tmp_dir:
-                # Download the 2 most recent X-17A-5 PDFs for multi-year data
+                # Download the 3 most recent X-17A-5 PDFs. Post-2023 amendments
+                # to Rule 17a-5 mean the audited report is commonly filed as a
+                # single-year Statement of Financial Condition (e.g. Nomura's
+                # NSISOFC0324.pdf), so 2 filings can yield only 2 unique
+                # fiscal years and starve the 3-Yr CAGR rollup
+                # (services/scoring.py::calculate_three_year_cagr).
                 try:
                     pdf_records = await self.downloader.download_recent_x17a5_pdfs(
-                        broker_dealer, tmp_dir, count=2
+                        broker_dealer, tmp_dir, count=3
                     )
                 except Exception as exc:
                     logger.warning("PDF download failed for BD %d (%s): %s", broker_dealer.id, broker_dealer.name, exc)
