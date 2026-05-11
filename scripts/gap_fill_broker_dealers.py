@@ -1,26 +1,54 @@
 """Bulk row-by-row gap-fill for broker_dealers.
 
-Walks every BD in priority order (hot → warm → cold → no-priority,
+Walks every BD in priority order (hot -> warm -> cold -> no-priority,
 high score first inside each bucket), inspects which fields are still
-NULL, and fires the corresponding sub-pipelines via the existing
+NULL or carry sentinel values like ``'unknown'`` / ``'needs_review'``,
+and fires the corresponding sub-pipelines via the existing
 ``run_refresh_all`` orchestrator. Skips firms whose
-``last_gap_fill_attempt_at`` is within the last ``COOLDOWN_DAYS`` so
-sources that genuinely have no value aren't re-queried every pass.
+``last_gap_fill_attempt_at`` is within the last ``COOLDOWN_DAYS``
+unless ``--reset-cooldown`` is passed.
 
-All six sub-pipelines participate — financials, health-check
+All six sub-pipelines participate -- financials, health-check
 (FINRA Form BD + search metadata), clearing extraction, contact
 enrichment, filings refresh, and website resolution. ``decide_pipelines``
-gates each on its target field being NULL, so a sub-pipeline only
-fires when there's actually something for it to fill.
+gates each one; this script defaults to aggressive mode so the gates
+also fire on sentinel values and detail-page-only fields, not just
+strict ``IS NULL``.
 
 Designed to run unattended for hours. Interruptible with Ctrl+C; the
 cooldown stamp is set per-BD so a rerun resumes automatically.
 
+Flow:
+  1. Phase 1 (read-only scan): walk every eligible BD, accumulate
+     per-column gap counts grouped by priority bucket, print a
+     summary table.
+  2. Confirmation: if neither ``--scan-only`` nor ``--apply`` is
+     passed, prompt the operator to proceed before any mutations.
+  3. Phase 2 (fill): existing concurrent ``run_refresh_all`` fan-out
+     over the same eligible set. DB commits land row-by-row; the
+     per-BD cooldown stamp makes the next invocation auto-resume
+     from where the last one stopped.
+
 Usage:
-    DATABASE_URL=<staging-url> python scripts/gap_fill_broker_dealers.py
+    # Default: scan, summarize, prompt, then fill.
+    python scripts/gap_fill_broker_dealers.py
+
+    # Scan-only -- useful for size/cost preview before committing.
+    python scripts/gap_fill_broker_dealers.py --scan-only
+
+    # Non-interactive (cron) -- scan + fill without prompt.
+    python scripts/gap_fill_broker_dealers.py --apply
+
+    # First run after a code fix -- bypass cooldown so previously-
+    # attempted BDs get a re-try with the new behavior.
+    python scripts/gap_fill_broker_dealers.py --reset-cooldown
+
+    # Cost-bounded smoke test on the first 25 eligible BDs.
+    python scripts/gap_fill_broker_dealers.py --apply --limit 25
 """
 from __future__ import annotations
 
+import argparse
 import asyncio
 import json
 import os
@@ -50,7 +78,126 @@ TRIGGER_SOURCE = "gap_fill_script"
 MAX_CONCURRENCY = int(os.environ.get("GAP_FILL_CONCURRENCY", "2"))
 
 
+_PRIORITY_BUCKETS = ("hot", "warm", "cold", "none")
+
+
+def _print_scan_summary(
+    *,
+    total_eligible: int,
+    gap_counts: dict[str, dict[str, int]],
+    bds_with_any_gap_by_bucket: dict[str, int],
+    pipeline_fires_by_bucket: dict[str, dict[str, int]],
+    sub_label_for_table: dict[str, str],
+    aggressive: bool,
+    cooldown_msg: str,
+) -> None:
+    """Render the phase 1 summary table to stdout.
+
+    Header line + per-column rows sorted by total gap count desc, then
+    a "TOTAL BDs with at least one gap" row, then per-pipeline fire
+    estimates by priority bucket. ASCII-only characters so the script
+    is portable across Windows cmd / PowerShell / Linux terminals
+    (cp1252 cannot encode the box-drawing characters).
+    """
+    aggressive_msg = "on" if aggressive else "off (strict)"
+    header_line = (
+        f"GAP-FILL SCAN  --  {total_eligible:,} eligible BDs "
+        f"(cooldown = {cooldown_msg}, aggressive = {aggressive_msg})"
+    )
+    bar = "=" * max(len(header_line), 80)
+    print(bar)
+    print(header_line)
+    print(bar)
+
+    # Per-column row header.
+    col_header = (
+        f"  {'column':<40}"
+        f"{'hot':>8}{'warm':>8}{'cold':>8}{'none':>8}"
+    )
+    print(col_header)
+    print("  " + "-" * (40 + 8 * 4))
+
+    # Sort columns by total gap count desc so the biggest offenders surface first.
+    def _col_total(col_key: str) -> int:
+        buckets = gap_counts[col_key]
+        return sum(buckets.values())
+
+    for col_key in sorted(gap_counts.keys(), key=lambda k: -_col_total(k)):
+        buckets = gap_counts[col_key]
+        row = f"  {col_key:<40}"
+        for bucket in _PRIORITY_BUCKETS:
+            row += f"{buckets.get(bucket, 0):>8,}"
+        print(row)
+
+    print("  " + "-" * (40 + 8 * 4))
+
+    # "TOTAL BDs with at least one gap" -- the deduped count per bucket.
+    total_row = f"  {'TOTAL BDs with at least one gap':<40}"
+    grand_total = 0
+    for bucket in _PRIORITY_BUCKETS:
+        n = bds_with_any_gap_by_bucket.get(bucket, 0)
+        grand_total += n
+        total_row += f"{n:>8,}"
+    print(total_row)
+    print(f"  Grand total BDs with at least one gap: {grand_total:,} "
+          f"/ {total_eligible:,} eligible "
+          f"({100 * grand_total / total_eligible:.1f}%)")
+    print()
+
+    # Sub-pipeline fire estimates (how many *pipeline runs* would fire,
+    # not how many *columns* are gapped).
+    print("  Estimated sub-pipeline fires (per priority bucket):")
+    for sub, label in sub_label_for_table.items():
+        buckets = pipeline_fires_by_bucket.get(sub, {})
+        parts = [f"{b}={buckets.get(b, 0):,}" for b in _PRIORITY_BUCKETS]
+        total = sum(buckets.values())
+        if total == 0:
+            continue
+        print(f"    {label:<14} {'  '.join(parts):<48}  total={total:,}")
+    print(bar)
+
+
+def _parse_args() -> argparse.Namespace:
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument(
+        "--scan-only",
+        action="store_true",
+        help="Run phase 1 (read-only summary) only; do not mutate any rows.",
+    )
+    parser.add_argument(
+        "--apply",
+        action="store_true",
+        help="Skip the interactive confirmation prompt. Intended for "
+             "non-interactive runs (cron, CI). Phase 1 still runs first.",
+    )
+    parser.add_argument(
+        "--strict",
+        action="store_true",
+        help="Use strict IS-NULL predicates only (no sentinel / "
+             "detail-page widening). Matches the per-firm refresh-all "
+             "endpoint's behavior. Default is aggressive=True.",
+    )
+    parser.add_argument(
+        "--reset-cooldown",
+        action="store_true",
+        help="Ignore last_gap_fill_attempt_at and consider every BD "
+             "eligible. Use this on the first run after a code change "
+             "that should produce a different extraction outcome.",
+    )
+    parser.add_argument(
+        "--limit",
+        type=int,
+        default=None,
+        help="Cap to the first N eligible BDs. Useful for cost-bounded "
+             "smoke tests before committing to a full pass.",
+    )
+    return parser.parse_args()
+
+
 async def main() -> None:
+    args = _parse_args()
+    aggressive = not args.strict
+
     if not os.environ.get("DATABASE_URL"):
         print("ERROR: DATABASE_URL is not set.")
         sys.exit(2)
@@ -71,6 +218,7 @@ async def main() -> None:
         SUB_REFRESH_FINANCIALS,
         SUB_RESOLVE_WEBSITE,
         decide_pipelines,
+        gap_report_for,
         run_refresh_all,
     )
     from app.services.scoring import score_broker_dealers
@@ -95,7 +243,7 @@ async def main() -> None:
 
     # BDs whose last extraction attempt hit a retryable transient failure
     # (today: network_error from DNS / timeout / connection failures) are
-    # eligible regardless of cooldown — a network blip 12 days ago should
+    # eligible regardless of cooldown -- a network blip 12 days ago should
     # not gate a re-attempt for the next 18. See #399.
     retryable_bd_ids_subq = (
         select(ClearingArrangement.bd_id)
@@ -104,35 +252,124 @@ async def main() -> None:
     )
 
     async with SessionLocal() as db:
-        eligible_stmt = (
-            select(BrokerDealer)
-            .where(
-                or_(
-                    BrokerDealer.last_gap_fill_attempt_at.is_(None),
-                    BrokerDealer.last_gap_fill_attempt_at < cutoff,
-                    BrokerDealer.id.in_(retryable_bd_ids_subq),
-                )
-            )
-            .order_by(
+        if args.reset_cooldown:
+            # Bypass the cooldown filter entirely -- every BD is eligible.
+            eligible_stmt = select(BrokerDealer).order_by(
                 priority_rank,
                 BrokerDealer.lead_score.desc().nullslast(),
                 BrokerDealer.id,
             )
-        )
+        else:
+            eligible_stmt = (
+                select(BrokerDealer)
+                .where(
+                    or_(
+                        BrokerDealer.last_gap_fill_attempt_at.is_(None),
+                        BrokerDealer.last_gap_fill_attempt_at < cutoff,
+                        BrokerDealer.id.in_(retryable_bd_ids_subq),
+                    )
+                )
+                .order_by(
+                    priority_rank,
+                    BrokerDealer.lead_score.desc().nullslast(),
+                    BrokerDealer.id,
+                )
+            )
         eligible = list((await db.execute(eligible_stmt)).scalars().all())
         contact_ids: set[int] = set(
             (await db.execute(select(ExecutiveContact.bd_id).distinct())).scalars().all()
         )
+
+    if args.limit is not None and args.limit > 0:
+        eligible = eligible[: args.limit]
 
     total_eligible = len(eligible)
     if total_eligible == 0:
         print("No eligible broker-dealers (all stamped within cooldown).")
         return
 
+    cooldown_msg = "reset" if args.reset_cooldown else f"{COOLDOWN_DAYS}d"
+    aggressive_msg = "on" if aggressive else "off (strict)"
     print(
-        f"Gap-fill: {total_eligible:,} eligible BDs (cooldown = {COOLDOWN_DAYS}d, "
-        f"all sub-pipelines included, concurrency = {MAX_CONCURRENCY})."
+        f"Gap-fill scan: {total_eligible:,} eligible BDs "
+        f"(cooldown = {cooldown_msg}, aggressive = {aggressive_msg}, "
+        f"concurrency = {MAX_CONCURRENCY})."
     )
+    print()
+
+    # ── Phase 1 -- read-only gap scan ─────────────────────────────────
+    # column key → bucket key → count. Bucket keys are "hot" / "warm" /
+    # "cold" / "none". The "column" key embeds both the sub-pipeline
+    # name and the BD column so the table reads sub_pipeline.column.
+    gap_counts: dict[str, dict[str, int]] = defaultdict(
+        lambda: defaultdict(int)
+    )
+    bds_with_any_gap_by_bucket: dict[str, int] = defaultdict(int)
+    pipeline_fires_by_bucket: dict[str, dict[str, int]] = defaultdict(
+        lambda: defaultdict(int)
+    )
+
+    sub_label_for_table = {
+        SUB_REFRESH_FINANCIALS: "financials",
+        SUB_RESOLVE_WEBSITE: "website",
+        SUB_HEALTH_CHECK: "health",
+        SUB_REFRESH_CLEARING: "clearing",
+        SUB_ENRICH: "enrich",
+        SUB_REFRESH_FILINGS: "filings",
+    }
+
+    def _bucket(bd: BrokerDealer) -> str:
+        return bd.lead_priority if bd.lead_priority in ("hot", "warm", "cold") else "none"
+
+    for bd in eligible:
+        has_contacts = bd.id in contact_ids
+        report = gap_report_for(bd, has_contacts, aggressive=aggressive)
+        bucket = _bucket(bd)
+        had_any = False
+        for sub, cols in report.items():
+            if not cols:
+                continue
+            had_any = True
+            pipeline_fires_by_bucket[sub][bucket] += 1
+            label = sub_label_for_table.get(sub, sub)
+            for col in cols:
+                gap_counts[f"{label}.{col}"][bucket] += 1
+        if had_any:
+            bds_with_any_gap_by_bucket[bucket] += 1
+
+    _print_scan_summary(
+        total_eligible=total_eligible,
+        gap_counts=gap_counts,
+        bds_with_any_gap_by_bucket=bds_with_any_gap_by_bucket,
+        pipeline_fires_by_bucket=pipeline_fires_by_bucket,
+        sub_label_for_table=sub_label_for_table,
+        aggressive=aggressive,
+        cooldown_msg=cooldown_msg,
+    )
+
+    if args.scan_only:
+        print()
+        print("--scan-only: exiting before any mutations.")
+        return
+
+    if not args.apply:
+        if not sys.stdin.isatty():
+            print()
+            print(
+                "Non-interactive stdin detected and --apply not passed. "
+                "Refusing to mutate without explicit confirmation. "
+                "Re-run with --apply or --scan-only.",
+                file=sys.stderr,
+            )
+            sys.exit(2)
+        print()
+        answer = input("Proceed with fill? (y/N): ").strip().lower()
+        if answer != "y":
+            print("Aborted by operator.")
+            return
+
+    print()
+    print("Proceeding with fill. Row-by-row updates begin now.")
     print()
 
     counters: dict[str, int] = {"processed": 0, "skipped_noop": 0}
@@ -149,7 +386,9 @@ async def main() -> None:
         asyncio (no preemption between ``+=`` and ``append``)."""
         async with semaphore:
             has_contacts = bd.id in contact_ids
-            decision = decide_pipelines(bd, has_contacts, scope="all")
+            decision = decide_pipelines(
+                bd, has_contacts, scope="all", aggressive=aggressive
+            )
             to_run = decision.to_run
             to_skip = decision.to_skip
 
@@ -157,7 +396,7 @@ async def main() -> None:
             name_short = (bd.name or "")[:38]
 
             if not to_run:
-                # Nothing to do — still stamp so we don't re-evaluate every pass.
+                # Nothing to do -- still stamp so we don't re-evaluate every pass.
                 async with SessionLocal() as db:
                     fresh = await db.get(BrokerDealer, bd.id)
                     if fresh is not None:
@@ -208,7 +447,7 @@ async def main() -> None:
                     f"{type(exc).__name__}: {str(exc)[:120]}"
                 )
                 failures.append((bd.id, bd.name, f"{type(exc).__name__}: {exc}"))
-                # Still stamp — we tried.
+                # Still stamp -- we tried.
                 async with SessionLocal() as db:
                     fresh = await db.get(BrokerDealer, bd.id)
                     if fresh is not None:
