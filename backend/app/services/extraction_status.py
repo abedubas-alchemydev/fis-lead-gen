@@ -50,20 +50,57 @@ ALL_EXTRACTION_STATUSES: tuple[str, ...] = (
 )
 
 
+# Upper bound for the total_assets / net_capital ratio on a sane
+# broker-dealer balance sheet. Heavily leveraged dealers can hit ~200×;
+# a 1000× ratio almost certainly means the extractor dropped an "in
+# thousands" / "in millions" scale multiplier from the Computation of
+# Net Capital section. Two production incidents (RBC ~33,000×,
+# DriveWealth ~33,000×) both fell well above this threshold.
+PLAUSIBLE_LEVERAGE_RATIO_MAX = 1000.0
+
+
+def is_plausible_net_capital_scale(
+    *,
+    net_capital: float | None,
+    total_assets: float | None,
+) -> bool:
+    """Cross-field sanity check: ``False`` when ``net_capital`` looks
+    too small relative to ``total_assets``, suggesting the extractor
+    dropped the scale multiplier on net_capital.
+
+    Returns ``True`` (assume sane) when the determination cannot be
+    made — i.e. either input is missing, zero, or negative. Callers
+    that need to gate on those conditions should use the other checks
+    in :func:`classify_financial_extraction_status` (``has_required_fields``).
+
+    The threshold (1000×) is intentionally conservative: it sits well
+    above the largest legitimate leverage seen on US broker-dealer
+    balance sheets while still catching the two known production bug
+    classes (RBC, DriveWealth — both ~33,000×).
+    """
+    if total_assets is None or net_capital is None:
+        return True
+    if net_capital <= 0 or total_assets <= 0:
+        return True
+    return (total_assets / net_capital) <= PLAUSIBLE_LEVERAGE_RATIO_MAX
+
+
 def classify_financial_extraction_status(
     *,
     confidence_score: float | None,
     min_confidence: float,
     has_required_fields: bool = True,
+    is_plausible_leverage: bool = True,
 ) -> str:
     """Return the ``extraction_status`` value for a financial extraction row.
 
     The rule mirrors the clearing pipeline's inline classifier in
-    ``services/llm_parser.py``: a row that clears the confidence threshold
-    and carries every required field is ``parsed``; anything else is
-    ``needs_review``. Callers that hit a provider error before obtaining any
-    payload should use :data:`STATUS_PROVIDER_ERROR` directly — this helper
-    is only for the post-extraction classification.
+    ``services/llm_parser.py``: a row that clears the confidence threshold,
+    carries every required field, AND passes the leverage-plausibility
+    cross-check is ``parsed``; anything else is ``needs_review``. Callers
+    that hit a provider error before obtaining any payload should use
+    :data:`STATUS_PROVIDER_ERROR` directly — this helper is only for the
+    post-extraction classification.
 
     Args:
         confidence_score: Value returned by the LLM. ``None`` is treated as
@@ -72,8 +109,15 @@ def classify_financial_extraction_status(
         has_required_fields: False when the extraction is missing a field
             the caller considers mandatory (e.g. net_capital on the
             financial side).
+        is_plausible_leverage: False when the cross-field sanity check
+            (see :func:`is_plausible_net_capital_scale`) flags the
+            net_capital/total_assets ratio as impossible. Defaults to
+            True so existing callers that don't yet compute the check
+            (or rows that lack total_assets) behave unchanged.
     """
     if not has_required_fields:
+        return STATUS_NEEDS_REVIEW
+    if not is_plausible_leverage:
         return STATUS_NEEDS_REVIEW
     if confidence_score is None or confidence_score < min_confidence:
         return STATUS_NEEDS_REVIEW
