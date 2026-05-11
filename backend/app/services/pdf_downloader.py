@@ -61,6 +61,77 @@ class _StreamingPdfTooLargeError(Exception):
         self.byte_size = byte_size
 
 
+# X-17A-5 multi-document filing packages — many large broker-dealers
+# (Morgan Stanley, Goldman, Citi, etc.) file 3–5 PDFs under one accession:
+# Statement of Financial Condition, Compliance Report, Exemption Report,
+# Independent Auditor's Report, and sometimes a Cover Letter. The
+# resolver scoring uses these substring markers (case-insensitive) to
+# prefer the Statement of Financial Condition (which carries net capital
+# + clearing narrative) and avoid the Compliance/Exemption sub-documents
+# (which Gemini correctly identifies as not containing financial data).
+# Why no \b boundaries: SEC filers concatenate firm codes with type stems
+# without separators — e.g., "MSSOFC.pdf", "GSSOCOMP.pdf" — so a plain
+# substring scan is the right primitive here.
+_FINANCIAL_STATEMENT_MARKERS = (
+    "sofc",                              # Morgan Stanley / Goldman convention
+    "statementoffinancialcondition",
+    "statement-of-financial-condition",
+    "statementoffin",                    # truncated variants
+    "financialcondition",
+    "financial-condition",
+    "stmt",                              # generic "Statement"
+    "balancesheet",
+    "annualaudit",
+    "annual-audit",
+)
+
+_NON_FINANCIAL_MARKERS = (
+    "comp",         # compliance report (MSSOCOMP, GSCOMP, etc.)
+    "compliance",
+    "exemp",        # truncated stem used in filenames like MSSOEXEMP, GSEXEMP
+    "exempt",       # exemption report (full spelling)
+    "exemption",
+    "cover",        # cover letter / wrapper
+    "letter",
+    "wrap",
+)
+
+
+def _score_pdf_candidate(name: str, primary_document: str) -> tuple[int, ...]:
+    """Sort key for picking the right PDF inside an X-17A-5 filing.
+
+    Lower tuples sort first. Tiers are evaluated in order; the resolver
+    feeds this into ``sorted(..., key=...)[0]`` so the winning filename
+    is the one with the smallest tuple.
+
+    Order of preference:
+      1. Strong financial-statement marker (e.g. ``SOFC``) AND no
+         non-financial marker — the Statement of Financial Condition.
+      2. No non-financial marker — penalize Compliance / Exemption /
+         Cover sub-documents that show up in multi-doc packages.
+      3. ``x-17`` / ``x17`` in the filename — loose X-17A-5 marker
+         (kept from the prior heuristic).
+      4. ``audit`` in the filename — narrower than the prior
+         ``audit OR report`` because Compliance **Report** + Exemption
+         **Report** both matched ``report`` and crowded out SOFC.
+      5. Filename equals ``primary_document`` — demoted to a tiebreaker
+         because EDGAR's ``primaryDocument`` field is unreliable for
+         multi-doc filings (often points to a Cover Letter).
+      6. Shorter filename — final tiebreaker (kept from prior).
+    """
+    lower = name.lower()
+    has_non_fin = any(marker in lower for marker in _NON_FINANCIAL_MARKERS)
+    has_fin = any(marker in lower for marker in _FINANCIAL_STATEMENT_MARKERS)
+    return (
+        0 if (has_fin and not has_non_fin) else 1,
+        1 if has_non_fin else 0,
+        0 if ("x-17" in lower or "x17" in lower) else 1,
+        0 if "audit" in lower else 1,
+        0 if name == primary_document else 1,
+        len(name),
+    )
+
+
 def _validate_sec_url(url: str) -> None:
     """Reject non-SEC, non-HTTPS, or private-IP targets before any network call.
 
@@ -128,7 +199,28 @@ class PdfDownloaderService:
                 continue
 
         filings.sort(key=lambda item: str(item["filing_date"]), reverse=True)
-        top_filings = filings[:count]
+        # Dedupe by filing_date: some firms (Morgan Stanley, e.g.) file two
+        # X-17A-5 accessions on the same day for the same fiscal year — one
+        # carries the audited financials, the other a paired compliance
+        # filing. Without this step, count=3 burns two of its three slots on
+        # the same fiscal year and we never reach a 3rd year of data, which
+        # in turn keeps three_year_cagr NULL on the broker-dealer rollup.
+        # The first accession at any given filing_date wins (sort above is
+        # by filing_date alone, so callers cannot rely on a deterministic
+        # tie-break between same-day filings; whichever appears first in
+        # EDGAR's submissions JSON is what we keep). If a same-day pair
+        # really did represent two distinct fiscal years, this would drop
+        # one — extremely rare and acceptable given how much more often the
+        # opposite pattern shows up.
+        seen_dates: set[str] = set()
+        unique_filings: list[dict[str, object]] = []
+        for filing in filings:
+            filing_date = str(filing["filing_date"])
+            if filing_date in seen_dates:
+                continue
+            seen_dates.add(filing_date)
+            unique_filings.append(filing)
+        top_filings = unique_filings[:count]
 
         results: list[DownloadedPdfRecord] = []
         for filing in top_filings:
@@ -374,12 +466,7 @@ class PdfDownloaderService:
 
         selected_name = sorted(
             pdf_candidates,
-            key=lambda name: (
-                0 if name == primary_document else 1,
-                0 if "x-17" in name.lower() or "x17" in name.lower() else 1,
-                0 if "audit" in name.lower() or "report" in name.lower() else 1,
-                len(name),
-            ),
+            key=lambda name: _score_pdf_candidate(name, primary_document),
         )[0]
         return f"{filing_directory_url}{selected_name}"
 
