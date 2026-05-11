@@ -754,6 +754,28 @@ export function BrokerDealerDetailClient({ brokerDealerId }: { brokerDealerId: s
                   : undefined
               }
             />
+            <MiniStat
+              label="3-Yr CAGR"
+              value={
+                bd.three_year_cagr !== null ? (
+                  formatPercent(bd.three_year_cagr)
+                ) : (
+                  "N/A"
+                )
+              }
+              valueClassName={
+                bd.three_year_cagr === null
+                  ? "text-[var(--text-muted,#94a3b8)]"
+                  : bd.three_year_cagr >= 0
+                  ? "text-[#16a34a]"
+                  : "text-[var(--pill-red-text,#b91c1c)]"
+              }
+              helper={
+                bd.three_year_cagr === null
+                  ? "Requires 3 years of financial history"
+                  : "Compound annual growth over 3 years"
+              }
+            />
           </div>
           <FinancialTrendChart points={chartPoints} />
         </SectionPanel>

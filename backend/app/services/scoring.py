@@ -92,6 +92,34 @@ def calculate_yoy_growth(metrics: Sequence[FinancialMetric]) -> float | None:
     return round(((latest - previous) / previous) * 100, 2)
 
 
+def calculate_three_year_cagr(metrics: Sequence[FinancialMetric]) -> float | None:
+    """3-year compound annual growth rate on ``net_capital``.
+
+    Sibling of :func:`calculate_yoy_growth`. Takes the latest and oldest
+    of the three most recent metrics (by ``report_date``) and returns
+    the annualised growth percentage between them, rounded to two
+    decimals to match ``yoy_growth`` precision.
+
+    Returns ``None`` when fewer than three metrics are available
+    (fail-closed: the master-list column stays NULL until the BD has
+    enough history) or when the oldest ``net_capital`` is zero or
+    negative (the growth rate is undefined on a non-positive base).
+    """
+    if len(metrics) < 3:
+        return None
+
+    ordered = sorted(metrics, key=lambda metric: metric.report_date, reverse=True)
+    latest = float(ordered[0].net_capital)
+    oldest = float(ordered[2].net_capital)
+
+    if oldest <= 0:
+        return None
+
+    # Two compounding periods between three annual data points.
+    cagr = ((latest / oldest) ** (1 / 2) - 1) * 100
+    return round(cagr, 2)
+
+
 def calculate_total_assets_yoy(metrics: Sequence[FinancialMetric]) -> float | None:
     """YoY growth percentage on total_assets between the two most recent
     metrics that both have a non-NULL total_assets value.

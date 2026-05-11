@@ -44,6 +44,7 @@ export type BrokerDealerListItem = {
   latest_excess_net_capital: number | null;
   latest_total_assets: number | null;
   yoy_growth: number | null;
+  three_year_cagr: number | null;
   health_status: string | null;
   is_deficient: boolean;
   latest_deficiency_filed_at: string | null;

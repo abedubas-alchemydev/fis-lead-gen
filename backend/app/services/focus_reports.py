@@ -30,6 +30,7 @@ from app.services.gemini_responses import (
 from app.services.pdf_downloader import PdfDownloaderService, pdf_tempdir
 from app.services.scoring import (
     calculate_total_assets_yoy,
+    calculate_three_year_cagr,
     calculate_yoy_growth,
     classify_health_status,
 )
@@ -792,6 +793,7 @@ class FocusReportService:
                 broker_dealer.latest_excess_net_capital = None
                 broker_dealer.latest_total_assets = None
                 broker_dealer.yoy_growth = None
+                broker_dealer.three_year_cagr = None
                 broker_dealer.total_assets_yoy = None
                 broker_dealer.health_status = None
                 continue
@@ -806,6 +808,7 @@ class FocusReportService:
             )
             broker_dealer.latest_total_assets = float(latest.total_assets) if latest.total_assets is not None else None
             broker_dealer.yoy_growth = yoy_growth
+            broker_dealer.three_year_cagr = calculate_three_year_cagr(ordered)
             broker_dealer.total_assets_yoy = calculate_total_assets_yoy(ordered)
             broker_dealer.health_status = classify_health_status(
                 latest_net_capital=float(latest.net_capital),
