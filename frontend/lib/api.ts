@@ -101,6 +101,8 @@ import type {
 import type {
   OutreachDraft,
   OutreachDraftRequest,
+  OutreachSendRequest,
+  OutreachSendResponse,
   PipelineRunItem,
   PipelineStatusResponse,
   PipelineTriggerResponse,
@@ -492,6 +494,22 @@ export async function generateOutreachDraft(
   payload: OutreachDraftRequest
 ): Promise<OutreachDraft> {
   return apiRequest<OutreachDraft>("/api/v1/outreach/draft", {
+    method: "POST",
+    body: JSON.stringify(payload)
+  });
+}
+
+// ── Send outreach via the user's Gmail ─────────────────────────────────────
+// POST /api/v1/outreach/send transmits the (possibly user-edited) draft
+// through Gmail's API using the OAuth token Better Auth stored when the
+// user signed in via Google. 412 responses are recoverable by the modal:
+//   - "google_account_not_linked" → linkSocial with no extra scopes
+//   - "gmail_scope_required" → linkSocial with the gmail.send scope
+// Both flows trigger Google's incremental consent popup.
+export async function sendOutreachEmail(
+  payload: OutreachSendRequest
+): Promise<OutreachSendResponse> {
+  return apiRequest<OutreachSendResponse>("/api/v1/outreach/send", {
     method: "POST",
     body: JSON.stringify(payload)
   });

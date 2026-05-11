@@ -522,6 +522,21 @@ export type OutreachDraft = {
   body: string;
 };
 
+export type OutreachSendRequest = {
+  broker_dealer_id: number;
+  contact_id: number;
+  folder_id: number;
+  subject: string;
+  body: string;
+};
+
+export type OutreachSendResponse = {
+  id: number;
+  gmail_message_id: string;
+  sent_at: string;
+  status: string;
+};
+
 // ── Investment Advisor (Form ADV / 13F filer) types ──
 //
 // Mirrors backend/app/schemas/investment_advisor.py. Lives alongside the
