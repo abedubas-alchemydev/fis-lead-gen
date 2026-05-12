@@ -87,8 +87,10 @@ echo -n "your-gemini-api-key" | \
 echo -n "your-apollo-api-key" | \
   gcloud secrets create APOLLO_API_KEY --data-file=-
 
-echo -n "your-resend-api-key" | \
-  gcloud secrets create RESEND_API_KEY --data-file=-
+# SMTP_PASSWORD is a 16-char Google Workspace App Password.
+# See: https://support.google.com/a/answer/176600
+gcloud secrets create SMTP_PASSWORD --replication-policy=automatic
+gcloud secrets versions add SMTP_PASSWORD --data-file=-   # paste App Password, then EOF
 ```
 
 ---
@@ -165,9 +167,12 @@ gcloud run deploy lead-gen-frontend \
   --set-env-vars="NODE_ENV=production" \
   --set-env-vars="NEXT_PUBLIC_APP_URL=https://yourdomain.com" \
   --set-env-vars="INTERNAL_API_URL=$BACKEND_URL" \
+  --set-env-vars="SMTP_HOST=smtp.gmail.com,SMTP_PORT=587,SMTP_USER=noreply@alchemydev.io,EMAIL_FROM=noreply@alchemydev.io" \
   --set-secrets="DATABASE_URL=DATABASE_URL:latest" \
   --set-secrets="BETTER_AUTH_SECRET=BETTER_AUTH_SECRET:latest" \
-  --set-secrets="RESEND_API_KEY=RESEND_API_KEY:latest"
+  --set-secrets="SMTP_PASSWORD=SMTP_PASSWORD:latest"
+
+# Canonical SMTP env contract: frontend/.env.example:17-22
 
 # Get the frontend URL
 FRONTEND_URL=$(gcloud run services describe lead-gen-frontend --region=$REGION --format='value(status.url)')
@@ -325,6 +330,6 @@ jobs:
 - [ ] `useSecureCookies: true` in BetterAuth (auto when ENVIRONMENT=production)
 - [ ] Backend min-instances=1 (cold start protection)
 - [ ] Database backups configured
-- [ ] Resend EMAIL_FROM set to a verified domain (not onboarding@resend.dev)
+- [ ] Workspace SMTP relay configured: `SMTP_PASSWORD` in Secret Manager and `EMAIL_FROM` matches `SMTP_USER`
 - [ ] SEC_USER_AGENT set to real company info
 - [ ] Test login/logout, data display, export, alerts

@@ -28,6 +28,7 @@ from app.services.refresh_all_orchestrator import (
     SUB_REFRESH_FINANCIALS,
     SUB_RESOLVE_WEBSITE,
     decide_pipelines,
+    gap_report_for,
 )
 
 
@@ -253,3 +254,168 @@ def test_filings_open_when_cik_present_and_date_missing() -> None:
     bd = _bd(cik="0000320193", last_filing_date=None)
     decision = decide_pipelines(bd, has_contacts=False)
     assert SUB_REFRESH_FILINGS in decision.to_run
+
+
+# ─────────────────────────── aggressive=True (bulk gap-fill) ───────────────────────────
+
+
+def _fully_filled_bd(**overrides: Any) -> BrokerDealer:
+    """Every legacy-strict gate-input field populated → with
+    ``aggressive=False`` all gates close. Tests in this section pass
+    overrides to flip a single aggressive-only field into a gap shape
+    so we can confirm aggressive=True opens that specific gate while
+    aggressive=False leaves everything closed."""
+    defaults: dict[str, Any] = {
+        "cik": "0000320193",
+        "website": "https://acme.example",
+        "latest_net_capital": 2_000_000.0,
+        "yoy_growth": 3.5,
+        "health_status": "ok",
+        "current_clearing_type": "fully_disclosed",
+        "current_clearing_partner": "Pershing",
+        "last_filing_date": date(2025, 6, 1),
+        "registration_date": date(1990, 1, 1),
+        "formation_date": date(1989, 12, 1),
+    }
+    defaults.update(overrides)
+    return _bd(**defaults)
+
+
+def test_aggressive_treats_unknown_clearing_type_as_gap() -> None:
+    """The 409 staging rows whose ``current_clearing_type='unknown'``
+    were skipped by the strict gate (it only checks IS NULL). Aggressive
+    mode must catch this sentinel and re-fire the clearing pipeline so
+    the PR #409 resolver fix can retry these firms."""
+    bd = _fully_filled_bd(
+        current_clearing_type="unknown",
+        current_clearing_partner=None,  # paired with unknown
+    )
+    # Default (strict) — gate is open because partner is None.
+    legacy = decide_pipelines(bd, has_contacts=True)
+    assert SUB_REFRESH_CLEARING in legacy.to_run
+
+    # Aggressive — same row would also trip if both partner and type
+    # were filled but clearing_classification was 'needs_review'. See
+    # next test. Here we just confirm the unknown sentinel matters.
+    bd2 = _fully_filled_bd(current_clearing_type="unknown")
+    aggressive = decide_pipelines(bd2, has_contacts=True, aggressive=True)
+    assert SUB_REFRESH_CLEARING in aggressive.to_run
+
+
+def test_aggressive_treats_needs_review_classification_as_gap() -> None:
+    """The 1,189 staging rows whose ``clearing_classification='needs_review'``
+    are the bulk of the "Not on file" tooltip population. Strict gate
+    misses them entirely; aggressive must re-fire clearing."""
+    bd = _fully_filled_bd(clearing_classification="needs_review")
+
+    legacy = decide_pipelines(bd, has_contacts=True)
+    assert SUB_REFRESH_CLEARING in legacy.to_skip  # strict ignores this field
+
+    aggressive = decide_pipelines(bd, has_contacts=True, aggressive=True)
+    assert SUB_REFRESH_CLEARING in aggressive.to_run
+
+
+def test_aggressive_widens_health_check_to_detail_fields() -> None:
+    """``registration_date`` + ``formation_date`` are filled but a
+    detail-page FINRA field (``dba_names``) is NULL. Strict gate closes
+    health-check; aggressive must open it so the FINRA parse re-runs
+    and fills the missing detail-page field."""
+    bd = _fully_filled_bd(dba_names=None)
+
+    legacy = decide_pipelines(bd, has_contacts=True)
+    assert SUB_HEALTH_CHECK in legacy.to_skip
+
+    aggressive = decide_pipelines(bd, has_contacts=True, aggressive=True)
+    assert SUB_HEALTH_CHECK in aggressive.to_run
+
+
+def test_aggressive_off_preserves_legacy_behavior() -> None:
+    """Backward-compat anchor: with aggressive=False, every existing
+    sentinel/unfilled-detail field must remain a non-gap. Locks the
+    contract for ``POST /broker-dealers/{id}/refresh-all`` which uses
+    the default."""
+    bd = _fully_filled_bd(
+        current_clearing_type="unknown",  # sentinel — aggressive-only
+        clearing_classification="needs_review",  # sentinel — aggressive-only
+        dba_names=None,  # detail-page — aggressive-only
+        types_of_business=None,  # detail-page — aggressive-only
+        three_year_cagr=None,  # detail-page — aggressive-only
+        latest_excess_net_capital=None,  # detail-page — aggressive-only
+        current_clearing_partner="Pershing",  # filled so strict closes clearing
+    )
+    decision = decide_pipelines(bd, has_contacts=True)
+    # Strict mode: every aggressive-only signal is invisible. With partner
+    # filled and type set (even to 'unknown'), the strict clearing gate
+    # closes. All other strict gates already closed in _fully_filled_bd.
+    assert decision.to_run == ()
+
+
+def test_gap_report_returns_column_names() -> None:
+    """The new ``gap_report_for`` helper returns per-pipeline column
+    name lists. The bulk script's scan-only mode uses this to print a
+    per-column summary without firing any pipelines."""
+    bd = _bd(
+        cik="0000320193",
+        latest_net_capital=None,
+        yoy_growth=None,
+        current_clearing_type="unknown",
+        clearing_classification="needs_review",
+        dba_names=None,
+        registration_date=date(1990, 1, 1),
+        formation_date=date(1989, 12, 1),
+    )
+    report = gap_report_for(bd, has_contacts=False, aggressive=True)
+
+    # Financials gate: net_capital + yoy_growth + health_status all NULL.
+    assert "latest_net_capital" in report[SUB_REFRESH_FINANCIALS]
+    assert "yoy_growth" in report[SUB_REFRESH_FINANCIALS]
+
+    # Clearing gate fires on partner=NULL (strict) plus unknown sentinel
+    # and needs_review (aggressive only).
+    assert "current_clearing_partner" in report[SUB_REFRESH_CLEARING]
+    assert "current_clearing_type=unknown" in report[SUB_REFRESH_CLEARING]
+    assert "clearing_classification" in report[SUB_REFRESH_CLEARING]
+
+    # Health gate: registration_date + formation_date are set, so strict
+    # closed — but dba_names=None opens it under aggressive.
+    assert "registration_date" not in report[SUB_HEALTH_CHECK]
+    assert "dba_names" in report[SUB_HEALTH_CHECK]
+
+
+def test_aggressive_treats_total_assets_and_required_min_as_gap() -> None:
+    """``latest_total_assets`` + ``required_min_capital`` are detail-page
+    fields filled as a side-effect of refresh-financials. They were
+    initially omitted from the aggressive predicate list, which left
+    BDs with NULL-here-and-everywhere-else-filled invisible to the
+    bulk gap-fill. This test pins the fix."""
+    bd = _fully_filled_bd(latest_total_assets=None)
+    decision = decide_pipelines(bd, has_contacts=True, aggressive=True)
+    assert SUB_REFRESH_FINANCIALS in decision.to_run
+
+    bd2 = _fully_filled_bd(required_min_capital=None)
+    decision2 = decide_pipelines(bd2, has_contacts=True, aggressive=True)
+    assert SUB_REFRESH_FINANCIALS in decision2.to_run
+
+    # Strict mode: both fields are aggressive-only; the legacy gate
+    # closes when net_capital / yoy_growth / health_status are filled.
+    decision_strict = decide_pipelines(bd, has_contacts=True)
+    assert SUB_REFRESH_FINANCIALS in decision_strict.to_skip
+
+
+def test_gap_report_strict_mode_omits_aggressive_only_fields() -> None:
+    """The legacy ``gap_report_for(..., aggressive=False)`` must not
+    surface sentinel/detail-page fields. Anchors the strict mode for
+    any future callers besides ``decide_pipelines``."""
+    bd = _fully_filled_bd(
+        current_clearing_type="unknown",
+        clearing_classification="needs_review",
+        dba_names=None,
+    )
+    report = gap_report_for(bd, has_contacts=True, aggressive=False)
+
+    assert report[SUB_REFRESH_CLEARING] == []  # sentinels invisible
+    assert report[SUB_HEALTH_CHECK] == []      # detail-page invisible
+    assert report[SUB_REFRESH_FINANCIALS] == []
+    assert report[SUB_RESOLVE_WEBSITE] == []
+    assert report[SUB_ENRICH] == []
+    assert report[SUB_REFRESH_FILINGS] == []

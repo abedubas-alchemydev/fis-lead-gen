@@ -132,7 +132,6 @@ jobs:
       NEXT_PUBLIC_APP_URL: "http://localhost:3000"
       BETTER_AUTH_SECRET: "ci-dummy-secret-padding-xxxxxxxxxxxxxxxx"
       DATABASE_URL: "postgresql://ci:ci@localhost:5432/ci"
-      RESEND_API_KEY: "re_ci_dummy_key_placeholder"
       NEXT_TELEMETRY_DISABLED: "1"
     steps:
       - uses: actions/checkout@v4
@@ -210,16 +209,37 @@ jobs:
 
       - name: Deploy backend to Cloud Run
         run: |
+          # --timeout=3600 lets the /api/v1/alerts/stream SSE endpoint hold a
+          # connection up to the Cloud Run HTTP/1 ceiling (60 min). The handler
+          # itself self-closes at 55 min so the client EventSource reconnects
+          # with Last-Event-ID rather than getting a hard 503.
+          # --min-instances=1 keeps the LISTEN/NOTIFY listener task warm so
+          # subscribers don't have to wait for a cold start to receive newly
+          # inserted alerts. See plans/how-does-the-activity-velvety-gosling.md.
           gcloud run deploy ${{ env.BACKEND_SERVICE }} \
             --image=${{ vars.GCP_REGISTRY }}/backend:${{ env.SHORT_SHA }} \
             --region=${{ vars.GCP_REGION }} \
             --project=${{ vars.GCP_PROJECT_ID }} \
+            --timeout=3600 \
+            --min-instances=1 \
             --labels=commit-sha=${{ env.SHORT_SHA }},environment=${{ env.ENV }}
 
       - name: Deploy frontend to Cloud Run
         run: |
+          # Re-establish SMTP env on every staging deploy so an accidental clear can't silently break better-auth emails.
+          EXTRA=""
+          if [[ "${{ env.ENV }}" == "staging" ]]; then
+            EXTRA="--update-env-vars=SMTP_HOST=${{ vars.SMTP_HOST }},SMTP_PORT=587,SMTP_USER=${{ vars.SMTP_USER }},EMAIL_FROM=${{ vars.EMAIL_FROM }} --update-secrets=SMTP_PASSWORD=SMTP_PASSWORD:latest"
+          fi
+          # --timeout=3600 mirrors the backend so the Next proxy at
+          # frontend/app/api/backend/[...path]/route.ts can hold the upstream
+          # SSE stream open for the same window the backend keeps it alive
+          # (55 min). Without this, the proxy connection dies at Cloud Run's
+          # default 300 s and the EventSource churns.
           gcloud run deploy ${{ env.FRONTEND_SERVICE }} \
             --image=${{ vars.GCP_REGISTRY }}/frontend:${{ env.SHORT_SHA }} \
             --region=${{ vars.GCP_REGION }} \
             --project=${{ vars.GCP_PROJECT_ID }} \
-            --labels=commit-sha=${{ env.SHORT_SHA }},environment=${{ env.ENV }}
+            --timeout=3600 \
+            --labels=commit-sha=${{ env.SHORT_SHA }},environment=${{ env.ENV }} \
+            $EXTRA

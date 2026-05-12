@@ -74,6 +74,38 @@ class FavoriteListItemCreate(BaseModel):
     broker_dealer_id: int = Field(ge=1)
 
 
+class FavoriteListItemBatchCreate(BaseModel):
+    """Request body for ``POST /api/v1/favorite-lists/{list_id}/items/batch``.
+
+    Cap of 200 is double the masterlist's max page size so a user selecting
+    a full page never trips 422; also bounds the single-statement DB work.
+    """
+
+    broker_dealer_ids: list[int] = Field(min_length=1, max_length=200)
+
+    @field_validator("broker_dealer_ids")
+    @classmethod
+    def _dedupe_and_validate(cls, value: list[int]) -> list[int]:
+        deduped = list(dict.fromkeys(value))
+        for bd_id in deduped:
+            if bd_id < 1:
+                raise ValueError("broker_dealer_ids must be positive integers")
+        return deduped
+
+
+class FavoriteListItemBatchResponse(BaseModel):
+    """Result of a batch-add to a favorite list.
+
+    ``added`` + ``skipped_existing`` + ``len(skipped_unknown)`` always equals
+    the unique-id count in the request, so the FE can render an accurate toast
+    like "Added 12 (3 already in list, 1 unknown)".
+    """
+
+    added: int
+    skipped_existing: int
+    skipped_unknown: list[int]
+
+
 class FavoriteListWithMembership(FavoriteListResponse):
     """One row in ``GET /api/v1/broker-dealers/{firm_id}/favorite-lists``.
 

@@ -179,6 +179,17 @@ class Settings(BaseSettings):
     openai_max_pdf_size_mb: int = 45
     anthropic_api_key: str | None = None
 
+    # Google OAuth — used by:
+    #   1. Better Auth (frontend) for "Login with Google" via the same
+    #      ``client_id`` + ``client_secret`` pair.
+    #   2. Backend (services/google_oauth.py) for refreshing Gmail access
+    #      tokens stored on the ``account`` table when the user clicks
+    #      Send in the per-contact Outreach modal at /master-list/{id}.
+    # Both can be unset in CI / tests where no Gmail call fires; the
+    # send endpoint surfaces a clean 412 when missing.
+    google_client_id: str | None = None
+    google_client_secret: str | None = None
+
     # Email extractor — discovery providers (Hunter, Snov, theHarvester, site crawler).
     # Apollo provider is intentionally absent: upstream module ships without it.
     # All keys are optional; missing credentials short-circuit to a provider-level

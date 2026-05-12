@@ -48,6 +48,27 @@ export const auth = betterAuth({
       await sendPasswordResetEmail({ user, url });
     }
   },
+  socialProviders: {
+    // "Continue with Google" on /login + /signup. Default scopes
+    // (openid + email + profile) — gmail.send is intentionally NOT
+    // requested here. The per-contact Outreach modal triggers
+    // authClient.linkSocial({ scopes: ["gmail.send"] }) the first time
+    // the user clicks Send, so the login consent screen stays minimal
+    // and users who never send outreach are never asked for the
+    // restricted scope.
+    //
+    // accessType=offline + prompt=consent are required to reliably
+    // receive a refresh_token. Google omits refresh_token on silent
+    // re-auth, so without prompt=consent the second sign-in leaves the
+    // account row without one and the backend can never refresh the
+    // access token (see services/google_oauth.py).
+    google: {
+      clientId: process.env.GOOGLE_CLIENT_ID ?? "",
+      clientSecret: process.env.GOOGLE_CLIENT_SECRET ?? "",
+      accessType: "offline",
+      prompt: "consent"
+    }
+  },
   emailVerification: {
     sendOnSignUp: true,
     // Off on purpose: session.create.before blocks non-active users, so an

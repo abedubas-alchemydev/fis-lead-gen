@@ -113,19 +113,20 @@ export async function sendPasswordResetEmail({
   });
 
   try {
-    await getTransporter().sendMail({
+    const info = await getTransporter().sendMail({
       from: fromAddress,
       to: user.email,
       subject: "Reset your password",
       html,
     });
+    console.log(
+      `[EMAIL][password-reset] sent ok messageId=${info.messageId} to=${user.email}`
+    );
   } catch (error: unknown) {
-    console.error("[EMAIL] Failed to send password reset:", error);
+    console.error(`[EMAIL][password-reset] FAIL to=${user.email}:`, error);
     const message = error instanceof Error ? error.message : String(error);
     throw new Error(`Email delivery failed: ${message}`);
   }
-
-  console.log(`[EMAIL] Password reset email sent to ${user.email}`);
 }
 
 // ─── Email Verification Email ───────────────────────────────────────
@@ -151,19 +152,20 @@ export async function sendVerificationEmail({
   });
 
   try {
-    await getTransporter().sendMail({
+    const info = await getTransporter().sendMail({
       from: fromAddress,
       to: user.email,
       subject: "Verify your email address",
       html,
     });
+    console.log(
+      `[EMAIL][verify] sent ok messageId=${info.messageId} to=${user.email}`
+    );
   } catch (error: unknown) {
-    console.error("[EMAIL] Failed to send verification email:", error);
+    console.error(`[EMAIL][verify] FAIL to=${user.email}:`, error);
     const message = error instanceof Error ? error.message : String(error);
     throw new Error(`Email delivery failed: ${message}`);
   }
-
-  console.log(`[EMAIL] Verification email sent to ${user.email}`);
 }
 
 // ─── Admin Approval Request Email ───────────────────────────────────
@@ -200,21 +202,23 @@ export async function sendAdminApprovalRequestEmail({
   });
 
   try {
-    await getTransporter().sendMail({
+    const info = await getTransporter().sendMail({
       from: fromAddress,
       to: adminEmails.join(", "),
       subject: "New DOX signup pending approval",
       html,
     });
+    console.log(
+      `[EMAIL][admin-approval] sent ok messageId=${info.messageId} to=${adminEmails.length}admin(s)`
+    );
   } catch (error: unknown) {
-    console.error("[EMAIL] Failed to send admin approval request:", error);
+    console.error(
+      `[EMAIL][admin-approval] FAIL to=${adminEmails.length}admin(s):`,
+      error
+    );
     const message = error instanceof Error ? error.message : String(error);
     throw new Error(`Email delivery failed: ${message}`);
   }
-
-  console.log(
-    `[EMAIL] Admin approval request sent to ${adminEmails.length} admin(s)`
-  );
 }
 
 // ─── Approval Notification (to the approved user) ───────────────────
@@ -240,17 +244,18 @@ export async function sendApprovalNotificationEmail({
   });
 
   try {
-    await getTransporter().sendMail({
+    const info = await getTransporter().sendMail({
       from: fromAddress,
       to: user.email,
       subject: "Your DOX account has been approved",
       html,
     });
+    console.log(
+      `[EMAIL][user-approved] sent ok messageId=${info.messageId} to=${user.email}`
+    );
   } catch (error: unknown) {
-    console.error("[EMAIL] Failed to send approval notification:", error);
+    console.error(`[EMAIL][user-approved] FAIL to=${user.email}:`, error);
     const message = error instanceof Error ? error.message : String(error);
     throw new Error(`Email delivery failed: ${message}`);
   }
-
-  console.log(`[EMAIL] Approval notification sent to ${user.email}`);
 }

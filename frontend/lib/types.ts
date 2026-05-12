@@ -44,6 +44,7 @@ export type BrokerDealerListItem = {
   latest_excess_net_capital: number | null;
   latest_total_assets: number | null;
   yoy_growth: number | null;
+  three_year_cagr: number | null;
   health_status: string | null;
   is_deficient: boolean;
   latest_deficiency_filed_at: string | null;
@@ -519,6 +520,21 @@ export type OutreachDraftRequest = {
 export type OutreachDraft = {
   subject: string;
   body: string;
+};
+
+export type OutreachSendRequest = {
+  broker_dealer_id: number;
+  contact_id: number;
+  folder_id: number;
+  subject: string;
+  body: string;
+};
+
+export type OutreachSendResponse = {
+  id: number;
+  gmail_message_id: string;
+  sent_at: string;
+  status: string;
 };
 
 // ── Investment Advisor (Form ADV / 13F filer) types ──

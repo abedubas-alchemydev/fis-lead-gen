@@ -42,3 +42,8 @@ email-verification-diagnosis.md
 .npm-cache/
 .tmp/
 logs/
+
+# Local dev-server output captured by `npm run dev` redirection
+# (e.g. `npm run dev > frontend-dev.out.log 2> frontend-dev.err.log`).
+# These leak per-developer machine paths into the repo if committed.
+frontend-dev.*.log

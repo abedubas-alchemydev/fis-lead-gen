@@ -118,10 +118,135 @@ class GateDecision:
     to_skip: tuple[str, ...]
 
 
+def gap_report_for(
+    broker_dealer: BrokerDealer,
+    has_contacts: bool,
+    *,
+    aggressive: bool = False,
+) -> dict[str, list[str]]:
+    """For each sub-pipeline, return the list of BD column names that
+    currently have a gap. Non-empty list = the pipeline should fire.
+
+    The bulk gap-fill script (``scripts/gap_fill_broker_dealers.py``)
+    uses this in its pre-flight scan to produce the per-column summary
+    table without firing any pipelines. ``decide_pipelines`` consumes
+    the same report so the gating logic stays single-source-of-truth.
+
+    With ``aggressive=False`` (default), only the legacy strict
+    ``IS NULL`` predicates are applied — preserves backward compat for
+    the per-firm refresh-all endpoint.
+
+    With ``aggressive=True``, additional predicates catch sentinel
+    values (e.g. ``current_clearing_type='unknown'``,
+    ``clearing_classification='needs_review'``) and detail-page-only
+    fields that the strict predicates skip. Used by the bulk gap-fill
+    script to surface and retry rows that the original extraction
+    flagged as "couldn't decide" but never re-attempted.
+    """
+    report: dict[str, list[str]] = {
+        SUB_REFRESH_FINANCIALS: [],
+        SUB_RESOLVE_WEBSITE: [],
+        SUB_HEALTH_CHECK: [],
+        SUB_REFRESH_CLEARING: [],
+        SUB_ENRICH: [],
+        SUB_REFRESH_FILINGS: [],
+    }
+
+    # ── refresh-financials ──
+    if broker_dealer.latest_net_capital is None:
+        report[SUB_REFRESH_FINANCIALS].append("latest_net_capital")
+    if broker_dealer.yoy_growth is None:
+        report[SUB_REFRESH_FINANCIALS].append("yoy_growth")
+    if broker_dealer.health_status is None:
+        report[SUB_REFRESH_FINANCIALS].append("health_status")
+    if aggressive:
+        if broker_dealer.latest_excess_net_capital is None:
+            report[SUB_REFRESH_FINANCIALS].append("latest_excess_net_capital")
+        if broker_dealer.three_year_cagr is None:
+            report[SUB_REFRESH_FINANCIALS].append("three_year_cagr")
+        if broker_dealer.total_assets_yoy is None:
+            report[SUB_REFRESH_FINANCIALS].append("total_assets_yoy")
+        # latest_total_assets + required_min_capital are filled by the
+        # same refresh-financials pass as a side-effect (rolled up from
+        # financial_metrics rows). Gate on them too so a BD whose other
+        # financials are filled but these two are NULL still re-fires.
+        if broker_dealer.latest_total_assets is None:
+            report[SUB_REFRESH_FINANCIALS].append("latest_total_assets")
+        if broker_dealer.required_min_capital is None:
+            report[SUB_REFRESH_FINANCIALS].append("required_min_capital")
+
+    # ── resolve-website ──
+    if not broker_dealer.website:
+        report[SUB_RESOLVE_WEBSITE].append("website")
+
+    # ── health-check (FINRA Form BD enrichment) ──
+    # Strict predicate (paired in the FINRA parse): registration_date +
+    # formation_date.
+    if broker_dealer.registration_date is None:
+        report[SUB_HEALTH_CHECK].append("registration_date")
+    if broker_dealer.formation_date is None:
+        report[SUB_HEALTH_CHECK].append("formation_date")
+    if aggressive:
+        # Detail-page fields filled by the same FINRA parse. If
+        # registration_date is set but these are missing, the strict gate
+        # won't fire and the detail page stays sparse.
+        if broker_dealer.dba_names is None:
+            report[SUB_HEALTH_CHECK].append("dba_names")
+        if broker_dealer.types_of_business is None:
+            report[SUB_HEALTH_CHECK].append("types_of_business")
+        if broker_dealer.direct_owners is None:
+            report[SUB_HEALTH_CHECK].append("direct_owners")
+        if broker_dealer.executive_officers is None:
+            report[SUB_HEALTH_CHECK].append("executive_officers")
+        if broker_dealer.firm_operations_text is None:
+            report[SUB_HEALTH_CHECK].append("firm_operations_text")
+        if broker_dealer.city is None:
+            report[SUB_HEALTH_CHECK].append("city")
+        if broker_dealer.state is None:
+            report[SUB_HEALTH_CHECK].append("state")
+        if broker_dealer.branch_count is None:
+            report[SUB_HEALTH_CHECK].append("branch_count")
+
+    # ── refresh-clearing (X-17A-5 PDF + Gemini) ──
+    if broker_dealer.current_clearing_partner is None:
+        report[SUB_REFRESH_CLEARING].append("current_clearing_partner")
+    if broker_dealer.current_clearing_type is None:
+        report[SUB_REFRESH_CLEARING].append("current_clearing_type")
+    if aggressive:
+        # Sentinel re-fire: rows the original extraction couldn't decide.
+        # ``unknown`` is the LLM's "I saw a doc but it doesn't say who clears";
+        # ``needs_review`` is the classifier's same verdict on the rollup.
+        # PR #409 (resolver fix) likely changes the outcome for many of these.
+        if broker_dealer.current_clearing_type == "unknown":
+            report[SUB_REFRESH_CLEARING].append("current_clearing_type=unknown")
+        if broker_dealer.clearing_classification in (None, "needs_review"):
+            report[SUB_REFRESH_CLEARING].append("clearing_classification")
+        # Note: clearing_raw_text was previously gated here but no service
+        # in the codebase writes to it -- it's a vestigial column the FE
+        # renders conditionally on the detail page (amber "raw clearing
+        # text" callout when classification is NULL/unknown). Gating on
+        # it IS NULL meant the clearing pipeline re-fired on every BD
+        # forever, wasting Gemini calls. The clearing_classification
+        # check above already covers the "uncertain" case meaningfully.
+
+    # ── enrich (executive_contacts) ──
+    if not has_contacts:
+        report[SUB_ENRICH].append("executive_contacts")
+
+    # ── filings (EDGAR) ──
+    # No CIK → no way to query EDGAR. Don't open the gate.
+    if bool(broker_dealer.cik) and broker_dealer.last_filing_date is None:
+        report[SUB_REFRESH_FILINGS].append("last_filing_date")
+
+    return report
+
+
 def decide_pipelines(
     broker_dealer: BrokerDealer,
     has_contacts: bool,
     scope: RefreshScope = "all",
+    *,
+    aggressive: bool = False,
 ) -> GateDecision:
     """Inspect the BD and return the (run, skip) split.
 
@@ -135,62 +260,46 @@ def decide_pipelines(
     column on the master-list grid. The other three sub-pipelines are
     evaluated normally — i.e. still skipped if their target fields are
     already set — so we never overwrite present data.
+
+    ``aggressive=True`` widens each gate to catch sentinel values
+    (``'unknown'`` / ``'needs_review'``) and detail-page-only fields.
+    Off by default to preserve the per-firm refresh-all endpoint's
+    legacy behavior; the bulk gap-fill script passes ``True``.
     """
+    report = gap_report_for(
+        broker_dealer, has_contacts, aggressive=aggressive
+    )
+
     to_run: list[str] = []
     to_skip: list[str] = []
 
-    needs_financials = (
-        broker_dealer.latest_net_capital is None
-        or broker_dealer.yoy_growth is None
-        or broker_dealer.health_status is None
+    (to_run if report[SUB_REFRESH_FINANCIALS] else to_skip).append(
+        SUB_REFRESH_FINANCIALS
     )
-    (to_run if needs_financials else to_skip).append(SUB_REFRESH_FINANCIALS)
 
-    needs_website = not broker_dealer.website
     if scope == "list_only":
         # Force-skip — website is not a list-view field.
         to_skip.append(SUB_RESOLVE_WEBSITE)
     else:
-        (to_run if needs_website else to_skip).append(SUB_RESOLVE_WEBSITE)
+        (to_run if report[SUB_RESOLVE_WEBSITE] else to_skip).append(
+            SUB_RESOLVE_WEBSITE
+        )
 
-    # health-check is the catch-all for FINRA Form BD-derived fields that
-    # are still missing. Cost is bounded — health-check is FINRA-only (no
-    # LLM), so a perpetual fire on a firm whose Form BD genuinely doesn't
-    # disclose one of these fields is cheap noise, not a money sink. The
-    # trade favors completeness over idempotency.
-    #
-    # Note: this gate previously included current_clearing_partner /
-    # current_clearing_type, but health-check doesn't actually fill those
-    # fields (only FINRA-side fields). Clearing extraction now has its
-    # own SUB_REFRESH_CLEARING sub-pipeline below.
-    needs_health = (
-        broker_dealer.registration_date is None
-        or broker_dealer.formation_date is None
+    (to_run if report[SUB_HEALTH_CHECK] else to_skip).append(SUB_HEALTH_CHECK)
+
+    (to_run if report[SUB_REFRESH_CLEARING] else to_skip).append(
+        SUB_REFRESH_CLEARING
     )
-    (to_run if needs_health else to_skip).append(SUB_HEALTH_CHECK)
 
-    # Clearing extraction (X-17A-5 PDF + Gemini → clearing_partner /
-    # clearing_type + clearing_arrangements row). Closes the long-standing
-    # gap where decide_pipelines gated on these fields but no sub-pipeline
-    # actually filled them — they were being filled only by the standalone
-    # scripts/run_clearing_pipeline.py batch script.
-    needs_clearing = (
-        broker_dealer.current_clearing_partner is None
-        or broker_dealer.current_clearing_type is None
-    )
-    (to_run if needs_clearing else to_skip).append(SUB_REFRESH_CLEARING)
-
-    needs_contacts = not has_contacts
     if scope == "list_only":
         # Force-skip — contacts are detail-page only.
         to_skip.append(SUB_ENRICH)
     else:
-        (to_run if needs_contacts else to_skip).append(SUB_ENRICH)
+        (to_run if report[SUB_ENRICH] else to_skip).append(SUB_ENRICH)
 
-    # Filings: open if the BD has a CIK we can re-query AND last_filing_date
-    # is missing. No CIK means we have no way to ask EDGAR — treat as skip.
-    needs_filings = bool(broker_dealer.cik) and broker_dealer.last_filing_date is None
-    (to_run if needs_filings else to_skip).append(SUB_REFRESH_FILINGS)
+    (to_run if report[SUB_REFRESH_FILINGS] else to_skip).append(
+        SUB_REFRESH_FILINGS
+    )
 
     return GateDecision(to_run=tuple(to_run), to_skip=tuple(to_skip))
 

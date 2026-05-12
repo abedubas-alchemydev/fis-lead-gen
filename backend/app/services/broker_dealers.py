@@ -57,6 +57,7 @@ ALLOWED_SORT_FIELDS = {
     "branch_count": BrokerDealer.branch_count,
     "latest_net_capital": BrokerDealer.latest_net_capital,
     "yoy_growth": BrokerDealer.yoy_growth,
+    "three_year_cagr": BrokerDealer.three_year_cagr,
     "health_status": BrokerDealer.health_status,
     "lead_score": BrokerDealer.lead_score,
     "lead_priority": BrokerDealer.lead_priority,

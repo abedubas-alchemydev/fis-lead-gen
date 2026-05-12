@@ -14,6 +14,7 @@ import { TopProspectsCard } from "@/components/dashboard/top-prospects-card";
 import { TopActions } from "@/components/layout/top-actions";
 import { apiRequest } from "@/lib/api";
 import type { AlertListItem, AlertListResponse, ClearingDistributionResponse, DashboardStats } from "@/lib/types";
+import { useAlertsStream } from "@/lib/use-alerts-stream";
 
 // ─── KPI icons — verbatim SVG paths from dashboard-redesign.html ──────────
 
@@ -176,6 +177,23 @@ export function DashboardHomeClient() {
       active = false;
     };
   }, [alertsReloadKey]);
+
+  // Real-time inserts from /api/v1/alerts/stream. The backend hydrates new
+  // alerts through the same projection as REST, so we splice them onto the
+  // front of the list and cap at 6 to mirror the existing ?limit=6 contract.
+  // De-duplication by id keeps reconnect-replay events idempotent against
+  // anything already on screen.
+  const handleAlertInsert = useCallback((incoming: AlertListItem[]) => {
+    setAlerts((current) => {
+      const seen = new Set(current.map((alert) => alert.id));
+      const fresh = incoming.filter((alert) => !seen.has(alert.id));
+      if (fresh.length === 0) {
+        return current;
+      }
+      return [...fresh, ...current].slice(0, 6);
+    });
+  }, []);
+  useAlertsStream(handleAlertInsert, !alertsLoadError);
 
   return (
     // App shell <main> owns the canvas bg. Typography is now applied at

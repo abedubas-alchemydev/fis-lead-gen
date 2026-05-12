@@ -55,6 +55,7 @@ from app.services.extraction_status import (
     STATUS_PARSED,
     STATUS_PENDING,
     STATUS_PIPELINE_ERROR,
+    STATUS_NETWORK_ERROR,
     STATUS_PROVIDER_ERROR,
 )
 
@@ -242,7 +243,12 @@ def derive_clearing_unknown_reason(
             extracted_at=extracted_at,
             confidence=confidence,
         )
-    if status == STATUS_PIPELINE_ERROR:
+    if status in (STATUS_PIPELINE_ERROR, STATUS_NETWORK_ERROR):
+        # Both surface as "pdf_unparseable" in the FE today — they're both
+        # "the extraction couldn't get to a parsed result" states from a
+        # user perspective. The distinction matters internally (network
+        # errors auto-retry past cooldown; pipeline errors don't) but the
+        # tooltip copy is the same.
         return UnknownReasonResult(
             category="pdf_unparseable",
             note=notes,
@@ -327,7 +333,7 @@ def derive_financial_unknown_reason(
             ca_status = clearing_arrangement.extraction_status
             if ca_status == STATUS_MISSING_PDF:
                 return UnknownReasonResult(category="no_filing_available")
-            if ca_status == STATUS_PIPELINE_ERROR:
+            if ca_status in (STATUS_PIPELINE_ERROR, STATUS_NETWORK_ERROR):
                 return UnknownReasonResult(category="pdf_unparseable")
             if ca_status == STATUS_PROVIDER_ERROR:
                 return UnknownReasonResult(category="provider_error")
@@ -348,7 +354,7 @@ def derive_financial_unknown_reason(
         return None
     if status == STATUS_PROVIDER_ERROR:
         return UnknownReasonResult(category="provider_error")
-    if status == STATUS_PIPELINE_ERROR:
+    if status in (STATUS_PIPELINE_ERROR, STATUS_NETWORK_ERROR):
         return UnknownReasonResult(category="pdf_unparseable")
     if status == STATUS_MISSING_PDF:
         return UnknownReasonResult(category="no_filing_available")

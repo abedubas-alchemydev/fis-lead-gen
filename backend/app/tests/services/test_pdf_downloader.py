@@ -17,6 +17,7 @@ from app.core.config import settings
 from app.services.pdf_downloader import (
     PdfDownloaderService,
     _StreamingPdfTooLargeError,
+    _score_pdf_candidate,
     _validate_sec_url,
     pdf_tempdir,
 )
@@ -732,4 +733,270 @@ class TestDownloadFilingPdfFlagBranching:
         # PDF was actually written to disk by the streaming path.
         assert Path(record.local_document_path).exists()
         assert Path(record.local_document_path).read_bytes() == b"%PDF-1.7 streamed-flag-on"
+
+
+# ─────────────────── PDF resolver scoring (multi-document filings) ─────────────
+
+
+class TestScorePdfCandidate:
+    """Pure unit tests for the filename scorer. No HTTP, no mocks — just
+    confirm the priority order picks the right file out of a multi-doc
+    X-17A-5 package.
+
+    Locks in the contract that Tier 1 (financial-statement marker, no
+    non-financial marker) beats every other tier, and that Tier 2
+    (penalize Compliance / Exemption / Cover) demotes the documents that
+    crowded out SOFC in the prior ``audit OR report`` heuristic.
+    """
+
+    def test_sofc_beats_compliance_when_primary_is_cover(self) -> None:
+        """Morgan Stanley shape: primary_document=Cover.pdf, the right
+        answer is MSSOFC.pdf, not the compliance report."""
+        primary = "Cover.pdf"
+        names = ["Cover.pdf", "MSSOFC.pdf", "MSSOCOMP.pdf", "MSSOEXEMP.pdf"]
+        ranked = sorted(names, key=lambda n: _score_pdf_candidate(n, primary))
+        assert ranked[0] == "MSSOFC.pdf"
+
+    def test_sofc_beats_compliance_when_primary_is_sofc(self) -> None:
+        """Sanity: when EDGAR correctly marks the SOFC as primary, SOFC
+        still wins — Tier 1 fires regardless of primary_document."""
+        primary = "MSSOFC.pdf"
+        names = ["Cover.pdf", "MSSOFC.pdf", "MSSOCOMP.pdf"]
+        ranked = sorted(names, key=lambda n: _score_pdf_candidate(n, primary))
+        assert ranked[0] == "MSSOFC.pdf"
+
+    def test_long_form_statement_filename(self) -> None:
+        """Long-form filename: 'StatementOfFinancialCondition.pdf' must
+        score as financial — the marker list covers both the SOFC stem
+        and the spelled-out variant."""
+        primary = "Cover.pdf"
+        names = [
+            "Cover.pdf",
+            "StatementOfFinancialCondition.pdf",
+            "ComplianceReport.pdf",
+        ]
+        ranked = sorted(names, key=lambda n: _score_pdf_candidate(n, primary))
+        assert ranked[0] == "StatementOfFinancialCondition.pdf"
+
+    def test_compliance_demoted_below_neutral_filename(self) -> None:
+        """Tier 2 penalty: a neutral filename (no markers either way)
+        beats a compliance-marked one even though neither has a SOFC
+        marker."""
+        primary = "ComplianceReport.pdf"
+        names = ["ComplianceReport.pdf", "filing.pdf"]
+        ranked = sorted(names, key=lambda n: _score_pdf_candidate(n, primary))
+        assert ranked[0] == "filing.pdf"
+
+    def test_all_non_financial_picks_via_tiebreaker(self) -> None:
+        """Degenerate filing: every PDF in the package is non-financial.
+        Resolver still has to pick one (something is better than nothing).
+        With all candidates tied on Tier 1 + 2, the primary_document
+        tiebreaker (Tier 5) decides."""
+        primary = "Cover.pdf"
+        names = ["ExemptionReport.pdf", "Cover.pdf", "ComplianceReport.pdf"]
+        ranked = sorted(names, key=lambda n: _score_pdf_candidate(n, primary))
+        assert ranked[0] == "Cover.pdf"
+
+    def test_primary_document_tiebreaker_when_no_markers(self) -> None:
+        """When no filename carries any marker either way, primary_document
+        still wins via Tier 5. Preserves the prior heuristic's good case so
+        well-marked single-doc filings aren't disturbed."""
+        primary = "filing.pdf"
+        names = ["filing.pdf", "appendix.pdf"]
+        ranked = sorted(names, key=lambda n: _score_pdf_candidate(n, primary))
+        assert ranked[0] == "filing.pdf"
+
+
+class TestResolvePdfUrlMultiDoc:
+    """End-to-end resolver test against mocked SEC index.json payloads.
+    Covers the regression Morgan Stanley & Co. LLC tripped: a 4-document
+    X-17A-5 package whose EDGAR ``primary_document`` was a Cover Letter,
+    so the old ``name == primary_document`` Tier 1 picked the wrong PDF
+    and Gemini received the Compliance Report instead of the Statement
+    of Financial Condition.
+    """
+
+    @respx.mock
+    @pytest.mark.asyncio
+    async def test_multi_doc_filing_picks_sofc(self) -> None:
+        respx.get(_SEC_INDEX_URL).mock(
+            return_value=httpx.Response(
+                200,
+                json={
+                    "directory": {
+                        "item": [
+                            {"name": "Cover.pdf"},
+                            {"name": "MSSOFC.pdf"},
+                            {"name": "MSSOCOMP.pdf"},
+                            {"name": "MSSOEXEMP.pdf"},
+                        ]
+                    }
+                },
+            )
+        )
+        downloader = PdfDownloaderService()
+        url = await downloader._resolve_pdf_url(
+            cik="0001234567",
+            accession_number="0001234567-25-000001",
+            primary_document="Cover.pdf",
+        )
+        assert url is not None
+        assert url.endswith("/MSSOFC.pdf")
+
+    @respx.mock
+    @pytest.mark.asyncio
+    async def test_single_pdf_filing_unchanged(self) -> None:
+        """Happy-path regression: single-PDF filing still returns that PDF.
+        Mirrors the existing TestDownloadFilingPdfWritesToDestDir contract
+        directly against ``_resolve_pdf_url``."""
+        respx.get(_SEC_INDEX_URL).mock(
+            return_value=httpx.Response(
+                200,
+                json={"directory": {"item": [{"name": "primary.pdf"}]}},
+            )
+        )
+        downloader = PdfDownloaderService()
+        url = await downloader._resolve_pdf_url(
+            cik="0001234567",
+            accession_number="0001234567-25-000001",
+            primary_document="primary.pdf",
+        )
+        assert url is not None
+        assert url.endswith("/primary.pdf")
+
+    @respx.mock
+    @pytest.mark.asyncio
+    async def test_dedupes_same_day_filings(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Morgan Stanley files two X-17A-5 accessions on the same day
+        each February — one carrying the audited financials, the other a
+        paired compliance filing. Without dedup, count=3 burned two of
+        its three slots on the same fiscal year, leaving three_year_cagr
+        NULL on the BD rollup. This test pins the fix: with two pairs of
+        same-day filings and count=3, the downloader must call
+        ``_download_filing_pdf`` exactly 3 times across 3 distinct
+        filing_dates."""
+        from app.models.broker_dealer import BrokerDealer
+        from app.services import pdf_downloader as pdf_downloader_module
+
+        # Submissions JSON with 5 X-17A-5 filings: 2 pairs of same-day
+        # duplicates (2026-02-25, 2024-02-26) + 1 standalone (2023-02-24).
+        # After dedup: 3 unique dates. With count=3 we should see one
+        # filing per unique date.
+        submissions_url = "https://data.sec.gov/submissions/CIK0001234567.json"
+        respx.get(submissions_url).mock(
+            return_value=httpx.Response(
+                200,
+                json={
+                    "filings": {
+                        "recent": {
+                            "form": [
+                                "X-17A-5",
+                                "X-17A-5",
+                                "X-17A-5",
+                                "X-17A-5",
+                                "X-17A-5",
+                            ],
+                            "accessionNumber": [
+                                "0001193125-26-072515",
+                                "0001193125-26-072285",  # same-day pair (1)
+                                "0001193125-25-036839",
+                                "0001193125-24-046487",
+                                "0001193125-24-046488",  # same-day pair (2)
+                            ],
+                            "primaryDocument": [
+                                "primary.pdf",
+                                "primary.pdf",
+                                "primary.pdf",
+                                "primary.pdf",
+                                "primary.pdf",
+                            ],
+                            "filingDate": [
+                                "2026-02-25",  # pair 1
+                                "2026-02-25",  # pair 1 — duplicate
+                                "2025-02-26",
+                                "2024-02-26",  # pair 2
+                                "2024-02-26",  # pair 2 — duplicate
+                            ],
+                        }
+                    }
+                },
+            )
+        )
+
+        seen_filings: list[dict[str, object]] = []
+
+        async def _fake_download(
+            _self: object,
+            broker_dealer: BrokerDealer,
+            filing: dict[str, object],
+            dest_dir: Path,
+        ) -> None:
+            seen_filings.append(filing)
+            return None  # Skip the actual PDF download; we only care which
+            # filings get dispatched.
+
+        monkeypatch.setattr(
+            pdf_downloader_module.PdfDownloaderService,
+            "_download_filing_pdf",
+            _fake_download,
+        )
+
+        bd = BrokerDealer()
+        bd.id = 1
+        bd.cik = "0001234567"
+        bd.filings_index_url = submissions_url
+
+        downloader = PdfDownloaderService()
+        await downloader.download_recent_x17a5_pdfs(bd, tmp_path, count=3)
+
+        # The dedup must have collapsed each same-day pair to one filing
+        # AND we must have reached the standalone 2025-02-26 + the older
+        # 2024-02-26 — exactly 3 distinct filing_dates.
+        assert len(seen_filings) == 3, (
+            f"expected 3 filings dispatched (1 per unique filing_date), "
+            f"got {len(seen_filings)}: {[f['filing_date'] for f in seen_filings]}"
+        )
+        seen_dates = [f["filing_date"] for f in seen_filings]
+        assert seen_dates == ["2026-02-25", "2025-02-26", "2024-02-26"], (
+            f"unexpected filing_date order/values: {seen_dates}"
+        )
+        # First-appearance wins for each same-day pair (the accession
+        # that EDGAR listed first in the submissions JSON).
+        assert seen_filings[0]["accession_number"] == "0001193125-26-072515"
+        assert seen_filings[2]["accession_number"] == "0001193125-24-046487"
+
+    @respx.mock
+    @pytest.mark.asyncio
+    async def test_index_with_only_non_financial_docs_still_returns_something(
+        self,
+    ) -> None:
+        """Degenerate filing where every PDF is non-financial: resolver
+        must still return a URL (don't drop the filing on the floor).
+        Downstream extractors decide whether to flag the result
+        ``needs_review``."""
+        respx.get(_SEC_INDEX_URL).mock(
+            return_value=httpx.Response(
+                200,
+                json={
+                    "directory": {
+                        "item": [
+                            {"name": "MSSOCOMP.pdf"},
+                            {"name": "MSSOEXEMP.pdf"},
+                        ]
+                    }
+                },
+            )
+        )
+        downloader = PdfDownloaderService()
+        url = await downloader._resolve_pdf_url(
+            cik="0001234567",
+            accession_number="0001234567-25-000001",
+            primary_document="MSSOCOMP.pdf",
+        )
+        assert url is not None
+        # Both candidates carry non-fin markers; Tier 5 (primary_document)
+        # breaks the tie → MSSOCOMP wins.
+        assert url.endswith("/MSSOCOMP.pdf")
 

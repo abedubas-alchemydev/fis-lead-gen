@@ -20,7 +20,11 @@ from datetime import date
 from decimal import Decimal
 
 from app.models.financial_metric import FinancialMetric
-from app.services.scoring import calculate_total_assets_yoy, calculate_yoy_growth
+from app.services.scoring import (
+    calculate_three_year_cagr,
+    calculate_total_assets_yoy,
+    calculate_yoy_growth,
+)
 
 
 def _metric(
@@ -132,3 +136,99 @@ def test_yoy_growth_uses_net_capital_not_total_assets() -> None:
 def test_yoy_growth_returns_none_when_fewer_than_two_metrics() -> None:
     metrics = [_metric(report_date=date(2025, 12, 31))]
     assert calculate_yoy_growth(metrics) is None
+
+
+# ── calculate_three_year_cagr ──
+
+
+def test_three_year_cagr_three_metrics_returns_annualised_percentage() -> None:
+    """Locks the contract: CAGR uses latest + oldest of the three most-recent
+    metrics, annualised across two compounding periods."""
+    metrics = [
+        _metric(report_date=date(2023, 12, 31), net_capital="100000.00"),
+        _metric(report_date=date(2024, 12, 31), net_capital="120000.00"),
+        _metric(report_date=date(2025, 12, 31), net_capital="144000.00"),
+    ]
+    # latest=144000, oldest=100000  ->  (144000/100000)^(1/2) - 1 = 0.20 -> 20.0%
+    assert calculate_three_year_cagr(metrics) == 20.0
+
+
+def test_three_year_cagr_orders_by_report_date_descending() -> None:
+    """Input order must not matter; the function sorts internally."""
+    metrics = [
+        _metric(report_date=date(2024, 12, 31), net_capital="120000.00"),
+        _metric(report_date=date(2025, 12, 31), net_capital="144000.00"),
+        _metric(report_date=date(2023, 12, 31), net_capital="100000.00"),
+    ]
+    assert calculate_three_year_cagr(metrics) == 20.0
+
+
+def test_three_year_cagr_uses_oldest_of_top_three_when_more_provided() -> None:
+    """When 4+ metrics exist, only the latest 3 (by report_date) are used.
+    The oldest of those 3 is the denominator, not the absolute oldest."""
+    metrics = [
+        _metric(report_date=date(2021, 12, 31), net_capital="50000.00"),   # ignored
+        _metric(report_date=date(2022, 12, 31), net_capital="50000.00"),   # ignored
+        _metric(report_date=date(2023, 12, 31), net_capital="100000.00"),  # oldest of top-3
+        _metric(report_date=date(2024, 12, 31), net_capital="120000.00"),
+        _metric(report_date=date(2025, 12, 31), net_capital="144000.00"),  # latest
+    ]
+    assert calculate_three_year_cagr(metrics) == 20.0
+
+
+def test_three_year_cagr_returns_none_when_fewer_than_three_metrics() -> None:
+    """Fail-closed when history is sparse — column stays NULL on the master
+    list rather than reporting a noisy growth number from too few periods."""
+    metrics = [
+        _metric(report_date=date(2024, 12, 31), net_capital="100000.00"),
+        _metric(report_date=date(2025, 12, 31), net_capital="120000.00"),
+    ]
+    assert calculate_three_year_cagr(metrics) is None
+
+
+def test_three_year_cagr_returns_none_on_empty_metrics() -> None:
+    assert calculate_three_year_cagr([]) is None
+
+
+def test_three_year_cagr_returns_none_when_oldest_is_zero() -> None:
+    """Avoid ZeroDivisionError. Growth from a zero base is undefined."""
+    metrics = [
+        _metric(report_date=date(2023, 12, 31), net_capital="0.00"),
+        _metric(report_date=date(2024, 12, 31), net_capital="50000.00"),
+        _metric(report_date=date(2025, 12, 31), net_capital="100000.00"),
+    ]
+    assert calculate_three_year_cagr(metrics) is None
+
+
+def test_three_year_cagr_returns_none_when_oldest_is_negative() -> None:
+    """net_capital is normally positive; a negative base would invert the
+    growth sign and round-trip through ``** (1/2)`` in surprising ways.
+    Treat as undefined."""
+    metrics = [
+        _metric(report_date=date(2023, 12, 31), net_capital="-1000.00"),
+        _metric(report_date=date(2024, 12, 31), net_capital="50000.00"),
+        _metric(report_date=date(2025, 12, 31), net_capital="100000.00"),
+    ]
+    assert calculate_three_year_cagr(metrics) is None
+
+
+def test_three_year_cagr_negative_growth() -> None:
+    """Negative CAGR is legitimate and returned as-is."""
+    metrics = [
+        _metric(report_date=date(2023, 12, 31), net_capital="100000.00"),
+        _metric(report_date=date(2024, 12, 31), net_capital="80000.00"),
+        _metric(report_date=date(2025, 12, 31), net_capital="64000.00"),
+    ]
+    # (64000/100000)^(1/2) - 1 = 0.8 - 1 = -0.20 -> -20.0%
+    assert calculate_three_year_cagr(metrics) == -20.0
+
+
+def test_three_year_cagr_uses_net_capital_not_total_assets() -> None:
+    """Like calculate_yoy_growth, the CAGR helper reads net_capital, not
+    total_assets. total_assets has its own helper if/when added."""
+    metrics = [
+        _metric(report_date=date(2023, 12, 31), net_capital="100000.00", total_assets="999999.00"),
+        _metric(report_date=date(2024, 12, 31), net_capital="120000.00", total_assets="111111.00"),
+        _metric(report_date=date(2025, 12, 31), net_capital="144000.00", total_assets="11111.00"),
+    ]
+    assert calculate_three_year_cagr(metrics) == 20.0

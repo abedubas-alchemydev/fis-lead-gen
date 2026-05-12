@@ -22,6 +22,7 @@ from app.schemas.pipeline import (
     WipeBdDataRequest,
     WipeBdDataResponse,
 )
+from app.api.v1.endpoints.broker_dealers import schedule_auto_refresh_financials_batch
 from app.services.auth import _ensure_admin_or_scheduler_sa, get_current_user
 from app.services.broker_dealers import BrokerDealerRepository
 from app.services.investment_advisors import InvestmentAdvisorRepository
@@ -283,6 +284,7 @@ async def list_competitors(
 
 @scheduled_router.post("/filing-monitor", response_model=PipelineTriggerResponse)
 async def run_filing_monitor(
+    background_tasks: BackgroundTasks,
     caller: str = Depends(_ensure_admin_or_scheduler_sa),
     db: AsyncSession = Depends(get_db_session),
 ) -> PipelineTriggerResponse:
@@ -292,8 +294,23 @@ async def run_filing_monitor(
     request timeout. The handler awaits :class:`FilingMonitorService.run`
     and returns the completed PipelineRun shape so Cloud Scheduler logs the
     final outcome alongside the 200.
+
+    After the monitor commits, any newly-inserted X-17A-5 alerts whose firm
+    is "watched" (favorited by any user OR ``lead_priority='hot'``) get
+    a per-firm financial re-extraction queued as BackgroundTasks. The
+    extractions run after this response returns; their PipelineRuns are
+    visible in the existing pipelines admin UI tagged
+    ``trigger_source="auto:filing_monitor:<this run id>"``.
     """
-    run = await filing_monitor_service.run(db, trigger_source=f"scheduled:{caller}")
+    run, auto_extract_bd_ids = await filing_monitor_service.run(
+        db, trigger_source=f"scheduled:{caller}"
+    )
+    await schedule_auto_refresh_financials_batch(
+        db,
+        background_tasks,
+        auto_extract_bd_ids,
+        trigger_source=f"auto:filing_monitor:{run.id}",
+    )
     return _trigger_response(run)
 
 

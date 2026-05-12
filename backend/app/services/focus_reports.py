@@ -21,6 +21,8 @@ from app.services.extraction_status import (
     STATUS_NEEDS_REVIEW,
     STATUS_PARSED,
     classify_financial_extraction_status,
+    is_plausible_net_capital_scale,
+    is_plausible_report_date,
 )
 from app.services.gemini_responses import (
     GeminiConfigurationError,
@@ -30,6 +32,7 @@ from app.services.gemini_responses import (
 from app.services.pdf_downloader import PdfDownloaderService, pdf_tempdir
 from app.services.scoring import (
     calculate_total_assets_yoy,
+    calculate_three_year_cagr,
     calculate_yoy_growth,
     classify_health_status,
 )
@@ -548,10 +551,15 @@ class FocusReportService:
             # Gemini calls don't depend on the file persisting on disk past
             # the ``with`` exit.
             with pdf_tempdir(prefix="financial_extract_") as tmp_dir:
-                # Download the 2 most recent X-17A-5 PDFs for multi-year data
+                # Download the 3 most recent X-17A-5 PDFs. Post-2023 amendments
+                # to Rule 17a-5 mean the audited report is commonly filed as a
+                # single-year Statement of Financial Condition (e.g. Nomura's
+                # NSISOFC0324.pdf), so 2 filings can yield only 2 unique
+                # fiscal years and starve the 3-Yr CAGR rollup
+                # (services/scoring.py::calculate_three_year_cagr).
                 try:
                     pdf_records = await self.downloader.download_recent_x17a5_pdfs(
-                        broker_dealer, tmp_dir, count=2
+                        broker_dealer, tmp_dir, count=3
                     )
                 except Exception as exc:
                     logger.warning("PDF download failed for BD %d (%s): %s", broker_dealer.id, broker_dealer.name, exc)
@@ -645,20 +653,50 @@ class FocusReportService:
                             continue
                         seen_dates.add(date_key)
 
-                        # Tag based on LLM confidence (#56 / Fix G). Below-threshold
-                        # rows with a valid net_capital still persist, tagged
-                        # 'needs_review', so the review queue can surface them
-                        # instead of a silent drop. See app.services.extraction_status.
+                        # Tag based on LLM confidence (#56 / Fix G) AND
+                        # cross-field sanity checks:
+                        #   - net_capital scale (issue #398 — RBC,
+                        #     DriveWealth scale-strip).
+                        #   - report_date plausibility (issue #398 —
+                        #     filing-date vs period-end mix-up). A
+                        #     mid-month report_date is almost always a
+                        #     filing-date contamination; legitimate
+                        #     X-17A-5 period-ends fall on a month-end.
+                        # Below-threshold rows still persist tagged
+                        # 'needs_review' so the review queue surfaces
+                        # them instead of a silent drop. See
+                        # app.services.extraction_status.
+                        plausible_leverage = is_plausible_net_capital_scale(
+                            net_capital=(
+                                float(extraction.net_capital)
+                                if extraction.net_capital is not None
+                                else None
+                            ),
+                            total_assets=(
+                                float(extraction.total_assets)
+                                if extraction.total_assets is not None
+                                else None
+                            ),
+                        )
+                        plausible_date = is_plausible_report_date(report_date)
                         extraction_status = classify_financial_extraction_status(
                             confidence_score=extraction.confidence_score,
                             min_confidence=settings.financial_extraction_min_confidence,
+                            is_plausible_leverage=plausible_leverage,
+                            is_plausible_date=plausible_date,
                         )
                         if extraction_status == STATUS_NEEDS_REVIEW:
                             logger.warning(
-                                "Financial extraction BD %s tagged needs_review: confidence=%s below min_confidence=%s",
+                                "Financial extraction BD %s tagged needs_review: "
+                                "confidence=%s min_confidence=%s "
+                                "plausible_leverage=%s plausible_date=%s "
+                                "report_date=%s",
                                 broker_dealer.id,
                                 extraction.confidence_score,
                                 settings.financial_extraction_min_confidence,
+                                plausible_leverage,
+                                plausible_date,
+                                report_date.isoformat(),
                             )
 
                         records.append(
@@ -792,6 +830,7 @@ class FocusReportService:
                 broker_dealer.latest_excess_net_capital = None
                 broker_dealer.latest_total_assets = None
                 broker_dealer.yoy_growth = None
+                broker_dealer.three_year_cagr = None
                 broker_dealer.total_assets_yoy = None
                 broker_dealer.health_status = None
                 continue
@@ -806,6 +845,7 @@ class FocusReportService:
             )
             broker_dealer.latest_total_assets = float(latest.total_assets) if latest.total_assets is not None else None
             broker_dealer.yoy_growth = yoy_growth
+            broker_dealer.three_year_cagr = calculate_three_year_cagr(ordered)
             broker_dealer.total_assets_yoy = calculate_total_assets_yoy(ordered)
             broker_dealer.health_status = classify_health_status(
                 latest_net_capital=float(latest.net_capital),

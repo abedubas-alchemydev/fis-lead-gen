@@ -30,6 +30,7 @@ class BrokerDealer(Base):
     latest_excess_net_capital: Mapped[float | None] = mapped_column(Numeric(18, 2), nullable=True)
     latest_total_assets: Mapped[float | None] = mapped_column(Numeric(18, 2), nullable=True)
     yoy_growth: Mapped[float | None] = mapped_column(Numeric(8, 2), nullable=True)
+    three_year_cagr: Mapped[float | None] = mapped_column(Numeric(8, 2), nullable=True)
     health_status: Mapped[str | None] = mapped_column(String(32), nullable=True)
     is_deficient: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
     latest_deficiency_filed_at: Mapped[date | None] = mapped_column(Date, nullable=True)

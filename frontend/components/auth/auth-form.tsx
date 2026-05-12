@@ -9,6 +9,7 @@ import { Loader2 } from "lucide-react";
 import { Input } from "@/components/ui/input";
 import { Button } from "@/components/ui/button";
 import { PasswordInput } from "@/components/ui/password-input";
+import { GoogleButton } from "@/components/auth/google-button";
 import { authClient } from "@/lib/auth-client";
 
 type AuthFormMode = "login" | "signup";
@@ -66,6 +67,15 @@ export function AuthForm({ mode }: { mode: AuthFormMode }) {
 
   return (
     <form onSubmit={handleSubmit} className="space-y-5">
+      <GoogleButton mode={mode} />
+
+      <div className="relative" aria-hidden>
+        <div className="absolute inset-x-0 top-1/2 h-px bg-slate-200" />
+        <div className="relative mx-auto w-fit bg-white px-3 text-xs uppercase tracking-[0.2em] text-slate-400">
+          or continue with email
+        </div>
+      </div>
+
       {mode === "signup" ? (
         <Input name="name" label="Full name" placeholder="Morgan Patel" required autoComplete="name" />
       ) : null}

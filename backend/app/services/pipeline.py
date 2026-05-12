@@ -15,6 +15,7 @@ from app.models.pipeline_run import PipelineRun
 from app.services.broker_dealers import BrokerDealerRepository
 from app.services.classification import apply_classification_to_all
 from app.services.competitors import CompetitorProviderService
+from app.services.extraction_status import classify_pipeline_exception
 from app.services.pdf_downloader import PdfDownloaderService, pdf_tempdir
 from app.services.pdf_processor import PdfProcessorService
 
@@ -205,6 +206,12 @@ class ClearingPipelineService:
                 }
         except Exception as exc:
             logger.exception("Clearing extraction failed for broker-dealer %s", broker_dealer.id)
+            # Map the raw exception to a sanitized status + note (#399).
+            # The classifier distinguishes transient network failures from
+            # other pipeline errors so the gap-fill runner can auto-retry
+            # the former, and ensures the persisted note never contains a
+            # raw OS-level error string that the UI would surface verbatim.
+            status, note = classify_pipeline_exception(exc)
             return {
                 "bd_id": broker_dealer.id,
                 "pipeline_run_id": pipeline_run_id,
@@ -218,8 +225,8 @@ class ClearingPipelineService:
                 "clearing_type": "unknown",
                 "agreement_date": None,
                 "extraction_confidence": 0.0,
-                "extraction_status": "pipeline_error",
-                "extraction_notes": str(exc)[:1000],
+                "extraction_status": status,
+                "extraction_notes": note,
                 "is_competitor": False,
                 "is_verified": False,
                 "extracted_at": datetime.now(timezone.utc),
