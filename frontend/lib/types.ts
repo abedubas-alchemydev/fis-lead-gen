@@ -47,6 +47,10 @@ export type BrokerDealerListItem = {
   health_status: string | null;
   is_deficient: boolean;
   latest_deficiency_filed_at: string | null;
+  // BE boundary fields — names mirror the FastAPI response contract verbatim
+  // (broker_dealers.lead_score / lead_priority columns). The FE displays
+  // these as "prospect score" / "prospect priority" everywhere user-facing,
+  // but the wire shape stays in BE vocabulary. Don't rename here.
   lead_score: number | null;
   lead_priority: string | null;
   current_clearing_partner: string | null;
@@ -80,6 +84,7 @@ export type BrokerDealerListItem = {
   total_assets_yoy: number | null;
   types_of_business_total: number | null;
   types_of_business_other: string | null;
+  dba_names: string[] | null;
   created_at: string;
 };
 
@@ -102,7 +107,10 @@ export type DashboardStats = {
   total_active_bds: number;
   new_bds_30_days: number;
   deficiency_alerts: number;
-  high_value_leads: number;
+  // BE boundary field — mirrors FastAPI response shape. Counts firms with
+  // latest_net_capital in the [$5M, $100M] band (the "High Value Participant"
+  // business rule); decoupled from the ACG ICP scorer's lead_priority.
+  high_value_participants: number;
 };
 
 export type FinancialMetricItem = {
@@ -219,6 +227,14 @@ export type FilingHistoryItem = {
   summary: string;
   source_filing_url: string | null;
   priority: string | null;
+};
+
+export type FilingHistoryPageResponse = {
+  items: FilingHistoryItem[];
+  total: number;
+  page: number;
+  limit: number;
+  total_pages: number;
 };
 
 // Where the executive_contact record was sourced from. Mirrors the cli01 BE
@@ -378,6 +394,40 @@ export type CompetitorProviderUpdate = {
   is_active: boolean;
 };
 
+export type ClearingPartnerMergeSuggestionStatus =
+  | "pending"
+  | "accepted"
+  | "rejected";
+
+export type ClearingPartnerMergeSuggestionItem = {
+  id: number;
+  cluster_signature: string;
+  variants: string[];
+  suggested_name: string;
+  min_score: number;
+  status: ClearingPartnerMergeSuggestionStatus;
+  accepted_provider_id: number | null;
+  created_at: string;
+  resolved_at: string | null;
+};
+
+export type ClearingPartnerMergeSuggestionList = {
+  items: ClearingPartnerMergeSuggestionItem[];
+  pending_count: number;
+};
+
+export type ClearingPartnerClusteringRunResponse = {
+  new_pending_count: number;
+  total_pending_count: number;
+};
+
+export type ClearingPartnerMergeSuggestionAccept = {
+  canonical_name: string;
+  display_name: string | null;
+  variants: string[];
+  priority: number;
+};
+
 export type DataRefreshResponse = {
   filing_monitor_run_id: number;
   clearing_pipeline_run_id: number;
@@ -409,4 +459,175 @@ export type FocusCeoExtractionResponse = {
   confidence_score: number;
   extraction_status: string;
   extraction_notes: string | null;
+};
+
+// ── Vault folders + Outreach drafts ───────────────────────────────────────
+// Mirrors backend/app/schemas/vault.py. Each folder is a named service
+// (e.g. "Custody") plus a freeform description AND a permanent
+// "instructions" string (Deshorn's 2026-05-04 ask) the AI follows on
+// every draft for that service.
+export type VaultFolder = {
+  id: number;
+  name: string;
+  description: string;
+  outreach_instructions: string;
+  created_at: string;
+  updated_at: string;
+};
+
+export type VaultFolderCreate = {
+  name: string;
+  description: string;
+  outreach_instructions?: string;
+};
+
+export type VaultFolderUpdate = {
+  name?: string;
+  description?: string;
+  outreach_instructions?: string;
+};
+
+// File rows attached to a folder. The status walks
+// extracting -> embedding -> ready (success) or any -> failed (terminal-fail).
+// FE polls non-terminal rows on a 2s interval until terminal.
+export type VaultFolderFileStatus =
+  | "extracting"
+  | "embedding"
+  | "ready"
+  | "failed";
+
+export type VaultFolderFile = {
+  id: number;
+  folder_id: number;
+  original_filename: string;
+  mime_type: string;
+  size_bytes: number;
+  processing_status: VaultFolderFileStatus;
+  processing_error: string | null;
+  processing_started_at: string;
+  processing_finished_at: string | null;
+  created_at: string;
+  updated_at: string;
+};
+
+export type OutreachDraftRequest = {
+  broker_dealer_id: number;
+  contact_id: number;
+  folder_id: number;
+};
+
+export type OutreachDraft = {
+  subject: string;
+  body: string;
+};
+
+// ── Investment Advisor (Form ADV / 13F filer) types ──
+//
+// Mirrors backend/app/schemas/investment_advisor.py. Lives alongside the
+// BD types so a single import surfaces both worlds — the advisor list is
+// a sibling workspace, not a fork. Field names match the FastAPI response
+// contract verbatim so the FE never touches a snake_case-to-camelCase
+// adapter for these.
+
+export type InvestmentAdvisorListItem = {
+  id: number;
+  cik: string | null;
+  crd_number: string | null;
+  sec_file_number: string | null;
+  name: string;
+  legal_name: string | null;
+  city: string | null;
+  state: string | null;
+  status: string;
+  matched_source: string;
+  registration_date: string | null;
+  formation_date: string | null;
+  last_filing_date: string | null;
+  filings_index_url: string | null;
+  website: string | null;
+  // 'iapd' | 'apollo' | 'serper' | 'serpapi' | null
+  website_source: string | null;
+  // Form ADV Item 5.F — regulatory AUM (analog of BD latest_net_capital)
+  // and the discretionary/non-discretionary split.
+  regulatory_aum: number | null;
+  discretionary_aum: number | null;
+  non_discretionary_aum: number | null;
+  total_clients: number | null;
+  // Item 5.G checkboxes (analog of types_of_business). Empty array ⇒
+  // pipeline hasn't extracted yet; null ⇒ never seen.
+  advisory_activities: string[] | null;
+  // Item 5.D categories.
+  client_types: string[] | null;
+  // Item 5.D.3 number-of-clients-per-category, e.g.
+  // {"high_net_worth": 12, "individuals": 238}.
+  client_counts: Record<string, number> | null;
+  // Schedule A direct owners and Schedule B indirect owners.
+  direct_owners: Array<Record<string, string>> | null;
+  indirect_owners: Array<Record<string, string>> | null;
+  executive_officers: Array<Record<string, string>> | null;
+  firm_operations_text: string | null;
+  // Hard-scope filter flag — true iff EDGAR shows ≥1 Form 13F-HR for
+  // this firm in the last 4 quarters. Refreshed by the daily 13F monitor.
+  files_13f: boolean;
+  latest_13f_filing_date: string | null;
+  last_enrich_attempt_at: string | null;
+  created_at: string;
+  updated_at: string;
+};
+
+export type InvestmentAdvisorDetail = InvestmentAdvisorListItem;
+
+export type InvestmentAdvisorListMeta = {
+  page: number;
+  limit: number;
+  total: number;
+  total_pages: number;
+  pipeline_refreshed_at: string | null;
+};
+
+export type InvestmentAdvisorListResponse = {
+  items: InvestmentAdvisorListItem[];
+  meta: InvestmentAdvisorListMeta;
+};
+
+export type AdvisorContactItem = {
+  id: number;
+  advisor_id: number;
+  name: string;
+  title: string;
+  email: string | null;
+  phone: string | null;
+  linkedin_url: string | null;
+  source: string;
+  discovery_source: string | null;
+  discovery_confidence: number | null;
+  enriched_at: string;
+};
+
+export type AdvisorFilingItem = {
+  id: number;
+  advisor_id: number;
+  form_type: string;
+  priority: string;
+  filed_at: string;
+  summary: string;
+  source_filing_url: string | null;
+  is_read: boolean;
+};
+
+export type InvestmentAdvisorProfileResponse = {
+  advisor: InvestmentAdvisorDetail;
+  contacts: AdvisorContactItem[];
+  filings: AdvisorFilingItem[];
+  is_favorited: boolean;
+};
+
+export type AdvisoryActivityCount = {
+  type: string;
+  count: number;
+};
+
+export type ClientTypeCount = {
+  type: string;
+  count: number;
 };

@@ -263,6 +263,7 @@ class PdfProcessorService:
             extraction_status=status,
             extraction_notes=notes,
             extracted_at=datetime.now(timezone.utc),
+            clearing_statement_text=extraction.evidence_excerpt,
         )
 
     def _error_result(

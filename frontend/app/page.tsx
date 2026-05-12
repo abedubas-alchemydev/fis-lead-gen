@@ -60,7 +60,7 @@ export default async function HomePage() {
               </h1>
               <p className="animate-fade-in delay-300 mt-6 max-w-lg text-lg leading-relaxed text-slate-600">
                 Aggregate SEC and FINRA data. Map clearing relationships.
-                Score and surface high-value leads for firms offering settlement
+                Score and surface high-value prospects for firms offering settlement
                 and clearing services.
               </p>
               <div className="animate-fade-in delay-400 mt-10 flex flex-wrap items-center gap-4">
@@ -112,7 +112,7 @@ export default async function HomePage() {
                     {[
                       { label: "Active BDs", value: "3,847", color: "bg-white/10" },
                       { label: "New (30d)", value: "127", color: "bg-blue/20" },
-                      { label: "Hot Leads", value: "312", color: "bg-gold/20" },
+                      { label: "Hot Prospects", value: "312", color: "bg-gold/20" },
                       { label: "Deficiencies", value: "18", color: "bg-danger/20" },
                     ].map((kpi) => (
                       <div key={kpi.label} className={`rounded-2xl ${kpi.color} p-4 backdrop-blur`}>
@@ -155,7 +155,7 @@ export default async function HomePage() {
             </h2>
             <p className="mx-auto mt-4 max-w-xl text-base text-slate-500">
               From new BD registrations to clearing partner changes, the platform monitors
-              SEC and FINRA in real time and delivers qualified leads inside one system.
+              SEC and FINRA in real time and delivers qualified prospects inside one system.
             </p>
           </div>
 
@@ -170,8 +170,8 @@ export default async function HomePage() {
               },
               {
                 icon: Target,
-                title: "Lead Scoring Engine",
-                desc: "Weighted scoring model with configurable factors. Hot, Warm, and Cold lead classification.",
+                title: "Prospect Scoring Engine",
+                desc: "Weighted scoring model with configurable factors. Hot, Warm, and Cold prospect classification.",
                 accent: "from-gold/10 to-gold/5",
                 iconBg: "bg-gold/10 text-[#b88520]",
               },
@@ -235,7 +235,7 @@ export default async function HomePage() {
             </h2>
             <p className="relative mx-auto mt-4 max-w-lg text-base text-white/70">
               DOX has surfaced eight-figure clearing opportunities through similar intelligence.
-              Every clearing lead starts with a signal you can see first.
+              Every clearing prospect starts with a signal you can see first.
             </p>
             <div className="relative mt-10 flex flex-wrap items-center justify-center gap-4">
               <Link

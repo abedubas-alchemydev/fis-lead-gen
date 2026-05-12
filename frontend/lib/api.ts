@@ -99,9 +99,15 @@ import type {
   PaginatedFavoriteListItems
 } from "@/types/favorite-list";
 import type {
+  OutreachDraft,
+  OutreachDraftRequest,
   PipelineRunItem,
   PipelineStatusResponse,
   PipelineTriggerResponse,
+  VaultFolder,
+  VaultFolderCreate,
+  VaultFolderFile,
+  VaultFolderUpdate,
   WipeBdDataResponse
 } from "@/lib/types";
 
@@ -390,13 +396,16 @@ function parseConflictDetail(detail: string): ConflictDetail | null {
   return null;
 }
 
+export type RefreshScope = "all" | "list_only";
+
 export async function refreshFirm(
-  firmId: number
+  firmId: number,
+  scope: RefreshScope = "all"
 ): Promise<RefreshFirmResponse> {
   try {
     return await apiRequest<RefreshFirmResponse>(
       `/api/v1/broker-dealers/${firmId}/refresh-all`,
-      { method: "POST" }
+      { method: "POST", body: JSON.stringify({ scope }) }
     );
   } catch (err) {
     if (err instanceof ApiError && err.status === 409) {
@@ -419,4 +428,130 @@ export async function getPipelineRunStatus(
   return apiRequest<PipelineRunDetail>(`/api/v1/pipeline/run/${runId}`, {
     method: "GET",
   });
+}
+
+// ── Vault folders + Outreach drafts (MVP) ─────────────────────────────────
+// Backs the /vault folder-CRUD UI and the Outreach modal on
+// /master-list/{id}. Folders are per-user (the BE filters on the session
+// user); the Outreach endpoint validates the (folder, BD, contact) triple
+// before calling Gemini Flash.
+
+export async function listVaultFolders(): Promise<VaultFolder[]> {
+  return apiRequest<VaultFolder[]>("/api/v1/vault/folders");
+}
+
+export async function createVaultFolder(
+  payload: VaultFolderCreate
+): Promise<VaultFolder> {
+  return apiRequest<VaultFolder>("/api/v1/vault/folders", {
+    method: "POST",
+    body: JSON.stringify(payload)
+  });
+}
+
+export async function updateVaultFolder(
+  folderId: number,
+  payload: VaultFolderUpdate
+): Promise<VaultFolder> {
+  return apiRequest<VaultFolder>(`/api/v1/vault/folders/${folderId}`, {
+    method: "PUT",
+    body: JSON.stringify(payload)
+  });
+}
+
+export async function deleteVaultFolder(folderId: number): Promise<void> {
+  await apiRequest<void>(`/api/v1/vault/folders/${folderId}`, {
+    method: "DELETE"
+  });
+}
+
+export async function generateOutreachDraft(
+  payload: OutreachDraftRequest
+): Promise<OutreachDraft> {
+  return apiRequest<OutreachDraft>("/api/v1/outreach/draft", {
+    method: "POST",
+    body: JSON.stringify(payload)
+  });
+}
+
+// ── Vault folder file uploads ─────────────────────────────────────────────
+// Multipart upload of one file per call. Async-processed server-side; the
+// caller polls listVaultFiles() until each row's processing_status is
+// "ready" or "failed". 10MB / 20 files-per-folder / 100MB-per-user caps
+// surface as 413 / 409 respectively.
+export async function uploadVaultFile(
+  folderId: number,
+  file: File
+): Promise<VaultFolderFile> {
+  const formData = new FormData();
+  formData.append("file", file, file.name);
+
+  // apiRequest sets Content-Type: application/json by default — strip it
+  // here so the browser can set the multipart boundary itself.
+  const url = `${resolveApiBaseUrl()}/api/v1/vault/folders/${folderId}/files`;
+  const response = await fetch(url, {
+    method: "POST",
+    credentials: "include",
+    body: formData
+  });
+
+  if (!response.ok) {
+    const text = await response.text();
+    let detail = text;
+    if (text) {
+      try {
+        const parsed = JSON.parse(text) as unknown;
+        if (
+          parsed &&
+          typeof parsed === "object" &&
+          "detail" in parsed &&
+          typeof (parsed as { detail: unknown }).detail === "string"
+        ) {
+          detail = (parsed as { detail: string }).detail;
+        }
+      } catch {
+        // Non-JSON body — fall back to raw text.
+      }
+    }
+    throw new ApiError(response.status, detail);
+  }
+
+  return (await response.json()) as VaultFolderFile;
+}
+
+export async function listVaultFiles(
+  folderId: number
+): Promise<VaultFolderFile[]> {
+  return apiRequest<VaultFolderFile[]>(
+    `/api/v1/vault/folders/${folderId}/files`
+  );
+}
+
+export async function deleteVaultFile(
+  folderId: number,
+  fileId: number
+): Promise<void> {
+  await apiRequest<void>(
+    `/api/v1/vault/folders/${folderId}/files/${fileId}`,
+    { method: "DELETE" }
+  );
+}
+
+// Download is a same-origin proxy GET that the BE 302s to a signed GCS URL.
+// Returning the path lets the FE either window.open() or use an <a download>.
+export function getVaultFileDownloadPath(
+  folderId: number,
+  fileId: number
+): string {
+  return `/api/backend/api/v1/vault/folders/${folderId}/files/${fileId}/download`;
+}
+
+export async function retryVaultFile(
+  folderId: number,
+  fileId: number
+): Promise<VaultFolderFile> {
+  return apiRequest<VaultFolderFile>(
+    `/api/v1/vault/folders/${folderId}/files/${fileId}/retry`,
+    { method: "POST" }
+  );
 }

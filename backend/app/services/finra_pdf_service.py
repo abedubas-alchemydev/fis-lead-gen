@@ -47,26 +47,41 @@ async def fetch_brokercheck_pdf(crd: str | int) -> bytes:
     headers = {
         "User-Agent": settings.sec_user_agent,
         "Accept": "application/pdf",
+        # FINRA's Cloudflare gateway responds with malformed compressed bodies
+        # that surface as ``pdfminer: Data-loss while decompressing corrupted
+        # data`` warnings on every Flate stream inside the PDF — the bytes
+        # are silently mangled by httpx's auto-decompressor before pdfminer
+        # ever sees them. Forcing identity + reading via ``aiter_raw`` keeps
+        # the bytes verbatim. Same root cause + same fix as ``services/edgar.py``
+        # and the SEC PDF path in ``services/pdf_downloader.py``.
+        "Accept-Encoding": "identity",
     }
 
     try:
         async with httpx.AsyncClient(
             timeout=REQUEST_TIMEOUT_SECONDS, follow_redirects=True
         ) as client:
-            response = await client.get(url, headers=headers)
+            async with client.stream("GET", url, headers=headers) as response:
+                if response.status_code == 404:
+                    raise FinraPdfNotFound(f"no PDF for CRD {crd}")
+                if response.status_code != 200:
+                    raise FinraPdfFetchError(f"http {response.status_code}")
+                content_type = response.headers.get("content-type", "").lower()
+                # aiter_raw, not aiter_bytes — bypass httpx auto-decompression.
+                # Cloudflare sometimes sets Content-Encoding: gzip on PDF
+                # bodies anyway; aiter_bytes auto-decompresses on that header
+                # and corrupts already-application-compressed PDF streams.
+                chunks: list[bytes] = []
+                async for chunk in response.aiter_raw():
+                    if chunk:
+                        chunks.append(chunk)
+                pdf_bytes = b"".join(chunks)
     except httpx.HTTPError as exc:
         raise FinraPdfFetchError(f"network: {exc.__class__.__name__}: {exc}") from exc
 
-    if response.status_code == 404:
-        raise FinraPdfNotFound(f"no PDF for CRD {crd}")
-    if response.status_code != 200:
-        snippet = response.text[:200] if response.text else "(empty body)"
-        raise FinraPdfFetchError(f"http {response.status_code}: {snippet}")
-
-    content_type = response.headers.get("content-type", "").lower()
-    if "pdf" not in content_type and not response.content.startswith(b"%PDF"):
+    if "pdf" not in content_type and not pdf_bytes.startswith(b"%PDF"):
         raise FinraPdfFetchError(
             f"unexpected content-type {content_type!r}; not a PDF"
         )
 
-    return response.content
+    return pdf_bytes

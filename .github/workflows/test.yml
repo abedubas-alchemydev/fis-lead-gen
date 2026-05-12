@@ -57,7 +57,12 @@ jobs:
         working-directory: backend
     services:
       postgres:
-        image: postgres:15
+        # pgvector/pgvector:pg15 is the upstream Postgres 15 image with
+        # pgvector preinstalled — drop-in replacement for postgres:15 plus
+        # the ``vector`` extension the Vault RAG migration needs. Switched
+        # 2026-05-05 when migration 20260505_0028 added CREATE EXTENSION
+        # vector. Keep this image for any future pgvector consumers.
+        image: pgvector/pgvector:pg15
         env:
           POSTGRES_USER: testuser
           POSTGRES_PASSWORD: testpass

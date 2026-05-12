@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from datetime import date, datetime
+from typing import Literal
 
 from pydantic import BaseModel, ConfigDict
 
@@ -60,6 +61,13 @@ class BrokerDealerListItem(BaseModel):
     total_assets_yoy: float | None = None
     types_of_business_total: int | None = None
     types_of_business_other: str | None = None
+    # Firm-filed alternate trade names from FINRA's BrokerCheck
+    # ``firm_other_names`` payload (parsed by ``FinraService._parse_dba_names``).
+    # Includes Form BD Item 1.B "Other Names of this Firm" entries plus
+    # historical predecessor / acquired firm names. Surfaced on the firm
+    # detail page so users can see every name a firm has been or is doing
+    # business as.
+    dba_names: list[str] | None = None
     # Stamped server-side on every Apollo /enrich attempt the API "owns"
     # (success or no-result). NULL = never attempted. Surfaced here so a
     # follow-up FE PR can use it to gate the detail-page enrich call.
@@ -138,6 +146,19 @@ class FilingHistoryItem(BaseModel):
     summary: str
     source_filing_url: str | None
     priority: str | None
+
+
+class FilingHistoryPage(BaseModel):
+    """Paginated filing-history response. Merges every SEC EDGAR filing
+    for the firm with our enriched alert / FOCUS / X-17A-5 entries, sorted
+    newest first.
+    """
+
+    items: list[FilingHistoryItem]
+    total: int
+    page: int
+    limit: int
+    total_pages: int
 
 
 class ExecutiveContactItem(BaseModel):
@@ -305,6 +326,19 @@ class RefreshFinancialsResponse(BaseModel):
     run_id: int
     status: str
     broker_dealer_id: int
+
+
+class RefreshAllRequest(BaseModel):
+    """Request body for ``POST /broker-dealers/{id}/refresh-all``.
+
+    ``scope="all"`` (default, back-compat with empty bodies) considers
+    all five sub-pipelines (financials, website, clearing, contacts,
+    filings). ``scope="list_only"`` is what the master-list row icon
+    sends — it force-skips ``website`` and ``contacts`` because neither
+    drives a column on the grid.
+    """
+
+    scope: Literal["all", "list_only"] = "all"
 
 
 class RefreshAllResponse(BaseModel):

@@ -19,6 +19,11 @@ from app.models.financial_metric import FinancialMetric
 from app.models.pipeline_run import PipelineRun
 from app.models.scoring_setting import ScoringSetting
 from app.schemas.broker_dealer import BrokerDealerListMeta, BrokerDealerListResponse
+from app.services.clearing_consolidation import (
+    consolidated_label_set,
+    expand_filter_predicate,
+    load_providers as load_consolidation_providers,
+)
 from app.services.scoring import CompetitorLookup, calculate_lead_score, classify_lead_priority
 from app.services.service_models import MergedBrokerDealerRecord, ProviderDistributionRecord
 from app.services.unknown_reasons import (
@@ -127,7 +132,7 @@ class BrokerDealerRepository:
             "status", "branch_count", "business_type", "registration_date",
             "matched_source", "last_filing_date", "filings_index_url",
             "website", "website_source", "types_of_business", "direct_owners",
-            "executive_officers", "firm_operations_text",
+            "executive_officers", "firm_operations_text", "dba_names",
         }
 
         def _to_values(batch: list[MergedBrokerDealerRecord]) -> list[dict[str, object]]:
@@ -152,6 +157,7 @@ class BrokerDealerRepository:
                     "direct_owners": record.direct_owners,
                     "executive_officers": record.executive_officers,
                     "firm_operations_text": record.firm_operations_text,
+                    "dba_names": record.dba_names,
                 }
                 for record in batch
             ]
@@ -204,6 +210,7 @@ class BrokerDealerRepository:
                             direct_owners=record.direct_owners,
                             executive_officers=record.executive_officers,
                             firm_operations_text=record.firm_operations_text,
+                            dba_names=record.dba_names,
                         )
                     )
                 else:
@@ -241,12 +248,32 @@ class BrokerDealerRepository:
         filters = []
         if search:
             like_value = f"%{search.strip()}%"
+            # Match the substring against any element of the JSONB ``dba_names``
+            # array so a search for the public-facing brand ("303Capital
+            # Markets") finds the firm even when the legal name reads
+            # differently ("303 ALTERNATIVES, LLC"). The ``jsonb_typeof =
+            # 'array'`` guard mirrors ``list_advisory_activities`` and protects
+            # against rows whose JSONB happens to be a scalar/object — those
+            # would otherwise crash ``jsonb_array_elements_text``.
+            dba_elem = func.jsonb_array_elements_text(
+                BrokerDealer.dba_names
+            ).table_valued("value")
+            dba_match = (
+                select(1)
+                .select_from(dba_elem)
+                .where(
+                    func.jsonb_typeof(BrokerDealer.dba_names) == "array",
+                    dba_elem.c.value.ilike(like_value),
+                )
+                .exists()
+            )
             filters.append(
                 or_(
                     BrokerDealer.name.ilike(like_value),
                     BrokerDealer.cik.ilike(like_value),
                     cast(BrokerDealer.crd_number, String).ilike(like_value),
                     cast(BrokerDealer.sec_file_number, String).ilike(like_value),
+                    dba_match,
                 )
             )
 
@@ -263,7 +290,29 @@ class BrokerDealerRepository:
             filters.append(BrokerDealer.lead_priority.in_(lead_priorities))
 
         if clearing_partners:
-            filters.append(BrokerDealer.current_clearing_partner.in_(clearing_partners))
+            # Selected labels are canonical short forms ("Pershing", "Apex"),
+            # not raw extracted strings. Expand each label back to the set
+            # of raw values that consolidate to it, then filter by
+            # `current_clearing_partner IN (raw_values)`. Reuses the same
+            # consolidate function the dropdown uses, so what the user sees
+            # and what they filter by are guaranteed to agree.
+            distinct_raw_stmt = (
+                select(BrokerDealer.current_clearing_partner)
+                .where(BrokerDealer.current_clearing_partner.is_not(None))
+                .distinct()
+            )
+            distinct_raw = list(
+                (await db.execute(distinct_raw_stmt)).scalars().all()
+            )
+            providers = await load_consolidation_providers(db)
+            predicate = expand_filter_predicate(
+                clearing_partners,
+                providers,
+                BrokerDealer.current_clearing_partner,
+                distinct_raw,
+            )
+            if predicate is not None:
+                filters.append(predicate)
 
         if clearing_types:
             filters.append(BrokerDealer.current_clearing_type.in_(clearing_types))
@@ -323,7 +372,7 @@ class BrokerDealerRepository:
             (latest_run.completed_at or latest_run.started_at) if latest_run else None
         )
         unknown_reasons = await self._build_list_unknown_reasons(
-            db, [item.id for item in items]
+            db, list(items)
         )
         for item in items:
             clearing_reason, financial_reason = unknown_reasons.get(
@@ -358,18 +407,23 @@ class BrokerDealerRepository:
     async def _build_list_unknown_reasons(
         self,
         db: AsyncSession,
-        bd_ids: list[int],
+        broker_dealers: list[BrokerDealer],
     ) -> dict[int, tuple[UnknownReasonResult | None, UnknownReasonResult | None]]:
         """Look up the latest clearing + financial row per BD and classify.
 
         Two queries (one per child table), each filtered by ``bd_id IN
         :ids`` and ordered so the first row per BD is the most recent. Built
-        once per list response so we never N+1 against the master list. The
-        helper keys back to ``bd_id`` so the caller can attach reasons to
-        each item without re-querying.
+        once per list response so we never N+1 against the master list.
+        Takes the BD objects (not just ids) so the financial classifier
+        can consult ``cik`` / ``filings_index_url`` on the row to
+        distinguish ``not_yet_extracted`` from ``no_filing_available``
+        when no financial_metric row exists.
         """
-        if not bd_ids:
+        if not broker_dealers:
             return {}
+
+        bd_by_id = {bd.id: bd for bd in broker_dealers}
+        bd_ids = list(bd_by_id.keys())
 
         clearing_stmt = (
             select(ClearingArrangement)
@@ -403,7 +457,9 @@ class BrokerDealerRepository:
                 latest_clearing.get(bd_id)
             )
             financial_reason = derive_financial_unknown_reason(
-                latest_financial.get(bd_id)
+                latest_financial.get(bd_id),
+                broker_dealer=bd_by_id.get(bd_id),
+                clearing_arrangement=latest_clearing.get(bd_id),
             )
             out[bd_id] = (clearing_reason, financial_reason)
         return out
@@ -431,8 +487,15 @@ class BrokerDealerRepository:
         stmt = select(func.count(BrokerDealer.id))
         return int((await db.execute(stmt)).scalar_one())
 
-    async def count_hot_leads(self, db: AsyncSession) -> int:
-        stmt = select(func.count(BrokerDealer.id)).where(BrokerDealer.lead_priority == "hot")
+    async def count_high_value_participants(self, db: AsyncSession) -> int:
+        # "High Value" = firms with latest_net_capital in the [$5M, $100M] band
+        # (business rule). Decoupled from the ACG ICP composite scorer, which
+        # still drives lead_priority hot/warm/cold for the master list and the
+        # Top Prospects card.
+        stmt = select(func.count(BrokerDealer.id)).where(
+            BrokerDealer.latest_net_capital >= 5_000_000,
+            BrokerDealer.latest_net_capital <= 100_000_000,
+        )
         return int((await db.execute(stmt)).scalar_one())
 
     async def list_states(self, db: AsyncSession) -> list[str]:
@@ -441,14 +504,23 @@ class BrokerDealerRepository:
         return [row for row in rows if row]
 
     async def list_clearing_partners(self, db: AsyncSession) -> list[str]:
+        """Distinct clearing partners, consolidated to canonical short labels.
+
+        Raw `current_clearing_partner` values from extraction frequently arrive
+        in multiple shapes for the same firm ("PERSHING LLC" / "PERSHING NFS"
+        / "BNY PERSHING"). The dropdown groups them via
+        ``CompetitorProvider`` aliases into one entry per canonical firm
+        (using ``display_name`` as the short label). Long-tail raw values
+        that don't match any provider are kept as their trimmed text.
+        """
         stmt = (
             select(BrokerDealer.current_clearing_partner)
             .where(BrokerDealer.current_clearing_partner.is_not(None))
             .distinct()
-            .order_by(BrokerDealer.current_clearing_partner.asc())
         )
         rows = (await db.execute(stmt)).scalars().all()
-        return [row for row in rows if row]
+        providers = await load_consolidation_providers(db)
+        return consolidated_label_set(list(rows), providers)
 
     async def list_types_of_business(self, db: AsyncSession) -> list[dict[str, object]]:
         """Distinct types-of-business across all firms with per-type counts.
@@ -532,6 +604,7 @@ class BrokerDealerRepository:
                 "is_competitor": stmt.excluded.is_competitor,
                 "is_verified": stmt.excluded.is_verified,
                 "extracted_at": stmt.excluded.extracted_at,
+                "clearing_statement_text": stmt.excluded.clearing_statement_text,
                 "updated_at": func.now(),
             },
         )
@@ -678,12 +751,18 @@ class BrokerDealerRepository:
         vs ``RBC Correspondent Services``).
 
         Match each competitor name and alias as a whole word
-        (``\\b<alias>\\b``, case-insensitive) against the original
+        (``(?<!\\w)<alias>(?!\\w)``, case-insensitive) against the original
         un-normalized partner string. Whitespace inside multi-word aliases
         is treated as ``\\s+`` so commas-and-spaces variants ("BNY Pershing"
         vs "BNY  Pershing") still match. Bare-prefix aliases that collide
         with sibling brands have been removed from ``DEFAULT_COMPETITORS``
         in tandem with this change.
+
+        Uses ``(?<!\\w)`` / ``(?!\\w)`` lookarounds instead of ``\\b`` so
+        aliases ending in non-word chars (``"BofA Securities, Inc."``,
+        ``"Mirae Asset Securities (USA)"``) still match their own raw
+        value — see ``clearing_consolidation._whole_word_pattern`` for
+        the full rationale.
         """
         if not partner_name:
             return False
@@ -692,7 +771,8 @@ class BrokerDealerRepository:
             for candidate in [competitor.name, *competitor.aliases]:
                 if not candidate:
                     continue
-                pattern = r"\b" + r"\s+".join(re.escape(token) for token in candidate.split()) + r"\b"
+                body = r"\s+".join(re.escape(token) for token in candidate.split())
+                pattern = rf"(?<!\w){body}(?!\w)"
                 if re.search(pattern, partner_name, re.IGNORECASE):
                     return True
         return False

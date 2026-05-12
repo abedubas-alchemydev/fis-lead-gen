@@ -3,6 +3,7 @@ from __future__ import annotations
 import base64
 import json
 import logging
+import re
 from datetime import date, datetime, time, timedelta, timezone
 
 from fastapi import APIRouter, BackgroundTasks, Body, Depends, HTTPException, Query, status
@@ -26,8 +27,10 @@ from app.schemas.broker_dealer import (
     FocusCeoExtractionResponse,
     IntroducingArrangementItem,
     FilingHistoryItem,
+    FilingHistoryPage,
     FinancialMetricItem,
     FinancialMetricsResponse,
+    RefreshAllRequest,
     RefreshAllResponse,
     RefreshFinancialsResponse,
     RegistrationComplianceSummary,
@@ -36,6 +39,7 @@ from app.schemas.broker_dealer import (
 from app.schemas.favorite_list import FavoriteListWithMembership
 from app.schemas.favorites import FavoriteResponse
 from app.services.contacts import ExecutiveContactService
+from app.services.edgar import EdgarService
 from app.schemas.pipeline import ClearingArrangementItem, ClearingArrangementsResponse
 from app.services.alerts import AlertRepository
 from app.services.auth import get_current_user
@@ -67,7 +71,6 @@ from app.services.finra_pdf_service import (
 from app.services.apollo import ApolloClient
 from app.services.focus_ceo_extraction import FocusCeoExtractionService
 from app.services.focus_reports import FocusReportService
-from app.services.hunter import HunterClient
 from app.services.refresh_all_orchestrator import (
     REFRESH_ALL_PIPELINE_NAME,
     decide_pipelines,
@@ -76,7 +79,9 @@ from app.services.refresh_all_orchestrator import (
     run_refresh_all,
 )
 from app.services.serpapi import SerpAPIClient
+from app.services.serper import SerperClient
 from app.services.service_models import FinraBrokerDealerRecord
+from app.services.firm_alias_enricher import ensure_resolver_aliases
 from app.services.website_resolver import resolve_website
 
 logger = logging.getLogger(__name__)
@@ -87,6 +92,7 @@ alert_repository = AlertRepository()
 contact_service = ExecutiveContactService()
 finra_service = FinraService()
 focus_ceo_service = FocusCeoExtractionService()
+edgar_service = EdgarService()
 
 
 def _parse_states(state: list[str] | None) -> list[str]:
@@ -97,6 +103,94 @@ def _parse_states(state: list[str] | None) -> list[str]:
     for value in state:
         parsed.extend(part.strip() for part in value.split(",") if part.strip())
     return parsed
+
+
+def _build_internal_filing_history(
+    *,
+    recent_alerts,
+    financials,
+    clearing_arrangements,
+) -> list[FilingHistoryItem]:
+    """Compose the alert / FOCUS / X-17A-5 entries the FE renders in the
+    FILING HISTORY card. Returns items unsorted — callers merge with EDGAR
+    rows and sort once at the end.
+    """
+    items: list[FilingHistoryItem] = []
+    for alert in recent_alerts:
+        items.append(
+            FilingHistoryItem(
+                label=alert.form_type,
+                filed_at=alert.filed_at,
+                summary=alert.summary,
+                source_filing_url=alert.source_filing_url,
+                priority=alert.priority,
+            )
+        )
+    for metric in financials:
+        items.append(
+            FilingHistoryItem(
+                label="FOCUS Report",
+                filed_at=datetime.combine(metric.report_date, time(hour=17), tzinfo=timezone.utc),
+                summary="Financial report used for net capital and YoY growth calculations.",
+                source_filing_url=metric.source_filing_url,
+                priority="medium",
+            )
+        )
+    for arrangement in clearing_arrangements:
+        report_date = arrangement.report_date
+        if report_date is None:
+            continue
+        items.append(
+            FilingHistoryItem(
+                label="X-17A-5 Annual Report",
+                filed_at=datetime.combine(report_date, time(hour=16), tzinfo=timezone.utc),
+                summary=(
+                    f"Clearing arrangement extracted as {arrangement.clearing_partner or 'Unknown'} "
+                    f"({arrangement.clearing_type or 'unknown'})."
+                ),
+                source_filing_url=arrangement.source_filing_url,
+                priority="medium",
+            )
+        )
+    return items
+
+
+_ACCESSION_PATTERN = re.compile(r"(\d{10}-\d{2}-\d{6})")
+
+
+def _extract_accession_from_url(url: str | None) -> str | None:
+    """Pull a SEC accession number (e.g., 0001234567-25-000123) out of a
+    filing URL when one is present. Returns ``None`` when the URL has no
+    embedded accession (FOCUS report URLs that point at a primary doc
+    inside an accession folder do; clearing-arrangement URLs sometimes
+    don't).
+    """
+    if not url:
+        return None
+    match = _ACCESSION_PATTERN.search(url)
+    if match:
+        return match.group(1)
+    # SEC archive URLs sometimes use the no-dash form: /000123456725000123/
+    no_dash = re.search(r"/(\d{18})/", url)
+    if no_dash:
+        raw = no_dash.group(1)
+        return f"{raw[:10]}-{raw[10:12]}-{raw[12:]}"
+    return None
+
+
+def _edgar_filing_url(cik: str | None, accession: str | None, primary_document: str | None) -> str | None:
+    """Build a deep link to an EDGAR filing's primary document. Falls back
+    to the accession folder index when ``primary_document`` is missing.
+    Returns ``None`` if we don't have enough to construct any URL.
+    """
+    if not cik or not accession:
+        return None
+    cik_no_pad = cik.lstrip("0") or "0"
+    accession_no_dash = accession.replace("-", "")
+    base = f"https://www.sec.gov/Archives/edgar/data/{cik_no_pad}/{accession_no_dash}"
+    if primary_document:
+        return f"{base}/{primary_document}"
+    return f"{base}/"
 
 
 @router.get("", response_model=BrokerDealerListResponse)
@@ -114,8 +208,8 @@ async def list_broker_dealers(
     registered_after: date | None = Query(default=None),
     registered_before: date | None = Query(default=None),
     list_mode: str = Query(default="primary", alias="list", pattern="^(primary|alternative|all)$"),
-    sort_by: str = Query(default="name"),
-    sort_dir: str = Query(default="asc", pattern="^(asc|desc)$"),
+    sort_by: str = Query(default="latest_net_capital"),
+    sort_dir: str = Query(default="desc", pattern="^(asc|desc)$"),
     page: int = Query(default=1, ge=1),
     limit: int = Query(default=25, ge=1, le=100),
     _: AuthenticatedUser = Depends(get_current_user),
@@ -278,11 +372,15 @@ async def download_brokercheck_pdf(
             detail=f"Could not fetch BrokerCheck PDF from FINRA: {exc}",
         ) from exc
 
+    # `inline` lets the browser render the PDF in the new tab opened by the
+    # frontend's `<a target="_blank">`. `attachment` would force a download
+    # regardless of `target`, which is exactly what the client asked us to
+    # stop doing.
     return Response(
         content=pdf_bytes,
         media_type="application/pdf",
         headers={
-            "Content-Disposition": f"attachment; filename={broker_dealer.crd_number}-brokercheck.pdf"
+            "Content-Disposition": f"inline; filename={broker_dealer.crd_number}-brokercheck.pdf"
         },
     )
 
@@ -308,7 +406,11 @@ async def get_broker_dealer(
     )
     detail.financial_unknown_reason = to_unknown_reason(
         with_trigger_fields(
-            derive_financial_unknown_reason(financials[0] if financials else None),
+            derive_financial_unknown_reason(
+                financials[0] if financials else None,
+                broker_dealer=broker_dealer,
+                clearing_arrangement=arrangements[0] if arrangements else None,
+            ),
             financial_trigger_fields(broker_dealer),
         )
     )
@@ -359,23 +461,33 @@ async def get_adjacent_broker_dealers(
     _: AuthenticatedUser = Depends(get_current_user),
     db: AsyncSession = Depends(get_db_session),
 ) -> dict[str, int | None]:
-    """Return the previous and next broker-dealer IDs for navigation arrows."""
-    from sqlalchemy import select as sel
+    """Return the previous and next broker-dealer IDs for navigation arrows.
 
-    prev_stmt = (
-        sel(BrokerDealer.id)
-        .where(BrokerDealer.id < broker_dealer_id)
-        .order_by(BrokerDealer.id.desc())
-        .limit(1)
-    )
-    next_stmt = (
-        sel(BrokerDealer.id)
-        .where(BrokerDealer.id > broker_dealer_id)
-        .order_by(BrokerDealer.id.asc())
-        .limit(1)
-    )
-    prev_id = (await db.execute(prev_stmt)).scalar_one_or_none()
-    next_id = (await db.execute(next_stmt)).scalar_one_or_none()
+    Walks the master-list page's *default* view: ``list_mode='primary'``
+    (``is_deficient=false``) ordered by ``name ASC NULLS LAST, id ASC``.
+    The frontend has a separate return-envelope path that walks whatever
+    filter / sort the user actually had on screen; this endpoint is the
+    fallback for direct-link / bookmark visits, so it should match what
+    the user would see if they navigated to ``/master-list`` fresh.
+    """
+    ordered_ids = (
+        await db.execute(
+            select(BrokerDealer.id)
+            .where(BrokerDealer.is_deficient.is_(False))
+            .order_by(BrokerDealer.name.asc().nullslast(), BrokerDealer.id.asc())
+        )
+    ).scalars().all()
+
+    try:
+        idx = ordered_ids.index(broker_dealer_id)
+    except ValueError:
+        # Firm exists but is filtered out of the primary list (e.g.
+        # is_deficient=true). Surface no neighbours rather than guess —
+        # the buttons disable, same UX contract as a head/tail row.
+        return {"prev_id": None, "next_id": None}
+
+    prev_id = ordered_ids[idx - 1] if idx > 0 else None
+    next_id = ordered_ids[idx + 1] if idx < len(ordered_ids) - 1 else None
     return {"prev_id": prev_id, "next_id": next_id}
 
 
@@ -691,46 +803,11 @@ async def get_broker_dealer_profile(
         )
     ).items
 
-    filing_history: list[FilingHistoryItem] = []
-    for alert in recent_alerts:
-        filing_history.append(
-            FilingHistoryItem(
-                label=alert.form_type,
-                filed_at=alert.filed_at,
-                summary=alert.summary,
-                source_filing_url=alert.source_filing_url,
-                priority=alert.priority,
-            )
-        )
-
-    for metric in financials:
-        filing_history.append(
-            FilingHistoryItem(
-                label="FOCUS Report",
-                filed_at=datetime.combine(metric.report_date, time(hour=17), tzinfo=timezone.utc),
-                summary="Financial report used for net capital and YoY growth calculations.",
-                source_filing_url=metric.source_filing_url,
-                priority="medium",
-            )
-        )
-
-    for arrangement in clearing_arrangements:
-        report_date = arrangement.report_date
-        if report_date is None:
-            continue
-        filing_history.append(
-            FilingHistoryItem(
-                label="X-17A-5 Annual Report",
-                filed_at=datetime.combine(report_date, time(hour=16), tzinfo=timezone.utc),
-                summary=(
-                    f"Clearing arrangement extracted as {arrangement.clearing_partner or 'Unknown'} "
-                    f"({arrangement.clearing_type or 'unknown'})."
-                ),
-                source_filing_url=arrangement.source_filing_url,
-                priority="medium",
-            )
-        )
-
+    filing_history = _build_internal_filing_history(
+        recent_alerts=recent_alerts,
+        financials=financials,
+        clearing_arrangements=clearing_arrangements,
+    )
     filing_history.sort(key=lambda item: item.filed_at, reverse=True)
 
     favorited, favorited_at = await is_favorited(db, current_user.id, broker_dealer_id)
@@ -746,7 +823,11 @@ async def get_broker_dealer_profile(
     )
     detail.financial_unknown_reason = to_unknown_reason(
         with_trigger_fields(
-            derive_financial_unknown_reason(financials[0] if financials else None),
+            derive_financial_unknown_reason(
+                financials[0] if financials else None,
+                broker_dealer=broker_dealer,
+                clearing_arrangement=clearing_arrangements[0] if clearing_arrangements else None,
+            ),
             financial_trigger_fields(broker_dealer),
         )
     )
@@ -775,7 +856,7 @@ async def get_broker_dealer_profile(
         introducing_arrangements=introducing_arrangements,
         industry_arrangements=industry_arrangements,
         recent_alerts=recent_alerts,
-        filing_history=filing_history[:20],
+        filing_history=filing_history[:10],
         executive_contacts=executive_items,
         executive_contacts_unknown_reason=executive_contacts_unknown_reason,
         is_favorited=favorited,
@@ -798,6 +879,92 @@ async def get_broker_dealer_profile(
                 else "No active Form 17a-11 deficiency notice is currently tracked."
             ),
         ),
+    )
+
+
+@router.get("/{broker_dealer_id}/filing-history", response_model=FilingHistoryPage)
+async def get_filing_history(
+    broker_dealer_id: int,
+    page: int = Query(default=1, ge=1),
+    limit: int = Query(default=10, ge=1, le=100),
+    _: AuthenticatedUser = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db_session),
+) -> FilingHistoryPage:
+    """Paginated filing history for the firm. Merges every SEC EDGAR filing
+    (when a CIK is on file) with our enriched alert / FOCUS / X-17A-5 entries,
+    dedupes by accession number, and sorts newest first.
+    """
+    broker_dealer = await repository.get_broker_dealer(db, broker_dealer_id)
+    if broker_dealer is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Broker-dealer not found.")
+
+    financials = await repository.get_financial_metrics(db, broker_dealer_id)
+    clearing_arrangements = await repository.list_clearing_arrangements(db, broker_dealer_id)
+    alert_response = await alert_repository.list_alerts(
+        db,
+        form_types=[],
+        priorities=[],
+        is_read=None,
+        broker_dealer_id=broker_dealer_id,
+        page=1,
+        limit=100,
+    )
+
+    internal_items = _build_internal_filing_history(
+        recent_alerts=alert_response.items,
+        financials=financials,
+        clearing_arrangements=clearing_arrangements,
+    )
+
+    edgar_pairs: list[tuple[str | None, FilingHistoryItem]] = []
+    if broker_dealer.cik:
+        raw_filings = await edgar_service.list_all_filings_for_cik(broker_dealer.cik)
+        for filing in raw_filings:
+            filing_date = filing.get("filing_date")
+            if filing_date is None:
+                continue
+            accession = filing.get("accession_number")
+            primary_doc = filing.get("primary_document")
+            primary_desc = filing.get("primary_doc_description")
+            url = (
+                _edgar_filing_url(broker_dealer.cik, str(accession) if accession else None,
+                                  str(primary_doc) if primary_doc else None)
+                or broker_dealer.filings_index_url
+            )
+            item = FilingHistoryItem(
+                label=str(filing.get("form") or "Filing"),
+                filed_at=datetime.combine(filing_date, time(hour=12), tzinfo=timezone.utc),
+                summary=str(primary_desc) if primary_desc else "Filed with SEC.",
+                source_filing_url=url,
+                priority=None,
+            )
+            edgar_pairs.append((str(accession) if accession else None, item))
+
+    internal_accessions: set[str] = set()
+    for item in internal_items:
+        accession = _extract_accession_from_url(item.source_filing_url)
+        if accession:
+            internal_accessions.add(accession)
+
+    deduped_edgar = [
+        item for accession, item in edgar_pairs
+        if not accession or accession not in internal_accessions
+    ]
+
+    merged = internal_items + deduped_edgar
+    merged.sort(key=lambda item: item.filed_at, reverse=True)
+
+    total = len(merged)
+    total_pages = max(1, (total + limit - 1) // limit) if total else 0
+    start = (page - 1) * limit
+    end = start + limit
+
+    return FilingHistoryPage(
+        items=merged[start:end],
+        total=total,
+        page=page,
+        limit=limit,
+        total_pages=total_pages,
     )
 
 
@@ -928,9 +1095,9 @@ async def resolve_broker_dealer_website(
             detail="Apollo API key is not configured.",
         )
     apollo = ApolloClient(apollo_key)
-    hunter = (
-        HunterClient(settings.hunter_api_key)
-        if settings.hunter_api_key
+    serper = (
+        SerperClient(settings.serper_api_key)
+        if settings.serper_api_key
         else None
     )
     serpapi = (
@@ -939,12 +1106,23 @@ async def resolve_broker_dealer_website(
         else None
     )
 
+    # Lazy alias enrichment: populate ``resolver_aliases`` via Gemini if
+    # this is the firm's first resolution attempt. The enricher writes
+    # ``[]`` (not NULL) on a successful-but-empty response so the call
+    # doesn't re-fire on every page mount for firms with no useful
+    # parent/brand alternates. On Gemini failure we get ``[]`` here and
+    # the column stays NULL for retry on the next visit; the resolver
+    # chain still runs without the augmented tokens (graceful degrade).
+    aliases = await ensure_resolver_aliases(db, broker_dealer)
+
     website, source, reason = await resolve_website(
         broker_dealer.name,
         broker_dealer.crd_number,
         apollo,
-        hunter,
         serpapi,
+        serper,
+        dba_names=broker_dealer.dba_names,
+        resolver_aliases=aliases,
     )
 
     if website and source:
@@ -1162,6 +1340,7 @@ async def refresh_broker_dealer_all(
     broker_dealer_id: int,
     background_tasks: BackgroundTasks,
     response: Response,
+    body: RefreshAllRequest = Body(default_factory=RefreshAllRequest),
     current_user: AuthenticatedUser = Depends(get_current_user),
     db: AsyncSession = Depends(get_db_session),
 ) -> RefreshAllResponse:
@@ -1172,6 +1351,12 @@ async def refresh_broker_dealer_all(
     sub-pipelines whose target fields are still missing. If every gate
     fails, returns 200 + ``status="skipped"`` immediately with no
     PipelineRun row and zero provider cost.
+
+    ``body.scope`` (default ``"all"``, preserves back-compat for empty
+    POST bodies the FE used to send) controls which sub-pipelines the
+    orchestrator considers. ``scope="list_only"`` is what the
+    master-list row icon sends — it force-skips ``website`` and
+    ``contacts`` because neither drives a column on the grid.
 
     Auth: any authenticated user. Each click costs at most ~2 Gemini +
     ~1 Apollo + ~1 Hunter calls (less when gates close); a 30-second
@@ -1191,7 +1376,7 @@ async def refresh_broker_dealer_all(
         )
 
     has_contacts = await has_executive_contacts(db, broker_dealer_id)
-    decision = decide_pipelines(broker_dealer, has_contacts=has_contacts)
+    decision = decide_pipelines(broker_dealer, has_contacts=has_contacts, scope=body.scope)
 
     # Skipped short-circuit: every gate closed. No row, no cost.
     if not decision.to_run:
@@ -1276,6 +1461,7 @@ async def refresh_broker_dealer_all(
             {
                 "bd_id": broker_dealer_id,
                 "stage": "queued",
+                "scope": body.scope,
                 "ran": list(decision.to_run),
                 "skipped": list(decision.to_skip),
             }

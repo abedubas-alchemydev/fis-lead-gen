@@ -6,7 +6,7 @@ import { AlertTriangle } from "lucide-react";
 // Matches the LoadErrorCard pattern shipped on /alerts and /visited-firms
 // — dashed-border surface-2 panel, red medallion, Retry button — so the
 // dashboard's four tile error surfaces (stats KPI row, clearing
-// distribution, top leads, lead volume trend) stay visually consistent
+// distribution, top prospects, prospect volume trend) stay visually consistent
 // with the rest of the app.
 //
 // Borderless on its own outer; callers either render it bare (e.g.
