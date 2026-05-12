@@ -102,6 +102,24 @@ function ResolvingSpinner() {
   );
 }
 
+function NoWebsiteNote() {
+  // Shown when the lazy resolver chain (Apollo → Hunter → SerpAPI) ran
+  // and produced no valid candidate. Many small broker-dealers don't
+  // maintain a public website at all — this is the polite null-state so
+  // it's clear the system tried, rather than looking like a missing
+  // field. The Google search link still renders alongside as a manual
+  // escape hatch.
+  return (
+    <span
+      className="inline-flex items-center gap-1.5 text-[13px] text-[var(--text-dim,#475569)] italic"
+      title="We checked Apollo, Hunter, and Google. Many small broker-dealers don't publish a public website."
+    >
+      <Globe className="h-3.5 w-3.5 opacity-60" strokeWidth={2} />
+      No public website on file
+    </span>
+  );
+}
+
 export function FirmWebsiteLink({
   firmId,
   firmName,
@@ -113,7 +131,11 @@ export function FirmWebsiteLink({
 }) {
   const persisted = (website ?? "").trim();
   const [resolved, setResolved] = useState<ResolveWebsiteResponse | null>(null);
-  const [isResolving, setIsResolving] = useState(false);
+  // Initial isResolving=true when we'll fire the lazy lookup; this avoids a
+  // one-frame flash of the "No public website on file" note before the
+  // useEffect tick kicks in and switches us to the spinner.
+  const [isResolving, setIsResolving] = useState(!website);
+  const [lookupDone, setLookupDone] = useState(false);
   const firedRef = useRef(false);
 
   useEffect(() => {
@@ -135,11 +157,14 @@ export function FirmWebsiteLink({
       })
       .finally(() => {
         setIsResolving(false);
+        setLookupDone(true);
       });
   }, [firmId, persisted]);
 
   // Domain side: persisted → ResolvedLink; otherwise resolved → ResolvedLink;
-  // otherwise resolving → spinner; otherwise nothing (just the Google link).
+  // otherwise resolving → spinner; otherwise (lookup ran, no result) →
+  // polite "No public website on file" note. The Google fallback always
+  // renders alongside as a manual escape hatch.
   let domainSide: JSX.Element | null = null;
   if (persisted) {
     domainSide = <ResolvedLink website={persisted} source={null} />;
@@ -147,6 +172,8 @@ export function FirmWebsiteLink({
     domainSide = <ResolvedLink website={resolved.website} source={resolved.website_source} />;
   } else if (isResolving) {
     domainSide = <ResolvingSpinner />;
+  } else if (lookupDone) {
+    domainSide = <NoWebsiteNote />;
   }
 
   // Always render the Google search link alongside (or as fallback when

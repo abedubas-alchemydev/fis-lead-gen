@@ -9,7 +9,7 @@ const labelMap: Record<string, string> = {
   self_clearing: "Self-Clearing",
   fully_disclosed: "Fully Disclosed",
   omnibus: "Omnibus",
-  unknown: "Unknown"
+  unknown: "Not classified"
 };
 
 export function ClearingTypeBadge({ type }: { type: string | null }) {

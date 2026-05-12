@@ -18,10 +18,9 @@ import {
 import { AlertPriorityBadge } from "@/components/alerts/alert-priority-badge";
 import { ArrangementFields } from "@/components/master-list/detail/arrangement-fields";
 import { ContactRow } from "@/components/master-list/detail/contact-row";
+import { EmailScansSection } from "@/components/master-list/detail/email-scans-section";
 import { FinancialTrendChart } from "@/components/master-list/detail/financial-trend-chart";
-import { FindEmailsButton } from "@/components/master-list/detail/find-emails-button";
 import { FirmWebsiteLink } from "@/components/master-list/detail/firm-website-link";
-import { RefreshFirmButton } from "@/components/master-list/detail/refresh-firm-button";
 import { FocusReportSection } from "@/components/master-list/detail/focus-report-section";
 import {
   classificationDisplay,
@@ -43,8 +42,8 @@ import { Pill } from "@/components/ui/pill";
 import { SourceBadge } from "@/components/master-list/source-badge";
 import { UnknownCell } from "@/components/master-list/unknown-cell";
 import { apiRequest, buildApiPath } from "@/lib/api";
-import { isFirmIncomplete } from "@/lib/firm-completeness";
 import { parseArrangementBlob } from "@/lib/arrangements";
+import { listScansForBrokerDealer } from "@/lib/email-extractor";
 import {
   recordVisit,
   type FavoriteListResponse,
@@ -63,6 +62,8 @@ import type {
   BrokerDealerListResponse,
   BrokerDealerProfileResponse,
   ExecutiveContactItem,
+  FilingHistoryItem,
+  FilingHistoryPageResponse,
 } from "@/lib/types";
 
 // Sprint 6 task #29: workspace-aware breadcrumb labels keyed by the
@@ -92,7 +93,7 @@ const SECONDARY_BTN =
 // Builds the same /api/v1/broker-dealers query the master list emits,
 // from a recovered MasterListQueryState. Mirrors the queryPath useMemo
 // in master-list-workspace-client.tsx so the two callers stay in lock
-// step — Next Lead must walk the *exact* same result set the user was
+// step — Next Prospect must walk the *exact* same result set the user was
 // looking at when they clicked into the firm.
 function listPathFromReturnState(
   state: MasterListQueryState,
@@ -105,8 +106,9 @@ function listPathFromReturnState(
       : undefined,
     health: state.health === "All" ? undefined : [state.health],
     lead_priority:
-      state.leadPriority === "All" ? undefined : [state.leadPriority],
-    clearing_partner: state.clearingPartner ? [state.clearingPartner] : undefined,
+      state.prospectPriority === "All" ? undefined : [state.prospectPriority],
+    clearing_partner:
+      state.clearingPartner.length > 0 ? state.clearingPartner : undefined,
     clearing_type:
       state.clearingType === "All" ? undefined : [state.clearingType],
     types_of_business:
@@ -130,7 +132,7 @@ export function BrokerDealerDetailClient({ brokerDealerId }: { brokerDealerId: s
   // The master-list workspace appends ?return=<encoded-url> to every
   // row link (see master-list-workspace-client.tsx). When present, it's
   // the source of truth for the user's filtered/sorted/paginated view.
-  // When absent (deep-link, bookmark, direct visit), Next Lead falls
+  // When absent (deep-link, bookmark, direct visit), Next Prospect falls
   // back to the global /adjacent endpoint so the button still works.
   const returnRaw = searchParams.get("return");
   const returnState = useMemo(
@@ -159,17 +161,24 @@ export function BrokerDealerDetailClient({ brokerDealerId }: { brokerDealerId: s
   const [profile, setProfile] = useState<BrokerDealerProfileResponse | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [enrichError, setEnrichError] = useState<string | null>(null);
+  const [enrichNotice, setEnrichNotice] = useState<string | null>(null);
   const [isEnriching, setIsEnriching] = useState(false);
-  const [attemptedAutoEnrich, setAttemptedAutoEnrich] = useState(false);
   const [isHealthChecking, setIsHealthChecking] = useState(false);
-  // Bumped by RefreshFirmButton's onRefreshComplete to re-fire the
-  // profile-fetch useEffect after a refresh-all run completes. The page
-  // owns profile state via useState — router.refresh() alone won't update
-  // it, so we drive a manual refetch via this dep on loadProfile below.
-  const [profileRefreshKey, setProfileRefreshKey] = useState(0);
   const [healthCheckResult, setHealthCheckResult] = useState<string | null>(null);
   const [prevId, setPrevId] = useState<number | null>(null);
   const [nextId, setNextId] = useState<number | null>(null);
+  // Inline "Discovered Emails" section state. `currentScanId` is the
+  // single source of truth — seeded from `?scanId=` (deep-link) or the
+  // most-recent scan for this BD on mount, then mutated by the
+  // FindEmailsButton callback when the user kicks off a new scan.
+  const [currentScanId, setCurrentScanId] = useState<number | null>(null);
+  const [isHydratingScan, setIsHydratingScan] = useState(true);
+  const FILING_PAGE_SIZE = 10;
+  const [filingPage, setFilingPage] = useState(1);
+  const [filingItems, setFilingItems] = useState<FilingHistoryItem[]>([]);
+  const [filingTotal, setFilingTotal] = useState(0);
+  const [filingTotalPages, setFilingTotalPages] = useState(0);
+  const [filingLoading, setFilingLoading] = useState(false);
 
   // Resolve adjacent firm IDs.
   //
@@ -296,7 +305,7 @@ export function BrokerDealerDetailClient({ brokerDealerId }: { brokerDealerId: s
   }, [brokerDealerId, returnState]);
 
   // Build a same-shape /master-list/{id} link that preserves the same
-  // return envelope so chaining Next Lead doesn't lose the master-list
+  // return envelope so chaining Next Prospect doesn't lose the master-list
   // context after the first click.
   const buildAdjacentHref = useCallback(
     (id: number): Route => {
@@ -343,7 +352,106 @@ export function BrokerDealerDetailClient({ brokerDealerId }: { brokerDealerId: s
     return () => {
       active = false;
     };
-  }, [brokerDealerId, profileRefreshKey]);
+  }, [brokerDealerId]);
+
+  // Hydrate the inline "Discovered Emails" section. Two sources, in
+  // precedence order:
+  //   1. `?scanId=` in the URL — wins, so deep-links and post-Find-Emails
+  //      refreshes re-open the same scan.
+  //   2. Most-recent scan for this BD via list-scans-by-bd_id — so the
+  //      user sees prior emails on first load without re-running.
+  // Reads `window.location.search` directly so this effect doesn't have
+  // to depend on the reactive `searchParams` (the URL-sync effect below
+  // would otherwise feed back into this and re-fetch on every change).
+  useEffect(() => {
+    const numericId = Number(brokerDealerId);
+    if (!Number.isFinite(numericId)) {
+      setIsHydratingScan(false);
+      return;
+    }
+
+    const urlScanId = new URLSearchParams(window.location.search).get(
+      "scanId",
+    );
+    if (urlScanId) {
+      const parsed = Number(urlScanId);
+      if (Number.isFinite(parsed)) {
+        setCurrentScanId(parsed);
+        setIsHydratingScan(false);
+        return;
+      }
+    }
+
+    let active = true;
+    setIsHydratingScan(true);
+    setCurrentScanId(null);
+    listScansForBrokerDealer(numericId, 1)
+      .then((scans) => {
+        if (!active) return;
+        if (scans.length > 0) {
+          setCurrentScanId(scans[0].id);
+        }
+      })
+      .catch(() => {
+        /* swallow — empty state will render */
+      })
+      .finally(() => {
+        if (active) setIsHydratingScan(false);
+      });
+
+    return () => {
+      active = false;
+    };
+  }, [brokerDealerId]);
+
+  // Persist the active scan in the URL so a refresh re-opens the same
+  // scan inside the inline section. Guards against a feedback loop by
+  // checking whether `?scanId=` already matches before replacing.
+  useEffect(() => {
+    if (currentScanId === null) return;
+    const desired = String(currentScanId);
+    if (searchParams.get("scanId") === desired) return;
+    const params = new URLSearchParams(searchParams.toString());
+    params.set("scanId", desired);
+    router.replace(
+      `/master-list/${brokerDealerId}?${params.toString()}` as Route,
+    );
+  }, [currentScanId, brokerDealerId, searchParams, router]);
+
+  // Reset to page 1 whenever the user navigates to a different firm.
+  useEffect(() => {
+    setFilingPage(1);
+  }, [brokerDealerId]);
+
+  // Fetch the merged EDGAR + internal filing history for the current page.
+  useEffect(() => {
+    let active = true;
+    setFilingLoading(true);
+    apiRequest<FilingHistoryPageResponse>(
+      buildApiPath(`/api/v1/broker-dealers/${brokerDealerId}/filing-history`, {
+        page: filingPage,
+        limit: FILING_PAGE_SIZE,
+      }),
+    )
+      .then((response) => {
+        if (!active) return;
+        setFilingItems(response.items);
+        setFilingTotal(response.total);
+        setFilingTotalPages(response.total_pages);
+      })
+      .catch(() => {
+        if (!active) return;
+        setFilingItems([]);
+        setFilingTotal(0);
+        setFilingTotalPages(0);
+      })
+      .finally(() => {
+        if (active) setFilingLoading(false);
+      });
+    return () => {
+      active = false;
+    };
+  }, [brokerDealerId, filingPage]);
 
   async function runHealthCheck() {
     setIsHealthChecking(true);
@@ -371,6 +479,7 @@ export function BrokerDealerDetailClient({ brokerDealerId }: { brokerDealerId: s
   async function enrichContacts() {
     setIsEnriching(true);
     setEnrichError(null);
+    setEnrichNotice(null);
     try {
       const directOwners = profile?.broker_dealer.direct_owners ?? [];
       const executiveOfficers = profile?.broker_dealer.executive_officers ?? [];
@@ -378,24 +487,31 @@ export function BrokerDealerDetailClient({ brokerDealerId }: { brokerDealerId: s
         ...directOwners.map(toOfficerEntity),
         ...executiveOfficers.map(toOfficerEntity),
       ]);
+      const previousNames = new Set(
+        (profile?.executive_contacts ?? []).map((c) => c.name.trim().toLowerCase()),
+      );
       const contacts = await apiRequest<BrokerDealerProfileResponse["executive_contacts"]>(
         `/api/v1/broker-dealers/${brokerDealerId}/enrich`,
         { method: "POST", body: JSON.stringify({ officers }) },
       );
       setProfile((c) => (c ? { ...c, executive_contacts: contacts } : c));
+      // BE returns the existing list verbatim when the discovery chain
+      // didn't find any new officers (90-day cooldown short-circuits the
+      // company-level Apollo path; per-officer fan-out can also return zero
+      // matches). Without this notice the button just stops spinning and
+      // the panel looks identical, so the click reads as a no-op.
+      const hasNewContact = contacts.some(
+        (c) => !previousNames.has(c.name.trim().toLowerCase()),
+      );
+      if (!hasNewContact) {
+        setEnrichNotice("No new contacts found for these officers.");
+      }
     } catch (err) {
       setEnrichError(err instanceof Error ? err.message : "Unable to enrich contacts.");
     } finally {
       setIsEnriching(false);
     }
   }
-
-  useEffect(() => {
-    if (!profile || profile.executive_contacts.length > 0 || attemptedAutoEnrich || isEnriching) return;
-    setAttemptedAutoEnrich(true);
-    void enrichContacts();
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [attemptedAutoEnrich, isEnriching, profile]);
 
   const chartPoints = useMemo(() => {
     if (!profile) return [] as Array<{ label: string; value: number }>;
@@ -488,24 +604,6 @@ export function BrokerDealerDetailClient({ brokerDealerId }: { brokerDealerId: s
               variant="detail"
               initialDefaultMember={profile.is_favorited}
             />
-            {isFirmIncomplete(bd) ? (
-              // autoFire: the firm-detail page kicks off the refresh-all
-              // orchestrator immediately on mount when the firm is
-              // incomplete. The orchestrator self-gates to only the
-              // sub-pipelines whose target fields are still missing, so
-              // existing data is preserved. Per-(user, BD) cooldown on the
-              // BE prevents rapid revisits from re-firing.
-              //
-              // onRefreshComplete bumps profileRefreshKey, which is in the
-              // loadProfile useEffect deps — this re-fetches the profile
-              // in place when the run completes, so values update without
-              // a full page reload.
-              <RefreshFirmButton
-                firmId={bd.id}
-                autoFire
-                onRefreshComplete={() => setProfileRefreshKey((k) => k + 1)}
-              />
-            ) : null}
           </div>
           <FirmWebsiteLink firmId={bd.id} firmName={bd.name} website={bd.website} />
           <div className="mt-2 flex flex-wrap items-center gap-x-3 gap-y-1 text-[12px] text-[var(--text-muted,#94a3b8)]">
@@ -581,7 +679,7 @@ export function BrokerDealerDetailClient({ brokerDealerId }: { brokerDealerId: s
           className={SECONDARY_BTN}
         >
           <ArrowLeft className="h-4 w-4" strokeWidth={2} />
-          Previous Lead
+          Previous Prospect
         </button>
         <Link
           href={sourceListHref}
@@ -595,7 +693,7 @@ export function BrokerDealerDetailClient({ brokerDealerId }: { brokerDealerId: s
           onClick={() => nextId && router.push(buildAdjacentHref(nextId))}
           className={SECONDARY_BTN}
         >
-          Next Lead
+          Next Prospect
           <ArrowRight className="h-4 w-4" strokeWidth={2} />
         </button>
       </div>
@@ -656,6 +754,28 @@ export function BrokerDealerDetailClient({ brokerDealerId }: { brokerDealerId: s
                   : undefined
               }
             />
+            <MiniStat
+              label="3-Yr CAGR"
+              value={
+                bd.three_year_cagr !== null ? (
+                  formatPercent(bd.three_year_cagr)
+                ) : (
+                  "N/A"
+                )
+              }
+              valueClassName={
+                bd.three_year_cagr === null
+                  ? "text-[var(--text-muted,#94a3b8)]"
+                  : bd.three_year_cagr >= 0
+                  ? "text-[#16a34a]"
+                  : "text-[var(--pill-red-text,#b91c1c)]"
+              }
+              helper={
+                bd.three_year_cagr === null
+                  ? "Requires 3 years of financial history"
+                  : "Compound annual growth over 3 years"
+              }
+            />
           </div>
           <FinancialTrendChart points={chartPoints} />
         </SectionPanel>
@@ -684,6 +804,28 @@ export function BrokerDealerDetailClient({ brokerDealerId }: { brokerDealerId: s
               compact
             />
           </div>
+
+          {/* Alternate Names — firm-filed DBAs / historical predecessor names
+              from FINRA's firm_other_names. Hidden when the firm has no
+              alternates so the card stays compact for single-name firms. */}
+          {bd.dba_names && bd.dba_names.length > 0 ? (
+            <div className="mt-4">
+              <div className="flex items-center gap-2">
+                <p className="text-[13px] font-semibold text-[var(--text,#0f172a)]">Alternate Names</p>
+                <Pill variant="info">{bd.dba_names.length} names</Pill>
+              </div>
+              <div className="mt-2 flex flex-wrap gap-2">
+                {bd.dba_names.map((name) => (
+                  <span
+                    key={name}
+                    className="rounded-full border border-[var(--border,rgba(30,64,175,0.1))] bg-[var(--surface-2,#f1f6fd)] px-3 py-1 text-[11px] text-[var(--text-dim,#475569)]"
+                  >
+                    {name}
+                  </span>
+                ))}
+              </div>
+            </div>
+          ) : null}
 
           {/* Types of Business */}
           <div className="mt-4">
@@ -717,7 +859,7 @@ export function BrokerDealerDetailClient({ brokerDealerId }: { brokerDealerId: s
             ) : null}
           </div>
 
-          {/* PDF + Find emails action strip */}
+          {/* PDF action strip */}
           <div className="mt-4 flex flex-wrap items-start gap-2">
             <a
               href={`/api/backend/api/v1/broker-dealers/${brokerDealerId}/focus-report.pdf`}
@@ -735,11 +877,10 @@ export function BrokerDealerDetailClient({ brokerDealerId }: { brokerDealerId: s
                 rel="noopener noreferrer"
                 className="inline-flex items-center gap-1.5 rounded-[10px] border border-[var(--border-2,rgba(30,64,175,0.16))] bg-[var(--surface,#ffffff)] px-3 py-1.5 text-[12px] font-medium text-[var(--text-dim,#475569)] transition hover:bg-[var(--surface-2,#f1f6fd)] hover:text-[var(--text,#0f172a)]"
               >
-                <Download className="h-3.5 w-3.5" strokeWidth={2} />
+                <ExternalLink className="h-3.5 w-3.5" strokeWidth={2} />
                 FINRA BrokerCheck (PDF)
               </a>
             ) : null}
-            <FindEmailsButton brokerDealerId={brokerDealerId} resolvedDomain={resolvedDomain} />
           </div>
 
           <FocusReportSection brokerDealerId={brokerDealerId} onProfileRefresh={reloadProfile} />
@@ -771,6 +912,12 @@ export function BrokerDealerDetailClient({ brokerDealerId }: { brokerDealerId: s
             </div>
           ) : null}
 
+          {enrichNotice ? (
+            <div className="mb-3 rounded-2xl border border-[rgba(59,130,246,0.25)] bg-[rgba(59,130,246,0.08)] px-4 py-3 text-sm text-[var(--pill-blue-text,#1d4ed8)]">
+              {enrichNotice}
+            </div>
+          ) : null}
+
           {bd.direct_owners && bd.direct_owners.length > 0 ? (
             <PeopleSubGroup title="Direct Owners">
               {bd.direct_owners.map((owner, i) => (
@@ -780,6 +927,8 @@ export function BrokerDealerDetailClient({ brokerDealerId }: { brokerDealerId: s
                   title={owner.title}
                   extra={owner.ownership_pct ? `Ownership: ${owner.ownership_pct}` : null}
                   contact={matchForFinra(owner.name)}
+                  brokerDealerId={bd.id}
+                  brokerDealerName={bd.name}
                 />
               ))}
             </PeopleSubGroup>
@@ -793,6 +942,8 @@ export function BrokerDealerDetailClient({ brokerDealerId }: { brokerDealerId: s
                   name={officer.name}
                   title={officer.title}
                   contact={matchForFinra(officer.name)}
+                  brokerDealerId={bd.id}
+                  brokerDealerName={bd.name}
                 />
               ))}
             </PeopleSubGroup>
@@ -807,6 +958,8 @@ export function BrokerDealerDetailClient({ brokerDealerId }: { brokerDealerId: s
                   title={contact.title}
                   contact={contact}
                   source={`${contact.source} · ${formatDate(contact.enriched_at)}`}
+                  brokerDealerId={bd.id}
+                  brokerDealerName={bd.name}
                 />
               ))}
             </PeopleSubGroup>
@@ -982,7 +1135,7 @@ export function BrokerDealerDetailClient({ brokerDealerId }: { brokerDealerId: s
                         {item.clearing_partner ?? (
                           <UnknownCell
                             reason={item.unknown_reason}
-                            fallback="Unknown partner"
+                            fallback="Partner not on file"
                           />
                         )}
                       </p>
@@ -1015,14 +1168,19 @@ export function BrokerDealerDetailClient({ brokerDealerId }: { brokerDealerId: s
       <div className="mt-4">
         <SectionPanel eyebrow="Filing History" title="Chronological filing timeline">
           <div className="space-y-3">
-            {profile.filing_history.length === 0 ? (
+            {filingLoading && filingItems.length === 0 ? (
+              <div className="flex items-center justify-center rounded-2xl bg-[var(--surface-2,#f1f6fd)] px-4 py-8 text-sm text-[var(--text-muted,#94a3b8)]">
+                <Loader2 className="mr-2 h-4 w-4 animate-spin" />
+                Loading filings…
+              </div>
+            ) : filingItems.length === 0 ? (
               <div className="rounded-2xl bg-[var(--surface-2,#f1f6fd)] px-4 py-8 text-center text-sm text-[var(--text-muted,#94a3b8)]">
                 No filing history is available yet.
               </div>
             ) : (
-              profile.filing_history.map((item, index) => (
+              filingItems.map((item, index) => (
                 <div
-                  key={`${item.label}-${index}`}
+                  key={`${item.label}-${item.filed_at}-${index}`}
                   className="rounded-2xl border border-[var(--border,rgba(30,64,175,0.1))] px-4 py-4"
                 >
                   <div className="flex flex-wrap items-start justify-between gap-3">
@@ -1050,7 +1208,46 @@ export function BrokerDealerDetailClient({ brokerDealerId }: { brokerDealerId: s
               ))
             )}
           </div>
+          {filingTotal > 0 ? (
+            <div className="mt-4 flex flex-wrap items-center justify-between gap-3 text-sm text-[var(--text-muted,#94a3b8)]">
+              <span>
+                Page {filingPage} of {Math.max(filingTotalPages, 1)} · {filingTotal} total filing
+                {filingTotal === 1 ? "" : "s"}
+              </span>
+              <div className="flex items-center gap-2">
+                <button
+                  type="button"
+                  onClick={() => setFilingPage((p) => Math.max(1, p - 1))}
+                  disabled={filingPage <= 1 || filingLoading}
+                  className={SECONDARY_BTN}
+                >
+                  <ArrowLeft className="h-4 w-4" />
+                  Previous
+                </button>
+                <button
+                  type="button"
+                  onClick={() => setFilingPage((p) => p + 1)}
+                  disabled={filingPage >= filingTotalPages || filingLoading}
+                  className={SECONDARY_BTN}
+                >
+                  Next
+                  <ArrowRight className="h-4 w-4" />
+                </button>
+              </div>
+            </div>
+          ) : null}
         </SectionPanel>
+      </div>
+
+      {/* ── Discovered emails (full width) ── */}
+      <div className="mt-4">
+        <EmailScansSection
+          brokerDealerId={brokerDealerId}
+          currentScanId={currentScanId}
+          resolvedDomain={resolvedDomain}
+          isHydrating={isHydratingScan}
+          onScanCreated={setCurrentScanId}
+        />
       </div>
     </div>
   );
@@ -1106,19 +1303,25 @@ function PeopleSubGroup({ title, children }: { title: string; children: React.Re
 }
 
 // Single owner / officer / contact row used by every PeopleSubGroup. Keeps
-// the Apollo source + enriched_at footer when present.
+// the Apollo source + enriched_at footer when present. brokerDealerId +
+// brokerDealerName are forwarded to ContactRow → OutreachButton so the
+// cold-email modal knows which firm the recipient belongs to.
 function PersonCard({
   name,
   title,
   extra,
   contact,
   source,
+  brokerDealerId,
+  brokerDealerName,
 }: {
   name: string;
   title: string;
   extra?: string | null;
   contact?: ExecutiveContactItem;
   source?: string;
+  brokerDealerId: number;
+  brokerDealerName: string;
 }) {
   return (
     <div className="rounded-2xl bg-[var(--surface-2,#f1f6fd)] px-4 py-3 text-sm text-[var(--text-dim,#475569)]">
@@ -1128,7 +1331,13 @@ function PersonCard({
       </p>
       {title ? <p className="mt-1">{title}</p> : null}
       {extra ? <p className="mt-1 text-xs text-[var(--text-muted,#94a3b8)]">{extra}</p> : null}
-      {contact ? <ContactRow contact={contact} /> : null}
+      {contact ? (
+        <ContactRow
+          brokerDealerId={brokerDealerId}
+          brokerDealerName={brokerDealerName}
+          contact={contact}
+        />
+      ) : null}
       {source ? (
         <p className="mt-1 text-[11px] uppercase tracking-[0.08em] text-[var(--text-muted,#94a3b8)]">
           {source}

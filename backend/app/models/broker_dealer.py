@@ -30,6 +30,7 @@ class BrokerDealer(Base):
     latest_excess_net_capital: Mapped[float | None] = mapped_column(Numeric(18, 2), nullable=True)
     latest_total_assets: Mapped[float | None] = mapped_column(Numeric(18, 2), nullable=True)
     yoy_growth: Mapped[float | None] = mapped_column(Numeric(8, 2), nullable=True)
+    three_year_cagr: Mapped[float | None] = mapped_column(Numeric(8, 2), nullable=True)
     health_status: Mapped[str | None] = mapped_column(String(32), nullable=True)
     is_deficient: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
     latest_deficiency_filed_at: Mapped[date | None] = mapped_column(Date, nullable=True)
@@ -65,6 +66,21 @@ class BrokerDealer(Base):
     is_niche_restricted: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
     formation_date: Mapped[date | None] = mapped_column(Date, nullable=True)
     total_assets_yoy: Mapped[float | None] = mapped_column(Numeric(8, 2), nullable=True)
+    # FINRA "Doing Business As" / alternate trade names. Parsed from
+    # ``firm_other_names`` in the BrokerCheck firm-search payload. Used by
+    # the website resolver so a firm registered as ``303 ALTERNATIVES,
+    # LLC`` but operating at ``303capitalmarkets.com`` (DBA "303Capital
+    # Markets") can still anchor a candidate URL on the trade-name token.
+    dba_names: Mapped[list | None] = mapped_column(JSONB(none_as_null=True), nullable=True)
+    # LLM-generated alias list — parent-company brand expansions, acronym
+    # expansions, and common stylized variants that FINRA's ``firm_other_names``
+    # rarely captures. Augments the resolver's token pool so subsidiary firms
+    # whose web presence lives on a parent domain (e.g., ``BOFA SECURITIES,
+    # INC.`` operating at ``bankofamerica.com``) can anchor a candidate via
+    # an LLM-supplied alias like "Bank of America Securities". Kept separate
+    # from ``dba_names`` to preserve provenance — FINRA-sourced trade names
+    # stay in their authoritative column.
+    resolver_aliases: Mapped[list | None] = mapped_column(JSONB(none_as_null=True), nullable=True)
 
     status: Mapped[str] = mapped_column(String(64), default="pending", nullable=False)
     # Stamped on every Apollo /enrich attempt that the API "owns" (success or
@@ -72,6 +88,14 @@ class BrokerDealer(Base):
     # server-side cooldown so empty-result firms don't re-fire Apollo on
     # every detail-page visit. NULL means "never attempted".
     last_enrich_attempt_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True, index=True
+    )
+    # Stamped after every bulk gap-fill pass over this BD (regardless of
+    # which sub-pipelines fired or what the result was). The bulk runner
+    # in scripts/gap_fill_broker_dealers.py uses this as a 30-day cooldown
+    # so a firm whose source genuinely has no value isn't re-queried on
+    # every run. NULL means "never attempted by gap-fill".
+    last_gap_fill_attempt_at: Mapped[datetime | None] = mapped_column(
         DateTime(timezone=True), nullable=True, index=True
     )
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now(), nullable=False)

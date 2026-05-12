@@ -9,9 +9,13 @@ from app.api.v1.endpoints import (
     favorite_lists,
     favorites,
     health,
+    investment_advisors,
+    outreach,
     pipeline,
     settings,
     stats,
+    vault,
+    vault_files,
     visits,
 )
 
@@ -19,6 +23,7 @@ api_router = APIRouter()
 api_router.include_router(health.router, tags=["health"])
 api_router.include_router(auth.router, prefix="/auth", tags=["auth"])
 api_router.include_router(broker_dealers.router, tags=["broker-dealers"])
+api_router.include_router(investment_advisors.router, tags=["investment-advisors"])
 api_router.include_router(alerts.router, tags=["alerts"])
 api_router.include_router(export.router, tags=["export"])
 api_router.include_router(pipeline.router, tags=["pipeline"])
@@ -30,3 +35,6 @@ api_router.include_router(email_extractor.router, tags=["email-extractor"])
 api_router.include_router(favorites.router, tags=["favorites"])
 api_router.include_router(favorite_lists.router, tags=["favorite-lists"])
 api_router.include_router(visits.router, tags=["visits"])
+api_router.include_router(vault.router, tags=["vault"])
+api_router.include_router(vault_files.router, tags=["vault-files"])
+api_router.include_router(outreach.router, tags=["outreach"])

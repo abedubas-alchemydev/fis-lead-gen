@@ -6,23 +6,23 @@
 //   - hard reload preserves the user's filters
 //   - share-links carry the same query state
 //   - the firm-detail page can read the same shape via a `?return=`
-//     envelope to walk Next/Previous Lead inside the user's filtered
-//     and sorted result set
+//     envelope to walk Next/Previous Prospect inside the user's
+//     filtered and sorted result set
 //
-// Param-key contract is intentionally aligned with the existing five
-// keys read by app/(app)/master-list/page.tsx (clearing_partner,
-// clearing_type, lead_priority, list, types_of_business) so any
-// bookmarked deep-link from PR #99 keeps working. New keys (q, state,
-// health, sort_by, sort_dir, page, limit) match the backend list
-// endpoint's vocabulary so a future copy-paste-from-API debugging
-// session lines up cleanly.
+// Param-key contract was originally aligned with the BE filter vocabulary
+// (clearing_partner, clearing_type, prospect_priority, list,
+// types_of_business). The "prospect_priority" URL key replaces the
+// previous "lead_priority" key — existing bookmarks with the old key
+// silently fall back to default. New keys (q, state, health, sort_by,
+// sort_dir, page, limit) match the backend list endpoint's vocabulary
+// so a future copy-paste-from-API debugging session lines up cleanly.
 
 export type ListMode = "primary" | "alternative" | "all";
 export type SortDir = "asc" | "desc";
 // Sprint 6 task #29: which workspace the user came from when they
-// landed on /master-list/{id}. Drives the detail-page Next-Lead walker
-// (which list to step through) and the breadcrumb back-link copy +
-// href. "master-list" is the existing behavior; "favorites" and
+// landed on /master-list/{id}. Drives the detail-page Next-Prospect
+// walker (which list to step through) and the breadcrumb back-link copy
+// + href. "master-list" is the existing behavior; "favorites" and
 // "visited" are added in this PR.
 export type DetailSource = "master-list" | "favorites" | "visited";
 
@@ -30,8 +30,8 @@ export interface MasterListQueryState {
   search: string;
   state: string;
   health: string;
-  leadPriority: string;
-  clearingPartner: string;
+  prospectPriority: string;
+  clearingPartner: string[];
   clearingType: string;
   typesOfBusiness: string[];
   // Sprint 3 task #15: net-capital range. Dollars (not cents). null when
@@ -58,8 +58,8 @@ export const MASTER_LIST_STATE_DEFAULTS: MasterListQueryState = {
   search: "",
   state: "",
   health: "All",
-  leadPriority: "All",
-  clearingPartner: "",
+  prospectPriority: "All",
+  clearingPartner: [],
   clearingType: "All",
   typesOfBusiness: [],
   minNetCapital: null,
@@ -67,8 +67,8 @@ export const MASTER_LIST_STATE_DEFAULTS: MasterListQueryState = {
   registeredAfter: null,
   registeredBefore: null,
   list: "primary",
-  sortBy: "name",
-  sortDir: "asc",
+  sortBy: "latest_net_capital",
+  sortDir: "desc",
   page: 1,
   limit: 25,
   source: "master-list",
@@ -138,10 +138,9 @@ export function fromSearchParams(sp: SearchParamsLike): MasterListQueryState {
     search: sp.get("q") ?? MASTER_LIST_STATE_DEFAULTS.search,
     state: sp.get("state") ?? MASTER_LIST_STATE_DEFAULTS.state,
     health: sp.get("health") ?? MASTER_LIST_STATE_DEFAULTS.health,
-    leadPriority:
-      sp.get("lead_priority") ?? MASTER_LIST_STATE_DEFAULTS.leadPriority,
-    clearingPartner:
-      sp.get("clearing_partner") ?? MASTER_LIST_STATE_DEFAULTS.clearingPartner,
+    prospectPriority:
+      sp.get("prospect_priority") ?? MASTER_LIST_STATE_DEFAULTS.prospectPriority,
+    clearingPartner: parseMultiParam(sp, "clearing_partner"),
     clearingType:
       sp.get("clearing_type") ?? MASTER_LIST_STATE_DEFAULTS.clearingType,
     typesOfBusiness: parseMultiParam(sp, "types_of_business"),
@@ -188,11 +187,13 @@ export function toSearchParams(state: MasterListQueryState): URLSearchParams {
   if (state.health !== MASTER_LIST_STATE_DEFAULTS.health) {
     sp.set("health", state.health);
   }
-  if (state.leadPriority !== MASTER_LIST_STATE_DEFAULTS.leadPriority) {
-    sp.set("lead_priority", state.leadPriority);
+  if (state.prospectPriority !== MASTER_LIST_STATE_DEFAULTS.prospectPriority) {
+    sp.set("prospect_priority", state.prospectPriority);
   }
-  if (state.clearingPartner !== MASTER_LIST_STATE_DEFAULTS.clearingPartner) {
-    sp.set("clearing_partner", state.clearingPartner);
+  if (state.clearingPartner.length > 0) {
+    state.clearingPartner.forEach((entry) =>
+      sp.append("clearing_partner", entry),
+    );
   }
   if (state.clearingType !== MASTER_LIST_STATE_DEFAULTS.clearingType) {
     sp.set("clearing_type", state.clearingType);
@@ -282,27 +283,30 @@ export function parseReturnParam(raw: string | null): MasterListQueryState | nul
 
 // Encodes a state object as the value of a `return` query param so the
 // caller can append `?return=<encodeReturnParam(state)>` to any
-// destination URL. Returns an empty string when the state is at its
-// defaults so we don't pollute outbound URLs with a no-op envelope.
+// destination URL. Always emits a non-empty envelope — even when state
+// is at defaults — so the detail page never falls through to its bare
+// "/master-list" fallback (broker-dealer-detail-client.tsx). The cost is
+// ~22 extra bytes on row hrefs at the default state; the win is no
+// silent filter-loss when the user round-trips through a firm detail.
 export function encodeReturnParam(state: MasterListQueryState): string {
   const query = toSearchParams(state).toString();
-  if (!query) return "";
-  return encodeURIComponent(`/master-list?${query}`);
+  const path = query ? `/master-list?${query}` : "/master-list";
+  return encodeURIComponent(path);
 }
 
 // True when at least one filter key differs from its default. Filter
-// keys are the user-facing query controls (search, state, health, lead
-// priority, clearing partner / type, types of business, net-capital
-// range, registration-date range). Sort, list mode, page size, page,
-// and source are workspace/navigation state — not filters — so they
-// don't count toward "is anything filtered?".
+// keys are the user-facing query controls (search, state, health,
+// prospect priority, clearing partner / type, types of business,
+// net-capital range, registration-date range). Sort, list mode, page
+// size, page, and source are workspace/navigation state — not filters
+// — so they don't count toward "is anything filtered?".
 export function hasActiveFilters(state: MasterListQueryState): boolean {
   return (
     state.search !== MASTER_LIST_STATE_DEFAULTS.search ||
     state.state !== MASTER_LIST_STATE_DEFAULTS.state ||
     state.health !== MASTER_LIST_STATE_DEFAULTS.health ||
-    state.leadPriority !== MASTER_LIST_STATE_DEFAULTS.leadPriority ||
-    state.clearingPartner !== MASTER_LIST_STATE_DEFAULTS.clearingPartner ||
+    state.prospectPriority !== MASTER_LIST_STATE_DEFAULTS.prospectPriority ||
+    state.clearingPartner.length > 0 ||
     state.clearingType !== MASTER_LIST_STATE_DEFAULTS.clearingType ||
     state.typesOfBusiness.length > 0 ||
     state.minNetCapital !== null ||
@@ -327,8 +331,8 @@ export function clearAllFilters(
     search: MASTER_LIST_STATE_DEFAULTS.search,
     state: MASTER_LIST_STATE_DEFAULTS.state,
     health: MASTER_LIST_STATE_DEFAULTS.health,
-    leadPriority: MASTER_LIST_STATE_DEFAULTS.leadPriority,
-    clearingPartner: MASTER_LIST_STATE_DEFAULTS.clearingPartner,
+    prospectPriority: MASTER_LIST_STATE_DEFAULTS.prospectPriority,
+    clearingPartner: [],
     clearingType: MASTER_LIST_STATE_DEFAULTS.clearingType,
     typesOfBusiness: [],
     minNetCapital: null,

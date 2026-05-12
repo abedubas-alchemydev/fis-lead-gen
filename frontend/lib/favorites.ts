@@ -13,6 +13,10 @@ export interface BrokerDealerSummary {
   name: string;
   city: string | null;
   state: string | null;
+  // BE boundary fields — names mirror the FastAPI response contract verbatim
+  // (broker_dealers.lead_score / lead_priority columns). The FE displays
+  // these as "prospect score" / "prospect priority" everywhere user-facing,
+  // but the wire shape stays in BE vocabulary. Don't rename here.
   lead_score: number | null;
   lead_priority: string | null;
   current_clearing_partner: string | null;
@@ -21,6 +25,7 @@ export interface BrokerDealerSummary {
   last_filing_date: string | null;
   latest_net_capital: number | null;
   yoy_growth: number | null;
+  three_year_cagr: number | null;
 }
 
 export interface FavoriteListItem extends BrokerDealerSummary {

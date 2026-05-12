@@ -3,14 +3,14 @@ from __future__ import annotations
 from collections.abc import Iterable, Sequence
 from dataclasses import dataclass
 from datetime import date
-from typing import TYPE_CHECKING
 
+from sqlalchemy import select
+from sqlalchemy.ext.asyncio import AsyncSession
+
+from app.models.broker_dealer import BrokerDealer
+from app.models.competitor_provider import CompetitorProvider
 from app.models.financial_metric import FinancialMetric
 from app.models.scoring_setting import ScoringSetting
-
-if TYPE_CHECKING:
-    from app.models.broker_dealer import BrokerDealer
-    from app.models.competitor_provider import CompetitorProvider
 
 
 # ── ACG ICP weight-bucket internal splits ──
@@ -90,6 +90,34 @@ def calculate_yoy_growth(metrics: Sequence[FinancialMetric]) -> float | None:
         return None
 
     return round(((latest - previous) / previous) * 100, 2)
+
+
+def calculate_three_year_cagr(metrics: Sequence[FinancialMetric]) -> float | None:
+    """3-year compound annual growth rate on ``net_capital``.
+
+    Sibling of :func:`calculate_yoy_growth`. Takes the latest and oldest
+    of the three most recent metrics (by ``report_date``) and returns
+    the annualised growth percentage between them, rounded to two
+    decimals to match ``yoy_growth`` precision.
+
+    Returns ``None`` when fewer than three metrics are available
+    (fail-closed: the master-list column stays NULL until the BD has
+    enough history) or when the oldest ``net_capital`` is zero or
+    negative (the growth rate is undefined on a non-positive base).
+    """
+    if len(metrics) < 3:
+        return None
+
+    ordered = sorted(metrics, key=lambda metric: metric.report_date, reverse=True)
+    latest = float(ordered[0].net_capital)
+    oldest = float(ordered[2].net_capital)
+
+    if oldest <= 0:
+        return None
+
+    # Two compounding periods between three annual data points.
+    cagr = ((latest / oldest) ** (1 / 2) - 1) * 100
+    return round(cagr, 2)
 
 
 def calculate_total_assets_yoy(metrics: Sequence[FinancialMetric]) -> float | None:
@@ -267,3 +295,175 @@ def classify_lead_priority(score: float | None) -> str | None:
     if score >= WARM_THRESHOLD:
         return "warm"
     return "cold"
+
+
+# ── Bulk-scoring entrypoint (used by scripts/run_scoring.py) ──
+#
+# `refresh_lead_scores` on BrokerDealerService re-scores every BD as a
+# follow-on to the refresh pipelines. This standalone path lets a planner
+# fill in `lead_priority IS NULL` rows on demand without re-running the
+# pipelines, and supports an `--all` mode for refreshing every score
+# after a financial backfill lands.
+
+
+@dataclass(frozen=True)
+class BulkScoreSummary:
+    target_count: int
+    scored: int
+    skipped_no_data: int
+    sample_ids: tuple[int, ...]
+
+
+def has_scorable_data(firm: BrokerDealer) -> bool:
+    """True when the firm carries at least one of the substantive ACG ICP
+    inputs. A firm with no financials, no clearing classification, and no
+    clearing-partner string has nothing to score on — the composite would
+    collapse to defaults (notably ``score_finra_status`` returning 1.0
+    when both flags are False), producing a meaningless number rather
+    than a real signal. We surface those as ``skipped_no_data`` instead.
+    """
+    return (
+        firm.latest_net_capital is not None
+        or firm.clearing_classification is not None
+        or firm.current_clearing_partner is not None
+    )
+
+
+def _apply_score(
+    firm: BrokerDealer,
+    *,
+    competitor_lookup: CompetitorLookup,
+    weights: ScoringSetting,
+    today: date | None = None,
+) -> bool:
+    if not has_scorable_data(firm):
+        return False
+    score = calculate_lead_score(
+        firm=firm,
+        competitor_lookup=competitor_lookup,
+        weights=weights,
+        today=today,
+    )
+    firm.lead_score = score
+    firm.lead_priority = classify_lead_priority(score)
+    return True
+
+
+async def _load_default_weights(db: AsyncSession) -> ScoringSetting:
+    weights = (
+        await db.execute(
+            select(ScoringSetting).where(ScoringSetting.settings_key == "default").limit(1)
+        )
+    ).scalar_one_or_none()
+    if weights is None:
+        weights = ScoringSetting(settings_key="default")
+        db.add(weights)
+        await db.flush()
+    return weights
+
+
+async def _load_competitor_lookup(db: AsyncSession) -> CompetitorLookup:
+    providers = (
+        await db.execute(
+            select(CompetitorProvider)
+            .where(CompetitorProvider.is_active.is_(True))
+            .order_by(CompetitorProvider.priority.asc(), CompetitorProvider.name.asc())
+        )
+    ).scalars().all()
+    return CompetitorLookup.from_providers(providers)
+
+
+async def _load_target_firms(
+    db: AsyncSession, *, only_null_priority: bool, limit: int | None
+) -> list[BrokerDealer]:
+    stmt = select(BrokerDealer).order_by(BrokerDealer.id.asc())
+    if only_null_priority:
+        stmt = stmt.where(BrokerDealer.lead_priority.is_(None))
+    if limit is not None:
+        stmt = stmt.limit(limit)
+    return list((await db.execute(stmt)).scalars().all())
+
+
+async def score_broker_dealers(
+    db: AsyncSession,
+    *,
+    only_null_priority: bool = True,
+    limit: int | None = None,
+    dry_run: bool = False,
+    today: date | None = None,
+) -> BulkScoreSummary:
+    """Bulk-score broker dealers and write `lead_score`/`lead_priority`.
+
+    By default scopes to rows where ``lead_priority IS NULL``. Pass
+    ``only_null_priority=False`` for a full re-score. ``dry_run=True``
+    returns the target set without writing anything.
+    """
+    firms = await _load_target_firms(db, only_null_priority=only_null_priority, limit=limit)
+    target_count = len(firms)
+    sample_ids = tuple(firm.id for firm in firms[:5])
+
+    if dry_run or target_count == 0:
+        return BulkScoreSummary(
+            target_count=target_count,
+            scored=0,
+            skipped_no_data=0,
+            sample_ids=sample_ids,
+        )
+
+    weights = await _load_default_weights(db)
+    competitor_lookup = await _load_competitor_lookup(db)
+
+    scored = 0
+    skipped = 0
+    for firm in firms:
+        if _apply_score(
+            firm,
+            competitor_lookup=competitor_lookup,
+            weights=weights,
+            today=today,
+        ):
+            scored += 1
+        else:
+            skipped += 1
+
+    await db.flush()
+    return BulkScoreSummary(
+        target_count=target_count,
+        scored=scored,
+        skipped_no_data=skipped,
+        sample_ids=sample_ids,
+    )
+
+
+async def score_all_null_priority(
+    db: AsyncSession,
+    *,
+    limit: int | None = None,
+    dry_run: bool = False,
+    today: date | None = None,
+) -> BulkScoreSummary:
+    """Score only rows where ``lead_priority IS NULL``."""
+    return await score_broker_dealers(
+        db,
+        only_null_priority=True,
+        limit=limit,
+        dry_run=dry_run,
+        today=today,
+    )
+
+
+async def score_all(
+    db: AsyncSession,
+    *,
+    limit: int | None = None,
+    dry_run: bool = False,
+    today: date | None = None,
+) -> BulkScoreSummary:
+    """Score every broker dealer regardless of current priority."""
+    return await score_broker_dealers(
+        db,
+        only_null_priority=False,
+        limit=limit,
+        dry_run=dry_run,
+        today=today,
+    )

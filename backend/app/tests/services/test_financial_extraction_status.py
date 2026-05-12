@@ -44,10 +44,17 @@ from sqlalchemy import (
 from app.models.broker_dealer import BrokerDealer
 from app.models.financial_metric import FinancialMetric
 from app.services.extraction_status import (
+    PLAUSIBLE_LEVERAGE_RATIO_MAX,
+    RETRYABLE_TRANSIENT_STATUSES,
     STATUS_NEEDS_REVIEW,
+    STATUS_NETWORK_ERROR,
     STATUS_PARSED,
     STATUS_PENDING,
+    STATUS_PIPELINE_ERROR,
     classify_financial_extraction_status,
+    classify_pipeline_exception,
+    is_plausible_net_capital_scale,
+    is_plausible_report_date,
 )
 from app.services.focus_reports import FocusReportService
 from app.services.service_models import DownloadedPdfRecord
@@ -97,6 +104,322 @@ class TestClassifyFinancialExtractionStatus:
             has_required_fields=False,
         )
         assert status == STATUS_NEEDS_REVIEW
+
+    def test_implausible_leverage_routes_to_needs_review(self) -> None:
+        """High confidence + required fields are not enough — if the
+        net_capital looks ~1000× too small relative to total_assets,
+        the row is gated to review (issue #398 — scale-strip bug)."""
+        status = classify_financial_extraction_status(
+            confidence_score=0.95,
+            min_confidence=0.65,
+            is_plausible_leverage=False,
+        )
+        assert status == STATUS_NEEDS_REVIEW
+
+    def test_plausible_leverage_default_does_not_block(self) -> None:
+        """Callers that don't compute the leverage check (or for whom
+        total_assets is NULL) get the original behaviour — defaulting
+        to plausible=True so they're not penalised."""
+        status = classify_financial_extraction_status(
+            confidence_score=0.95,
+            min_confidence=0.65,
+        )
+        assert status == STATUS_PARSED
+
+    def test_implausible_date_routes_to_needs_review(self) -> None:
+        """High confidence + good leverage + everything-but-the-date — a
+        mid-month report_date is still enough to gate the row (issue
+        #398 — filing-date vs period-end mix-up)."""
+        status = classify_financial_extraction_status(
+            confidence_score=0.95,
+            min_confidence=0.65,
+            is_plausible_date=False,
+        )
+        assert status == STATUS_NEEDS_REVIEW
+
+    def test_plausible_date_default_does_not_block(self) -> None:
+        """Callers that don't yet compute the date check get the
+        original behaviour — defaulting to plausible=True."""
+        status = classify_financial_extraction_status(
+            confidence_score=0.95,
+            min_confidence=0.65,
+        )
+        assert status == STATUS_PARSED
+
+
+class TestIsPlausibleNetCapitalScale:
+    """Cross-field sanity check on the extracted net_capital scale."""
+
+    def test_normal_ratio_is_plausible(self) -> None:
+        """Common range: total_assets ~10-50× net_capital."""
+        assert is_plausible_net_capital_scale(
+            net_capital=100_000_000.0,
+            total_assets=3_000_000_000.0,  # 30×
+        )
+
+    def test_highly_leveraged_dealer_still_plausible(self) -> None:
+        """Heavily leveraged BDs can run ~200×; the threshold has
+        ~5× headroom above that."""
+        assert is_plausible_net_capital_scale(
+            net_capital=10_000_000.0,
+            total_assets=5_000_000_000.0,  # 500×
+        )
+
+    def test_exact_threshold_is_plausible(self) -> None:
+        assert is_plausible_net_capital_scale(
+            net_capital=1.0,
+            total_assets=PLAUSIBLE_LEVERAGE_RATIO_MAX,
+        )
+
+    def test_above_threshold_is_implausible(self) -> None:
+        """The RBC / DriveWealth bug shape: 33,000× ratio means the
+        net_capital extractor dropped the 'in thousands' multiplier."""
+        assert not is_plausible_net_capital_scale(
+            net_capital=103_192.0,
+            total_assets=3_430_043_000.0,  # 33,243×
+        )
+
+    def test_extreme_rbc_shape_is_implausible(self) -> None:
+        """RBC's specific incident: $1.60 vs $70.3B total_assets."""
+        assert not is_plausible_net_capital_scale(
+            net_capital=1.60,
+            total_assets=70_298_944_000.0,
+        )
+
+    def test_null_total_assets_assumed_plausible(self) -> None:
+        """When total_assets is NULL the check cannot be made — assume
+        plausible so the absence of a sibling field doesn't gate the
+        confidence-based path. (The caller knows about total_assets
+        availability and can pass has_required_fields=False if it
+        matters.)"""
+        assert is_plausible_net_capital_scale(
+            net_capital=100_000_000.0,
+            total_assets=None,
+        )
+
+    def test_null_net_capital_assumed_plausible(self) -> None:
+        """has_required_fields=False is the right gate for missing
+        net_capital, not this check."""
+        assert is_plausible_net_capital_scale(
+            net_capital=None,
+            total_assets=1_000_000_000.0,
+        )
+
+    def test_both_null_assumed_plausible(self) -> None:
+        assert is_plausible_net_capital_scale(
+            net_capital=None,
+            total_assets=None,
+        )
+
+    def test_zero_net_capital_assumed_plausible(self) -> None:
+        """Zero/negative net_capital is its own problem (covered by
+        the YoY divide-by-zero and CAGR oldest<=0 guards). Don't
+        double-flag here."""
+        assert is_plausible_net_capital_scale(
+            net_capital=0.0,
+            total_assets=1_000_000_000.0,
+        )
+
+    def test_negative_net_capital_assumed_plausible(self) -> None:
+        assert is_plausible_net_capital_scale(
+            net_capital=-100.0,
+            total_assets=1_000_000_000.0,
+        )
+
+    def test_zero_total_assets_assumed_plausible(self) -> None:
+        """Inverse of the bug shape — possible for a wind-down BD with
+        no remaining assets. Not the scale-strip bug."""
+        assert is_plausible_net_capital_scale(
+            net_capital=100_000.0,
+            total_assets=0.0,
+        )
+
+
+# ──────────────────────── report_date plausibility ────────────────────────
+
+
+class TestIsPlausibleReportDate:
+    """report_date must look like a fiscal period-end (last day of a month).
+
+    The bug shape (issue #398): Gemini occasionally returns the filing
+    date instead of the period-end. Filing dates are typically mid-month
+    and never line up with a month-end by chance.
+    """
+
+    def test_calendar_year_end_is_plausible(self) -> None:
+        """12/31 is the dominant fiscal year-end for US broker-dealers."""
+        assert is_plausible_report_date(date(2025, 12, 31))
+
+    def test_q1_end_is_plausible(self) -> None:
+        assert is_plausible_report_date(date(2025, 3, 31))
+
+    def test_q2_end_is_plausible(self) -> None:
+        assert is_plausible_report_date(date(2025, 6, 30))
+
+    def test_q3_end_is_plausible(self) -> None:
+        assert is_plausible_report_date(date(2025, 9, 30))
+
+    def test_non_quarter_month_end_is_plausible(self) -> None:
+        """Non-calendar fiscal years exist — e.g. 01/31, 10/31. The
+        validator must accept any month-end so we don't false-positive
+        legitimate non-Q firms."""
+        assert is_plausible_report_date(date(2025, 1, 31))
+        assert is_plausible_report_date(date(2025, 10, 31))
+
+    def test_february_28_non_leap_is_plausible(self) -> None:
+        """2/28 in a non-leap year IS the month-end."""
+        assert is_plausible_report_date(date(2025, 2, 28))
+
+    def test_february_29_leap_year_is_plausible(self) -> None:
+        """2/29 in a leap year IS the month-end."""
+        assert is_plausible_report_date(date(2024, 2, 29))
+
+    def test_february_28_in_leap_year_is_implausible(self) -> None:
+        """2/28 in a leap year is NOT the month-end (2/29 is)."""
+        assert not is_plausible_report_date(date(2024, 2, 28))
+
+    def test_mid_month_is_implausible(self) -> None:
+        """The DriveWealth bug shape: report_date=2026-02-25, which is
+        a Wednesday in mid-month — almost certainly a filing date."""
+        assert not is_plausible_report_date(date(2026, 2, 25))
+
+    def test_early_month_is_implausible(self) -> None:
+        """A staging row had report_date=2026-04-07 — same bug class."""
+        assert not is_plausible_report_date(date(2026, 4, 7))
+
+    def test_day_before_month_end_is_implausible(self) -> None:
+        """Off-by-one filing-date case — 03/30 (not 03/31)."""
+        assert not is_plausible_report_date(date(2025, 3, 30))
+
+    def test_april_31_is_implausible(self) -> None:
+        """4/30 is the April month-end; date(2025, 4, 30) is plausible,
+        but a Gemini response giving '4/30' for a calendar-year-end BD
+        still triggers the cross-check only at the calendar level. We
+        don't enforce same-quarter-pattern-as-history here; that's a
+        future improvement. Here we just confirm the helper itself
+        treats 4/30 as a month-end."""
+        assert is_plausible_report_date(date(2025, 4, 30))
+
+    def test_none_assumed_plausible(self) -> None:
+        """NULL dates are caught by has_required_fields, not by this
+        check. Returning True here keeps the gate single-purpose."""
+        assert is_plausible_report_date(None)
+
+
+# ──────────────────────── pipeline exception classifier ────────────────────────
+
+
+class TestClassifyPipelineException:
+    """Maps an extraction-loop exception to (status, sanitized_note).
+
+    The classifier exists so that transient network failures get their own
+    status (and bypass the gap-fill cooldown) while every other failure mode
+    lands as pipeline_error with a sanitized note that's safe to show in the
+    UI tooltip. Issue #399 — prior behaviour leaked raw OS error strings
+    like ``[Errno 11001] getaddrinfo failed`` to end users on 182 BDs.
+    """
+
+    def test_windows_dns_error_returns_network_status(self) -> None:
+        """The exact RBC-shape DNS message that leaked into 182 staging rows."""
+        exc = OSError("[Errno 11001] getaddrinfo failed")
+        status, note = classify_pipeline_exception(exc)
+        assert status == STATUS_NETWORK_ERROR
+        assert "Network failure" in note
+        # The sanitized note must NOT echo the raw OS error string.
+        assert "11001" not in note
+        assert "getaddrinfo" not in note
+
+    def test_linux_dns_error_returns_network_status(self) -> None:
+        exc = OSError("Name or service not known")
+        status, _ = classify_pipeline_exception(exc)
+        assert status == STATUS_NETWORK_ERROR
+
+    def test_temporary_dns_failure_returns_network_status(self) -> None:
+        exc = OSError("Temporary failure in name resolution")
+        status, _ = classify_pipeline_exception(exc)
+        assert status == STATUS_NETWORK_ERROR
+
+    def test_timeout_returns_network_status(self) -> None:
+        """httpx surfaces ``timed out`` / ``timeout`` on slow upstreams."""
+        exc = TimeoutError("Read operation timed out")
+        status, _ = classify_pipeline_exception(exc)
+        assert status == STATUS_NETWORK_ERROR
+
+    def test_connection_refused_returns_network_status(self) -> None:
+        exc = ConnectionRefusedError("Connection refused")
+        status, _ = classify_pipeline_exception(exc)
+        assert status == STATUS_NETWORK_ERROR
+
+    def test_connection_reset_returns_network_status(self) -> None:
+        exc = ConnectionResetError("Connection reset by peer")
+        status, _ = classify_pipeline_exception(exc)
+        assert status == STATUS_NETWORK_ERROR
+
+    def test_connection_aborted_returns_network_status(self) -> None:
+        """httpx wraps remote-disconnect with 'Connection aborted'."""
+        exc = OSError("Connection aborted.")
+        status, _ = classify_pipeline_exception(exc)
+        assert status == STATUS_NETWORK_ERROR
+
+    def test_classifier_is_case_insensitive(self) -> None:
+        """The fingerprint match folds case — providers vary on capitalisation."""
+        exc = OSError("GETADDRINFO FAILED")
+        status, _ = classify_pipeline_exception(exc)
+        assert status == STATUS_NETWORK_ERROR
+
+    def test_generic_exception_returns_pipeline_error(self) -> None:
+        """Non-network failures fall through to the catch-all category."""
+        exc = ValueError("PDF parse failed: missing /Root xref entry")
+        status, note = classify_pipeline_exception(exc)
+        assert status == STATUS_PIPELINE_ERROR
+        assert note.startswith("Extraction failed (ValueError):")
+        assert "PDF parse failed" in note
+
+    def test_pipeline_error_note_truncates_long_message(self) -> None:
+        """Stack-trace-shaped payloads get capped so a single bad row can't
+        drown the UI tooltip. The 160-char limit leaves room for the
+        ``Extraction failed (Class): `` prefix in the column."""
+        long_msg = "A" * 500
+        exc = ValueError(long_msg)
+        _, note = classify_pipeline_exception(exc)
+        # Note holds the prefix plus a truncated (157 + "...") payload.
+        assert note.endswith("...")
+        # The longest the payload portion can be is 160 chars (157 + "...").
+        prefix = "Extraction failed (ValueError): "
+        assert len(note) <= len(prefix) + 160
+
+    def test_pipeline_error_note_uses_first_line_only(self) -> None:
+        """Multi-line tracebacks collapse to the first line — the rest goes
+        into ``logger.exception`` at the call site, not into the UI."""
+        exc = RuntimeError("first line of trace\nsecond line\nthird line")
+        _, note = classify_pipeline_exception(exc)
+        assert "first line of trace" in note
+        assert "second line" not in note
+        assert "third line" not in note
+
+    def test_pipeline_error_handles_empty_message(self) -> None:
+        """Some exception classes raise with no message — note still parses."""
+        exc = RuntimeError()
+        status, note = classify_pipeline_exception(exc)
+        assert status == STATUS_PIPELINE_ERROR
+        assert note == "Extraction failed (RuntimeError)"
+
+    def test_pipeline_error_includes_class_name(self) -> None:
+        """The class name carries diagnostic value (which library raised
+        it) — keep it visible in the persisted note."""
+        exc = KeyError("net_capital")
+        _, note = classify_pipeline_exception(exc)
+        assert "KeyError" in note
+
+    def test_network_status_is_in_retryable_set(self) -> None:
+        """Lock the contract: gap_fill_broker_dealers.py keys off this set
+        to bypass the 30-day cooldown for transient failures."""
+        assert STATUS_NETWORK_ERROR in RETRYABLE_TRANSIENT_STATUSES
+
+    def test_pipeline_error_is_NOT_in_retryable_set(self) -> None:
+        """pipeline_error is a catch-all for genuine code/data bugs —
+        retrying it on the same input would just reproduce the same failure."""
+        assert STATUS_PIPELINE_ERROR not in RETRYABLE_TRANSIENT_STATUSES
 
 
 # ──────────────────────── migration SQL shim ────────────────────────

@@ -36,6 +36,7 @@ from app.services.apollo import ApolloClient, ApolloError, ApolloExecutive
 from app.services.extraction_status import (
     STATUS_PARSED,
     classify_financial_extraction_status,
+    is_plausible_net_capital_scale,
 )
 from app.services.gemini_responses import (
     GeminiConfigurationError,
@@ -45,6 +46,7 @@ from app.services.gemini_responses import (
 from app.services.pdf_downloader import PdfDownloaderService, pdf_tempdir
 from app.services.pdf_text_extractor import extract_from_pdf
 from app.services.scoring import (
+    calculate_three_year_cagr,
     calculate_total_assets_yoy,
     calculate_yoy_growth,
     classify_health_status,
@@ -738,6 +740,10 @@ class FocusCeoExtractionService:
             confidence_score=confidence_score,
             min_confidence=settings.financial_extraction_min_confidence,
             has_required_fields=True,
+            is_plausible_leverage=is_plausible_net_capital_scale(
+                net_capital=float(net_capital) if net_capital is not None else None,
+                total_assets=float(total_assets) if total_assets is not None else None,
+            ),
         )
 
         existing = (
@@ -821,6 +827,7 @@ class FocusCeoExtractionService:
             float(latest.total_assets) if latest.total_assets is not None else None
         )
         broker_dealer.yoy_growth = yoy_growth
+        broker_dealer.three_year_cagr = calculate_three_year_cagr(metrics)
         broker_dealer.total_assets_yoy = calculate_total_assets_yoy(metrics)
         broker_dealer.health_status = classify_health_status(
             latest_net_capital=float(latest.net_capital),

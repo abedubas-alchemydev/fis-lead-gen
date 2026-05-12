@@ -18,6 +18,38 @@ from app.models.pipeline_run import PipelineRun
 from app.services.alerts import AlertRepository
 from app.services.broker_dealers import BrokerDealerRepository
 from app.services.service_models import FilingAlertRecord
+from app.services.watched_firms import get_watched_bd_ids
+
+
+_AUTO_EXTRACT_FORM_TYPE = "Form X-17A-5"
+
+
+def filter_auto_extract_bd_ids(
+    inserted_rows: list[tuple[int, int, str]],
+    watched_bd_ids: set[int],
+) -> list[int]:
+    """Reduce the upsert_many output to the bd_ids that qualify for
+    automatic financial re-extraction.
+
+    Two predicates:
+      1. ``form_type == "Form X-17A-5"`` — only annual audited financial
+         reports carry the data the financial pipeline knows how to parse.
+         Form BD (new registrations) and Form 17a-11 (deficiency notices)
+         are surfaced as alerts but have no FOCUS-report bytes to extract.
+      2. ``bd_id in watched_bd_ids`` — bounds cost to the firms we care
+         about keeping fresh (see :mod:`app.services.watched_firms`).
+
+    The output is deduped + sorted for stable enqueue order across
+    repeated runs (one extraction per firm even if multiple X-17A-5s
+    landed in the same batch, which can happen with prior-year amendments).
+    """
+    return sorted(
+        {
+            bd_id
+            for (_alert_id, bd_id, form_type) in inserted_rows
+            if form_type == _AUTO_EXTRACT_FORM_TYPE and bd_id in watched_bd_ids
+        }
+    )
 
 
 class FilingMonitorService:
@@ -25,7 +57,18 @@ class FilingMonitorService:
         self.alert_repository = AlertRepository()
         self.repository = BrokerDealerRepository()
 
-    async def run(self, db: AsyncSession, *, trigger_source: str = "manual") -> PipelineRun:
+    async def run(
+        self, db: AsyncSession, *, trigger_source: str = "manual"
+    ) -> tuple[PipelineRun, list[int]]:
+        """Run the filing monitor end-to-end.
+
+        Returns ``(run, auto_extract_bd_ids)`` where ``auto_extract_bd_ids``
+        is the list of broker-dealer ids whose newly-inserted X-17A-5
+        alerts qualify for automatic financial re-extraction (a watched
+        firm filed a fresh annual audit). The caller schedules the
+        per-firm BackgroundTasks; the service stays free of FastAPI
+        dependencies.
+        """
         broker_dealers = (await db.execute(select(BrokerDealer).order_by(BrokerDealer.id.asc()))).scalars().all()
         if settings.filing_monitor_offset > 0:
             broker_dealers = broker_dealers[settings.filing_monitor_offset :]
@@ -52,7 +95,7 @@ class FilingMonitorService:
         else:
             records = await self._fetch_live_alerts(broker_dealers)
         async with SessionLocal() as write_db:
-            await self.alert_repository.upsert_many(write_db, records)
+            inserted_rows = await self.alert_repository.upsert_many(write_db, records)
             refreshed_broker_dealers = (
                 await write_db.execute(select(BrokerDealer).order_by(BrokerDealer.id.asc()))
             ).scalars().all()
@@ -65,6 +108,12 @@ class FilingMonitorService:
             await write_db.commit()
             await self.repository.refresh_lead_scores(write_db)
 
+            # Compute the auto-extract targets AFTER lead-score refresh so
+            # a firm whose priority just flipped to "hot" gets picked up
+            # on the same run that triggered the flip.
+            watched = await get_watched_bd_ids(write_db)
+            auto_extract_bd_ids = filter_auto_extract_bd_ids(inserted_rows, watched)
+
             run = await write_db.get(PipelineRun, run_id)
             if run is None:
                 raise RuntimeError(f"Pipeline run {run_id} could not be reloaded for filing monitor finalization.")
@@ -75,10 +124,13 @@ class FilingMonitorService:
             run.failure_count = 0
             run.status = "completed"
             run.completed_at = datetime.now(timezone.utc)
-            run.notes = f"Processed {len(records)} filing alerts in {settings.data_source_mode} mode."
+            run.notes = (
+                f"Processed {len(records)} filing alerts in {settings.data_source_mode} mode; "
+                f"queued auto re-extraction for {len(auto_extract_bd_ids)} watched firm(s)."
+            )
             await write_db.commit()
             await write_db.refresh(run)
-            return run
+            return run, auto_extract_bd_ids
 
     async def _fetch_live_alerts(self, broker_dealers: list[BrokerDealer]) -> list[FilingAlertRecord]:
         alerts: list[FilingAlertRecord] = []

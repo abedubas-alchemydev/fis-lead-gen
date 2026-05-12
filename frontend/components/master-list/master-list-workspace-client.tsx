@@ -1,11 +1,21 @@
 "use client";
 
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import Link from "next/link";
 import type { Route } from "next";
 import { useRouter, useSearchParams } from "next/navigation";
 
-import { ArrowDown, ArrowUp, Bell, Search, TrendingDown, TrendingUp, X } from "lucide-react";
+import {
+  ArrowDown,
+  ArrowUp,
+  Bell,
+  ChevronDown,
+  Heart,
+  Search,
+  TrendingDown,
+  TrendingUp,
+  X,
+} from "lucide-react";
 
 import { apiRequest, buildApiPath } from "@/lib/api";
 import { formatCurrency, formatRelativeTime } from "@/lib/format";
@@ -19,12 +29,11 @@ import {
 } from "@/lib/master-list-state";
 import { STATE_NAMES, stateCodeFromName } from "@/lib/states";
 import { Combo } from "@/components/ui/combo";
+import { BulkListPicker } from "@/components/list-picker/bulk-list-picker";
 import { ListPicker } from "@/components/list-picker/list-picker";
 import { NetCapitalRangeFilter } from "@/components/master-list/filters/net-capital-range-filter";
 import { RegistrationDateRangeFilter } from "@/components/master-list/filters/registration-date-range-filter";
-import { RefreshFirmButton } from "@/components/master-list/detail/refresh-firm-button";
 import { UnknownCell } from "@/components/master-list/unknown-cell";
-import { isFirmIncomplete } from "@/lib/firm-completeness";
 import {
   MultiSelectFilter,
   type MultiSelectFilterOption,
@@ -36,24 +45,24 @@ import { ThemeToggle } from "@/components/ui/theme-toggle";
 import type {
   BrokerDealerListItem,
   BrokerDealerListResponse,
-  CompetitorProvidersResponse,
   DashboardStats,
   TypeOfBusinessOption,
 } from "@/lib/types";
 
 // ── Column catalog ────────────────────────────────────────────────────────
 // 9 columns (mockup Q1 resolution). Location is merged into the firm-cell
-// as sub-text so the table has room for the Clearing Partner column, which
+// as sub-text so the table has room for the Clearing Arrangement column, which
 // frequently carries long compound provider names.
 const columns = [
   { key: "name", label: "Firm Name" },
   { key: "cik", label: "CIK" },
-  { key: "current_clearing_partner", label: "Clearing Partner" },
+  { key: "current_clearing_partner", label: "Clearing Arrangement" },
   { key: "current_clearing_type", label: "Clearing Type" },
   { key: "health_status", label: "Financial Health" },
-  { key: "lead_score", label: "Lead Priority" },
+  { key: "lead_score", label: "Prospect Priority" },
   { key: "latest_net_capital", label: "Net Capital" },
   { key: "yoy_growth", label: "YoY Growth" },
+  { key: "three_year_cagr", label: "3-Yr CAGR" },
   { key: "last_filing_date", label: "Last Filing" },
 ] as const;
 
@@ -105,7 +114,7 @@ function healthLabel(status: string | null): string {
   if (status === "healthy") return "Healthy";
   if (status === "ok") return "OK";
   if (status === "at_risk") return "At Risk";
-  return "Unknown";
+  return "Not assessed";
 }
 
 function clearingTypeVariant(value: string | null): PillVariant {
@@ -119,7 +128,7 @@ function clearingTypeLabel(value: string | null): string {
   if (value === "fully_disclosed") return "Fully Disclosed";
   if (value === "self_clearing") return "Self-Clearing";
   if (value === "omnibus") return "Omnibus";
-  return "Unknown";
+  return "Not classified";
 }
 
 function priorityLabel(priority: string | null): string {
@@ -181,15 +190,20 @@ export function MasterListWorkspaceClient() {
 
   const updateState = useCallback(
     (patch: Partial<MasterListQueryState>) => {
-      commit({ ...queryState, ...patch });
+      // Re-parse the URL at call time instead of closing over queryState.
+      // Belt-and-suspenders against any stale-closure regression where a
+      // pagination/sort/filter handler captured an older queryState ref —
+      // every patch is now applied on top of the live URL.
+      const current = fromSearchParams(searchParams);
+      commit({ ...current, ...patch });
     },
-    [commit, queryState],
+    [commit, searchParams],
   );
 
   const stateFilter = queryState.state;
   const search = queryState.search;
   const healthFilter = queryState.health;
-  const leadPriorityFilter = queryState.leadPriority;
+  const prospectPriorityFilter = queryState.prospectPriority;
   const clearingTypeFilter = queryState.clearingType;
   const clearingPartnerFilter = queryState.clearingPartner;
   const typesOfBusinessFilter = queryState.typesOfBusiness;
@@ -206,7 +220,6 @@ export function MasterListWorkspaceClient() {
   // ── Table data — fetched on every URL-state change ─────────────────
   const [items, setItems] = useState<BrokerDealerListItem[]>([]);
   const [clearingPartners, setClearingPartners] = useState<string[]>([]);
-  const [competitorSeeds, setCompetitorSeeds] = useState<string[]>([]);
   // Distinct types-of-business values + per-type firm counts. Loaded once
   // from /broker-dealers/types-of-business; sorted by count desc inside the
   // filter so the most common types surface first. Empty array until the
@@ -239,6 +252,17 @@ export function MasterListWorkspaceClient() {
   });
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
+
+  // ── Bulk-select state (page-scoped) ─────────────────────────────────────
+  // selectedIds is intentionally NOT URL-backed — URL mutations re-fire the
+  // items effect (which clears the set), so URL-backing would create a
+  // feedback loop. Selection is ephemeral and resolves on bulk-action.
+  const [selectedIds, setSelectedIds] = useState<ReadonlySet<number>>(
+    () => new Set(),
+  );
+  const [bulkPickerOpen, setBulkPickerOpen] = useState(false);
+  const headerCheckboxRef = useRef<HTMLInputElement | null>(null);
+  const bulkActionTriggerRef = useRef<HTMLButtonElement | null>(null);
   // Mirrors the sidebar's Alerts badge — drives the topbar bell's red pip
   // when unread deficiency alerts exist. Same `/api/v1/stats` endpoint the
   // sidebar hits; one extra GET per page-load, no per-render refetches.
@@ -253,8 +277,9 @@ export function MasterListWorkspaceClient() {
         search,
         state: stateFilter ? [stateCodeFromName(stateFilter) ?? stateFilter] : undefined,
         health: healthFilter === "All" ? undefined : [healthFilter],
-        lead_priority: leadPriorityFilter === "All" ? undefined : [leadPriorityFilter],
-        clearing_partner: clearingPartnerFilter ? [clearingPartnerFilter] : undefined,
+        lead_priority: prospectPriorityFilter === "All" ? undefined : [prospectPriorityFilter],
+        clearing_partner:
+          clearingPartnerFilter.length > 0 ? clearingPartnerFilter : undefined,
         clearing_type: clearingTypeFilter === "All" ? undefined : [clearingTypeFilter],
         types_of_business:
           typesOfBusinessFilter.length > 0 ? typesOfBusinessFilter : undefined,
@@ -275,7 +300,7 @@ export function MasterListWorkspaceClient() {
       search,
       stateFilter,
       healthFilter,
-      leadPriorityFilter,
+      prospectPriorityFilter,
       clearingPartnerFilter,
       clearingTypeFilter,
       typesOfBusinessFilter,
@@ -318,27 +343,65 @@ export function MasterListWorkspaceClient() {
     };
   }, [queryPath]);
 
-  // One-shot filter-metadata fetch. Pulls states + clearing-partners +
-  // active-competitor names (for the Combo's quick-chips) + per-list totals
-  // (for the tab-count badges). Per plan Q3 default (a): three limit=1
-  // probes instead of a new backend endpoint.
+  // ── Bulk-select effects ────────────────────────────────────────────────
+  // Selection scope is "current page only" — every items refetch (page,
+  // sort, filter, list-mode, search) clears the set so the user never
+  // bulk-acts on off-page rows they can't see.
+  useEffect(() => {
+    setSelectedIds(new Set());
+  }, [items]);
+
+  // Auto-dismiss the popover when there's nothing left to act on.
+  useEffect(() => {
+    if (selectedIds.size === 0) setBulkPickerOpen(false);
+  }, [selectedIds]);
+
+  const allOnPageSelected =
+    items.length > 0 && selectedIds.size === items.length;
+  const someOnPageSelected =
+    selectedIds.size > 0 && selectedIds.size < items.length;
+
+  // Indeterminate must be set imperatively — React doesn't expose it as a
+  // prop on <input>. checked={true} + indeterminate=true reads as
+  // "indeterminate" in the browser; setting one without the other is fine.
+  useEffect(() => {
+    if (headerCheckboxRef.current) {
+      headerCheckboxRef.current.indeterminate = someOnPageSelected;
+    }
+  }, [someOnPageSelected]);
+
+  const toggleRow = useCallback((id: number) => {
+    setSelectedIds((current) => {
+      const next = new Set(current);
+      if (next.has(id)) next.delete(id);
+      else next.add(id);
+      return next;
+    });
+  }, []);
+
+  const toggleAllOnPage = useCallback(() => {
+    setSelectedIds((current) => {
+      if (current.size === items.length) return new Set();
+      return new Set(items.map((item) => item.id));
+    });
+  }, [items]);
+
+  // One-shot filter-metadata fetch. Pulls clearing-partners +
+  // types-of-business + per-list totals (for the tab-count badges).
   useEffect(() => {
     let active = true;
 
     async function loadFilters() {
-      // Each fetch is settled independently so one failing endpoint (e.g.
-      // a 403 on /settings/competitors for the Viewer role) does not wipe
-      // every other filter on the page.
+      // Each fetch is settled independently so one failing endpoint does not
+      // wipe every other filter on the page.
       const [
         partner,
-        competitor,
         types,
         primary,
         alternative,
         all,
       ] = await Promise.allSettled([
         apiRequest<string[]>("/api/v1/broker-dealers/clearing-partners"),
-        apiRequest<CompetitorProvidersResponse>("/api/v1/settings/competitors"),
         apiRequest<TypeOfBusinessOption[]>(
           "/api/v1/broker-dealers/types-of-business",
         ),
@@ -355,17 +418,6 @@ export function MasterListWorkspaceClient() {
       if (!active) return;
 
       setClearingPartners(partner.status === "fulfilled" ? partner.value : []);
-
-      if (competitor.status === "fulfilled") {
-        setCompetitorSeeds(
-          competitor.value.items
-            .filter((item) => item.is_active)
-            .sort((a, b) => a.priority - b.priority)
-            .map((item) => item.name),
-        );
-      } else {
-        setCompetitorSeeds([]);
-      }
 
       if (types.status === "fulfilled") {
         // Defensive parsing: the BE has occasionally returned thousands of
@@ -453,8 +505,8 @@ export function MasterListWorkspaceClient() {
     if (search !== "") count += 1;
     if (stateFilter !== "") count += 1;
     if (healthFilter !== "All") count += 1;
-    if (leadPriorityFilter !== "All") count += 1;
-    if (clearingPartnerFilter !== "") count += 1;
+    if (prospectPriorityFilter !== "All") count += 1;
+    if (clearingPartnerFilter.length > 0) count += 1;
     if (clearingTypeFilter !== "All") count += 1;
     if (typesOfBusinessFilter.length > 0) count += 1;
     if (minNetCapitalFilter !== null) count += 1;
@@ -466,7 +518,7 @@ export function MasterListWorkspaceClient() {
     search,
     stateFilter,
     healthFilter,
-    leadPriorityFilter,
+    prospectPriorityFilter,
     clearingPartnerFilter,
     clearingTypeFilter,
     typesOfBusinessFilter,
@@ -489,6 +541,14 @@ export function MasterListWorkspaceClient() {
         })
         .map((item) => ({ value: item.type, label: item.type, count: item.count })),
     [typesOfBusinessOptions],
+  );
+
+  // Backend returns canonical short labels ("Pershing", "Apex") with the
+  // long-tail of raw provider strings deduped behind them, already sorted
+  // alphabetically. Wrap in the option shape MultiSelectFilter expects.
+  const clearingPartnerFilterOptions = useMemo<MultiSelectFilterOption[]>(
+    () => clearingPartners.map((name) => ({ value: name, label: name })),
+    [clearingPartners],
   );
 
   const pages = paginationPages(meta.page, meta.total_pages);
@@ -666,16 +726,19 @@ export function MasterListWorkspaceClient() {
 
           <div>
             <label className="mb-1.5 block text-[11px] font-semibold uppercase tracking-[0.08em] text-[var(--text-muted,#94a3b8)]">
-              Clearing Partner
+              Clearing Arrangement
             </label>
-            <Combo
+            <MultiSelectFilter
               value={clearingPartnerFilter}
-              onChange={(next) => updateState({ clearingPartner: next, page: 1 })}
-              options={clearingPartners}
-              quickChips={competitorSeeds}
+              onChange={(next) =>
+                updateState({ clearingPartner: next, page: 1 })
+              }
+              options={clearingPartnerFilterOptions}
+              triggerLabel="Clearing Arrangement"
               placeholder="Search partners…"
-              emptyLabel="All providers"
-              ariaLabel="Clearing Partner"
+              emptyLabel="No partners match your search"
+              noOptionsLabel="No clearing partners available."
+              ariaLabel="Clearing Arrangement"
             />
           </div>
 
@@ -732,13 +795,13 @@ export function MasterListWorkspaceClient() {
           </div>
           <div>
             <p className="mb-1.5 text-[11px] font-semibold uppercase tracking-[0.08em] text-[var(--text-muted,#94a3b8)]">
-              Lead Priority
+              Prospect Priority
             </p>
             <Segmented
-              value={leadPriorityFilter}
-              onChange={(next) => updateState({ leadPriority: next, page: 1 })}
+              value={prospectPriorityFilter}
+              onChange={(next) => updateState({ prospectPriority: next, page: 1 })}
               items={PRIORITY_ITEMS}
-              ariaLabel="Lead priority"
+              ariaLabel="Prospect priority"
             />
           </div>
         </div>
@@ -780,27 +843,33 @@ export function MasterListWorkspaceClient() {
                 State: {stateFilter}
               </Tag>
             ) : null}
-            {clearingPartnerFilter ? (
+            {clearingPartnerFilter.map((partner) => (
               <Tag
+                key={`partner-${partner}`}
                 onDismiss={() =>
-                  updateState({ clearingPartner: "", page: 1 })
+                  updateState({
+                    clearingPartner: clearingPartnerFilter.filter(
+                      (value) => value !== partner,
+                    ),
+                    page: 1,
+                  })
                 }
               >
-                Partner: {clearingPartnerFilter}
+                Partner: {partner}
               </Tag>
-            ) : null}
+            ))}
             {healthFilter !== "All" ? (
               <Tag onDismiss={() => updateState({ health: "All", page: 1 })}>
                 Health: {healthLabel(healthFilter)}
               </Tag>
             ) : null}
-            {leadPriorityFilter !== "All" ? (
+            {prospectPriorityFilter !== "All" ? (
               <Tag
                 onDismiss={() =>
-                  updateState({ leadPriority: "All", page: 1 })
+                  updateState({ prospectPriority: "All", page: 1 })
                 }
               >
-                Priority: {priorityLabel(leadPriorityFilter)}
+                Priority: {priorityLabel(prospectPriorityFilter)}
               </Tag>
             ) : null}
             {clearingTypeFilter !== "All" ? (
@@ -973,25 +1042,78 @@ export function MasterListWorkspaceClient() {
               Broker-dealer list
             </h3>
           </div>
-          <span className="text-[12px] text-[var(--text-muted,#94a3b8)]">
-            {meta.total.toLocaleString()} firm{meta.total === 1 ? "" : "s"}
-          </span>
+          {selectedIds.size > 0 ? (
+            <div className="flex items-center gap-3">
+              <span
+                className="text-[12px] font-semibold text-[var(--text-dim,#475569)]"
+                aria-live="polite"
+              >
+                {selectedIds.size} selected
+              </span>
+              <button
+                type="button"
+                onClick={() => setSelectedIds(new Set())}
+                className="rounded-[6px] border border-[var(--border-2,rgba(30,64,175,0.16))] bg-transparent px-2.5 py-1 text-[11px] font-semibold text-[var(--text-dim,#475569)] transition hover:bg-[var(--surface-2,#f1f6fd)]"
+              >
+                Clear
+              </button>
+              <button
+                ref={bulkActionTriggerRef}
+                type="button"
+                onClick={() => setBulkPickerOpen((v) => !v)}
+                aria-haspopup="dialog"
+                aria-expanded={bulkPickerOpen}
+                className="inline-flex items-center gap-1.5 rounded-[8px] border border-[rgba(99,102,241,0.4)] bg-gradient-to-br from-[#6366f1] to-[#8b5cf6] px-3 py-1.5 text-[12px] font-semibold text-white shadow-[0_6px_16px_rgba(99,102,241,0.35)]"
+              >
+                <Heart className="h-3.5 w-3.5" strokeWidth={2.5} aria-hidden />
+                Save to list
+                <ChevronDown
+                  className="h-3.5 w-3.5"
+                  strokeWidth={2.5}
+                  aria-hidden
+                />
+              </button>
+              {bulkPickerOpen ? (
+                <BulkListPicker
+                  selectedIds={Array.from(selectedIds)}
+                  anchorRef={bulkActionTriggerRef}
+                  onAdded={() => {
+                    setBulkPickerOpen(false);
+                    setSelectedIds(new Set());
+                  }}
+                  onDismiss={() => setBulkPickerOpen(false)}
+                />
+              ) : null}
+            </div>
+          ) : (
+            <span className="text-[12px] text-[var(--text-muted,#94a3b8)]">
+              {meta.total.toLocaleString()} firm{meta.total === 1 ? "" : "s"}
+            </span>
+          )}
         </div>
 
         <div className="overflow-x-auto">
-          <table className="w-full min-w-[1080px] text-left">
+          <table className="w-full min-w-[1124px] text-left">
             <thead>
               <tr>
-                {/*
-                  Utility column for the per-row "Refresh firm" button.
-                  No label, no sort button — it's an action column, not a
-                  data column. Width tracks the button itself.
-                */}
                 <th
                   scope="col"
-                  aria-label="Refresh firm"
-                  className="w-10 whitespace-nowrap border-b border-[var(--border,rgba(30,64,175,0.1))] bg-[var(--surface-2,#f1f6fd)] px-3 py-3"
-                />
+                  className="w-[44px] whitespace-nowrap border-b border-[var(--border,rgba(30,64,175,0.1))] bg-[var(--surface-2,#f1f6fd)] px-5 py-3"
+                >
+                  <input
+                    ref={headerCheckboxRef}
+                    type="checkbox"
+                    aria-label={
+                      allOnPageSelected
+                        ? "Deselect all firms on this page"
+                        : "Select all firms on this page"
+                    }
+                    checked={allOnPageSelected}
+                    onChange={toggleAllOnPage}
+                    disabled={loading || items.length === 0}
+                    className="h-4 w-4 rounded border-[var(--border-2,rgba(30,64,175,0.16))] text-[var(--accent,#6366f1)] focus:ring-[var(--accent,#6366f1)]"
+                  />
+                </th>
                 {columns.map((column) => {
                   const isSorted = sortBy === column.key;
                   return (
@@ -1025,7 +1147,9 @@ export function MasterListWorkspaceClient() {
                     key={`loading-${index}`}
                     className="border-t border-[var(--border,rgba(30,64,175,0.1))]"
                   >
-                    <td className="px-3 py-3.5" aria-hidden />
+                    <td className="w-[44px] px-5 py-3.5">
+                      <div className="h-4 w-4 animate-pulse rounded bg-[var(--surface-2,#f1f6fd)]" />
+                    </td>
                     {columns.map((column) => (
                       <td key={column.key} className="px-5 py-3.5">
                         <div className="h-4 w-full animate-pulse rounded bg-[var(--surface-2,#f1f6fd)]" />
@@ -1046,6 +1170,19 @@ export function MasterListWorkspaceClient() {
                 items.map((item) => {
                   const hot = item.lead_priority === "hot";
                   const location = [item.city, item.state].filter(Boolean).join(", ");
+                  // When the search query matched a DBA but NOT the legal
+                  // name, surface the matched alt name so the user can see
+                  // why this row appeared. Suppress when the legal name
+                  // already contains the substring — otherwise the hint is
+                  // noise. Mirrors the BE substring match in
+                  // ``BrokerDealerRepository.list_broker_dealers``.
+                  const searchTerm = search.trim().toLowerCase();
+                  const matchedDba =
+                    searchTerm && !item.name.toLowerCase().includes(searchTerm)
+                      ? item.dba_names?.find((alt) =>
+                          alt.toLowerCase().includes(searchTerm),
+                        ) ?? null
+                      : null;
                   // Hot-row stripe lives on the firm-cell <td> as a
                   // background-image so Chromium doesn't render it as a
                   // phantom <tr>::before cell that shifts every td one
@@ -1064,10 +1201,15 @@ export function MasterListWorkspaceClient() {
                       key={item.id}
                       className="border-t border-[var(--border,rgba(30,64,175,0.1))] align-top transition hover:bg-[var(--row-hover,rgba(99,102,241,0.04))]"
                     >
-                      <td className="px-3 py-3.5">
-                        {isFirmIncomplete(item) ? (
-                          <RefreshFirmButton firmId={item.id} compact />
-                        ) : null}
+                      <td className="w-[44px] px-5 py-3.5 align-top">
+                        <input
+                          type="checkbox"
+                          aria-label={`Select ${item.name}`}
+                          checked={selectedIds.has(item.id)}
+                          onChange={() => toggleRow(item.id)}
+                          onClick={(e) => e.stopPropagation()}
+                          className="mt-0.5 h-4 w-4 rounded border-[var(--border-2,rgba(30,64,175,0.16))] text-[var(--accent,#6366f1)] focus:ring-[var(--accent,#6366f1)]"
+                        />
                       </td>
                       <td className="min-w-[220px] px-5 py-3.5" style={firmCellStyle}>
                         <div className="flex items-start justify-between gap-3">
@@ -1078,6 +1220,14 @@ export function MasterListWorkspaceClient() {
                             >
                               {item.name}
                             </Link>
+                            {matchedDba ? (
+                              <div className="mt-0.5 text-[11px] text-[var(--text-muted,#94a3b8)]">
+                                DBA:{" "}
+                                <span className="font-medium text-[var(--text-dim,#475569)]">
+                                  {matchedDba}
+                                </span>
+                              </div>
+                            ) : null}
                             {location ? (
                               <div className="mt-0.5 text-[11px] uppercase tracking-[0.04em] text-[var(--text-muted,#94a3b8)]">
                                 {location}
@@ -1101,9 +1251,12 @@ export function MasterListWorkspaceClient() {
                             >
                               {item.current_clearing_partner}
                             </span>
+                          ) : item.current_clearing_type === "self_clearing" ? (
+                            <span className="text-[var(--text-muted,#94a3b8)]">—</span>
                           ) : (
                             <UnknownCell
                               reason={item.current_clearing_unknown_reason}
+                              fallback="Not on file"
                             />
                           )}
                           {item.current_clearing_is_competitor ? (
@@ -1197,6 +1350,31 @@ export function MasterListWorkspaceClient() {
                             reason={item.financial_unknown_reason}
                             fallback="—"
                           />
+                        )}
+                      </td>
+                      <td className="whitespace-nowrap px-5 py-3.5">
+                        {item.three_year_cagr !== null ? (
+                          <span
+                            className={`inline-flex items-center gap-1 font-semibold tabular-nums ${
+                              item.three_year_cagr >= 0 ? "text-[#16a34a]" : "text-[#dc2626]"
+                            }`}
+                            title="3-year compound annual growth rate on net capital"
+                          >
+                            {item.three_year_cagr >= 0 ? (
+                              <TrendingUp className="h-3.5 w-3.5" strokeWidth={2.5} />
+                            ) : (
+                              <TrendingDown className="h-3.5 w-3.5" strokeWidth={2.5} />
+                            )}
+                            {item.three_year_cagr >= 0 ? "+" : ""}
+                            {item.three_year_cagr.toFixed(1)}%
+                          </span>
+                        ) : (
+                          <span
+                            className="text-[var(--text-muted,#94a3b8)]"
+                            title="Needs 3 years of financial history to compute"
+                          >
+                            —
+                          </span>
                         )}
                       </td>
                       <td className="whitespace-nowrap px-5 py-3.5 text-[var(--text-muted,#94a3b8)]">

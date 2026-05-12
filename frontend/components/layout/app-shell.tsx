@@ -3,8 +3,8 @@
 import Link from "next/link";
 import type { Route } from "next";
 import type { ReactNode } from "react";
-import { useEffect, useState } from "react";
-import { usePathname, useRouter } from "next/navigation";
+import { useEffect, useMemo, useState } from "react";
+import { usePathname, useRouter, useSearchParams } from "next/navigation";
 
 import { apiRequest } from "@/lib/api";
 import { authClient } from "@/lib/auth-client";
@@ -51,6 +51,20 @@ function MasterListIcon(props: IconProps) {
   return (
     <IconBase {...props}>
       <path d="M3 6h18M3 12h18M3 18h18" />
+    </IconBase>
+  );
+}
+
+// Briefcase + chart-bar mark — distinguishes the Investment Advisor list
+// from the Master List's three-line glyph at a glance.
+function AdvisorListIcon(props: IconProps) {
+  return (
+    <IconBase {...props}>
+      <rect x="3" y="7" width="18" height="13" rx="2" />
+      <path d="M9 7V5a2 2 0 012-2h2a2 2 0 012 2v2" />
+      <path d="M8 14v3" />
+      <path d="M12 12v5" />
+      <path d="M16 10v7" />
     </IconBase>
   );
 }
@@ -118,6 +132,17 @@ function VaultIcon(props: IconProps) {
   );
 }
 
+function UsersIcon(props: IconProps) {
+  return (
+    <IconBase {...props}>
+      <circle cx="9" cy="8" r="3.5" />
+      <path d="M2 21c0-3.5 3.1-6 7-6s7 2.5 7 6" />
+      <circle cx="17" cy="8" r="2.5" />
+      <path d="M16 14c2.8 0 5 1.8 5 4" />
+    </IconBase>
+  );
+}
+
 type SessionUser = {
   name?: string | null;
   email?: string | null;
@@ -138,11 +163,17 @@ type NavEntry = {
   label: string;
   icon: NavIconComponent;
   badgeKey: BadgeKey;
+  adminOnly?: boolean;
 };
 
 const workspaceNav: ReadonlyArray<NavEntry> = [
   { href: "/dashboard", label: "Dashboard", icon: DashboardIcon, badgeKey: null },
   { href: "/master-list", label: "Master List", icon: MasterListIcon, badgeKey: "total" },
+  // ``as Route`` cast: Next's typed-routes type-gen runs on `next build`/`next
+  // dev`, so a fresh route added in a tsc-only check (no Next pipeline run)
+  // isn't yet known to the Route union. Removing once a build regenerates
+  // .next/types is fine but cheap to leave for new sibling routes.
+  { href: "/advisor-list" as Route, label: "Investment Advisors", icon: AdvisorListIcon, badgeKey: null },
   { href: "/alerts", label: "Alerts", icon: AlertsIcon, badgeKey: "alerts" },
   { href: "/email-extractor", label: "Email Extractor", icon: EmailExtractorIcon, badgeKey: null },
   { href: "/export", label: "Export", icon: ExportIcon, badgeKey: null },
@@ -152,6 +183,7 @@ const workspaceNav: ReadonlyArray<NavEntry> = [
 
 const accountNav: ReadonlyArray<NavEntry> = [
   { href: "/settings", label: "Settings", icon: SettingsIcon, badgeKey: null },
+  { href: "/settings/users" as Route, label: "Users", icon: UsersIcon, badgeKey: null, adminOnly: true },
   { href: "/vault", label: "Vault", icon: VaultIcon, badgeKey: null }
 ];
 
@@ -173,6 +205,19 @@ export function AppShell({
 }) {
   const pathname = usePathname();
   const router = useRouter();
+  const searchParams = useSearchParams();
+  // Sidebar Master List link href. When the user is already on
+  // /master-list, preserve the live filter / sort / page query string so
+  // clicking the nav item is a no-op rather than a destructive reset.
+  // From any other route, link to bare /master-list (the user has no
+  // master-list filter context to preserve).
+  const masterListHref = useMemo<Route>(() => {
+    if (pathname === "/master-list") {
+      const qs = searchParams.toString();
+      return (qs ? `/master-list?${qs}` : "/master-list") as Route;
+    }
+    return "/master-list" as Route;
+  }, [pathname, searchParams]);
   const [stats, setStats] = useState<StatsLite | null>(null);
   const [signingOut, setSigningOut] = useState(false);
 
@@ -214,12 +259,26 @@ export function AppShell({
 
   const initials = initialsFromName(session.user.name ?? session.user.email);
 
-  function isActivePath(href: string) {
-    return pathname === href || pathname.startsWith(`${href}/`);
-  }
-
   const role = session.user.role ?? "viewer";
   const displayRole = role.charAt(0).toUpperCase() + role.slice(1);
+  const isAdmin = role === "admin";
+
+  const visibleWorkspaceNav = workspaceNav.filter((e) => !e.adminOnly || isAdmin);
+  const visibleAccountNav = accountNav.filter((e) => !e.adminOnly || isAdmin);
+
+  function isActivePath(href: string) {
+    if (pathname === href) return true;
+    if (!pathname.startsWith(`${href}/`)) return false;
+    // If a sibling nav entry has a longer matching href, defer to it. Stops
+    // /settings from staying highlighted while on /settings/users.
+    const all = [...visibleWorkspaceNav, ...visibleAccountNav];
+    return !all.some(
+      (e) =>
+        e.href !== href &&
+        e.href.length > href.length &&
+        (pathname === e.href || pathname.startsWith(`${e.href}/`))
+    );
+  }
 
   return (
     <div className="h-screen overflow-hidden">
@@ -256,20 +315,26 @@ export function AppShell({
           {/* Workspace section */}
           <SidebarSectionLabel>Workspace</SidebarSectionLabel>
           <nav className="flex flex-col" aria-label="Workspace">
-            {workspaceNav.map((entry) => (
-              <SidebarNavLink
-                key={entry.href}
-                entry={entry}
-                active={isActivePath(entry.href)}
-                badge={entry.badgeKey ? badges[entry.badgeKey] : null}
-              />
-            ))}
+            {visibleWorkspaceNav.map((entry) => {
+              const live =
+                entry.href === "/master-list"
+                  ? { ...entry, href: masterListHref }
+                  : entry;
+              return (
+                <SidebarNavLink
+                  key={entry.href}
+                  entry={live}
+                  active={isActivePath(entry.href)}
+                  badge={entry.badgeKey ? badges[entry.badgeKey] : null}
+                />
+              );
+            })}
           </nav>
 
           {/* Account section */}
           <SidebarSectionLabel>Account</SidebarSectionLabel>
           <nav className="flex flex-col" aria-label="Account">
-            {accountNav.map((entry) => (
+            {visibleAccountNav.map((entry) => (
               <SidebarNavLink
                 key={entry.href}
                 entry={entry}
@@ -334,12 +399,13 @@ export function AppShell({
             className="flex shrink-0 gap-2 overflow-x-auto border-b border-slate-200/70 bg-white/80 px-4 py-3 lg:hidden"
             aria-label="Primary mobile"
           >
-            {[...workspaceNav, ...accountNav].map(({ href, label }) => {
+            {[...visibleWorkspaceNav, ...visibleAccountNav].map(({ href, label }) => {
               const active = isActivePath(href);
+              const liveHref = href === "/master-list" ? masterListHref : href;
               return (
                 <Link
                   key={href}
-                  href={href}
+                  href={liveHref}
                   className={`whitespace-nowrap rounded-full px-4 py-2 text-sm ${
                     active ? "bg-indigo-500/15 text-indigo-600" : "bg-slate-100 text-slate-700"
                   }`}

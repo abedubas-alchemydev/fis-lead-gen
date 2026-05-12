@@ -73,7 +73,7 @@ Anonymous mode (always runs):
 
 Authenticated admin mode (additional, only when `-AdminCookie` set):
 
-- `/dashboard` renders the `Lead Intelligence Workspace` heading
+- `/dashboard` renders the `Prospect Intelligence Workspace` heading
 - `/master-list` renders the `Broker-Dealer Master List` heading
 - `/alerts` renders the `Daily filing monitor` heading
 - `/my-favorites` renders the `Saved firms` heading

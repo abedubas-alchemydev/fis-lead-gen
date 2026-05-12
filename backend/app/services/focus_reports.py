@@ -21,6 +21,8 @@ from app.services.extraction_status import (
     STATUS_NEEDS_REVIEW,
     STATUS_PARSED,
     classify_financial_extraction_status,
+    is_plausible_net_capital_scale,
+    is_plausible_report_date,
 )
 from app.services.gemini_responses import (
     GeminiConfigurationError,
@@ -30,6 +32,7 @@ from app.services.gemini_responses import (
 from app.services.pdf_downloader import PdfDownloaderService, pdf_tempdir
 from app.services.scoring import (
     calculate_total_assets_yoy,
+    calculate_three_year_cagr,
     calculate_yoy_growth,
     classify_health_status,
 )
@@ -86,6 +89,103 @@ class FocusReportService:
             limit=settings.financial_pipeline_limit,
         )
 
+        # Default-path narrowing rule (preserved): when a batch limit is in
+        # effect AND the CSV path isn't bulk-loading the full universe, key
+        # the DELETE on (bd_id, report_date) pairs so prior years for OTHER
+        # firms survive. The bare ``DELETE FROM financial_metrics`` fallback
+        # remains the no-limit, no-CSV behavior for full-table refreshes.
+        narrow_delete = bool(
+            settings.financial_pipeline_limit and not settings.focus_reports_csv_path
+        )
+        extraction, _run_id = await self._run_extraction_pipeline(
+            db,
+            target_broker_dealers,
+            trigger_source=trigger_source,
+            narrow_delete=narrow_delete,
+        )
+        return len(extraction.records)
+
+    async def load_financial_metrics_for_null_health(
+        self,
+        db: AsyncSession,
+        *,
+        trigger_source: str = "manual_backfill",
+        limit: int | None = None,
+    ) -> FinancialExtractionResult:
+        """Backfill mode: re-run the financial extraction against only the
+        broker-dealers whose ``health_status`` is still NULL (i.e. firms
+        the default pipeline never reached). Only rows we can actually
+        reach (``filings_index_url IS NOT NULL``) are considered, so we
+        don't burn Gemini calls on firms missing the prerequisite filings
+        index.
+
+        Returns the full :class:`FinancialExtractionResult` so a CLI
+        caller can print the structured ``target_null_health=X,
+        attempted=Y, populated=Z, needs_review=W, errors=V`` summary
+        without re-running the selector. Always uses the narrowed
+        ``(bd_id, report_date)`` DELETE — a backfill is by definition a
+        subset run and must never wipe other firms' fiscal-year history.
+
+        ``limit`` from a CLI flag overrides
+        ``settings.financial_pipeline_limit`` for this run; offset still
+        comes from settings so the chunked-backfill knob behaves the same
+        as the default path.
+        """
+        universe = await self._select_null_health_targets(db)
+        target_broker_dealers = self._apply_batch_window(
+            universe,
+            offset=settings.financial_pipeline_offset,
+            limit=limit if limit is not None else settings.financial_pipeline_limit,
+        )
+        extraction, _run_id = await self._run_extraction_pipeline(
+            db,
+            target_broker_dealers,
+            trigger_source=trigger_source,
+            narrow_delete=True,
+        )
+        return extraction
+
+    async def _select_null_health_targets(self, db: AsyncSession) -> list[BrokerDealer]:
+        """Return every broker-dealer whose ``health_status`` is NULL but
+        for which an X-17A-5 filing is reachable (``filings_index_url IS
+        NOT NULL``). The list is unbounded — callers (the script's
+        dry-run path; ``load_financial_metrics_for_null_health``) decide
+        how to slice it via offset/limit so a single SELECT serves both
+        the ``target_null_health=X`` universe count and the
+        ``would_attempt=Y`` canary slice.
+        """
+        broker_dealers = (await db.execute(
+            select(BrokerDealer)
+            .where(
+                BrokerDealer.health_status.is_(None),
+                BrokerDealer.filings_index_url.is_not(None),
+            )
+            .order_by(BrokerDealer.id.asc())
+        )).scalars().all()
+        return list(broker_dealers)
+
+    async def _run_extraction_pipeline(
+        self,
+        db: AsyncSession,
+        target_broker_dealers: list[BrokerDealer],
+        *,
+        trigger_source: str,
+        narrow_delete: bool,
+    ) -> tuple[FinancialExtractionResult, int]:
+        """Run ``PipelineRun`` insert → live extraction → DELETE+INSERT
+        into ``financial_metrics`` → BD rollup refresh → finalize, for an
+        arbitrary target set. Both the default ``load_financial_metrics``
+        and the NULL-health backfill path delegate here so the extraction
+        body is single-sourced.
+
+        ``narrow_delete=True`` keys the DELETE on ``(bd_id, report_date)``
+        tuples instead of wiping the full table — required for any subset
+        run so other firms' fiscal-year history survives.
+
+        Returns the :class:`FinancialExtractionResult` and the persisted
+        ``pipeline_run.id`` so the caller can correlate audit rows with
+        downstream work.
+        """
         # Commit the pipeline_run row in its own transaction before any
         # extraction work begins, so a crash mid-loop still leaves a
         # discoverable audit row in status='running'.
@@ -113,14 +213,11 @@ class FocusReportService:
         await db.commit()
 
         try:
-            incremental_target_ids: list[int] | None = None
             extraction = await self._load_live_records(target_broker_dealers)
             records = extraction.records
-            if settings.financial_pipeline_limit and not settings.focus_reports_csv_path:
-                incremental_target_ids = [broker_dealer.id for broker_dealer in target_broker_dealers]
 
             async with SessionLocal() as write_db:
-                if incremental_target_ids is not None:
+                if narrow_delete:
                     # Narrow the DELETE to the (bd_id, report_date) pairs the
                     # current run is about to re-insert. Prevents wiping prior
                     # fiscal-year history for the same bd once the multi-year
@@ -158,7 +255,7 @@ class FocusReportService:
                 await write_db.commit()
 
                 await self._finalize_pipeline_run(write_db, run_id, extraction)
-            return len(records)
+            return extraction, run_id
         except Exception as exc:
             logger.exception("Financial extraction pipeline failed for run %s", run_id)
             await self._mark_pipeline_run_failed(run_id, exc, len(target_broker_dealers))
@@ -454,10 +551,15 @@ class FocusReportService:
             # Gemini calls don't depend on the file persisting on disk past
             # the ``with`` exit.
             with pdf_tempdir(prefix="financial_extract_") as tmp_dir:
-                # Download the 2 most recent X-17A-5 PDFs for multi-year data
+                # Download the 3 most recent X-17A-5 PDFs. Post-2023 amendments
+                # to Rule 17a-5 mean the audited report is commonly filed as a
+                # single-year Statement of Financial Condition (e.g. Nomura's
+                # NSISOFC0324.pdf), so 2 filings can yield only 2 unique
+                # fiscal years and starve the 3-Yr CAGR rollup
+                # (services/scoring.py::calculate_three_year_cagr).
                 try:
                     pdf_records = await self.downloader.download_recent_x17a5_pdfs(
-                        broker_dealer, tmp_dir, count=2
+                        broker_dealer, tmp_dir, count=3
                     )
                 except Exception as exc:
                     logger.warning("PDF download failed for BD %d (%s): %s", broker_dealer.id, broker_dealer.name, exc)
@@ -551,20 +653,50 @@ class FocusReportService:
                             continue
                         seen_dates.add(date_key)
 
-                        # Tag based on LLM confidence (#56 / Fix G). Below-threshold
-                        # rows with a valid net_capital still persist, tagged
-                        # 'needs_review', so the review queue can surface them
-                        # instead of a silent drop. See app.services.extraction_status.
+                        # Tag based on LLM confidence (#56 / Fix G) AND
+                        # cross-field sanity checks:
+                        #   - net_capital scale (issue #398 — RBC,
+                        #     DriveWealth scale-strip).
+                        #   - report_date plausibility (issue #398 —
+                        #     filing-date vs period-end mix-up). A
+                        #     mid-month report_date is almost always a
+                        #     filing-date contamination; legitimate
+                        #     X-17A-5 period-ends fall on a month-end.
+                        # Below-threshold rows still persist tagged
+                        # 'needs_review' so the review queue surfaces
+                        # them instead of a silent drop. See
+                        # app.services.extraction_status.
+                        plausible_leverage = is_plausible_net_capital_scale(
+                            net_capital=(
+                                float(extraction.net_capital)
+                                if extraction.net_capital is not None
+                                else None
+                            ),
+                            total_assets=(
+                                float(extraction.total_assets)
+                                if extraction.total_assets is not None
+                                else None
+                            ),
+                        )
+                        plausible_date = is_plausible_report_date(report_date)
                         extraction_status = classify_financial_extraction_status(
                             confidence_score=extraction.confidence_score,
                             min_confidence=settings.financial_extraction_min_confidence,
+                            is_plausible_leverage=plausible_leverage,
+                            is_plausible_date=plausible_date,
                         )
                         if extraction_status == STATUS_NEEDS_REVIEW:
                             logger.warning(
-                                "Financial extraction BD %s tagged needs_review: confidence=%s below min_confidence=%s",
+                                "Financial extraction BD %s tagged needs_review: "
+                                "confidence=%s min_confidence=%s "
+                                "plausible_leverage=%s plausible_date=%s "
+                                "report_date=%s",
                                 broker_dealer.id,
                                 extraction.confidence_score,
                                 settings.financial_extraction_min_confidence,
+                                plausible_leverage,
+                                plausible_date,
+                                report_date.isoformat(),
                             )
 
                         records.append(
@@ -698,6 +830,7 @@ class FocusReportService:
                 broker_dealer.latest_excess_net_capital = None
                 broker_dealer.latest_total_assets = None
                 broker_dealer.yoy_growth = None
+                broker_dealer.three_year_cagr = None
                 broker_dealer.total_assets_yoy = None
                 broker_dealer.health_status = None
                 continue
@@ -712,6 +845,7 @@ class FocusReportService:
             )
             broker_dealer.latest_total_assets = float(latest.total_assets) if latest.total_assets is not None else None
             broker_dealer.yoy_growth = yoy_growth
+            broker_dealer.three_year_cagr = calculate_three_year_cagr(ordered)
             broker_dealer.total_assets_yoy = calculate_total_assets_yoy(ordered)
             broker_dealer.health_status = classify_health_status(
                 latest_net_capital=float(latest.net_capital),

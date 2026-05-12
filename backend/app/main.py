@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import logging
 import sys
 from collections.abc import AsyncIterator
@@ -12,6 +13,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from app.api.router import api_router
 from app.core.config import settings
 from app.db.session import engine
+from app.services.alert_events import alert_event_bus
 
 if sys.platform == "win32":
     asyncio.set_event_loop_policy(asyncio.WindowsSelectorEventLoopPolicy())
@@ -25,9 +27,18 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     # time (see app.db.session). httpx clients are per-request — each call
     # site uses `async with httpx.AsyncClient(...) as client`, so there are
     # no long-lived HTTP pools to initialize here.
+    #
+    # The alert_event_bus listener task holds one dedicated psycopg3
+    # connection per Cloud Run instance (outside the SQLAlchemy pool) for
+    # LISTEN filing_alerts_new so SSE subscribers on any instance see new
+    # filing alerts regardless of which instance ran the upsert.
+    listener_task = asyncio.create_task(alert_event_bus.run_listener())
     try:
         yield
     finally:
+        listener_task.cancel()
+        with contextlib.suppress(asyncio.CancelledError):
+            await listener_task
         # Shutdown: drain the async SQLAlchemy engine so Neon observes clean
         # TCP FIN rather than having to reclaim the connections via idle
         # detection on Cloud Run revision swap / scale-down.

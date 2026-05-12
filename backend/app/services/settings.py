@@ -46,22 +46,27 @@ class SettingsService:
         name: str,
         aliases: list[str],
         priority: int,
+        display_name: str | None = None,
     ) -> CompetitorProvider:
-        stmt = insert(CompetitorProvider).values(
-            {
-                "name": name,
-                "aliases": aliases,
-                "priority": priority,
-                "is_active": True,
-            }
-        )
+        values: dict[str, object] = {
+            "name": name,
+            "aliases": aliases,
+            "priority": priority,
+            "is_active": True,
+        }
+        if display_name is not None:
+            values["display_name"] = display_name
+        stmt = insert(CompetitorProvider).values(values)
+        update_set: dict[str, object] = {
+            "aliases": stmt.excluded.aliases,
+            "priority": stmt.excluded.priority,
+            "is_active": True,
+        }
+        if display_name is not None:
+            update_set["display_name"] = stmt.excluded.display_name
         upsert_stmt = stmt.on_conflict_do_update(
             index_elements=[CompetitorProvider.name],
-            set_={
-                "aliases": stmt.excluded.aliases,
-                "priority": stmt.excluded.priority,
-                "is_active": True,
-            },
+            set_=update_set,
         )
         await db.execute(upsert_stmt)
         await db.commit()

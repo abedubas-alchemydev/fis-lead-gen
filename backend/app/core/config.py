@@ -58,6 +58,39 @@ class Settings(BaseSettings):
     sec_bulk_submissions_url: str = "https://www.sec.gov/Archives/edgar/daily-index/bulkdata/submissions.zip"
     sec_bulk_submissions_zip_path: str = ".tmp/sec/submissions.zip"
     edgar_target_sic_codes: str = "6211"
+    # ── IAPD Investment Adviser bulk download (PR 2 of advisor-list rollout) ──
+    # Index page that lists monthly ``ia{MMDDYY}.zip`` snapshots of all
+    # SEC-registered Investment Advisers. The IapdService scrapes this page
+    # rather than constructing a URL by date because the SEC moved the file
+    # path from ``/files/investment/data/.../`` to
+    # ``/files/investment/data/other/.../`` mid-Jan 2026 and may move it again.
+    # Both old and new paths still serve historical files; scraping the index
+    # avoids hard-coding a fragile path.
+    iapd_index_url: str = (
+        "https://www.sec.gov/data-research/sec-markets-data/"
+        "information-about-registered-investment-advisers-exempt-reporting-advisers"
+    )
+    # Local cache for the downloaded ZIP. ~5 MB / month. TTL'd to 7 days to
+    # match the BD bulk submissions cache.
+    iapd_zip_cache_path: str = ".tmp/iapd/registered_advisers.zip"
+    iapd_zip_ttl_seconds: int = 7 * 24 * 60 * 60
+    # Same SEC-wide 10 req/sec ceiling as EDGAR. The IAPD bulk path is one
+    # GET per month, so this limit is effectively for the EFTS 13F pass.
+    iapd_request_timeout_seconds: float = 60.0
+    iapd_request_max_retries: int = 3
+    # ── EDGAR full-text search (EFTS) for Form 13F-HR enumeration ──
+    # Used by ThirteenFFilterService to flag IAPD records that have filed a
+    # 13F holdings report in the recent window. EFTS pages are capped at
+    # ``from + size <= 10000`` (Elasticsearch default), and 90 days of
+    # 13F-HR easily exceeds that, so the service partitions by week and
+    # dedupes by CIK.
+    sec_efts_search_url: str = "https://efts.sec.gov/LATEST/search-index"
+    # 90 days = ~one quarter, which is the 13F filing cadence. Tighter
+    # windows yield fresher data (and miss fewer recent filers); wider
+    # windows pick up more historical filers but inflate scan cost.
+    thirteen_f_lookback_days: int = 120
+    thirteen_f_partition_days: int = 7
+    initial_load_advisors_limit: int | None = None
     finra_search_base_url: str = "https://api.brokercheck.finra.org/search/firm"
     finra_request_timeout_seconds: float = 20.0
     finra_request_delay_seconds: float = 0.5
@@ -80,11 +113,19 @@ class Settings(BaseSettings):
     clearing_pipeline_limit: int | None = None
     contact_enrichment_provider: str = "disabled"
     apollo_api_key: str | None = None
-    # Tier 3 of the firm-website resolver chain (Apollo -> Hunter -> SerpAPI).
-    # Free-tier key gives 100 searches/month — enough for the lazy resolution
-    # flow (fires only on a master-list detail-page visit when bd.website is
-    # NULL and Apollo + Hunter both miss). Optional: when unset, the resolver
-    # skips Tier 3 the same way it skips Hunter when hunter_api_key is unset.
+    # Tier 3 of the firm-website resolver chain
+    # (Apollo -> Hunter -> serper.dev -> SerpAPI). Slotted ahead of SerpAPI
+    # because serper.dev is ~50× cheaper per query and ships a 2,500-query
+    # one-time free credit on signup, so it's the right primary search tier
+    # for both the lazy on-demand resolver and the bulk backfill scripts.
+    # Optional: when unset, the resolver skips this tier and falls straight
+    # through to SerpAPI.
+    serper_api_key: str | None = None
+    # Tier 4 of the firm-website resolver chain — fallback when serper.dev
+    # is unset or misses. Free-tier key gives 250 searches/month; bulk
+    # backfills should run on a paid plan. Optional: when unset, the
+    # resolver skips this tier the same way it skips Hunter when
+    # hunter_api_key is unset.
     serpapi_api_key: str | None = None
     # Cooldown window between successive Apollo /enrich attempts for the same
     # broker-dealer. Stops the detail-page useEffect from re-firing /enrich
@@ -105,7 +146,16 @@ class Settings(BaseSettings):
     contact_discovery_timeout: float = 10.0
     gemini_api_key: str | None = None
     gemini_api_base: str = "https://generativelanguage.googleapis.com/v1beta"
-    gemini_pdf_model: str = "gemini-2.5-pro"
+    # Production default for the structured-PDF extraction path
+    # (clearing pipeline, financial pipeline, classification fan-out). Tier 1
+    # of the Gemini paid plan caps ``gemini-2.5-pro`` at 1,000 requests/day
+    # but allows ``gemini-2.5-flash`` at 10,000 requests/day with the same
+    # JSON-schema + multi-modal capabilities and ~5x lower per-call cost,
+    # so Flash is the production default. Override with the
+    # ``GEMINI_PDF_MODEL`` env var (e.g. on Cloud Run) to flip back to Pro
+    # for ad-hoc reruns when Pro quota is healthy and the deeper reasoning
+    # chain is wanted on rationale-heavy ambiguous cases.
+    gemini_pdf_model: str = "gemini-2.5-flash"
     gemini_request_timeout_seconds: float = 120.0
     gemini_request_max_retries: int = 2
     gemini_inline_pdf_max_size_mb: int = 45
@@ -129,6 +179,17 @@ class Settings(BaseSettings):
     openai_max_pdf_size_mb: int = 45
     anthropic_api_key: str | None = None
 
+    # Google OAuth — used by:
+    #   1. Better Auth (frontend) for "Login with Google" via the same
+    #      ``client_id`` + ``client_secret`` pair.
+    #   2. Backend (services/google_oauth.py) for refreshing Gmail access
+    #      tokens stored on the ``account`` table when the user clicks
+    #      Send in the per-contact Outreach modal at /master-list/{id}.
+    # Both can be unset in CI / tests where no Gmail call fires; the
+    # send endpoint surfaces a clean 412 when missing.
+    google_client_id: str | None = None
+    google_client_secret: str | None = None
+
     # Email extractor — discovery providers (Hunter, Snov, theHarvester, site crawler).
     # Apollo provider is intentionally absent: upstream module ships without it.
     # All keys are optional; missing credentials short-circuit to a provider-level
@@ -146,6 +207,13 @@ class Settings(BaseSettings):
     smtp_verify_concurrency: int = Field(default=1, ge=1, le=10)
     smtp_verify_from_address: str = "verify@email-extractor.local"
     smtp_verify_helo_host: str = "email-extractor.local"
+
+    # Vault file-upload + RAG (2026-05-05). The bucket is per-environment
+    # (``fis-vault-staging`` vs ``fis-vault-prod``); see
+    # ``plans/vault-rag-ops-2026-05-04.md`` for provisioning. Empty string
+    # = feature disabled — services/vault_storage.py raises VaultStorageError
+    # when an upload is attempted, which the endpoint maps to 503.
+    vault_storage_bucket: str = ""
 
     # Cloud Scheduler / OIDC dual-auth for Tier 2 pipeline trigger endpoints.
     # ``cloud_scheduler_sa_email`` is the only ``email`` claim accepted on the

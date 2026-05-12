@@ -2,20 +2,34 @@ from __future__ import annotations
 
 from math import ceil
 
-from sqlalchemy import and_, func, select, update
+from sqlalchemy import and_, func, literal_column, select, update
 from sqlalchemy.dialects.postgresql import insert
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.models.broker_dealer import BrokerDealer
 from app.models.filing_alert import FilingAlert
 from app.schemas.alerts import AlertListItem, AlertListMeta, AlertListResponse
+from app.services.alert_events import alert_event_bus, make_alert_inserted_payload
 from app.services.service_models import FilingAlertRecord
 
 
 class AlertRepository:
-    async def upsert_many(self, db: AsyncSession, records: list[FilingAlertRecord]) -> int:
+    async def upsert_many(
+        self, db: AsyncSession, records: list[FilingAlertRecord]
+    ) -> list[tuple[int, int, str]]:
+        """Bulk-upsert filing alerts. Returns one (id, bd_id, form_type)
+        tuple per row that was actually INSERTED on this call (conflict
+        updates are excluded).
+
+        The newly-inserted set is what downstream consumers care about:
+          - The SSE NOTIFY broadcast (so dashboards don't re-surface
+            alerts they already saw).
+          - The auto re-extraction hook (so the financial pipeline only
+            runs on the first occurrence of a filing, not every time the
+            monitor re-encounters it).
+        """
         if not records:
-            return 0
+            return []
 
         stmt = insert(FilingAlert).values(
             [
@@ -32,6 +46,10 @@ class AlertRepository:
                 for record in records
             ]
         )
+        # ``xmax = 0`` distinguishes a freshly-inserted row from a conflict
+        # update inside ON CONFLICT DO UPDATE — only the former should
+        # broadcast, because subscribers already saw the row on its first
+        # insert. (Repeat monitor runs would otherwise re-emit every alert.)
         upsert_stmt = stmt.on_conflict_do_update(
             index_elements=[FilingAlert.dedupe_key],
             set_={
@@ -42,10 +60,23 @@ class AlertRepository:
                 "source_filing_url": stmt.excluded.source_filing_url,
                 "updated_at": func.now(),
             },
+        ).returning(
+            FilingAlert.id,
+            FilingAlert.bd_id,
+            FilingAlert.form_type,
+            (literal_column("xmax") == 0).label("is_new"),
         )
-        await db.execute(upsert_stmt)
+        result = await db.execute(upsert_stmt)
+        inserted_rows: list[tuple[int, int, str]] = [
+            (row.id, row.bd_id, row.form_type) for row in result.all() if row.is_new
+        ]
         await db.flush()
-        return len(records)
+        if inserted_rows:
+            await alert_event_bus.publish_via_session(
+                db,
+                make_alert_inserted_payload([row[0] for row in inserted_rows]),
+            )
+        return inserted_rows
 
     async def list_alerts(
         self,
@@ -95,7 +126,10 @@ class AlertRepository:
                 bd_id=alert.bd_id,
                 firm_name=firm_name,
                 form_type=alert.form_type,
-                priority=alert.priority,
+                # Form BD = new-registration filing → surface as "high" priority
+                # in the activity feed regardless of the stored value, per the
+                # "new registrants flagged as priority by default" rule.
+                priority="high" if alert.form_type == "Form BD" else alert.priority,
                 filed_at=alert.filed_at,
                 summary=alert.summary,
                 source_filing_url=alert.source_filing_url,
