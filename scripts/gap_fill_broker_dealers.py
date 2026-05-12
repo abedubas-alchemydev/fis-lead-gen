@@ -81,6 +81,56 @@ MAX_CONCURRENCY = int(os.environ.get("GAP_FILL_CONCURRENCY", "2"))
 _PRIORITY_BUCKETS = ("hot", "warm", "cold", "none")
 
 
+async def _flush_dns_cache() -> None:
+    """Best-effort: flush the OS DNS resolver cache.
+
+    Windows DNS Client caches negative responses ("host not found")
+    for 15 minutes by default (NegativeCacheTime). A single Neon
+    pooler endpoint blip then turns into a 15-minute apparent outage
+    for the script: the first lookup fails, the negative result gets
+    cached, and every subsequent BD's connect attempt hits the cache
+    and "fails" instantly without even touching the network.
+
+    Flushing the cache breaks the cascade. ``ipconfig /flushdns``
+    works without admin rights. Subprocess failure is suppressed --
+    if we can't flush, the next attempt will likely re-fail and the
+    BD just stays unstamped for the next run.
+
+    No-op on non-Windows -- Linux glibc doesn't aggressively cache
+    negative DNS results the same way.
+    """
+    if sys.platform != "win32":
+        return
+    try:
+        proc = await asyncio.create_subprocess_exec(
+            "ipconfig", "/flushdns",
+            stdout=asyncio.subprocess.DEVNULL,
+            stderr=asyncio.subprocess.DEVNULL,
+        )
+        await proc.wait()
+    except Exception:
+        pass
+
+
+def _is_dns_or_transient_db_error(exc: BaseException) -> bool:
+    """True if the exception looks like a DNS-cache cascade or a
+    transient DB connection drop -- both of which are worth retrying
+    after a DNS flush, not giving up on.
+
+    Substring match on the chained exception message is the most
+    robust signal across psycopg / sqlalchemy / asyncpg wrappers.
+    """
+    msg = str(exc)
+    return (
+        "getaddrinfo failed" in msg
+        or "Name or service not known" in msg
+        or "Temporary failure in name resolution" in msg
+        or "server closed the connection" in msg
+        or "Connection reset" in msg
+        or "Connection refused" in msg
+    )
+
+
 def _print_scan_summary(
     *,
     total_eligible: int,
@@ -402,10 +452,18 @@ async def main() -> None:
         transient, network DNS blip, anything -- is logged as a worker
         crash and does NOT propagate to ``asyncio.gather``. Combined
         with ``return_exceptions=True`` on gather, this means one bad
-        BD never tears down the rest of the batch."""
+        BD never tears down the rest of the batch.
+
+        On DNS-cascade or transient-DB-drop errors, the worker
+        proactively flushes the Windows DNS resolver cache and retries
+        the BD once before giving up. Without this, a single Neon
+        pooler blip would 15-minute-DNS-cache its way into dozens of
+        consecutive BD failures (the cascade we observed twice on this
+        machine)."""
         tag = f"[{idx:>5}/{total_eligible:>5}]"
         name_short = (bd.name or "")[:38]
         async with semaphore:
+          for attempt in range(2):
             try:
                 has_contacts = bd.id in contact_ids
                 decision = decide_pipelines(
@@ -503,13 +561,31 @@ async def main() -> None:
                     failures.append(
                         (bd.id, bd.name, f"failed: {','.join(fail_subs)}")
                     )
+                # Success -- exit the retry loop AND the function. Without
+                # this return the for loop would iterate and re-run the BD.
+                return
 
             except Exception as exc:
                 # Last-resort catch-all. Any escape from the orchestrator-
                 # crash branch's stamp call, the parent-PipelineRun creation,
-                # or the read-children-notes block lands here. Log and move
-                # on; do NOT propagate to gather. The BD stays unstamped so
-                # the next invocation re-attempts it.
+                # or the read-children-notes block lands here. The BD stays
+                # unstamped so the next invocation re-attempts it.
+                if attempt == 0 and _is_dns_or_transient_db_error(exc):
+                    # DNS or transient DB drop on the first attempt -- this
+                    # is precisely the cascade Windows DNS Client negative
+                    # caching turns into a 15-minute outage. Flush the OS
+                    # cache, brief pause to let things settle, then retry
+                    # this BD once before giving up.
+                    print(
+                        f"{tag} BD {bd.id:<6} {name_short:<38}  "
+                        f"DNS/CONN BLIP -- flushing DNS cache and retrying once: "
+                        f"{type(exc).__name__}: {str(exc)[:80]}"
+                    )
+                    await _flush_dns_cache()
+                    await asyncio.sleep(2)
+                    continue
+                # Either a non-retryable error or the retry already failed.
+                # Log and give up; do NOT propagate to gather.
                 print(
                     f"{tag} BD {bd.id:<6} {name_short:<38}  WORKER CRASH: "
                     f"{type(exc).__name__}: {str(exc)[:120]}"
@@ -518,6 +594,7 @@ async def main() -> None:
                     (bd.id, bd.name, f"worker crash: {type(exc).__name__}: {exc}")
                 )
                 counters["processed"] += 1
+                return
 
     try:
         tasks = [
