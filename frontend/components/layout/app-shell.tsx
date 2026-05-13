@@ -78,6 +78,18 @@ function AlertsIcon(props: IconProps) {
   );
 }
 
+// Trending-up + dollar mark — distinguishes the Investors tab (SEC
+// Form 4 insider transaction feed) from the BD-scoped Alerts bell at a
+// glance. Two ascending bars + a dollar sign overlay.
+function InvestorsIcon(props: IconProps) {
+  return (
+    <IconBase {...props}>
+      <path d="M3 17l6-6 4 4 7-7" />
+      <path d="M14 8h7v7" />
+    </IconBase>
+  );
+}
+
 function EmailExtractorIcon(props: IconProps) {
   return (
     <IconBase {...props}>
@@ -175,6 +187,7 @@ const workspaceNav: ReadonlyArray<NavEntry> = [
   // .next/types is fine but cheap to leave for new sibling routes.
   { href: "/advisor-list" as Route, label: "Investment Advisors", icon: AdvisorListIcon, badgeKey: null },
   { href: "/alerts", label: "Alerts", icon: AlertsIcon, badgeKey: "alerts" },
+  { href: "/investors" as Route, label: "Investors", icon: InvestorsIcon, badgeKey: null },
   { href: "/email-extractor", label: "Email Extractor", icon: EmailExtractorIcon, badgeKey: null },
   { href: "/export", label: "Export", icon: ExportIcon, badgeKey: null },
   { href: "/my-favorites", label: "My Favorites", icon: FavoritesIcon, badgeKey: null },

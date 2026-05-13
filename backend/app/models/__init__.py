@@ -13,6 +13,7 @@ from app.models.extraction_run import ExtractionRun
 from app.models.favorite_list import FavoriteList, FavoriteListItem
 from app.models.financial_metric import FinancialMetric
 from app.models.filing_alert import FilingAlert
+from app.models.form4_transaction import Form4Transaction
 from app.models.industry_arrangement import IndustryArrangement
 from app.models.introducing_arrangement import IntroducingArrangement
 from app.models.investment_advisor import InvestmentAdvisor
@@ -44,6 +45,7 @@ __all__ = [
     "FavoriteListItem",
     "FinancialMetric",
     "FilingAlert",
+    "Form4Transaction",
     "IndustryArrangement",
     "IntroducingArrangement",
     "InvestmentAdvisor",

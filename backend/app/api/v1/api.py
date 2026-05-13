@@ -10,6 +10,7 @@ from app.api.v1.endpoints import (
     favorites,
     health,
     investment_advisors,
+    investors,
     outreach,
     pipeline,
     settings,
@@ -25,6 +26,7 @@ api_router.include_router(auth.router, prefix="/auth", tags=["auth"])
 api_router.include_router(broker_dealers.router, tags=["broker-dealers"])
 api_router.include_router(investment_advisors.router, tags=["investment-advisors"])
 api_router.include_router(alerts.router, tags=["alerts"])
+api_router.include_router(investors.router, tags=["investors"])
 api_router.include_router(export.router, tags=["export"])
 api_router.include_router(pipeline.router, tags=["pipeline"])
 api_router.include_router(pipeline.scheduled_router, tags=["pipeline"])

@@ -203,6 +203,49 @@ class FilingAlertRecord:
 
 
 @dataclass(slots=True)
+class Form4TransactionRecord:
+    """One DB-bound row emitted by the Form 4 watcher.
+
+    Built by ``form4_watcher._build_transaction_records`` from a parsed
+    ``ParsedForm4Filing`` after the per-row value filter passes. The
+    upsert in ``Form4TransactionRepository.upsert_many`` collapses on
+    ``dedupe_key`` so re-running the watcher is idempotent.
+    """
+
+    accession_number: str
+    transaction_index: int
+    is_derivative: bool
+    dedupe_key: str
+
+    issuer_cik: str
+    issuer_name: str
+    issuer_ticker: str | None
+
+    reporting_owner_cik: str
+    reporting_owner_name: str
+    reporting_owner_is_director: bool
+    reporting_owner_is_officer: bool
+    reporting_owner_is_ten_pct: bool
+    reporting_owner_title: str | None
+    reporting_owner_street1: str | None
+    reporting_owner_street2: str | None
+    reporting_owner_city: str | None
+    reporting_owner_state: str | None
+    reporting_owner_zip: str | None
+
+    security_title: str | None
+    transaction_date: date
+    transaction_code: str | None
+    ad_code: str
+    shares: float | None
+    price_per_share: float | None
+    transaction_value: float | None
+
+    source_filing_url: str | None
+    filed_at: datetime
+
+
+@dataclass(slots=True)
 class DownloadedPdfRecord:
     bd_id: int
     filing_year: int
