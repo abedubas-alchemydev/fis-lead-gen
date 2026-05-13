@@ -171,19 +171,53 @@ class Form4WatcherService:
         *,
         lookback_days: int,
     ) -> list[dict[str, Any]]:
-        """Page through EFTS for ``forms=4`` filings in the lookback window."""
+        """Fetch Form 4 EFTS hits across the lookback window.
+
+        EFTS pagination is backed by Elasticsearch with a per-query
+        ``from + size <= 10000`` ceiling, and in practice SEC starts
+        500'ing well before that on a busy form code: a 7-day Form 4
+        query returns ~2500-3500 hits and consistently 500s around
+        ``from=2600``. To stay well clear of both ceilings we partition
+        the query by **single day** — each day produces ~300-500 Form 4s
+        which pages cleanly. The partition also lets a single bad day
+        fail without aborting the whole window.
+        """
         end = date.today()
-        start = end - timedelta(days=lookback_days)
+        all_hits: list[dict[str, Any]] = []
+        for offset in range(lookback_days):
+            day = end - timedelta(days=offset)
+            try:
+                day_hits = await self._fetch_efts_hits_for_day(client, day)
+            except Exception as exc:  # noqa: BLE001
+                logger.warning(
+                    "Form 4 EFTS fetch failed for %s: %s. Continuing with remaining days.",
+                    day.isoformat(),
+                    exc,
+                )
+                continue
+            all_hits.extend(day_hits)
+            await asyncio.sleep(_HTTP_DELAY_SECONDS)
+        return all_hits
+
+    async def _fetch_efts_hits_for_day(
+        self,
+        client: httpx.AsyncClient,
+        day: date,
+    ) -> list[dict[str, Any]]:
+        """Page through EFTS for ``forms=4`` filings on a single date.
+
+        Per-page errors (transient SEC 5xx, rate-limiting) abort the
+        current day but bubble up — the day-level loop catches them.
+        """
         params: dict[str, Any] = {
             "forms": "4",
             "dateRange": "custom",
-            "startdt": start.isoformat(),
-            "enddt": end.isoformat(),
+            "startdt": day.isoformat(),
+            "enddt": day.isoformat(),
             "from": 0,
             "size": _PAGE_SIZE,
         }
-
-        all_hits: list[dict[str, Any]] = []
+        day_hits: list[dict[str, Any]] = []
         cursor = 0
         while True:
             params["from"] = cursor
@@ -194,7 +228,7 @@ class Form4WatcherService:
             page_hits = hits_block.get("hits", []) if isinstance(hits_block, dict) else []
             if not page_hits:
                 break
-            all_hits.extend(page_hits)
+            day_hits.extend(page_hits)
             cursor += len(page_hits)
             total = hits_block.get("total", {})
             total_value = (
@@ -205,7 +239,7 @@ class Form4WatcherService:
             if cursor >= total_value or len(page_hits) < _PAGE_SIZE:
                 break
             await asyncio.sleep(_HTTP_DELAY_SECONDS)
-        return all_hits
+        return day_hits
 
     async def _process_hit(
         self,
