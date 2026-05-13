@@ -32,6 +32,7 @@ from app.services.cloud_run_client import (
 )
 from app.services.deficiency_watcher import DeficiencyWatcherService
 from app.services.filing_monitor import FilingMonitorService
+from app.services.form4_watcher import Form4WatcherService
 from app.services.pipeline import ClearingPipelineService
 from app.services.registration_watcher import RegistrationWatcherService
 
@@ -46,6 +47,7 @@ pipeline_service = ClearingPipelineService()
 filing_monitor_service = FilingMonitorService()
 registration_watcher_service = RegistrationWatcherService()
 deficiency_watcher_service = DeficiencyWatcherService()
+form4_watcher_service = Form4WatcherService()
 
 
 def _ensure_admin(current_user: AuthenticatedUser) -> None:
@@ -355,6 +357,29 @@ async def run_deficiency_monitor(
     plus an idempotent upsert. Completes in seconds.
     """
     run = await deficiency_watcher_service.run(
+        db, trigger_source=f"scheduled:{caller}"
+    )
+    return _trigger_response(run)
+
+
+@scheduled_router.post("/form4-watcher", response_model=PipelineTriggerResponse)
+async def run_form4_watcher(
+    caller: str = Depends(_ensure_admin_or_scheduler_sa),
+    db: AsyncSession = Depends(get_db_session),
+) -> PipelineTriggerResponse:
+    """Trigger the SEC Form 4 (insider transactions) watcher.
+
+    Populates ``form4_transactions`` which backs the Investors tab.
+    Streams the last ``settings.form4_lookback_days`` days of Form 4
+    filings out of EDGAR's full-text search, parses each XML, and
+    upserts one row per (reportingOwner × transaction) pair that
+    clears the $50K value floor.
+
+    Synchronous: typical run is 30-90 seconds (a day's worth of Form 4
+    filings is ~200-500, each costs one index.json + one XML fetch at
+    the 8 req/sec pacing). Well inside Cloud Run's request timeout.
+    """
+    run = await form4_watcher_service.run(
         db, trigger_source=f"scheduled:{caller}"
     )
     return _trigger_response(run)

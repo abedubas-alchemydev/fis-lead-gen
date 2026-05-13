@@ -99,6 +99,8 @@ import type {
   PaginatedFavoriteListItems
 } from "@/types/favorite-list";
 import type {
+  InvestorEnrichResponse,
+  InvestorListResponse,
   OutreachDraft,
   OutreachDraftRequest,
   OutreachSendRequest,
@@ -112,6 +114,35 @@ import type {
   VaultFolderUpdate,
   WipeBdDataResponse
 } from "@/lib/types";
+
+// ── Investors tab (SEC Form 4 insider transactions) ───────────────────
+export async function getInvestors(opts: {
+  tab?: "buyers" | "sellers" | "all";
+  ticker?: string;
+  days?: number;
+  minValue?: number;
+  page?: number;
+  limit?: number;
+}): Promise<InvestorListResponse> {
+  return apiRequest<InvestorListResponse>(
+    buildApiPath("/api/v1/investors", {
+      tab: opts.tab && opts.tab !== "all" ? opts.tab : undefined,
+      ticker: opts.ticker || undefined,
+      days: opts.days,
+      min_value: opts.minValue,
+      page: opts.page,
+      limit: opts.limit
+    })
+  );
+}
+
+export async function enrichInvestor(
+  id: number
+): Promise<InvestorEnrichResponse> {
+  return apiRequest<InvestorEnrichResponse>(`/api/v1/investors/${id}/enrich`, {
+    method: "POST"
+  });
+}
 
 export async function getFavoriteLists(): Promise<FavoriteList[]> {
   return apiRequest<FavoriteList[]>("/api/v1/favorite-lists");

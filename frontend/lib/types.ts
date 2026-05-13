@@ -161,6 +161,63 @@ export type AlertReadResponse = {
   is_read: boolean;
 };
 
+// ── Investors tab (SEC Form 4 insider transactions) ───────────────────
+// One row per (reporting-person × Form 4 transaction) pair already
+// passed through the $50K / last-3-months filter on the BE. ad_code is
+// "A" (acquired/buy) or "D" (disposed/sell) — the FE partitions the
+// two product-facing lists on that field.
+export type InvestorItem = {
+  id: number;
+  accession_number: string;
+  is_derivative: boolean;
+
+  issuer_cik: string;
+  issuer_name: string;
+  issuer_ticker: string | null;
+
+  reporting_owner_cik: string;
+  reporting_owner_name: string;
+  reporting_owner_title: string | null;
+  reporting_owner_is_director: boolean;
+  reporting_owner_is_officer: boolean;
+  reporting_owner_is_ten_pct: boolean;
+  reporting_owner_street1: string | null;
+  reporting_owner_street2: string | null;
+  reporting_owner_city: string | null;
+  reporting_owner_state: string | null;
+  reporting_owner_zip: string | null;
+
+  security_title: string | null;
+  transaction_date: string;
+  transaction_code: string | null;
+  ad_code: "A" | "D";
+  shares: number | null;
+  price_per_share: number | null;
+  transaction_value: number | null;
+
+  enriched_phone: string | null;
+  enriched_email: string | null;
+  enriched_at: string | null;
+
+  source_filing_url: string | null;
+  filed_at: string;
+};
+
+export type InvestorListResponse = {
+  items: InvestorItem[];
+  meta: {
+    page: number;
+    limit: number;
+    total: number;
+    total_pages: number;
+  };
+};
+
+export type InvestorEnrichResponse = {
+  item: InvestorItem;
+  matched: boolean;
+};
+
 export type AlertsBulkReadResponse = {
   updated_count: number;
 };

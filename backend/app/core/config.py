@@ -215,6 +215,25 @@ class Settings(BaseSettings):
     # when an upload is attempted, which the endpoint maps to 503.
     vault_storage_bucket: str = ""
 
+    # ── SEC Form 4 ingestion (Investors tab — 2026-05-13) ──────────────────
+    # Form 4 (Statement of Changes in Beneficial Ownership) is filed by
+    # corporate insiders within ~2 business days of an insider transaction.
+    # The Investors tab surfaces reporting persons whose transactions clear
+    # the value floor, partitioned into A (acquired/buy) and D (disposed/sell)
+    # buckets. See plans/c-users-dswdsrv-caraga-downloads-potenti-robust-wombat.md
+    # for the full design and product context.
+    form4_min_transaction_value: float = 50000.0
+    # Watcher fetch window: how many days back from `today` to query EFTS on
+    # each run. The 7-day overlap (vs the 3-month visibility window) is
+    # deliberate — it catches late-filed Form 4s and is idempotent via the
+    # dedupe_key UNIQUE constraint, so re-running across the same window
+    # is free.
+    form4_lookback_days: int = 7
+    # UI default visibility window: "last 3 months" per the product brief.
+    # The API caps the param at 365 days; the FE filter exposes
+    # 30 / 90 / 180 / 365 as the user-facing presets.
+    form4_default_visibility_days: int = 90
+
     # Cloud Scheduler / OIDC dual-auth for Tier 2 pipeline trigger endpoints.
     # ``cloud_scheduler_sa_email`` is the only ``email`` claim accepted on the
     # OIDC path of ``_ensure_admin_or_scheduler_sa``. Defaults to the runtime
