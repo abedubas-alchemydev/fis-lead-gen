@@ -132,38 +132,62 @@ class Form4WatcherService:
                     return fail_run
             raise
 
-        async with SessionLocal() as write_db:
-            inserted = await self.repository.upsert_many(write_db, records)
-            await write_db.commit()
+        # Upsert + finalize gets its own try/except: a chunked upsert that
+        # bombs mid-flight (Postgres param ceiling, transient Neon error)
+        # should mark the PipelineRun as failed/partial, not propagate a
+        # 500 to the Cloud Scheduler caller which would burn retries on a
+        # poison batch.
+        try:
+            async with SessionLocal() as write_db:
+                inserted = await self.repository.upsert_many(write_db, records)
+                await write_db.commit()
 
-            run = await write_db.get(PipelineRun, run_id)
-            if run is None:
-                raise RuntimeError(
-                    f"Pipeline run {run_id} could not be reloaded for "
-                    "form4 watcher finalization."
+                run = await write_db.get(PipelineRun, run_id)
+                if run is None:
+                    raise RuntimeError(
+                        f"Pipeline run {run_id} could not be reloaded for "
+                        "form4 watcher finalization."
+                    )
+                run.total_items = len(hits)
+                run.processed_items = len(records)
+                run.success_count = inserted
+                run.failure_count = failures
+                run.status = "completed" if failures == 0 else "completed_with_errors"
+                run.completed_at = datetime.now(timezone.utc)
+                run.notes = (
+                    f"Scanned {len(hits)} Form 4 filing(s) over the last "
+                    f"{lookback} day(s); built {len(records)} record(s); "
+                    f"inserted {inserted} new row(s); {failures} hit(s) failed."
                 )
-            run.total_items = len(hits)
-            run.processed_items = len(records)
-            run.success_count = inserted
-            run.failure_count = failures
-            run.status = "completed" if failures == 0 else "completed_with_errors"
-            run.completed_at = datetime.now(timezone.utc)
-            run.notes = (
-                f"Scanned {len(hits)} Form 4 filing(s) over the last "
-                f"{lookback} day(s); built {len(records)} record(s); "
-                f"inserted {inserted} new row(s); {failures} hit(s) failed."
-            )
-            await write_db.commit()
-            await write_db.refresh(run)
-            logger.info(
-                "Form 4 watcher run %d: %d hits, %d records, %d inserted, %d failures.",
-                run.id,
-                len(hits),
-                len(records),
-                inserted,
-                failures,
-            )
-            return run
+                await write_db.commit()
+                await write_db.refresh(run)
+                logger.info(
+                    "Form 4 watcher run %d: %d hits, %d records, %d inserted, %d failures.",
+                    run.id,
+                    len(hits),
+                    len(records),
+                    inserted,
+                    failures,
+                )
+                return run
+        except Exception as exc:  # noqa: BLE001
+            logger.exception("Form 4 watcher upsert failed for run %d: %s", run_id, exc)
+            async with SessionLocal() as fail_db:
+                fail_run = await fail_db.get(PipelineRun, run_id)
+                if fail_run is not None:
+                    fail_run.status = "failed"
+                    fail_run.completed_at = datetime.now(timezone.utc)
+                    fail_run.total_items = len(hits)
+                    fail_run.processed_items = len(records)
+                    fail_run.failure_count = failures + 1
+                    fail_run.notes = (
+                        f"Upsert failed after building {len(records)} record(s) "
+                        f"from {len(hits)} hit(s): {exc}"
+                    )
+                    await fail_db.commit()
+                    await fail_db.refresh(fail_run)
+                    return fail_run
+            raise
 
     async def _fetch_efts_hits(
         self,
