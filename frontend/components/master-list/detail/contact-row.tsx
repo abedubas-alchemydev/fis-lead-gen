@@ -67,11 +67,13 @@ export function ContactRow({
         </a>
       ) : null}
       {contact.email ? (
-        <OutreachButton
-          brokerDealerId={brokerDealerId}
-          brokerDealerName={brokerDealerName}
-          contact={contact}
-        />
+        <span className="ml-auto">
+          <OutreachButton
+            brokerDealerId={brokerDealerId}
+            brokerDealerName={brokerDealerName}
+            contact={contact}
+          />
+        </span>
       ) : null}
     </div>
   );
