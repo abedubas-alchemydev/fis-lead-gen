@@ -32,6 +32,7 @@ export interface DiscoveredEmailResponse {
   enriched_title: string | null;
   enriched_linkedin_url: string | null;
   enriched_company: string | null;
+  enriched_phone: string | null;
   enriched_at: string | null;
   enrichment_status: EnrichmentStatus;
   created_at: string;

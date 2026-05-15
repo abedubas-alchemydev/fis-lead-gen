@@ -5,6 +5,7 @@ import {
   CheckCircle2,
   Linkedin,
   Loader2,
+  Phone,
   Search,
   XCircle,
 } from "lucide-react";
@@ -255,6 +256,15 @@ function EnrichmentCell({
           <span className="text-[var(--text-muted,#94a3b8)]">
             {row.enriched_company}
           </span>
+        ) : null}
+        {row.enriched_phone ? (
+          <a
+            href={`tel:${row.enriched_phone}`}
+            className="inline-flex items-center gap-1 text-[var(--text-dim,#475569)] hover:underline"
+          >
+            <Phone className="h-3.5 w-3.5" strokeWidth={2} />
+            {row.enriched_phone}
+          </a>
         ) : null}
         {row.enriched_linkedin_url ? (
           <a
@@ -575,7 +585,8 @@ export function ScanDetailView({
         row.source.toLowerCase().includes(q) ||
         (row.enriched_name?.toLowerCase().includes(q) ?? false) ||
         (row.enriched_title?.toLowerCase().includes(q) ?? false) ||
-        (row.enriched_company?.toLowerCase().includes(q) ?? false)
+        (row.enriched_company?.toLowerCase().includes(q) ?? false) ||
+        (row.enriched_phone?.toLowerCase().includes(q) ?? false)
     );
   }, [scan, searchQuery]);
 
@@ -858,7 +869,7 @@ export function ScanDetailView({
                   type="search"
                   value={searchQuery}
                   onChange={(e) => setSearchQuery(e.target.value)}
-                  placeholder="Search email, source, name, title, or company"
+                  placeholder="Search email, source, name, title, company, or phone"
                   aria-label="Search discovered emails"
                   className="w-full rounded-md border border-[var(--border,rgba(30,64,175,0.1))] bg-[var(--surface,#ffffff)] py-1.5 pl-8 pr-3 text-[13px] text-[var(--text,#0f172a)] placeholder:text-[var(--text-muted,#94a3b8)] focus:border-[var(--blue,#3b82f6)] focus:outline-none focus:ring-2 focus:ring-[rgba(59,130,246,0.2)]"
                 />

@@ -15,6 +15,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.core.config import settings
 from app.db.session import SessionLocal, get_db_session
 from app.models.broker_dealer import BrokerDealer
+from app.models.executive_contact import ExecutiveContact
 from app.models.favorite_list import FavoriteList, FavoriteListItem
 from app.models.pipeline_run import PipelineRun
 from app.schemas.auth import AuthenticatedUser
@@ -61,7 +62,13 @@ from app.services.user_lists import (
 )
 from app.services.classification import apply_classification_to_all
 from app.services.contact_discovery.orchestrator import discover_contact
-from app.services.contacts import ContactEnrichmentUnavailableError, ExecutiveContactService
+from app.services.contacts import (
+    ApolloLookupError,
+    ContactEnrichmentUnavailableError,
+    ContactNotFoundError,
+    ExecutiveContactService,
+    NoEmailForLookupError,
+)
 from app.services.finra import FinraService
 from app.services.finra_pdf_service import (
     FinraPdfFetchError,
@@ -562,6 +569,48 @@ async def enrich_broker_dealer_contacts(
             contacts = await contact_service.list_contacts(db, broker_dealer.id)
 
     return [ExecutiveContactItem.model_validate(item) for item in contacts]
+
+
+@router.post(
+    "/{broker_dealer_id}/contacts/{contact_id}/find-phone",
+    response_model=ExecutiveContactItem,
+)
+async def find_phone_for_contact(
+    broker_dealer_id: int,
+    contact_id: int,
+    _: AuthenticatedUser = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db_session),
+) -> ExecutiveContactItem:
+    """Per-person Apollo /people/match phone lookup.
+
+    Costs one Apollo credit per call. The frontend gates this behind an
+    explicit per-row button (the "Find phone" pill on the People panel) so
+    spend stays tied to user intent. Returns the updated contact; ``phone``
+    will be ``null`` if Apollo had no phone for this email — the UI uses
+    that to render a "tried, nothing found" state.
+    """
+    contact = await db.get(ExecutiveContact, contact_id)
+    if contact is None or contact.bd_id != broker_dealer_id:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Contact not found.")
+
+    try:
+        updated = await contact_service.find_phone_for_contact(db, contact_id)
+    except ContactNotFoundError as exc:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(exc)) from exc
+    except NoEmailForLookupError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail=str(exc)
+        ) from exc
+    except ContactEnrichmentUnavailableError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE, detail=str(exc)
+        ) from exc
+    except ApolloLookupError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_502_BAD_GATEWAY, detail=f"apollo: {exc}"
+        ) from exc
+
+    return ExecutiveContactItem.model_validate(updated)
 
 
 def _resolve_domain(broker_dealer: BrokerDealer) -> str | None:
