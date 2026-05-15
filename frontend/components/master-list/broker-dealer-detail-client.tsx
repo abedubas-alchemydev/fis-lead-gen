@@ -513,6 +513,21 @@ export function BrokerDealerDetailClient({ brokerDealerId }: { brokerDealerId: s
     }
   }
 
+  // Per-contact updates from the Find-phone button. Replaces the single
+  // row in place so the UI reflects the new phone without a full refetch.
+  const handleContactUpdated = useCallback((updated: ExecutiveContactItem) => {
+    setProfile((c) =>
+      c
+        ? {
+            ...c,
+            executive_contacts: c.executive_contacts.map((row) =>
+              row.id === updated.id ? updated : row,
+            ),
+          }
+        : c,
+    );
+  }, []);
+
   const chartPoints = useMemo(() => {
     if (!profile) return [] as Array<{ label: string; value: number }>;
     return profile.financials
@@ -929,6 +944,7 @@ export function BrokerDealerDetailClient({ brokerDealerId }: { brokerDealerId: s
                   contact={matchForFinra(owner.name)}
                   brokerDealerId={bd.id}
                   brokerDealerName={bd.name}
+                  onContactUpdated={handleContactUpdated}
                 />
               ))}
             </PeopleSubGroup>
@@ -944,6 +960,7 @@ export function BrokerDealerDetailClient({ brokerDealerId }: { brokerDealerId: s
                   contact={matchForFinra(officer.name)}
                   brokerDealerId={bd.id}
                   brokerDealerName={bd.name}
+                  onContactUpdated={handleContactUpdated}
                 />
               ))}
             </PeopleSubGroup>
@@ -960,6 +977,7 @@ export function BrokerDealerDetailClient({ brokerDealerId }: { brokerDealerId: s
                   source={`${contact.source} · ${formatDate(contact.enriched_at)}`}
                   brokerDealerId={bd.id}
                   brokerDealerName={bd.name}
+                  onContactUpdated={handleContactUpdated}
                 />
               ))}
             </PeopleSubGroup>
@@ -1314,6 +1332,7 @@ function PersonCard({
   source,
   brokerDealerId,
   brokerDealerName,
+  onContactUpdated,
 }: {
   name: string;
   title: string;
@@ -1322,6 +1341,7 @@ function PersonCard({
   source?: string;
   brokerDealerId: number;
   brokerDealerName: string;
+  onContactUpdated?: (updated: ExecutiveContactItem) => void;
 }) {
   return (
     <div className="rounded-2xl bg-[var(--surface-2,#f1f6fd)] px-4 py-3 text-sm text-[var(--text-dim,#475569)]">
@@ -1336,6 +1356,7 @@ function PersonCard({
           brokerDealerId={brokerDealerId}
           brokerDealerName={brokerDealerName}
           contact={contact}
+          onContactUpdated={onContactUpdated}
         />
       ) : null}
       {source ? (

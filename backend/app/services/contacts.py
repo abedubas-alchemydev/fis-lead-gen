@@ -11,12 +11,25 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.core.config import settings
 from app.models.broker_dealer import BrokerDealer
 from app.models.executive_contact import ExecutiveContact
+from app.services.contact_discovery._shared import first_apollo_phone
 
 logger = logging.getLogger(__name__)
 
 
 class ContactEnrichmentUnavailableError(RuntimeError):
     pass
+
+
+class ContactNotFoundError(RuntimeError):
+    pass
+
+
+class NoEmailForLookupError(RuntimeError):
+    """find_phone_for_contact() called on a contact with no email to look up."""
+
+
+class ApolloLookupError(RuntimeError):
+    """Apollo /people/match returned a transient failure (network / 5xx / 429)."""
 
 
 class ExecutiveContactService:
@@ -275,6 +288,72 @@ class ExecutiveContactService:
                 continue
 
         return [], apollo_errored
+
+    async def find_phone_for_contact(
+        self, db: AsyncSession, contact_id: int
+    ) -> ExecutiveContact:
+        """Per-person Apollo /people/match lookup that updates only ``phone``.
+
+        Used by the "Find phone" button on the broker-dealer detail page when
+        a contact has an email but no phone. Costs one Apollo credit per call.
+        Mirrors ``apollo_enrichment.enrich_discovered_email`` but operates on
+        ExecutiveContact instead of DiscoveredEmail, and only writes ``phone``
+        — never overwrites name/title/company that may have come from a
+        higher-trust source (FOCUS PDF).
+
+        Does not blow away an existing non-null phone with null when Apollo
+        returns no phone — that would be a regression.
+        """
+        contact = await db.get(ExecutiveContact, contact_id)
+        if contact is None:
+            raise ContactNotFoundError(f"contact {contact_id} not found")
+
+        if not contact.email:
+            raise NoEmailForLookupError("contact has no email to look up")
+
+        api_key = settings.apollo_api_key
+        if not api_key:
+            raise ContactEnrichmentUnavailableError(
+                "Contact enrichment is disabled. Set CONTACT_ENRICHMENT_PROVIDER=apollo "
+                "and APOLLO_API_KEY in the backend .env file."
+            )
+
+        headers = {
+            "Cache-Control": "no-cache",
+            "Content-Type": "application/json",
+            "X-Api-Key": api_key,
+        }
+
+        try:
+            async with httpx.AsyncClient(timeout=20) as client:
+                response = await client.post(
+                    self._APOLLO_MATCH_URL,
+                    json={"email": contact.email},
+                    headers=headers,
+                )
+        except httpx.HTTPError as exc:
+            raise ApolloLookupError(f"network: {exc.__class__.__name__}: {exc}") from exc
+
+        if response.status_code != 200:
+            snippet = response.text[:200] if response.text else "(no body)"
+            raise ApolloLookupError(f"http {response.status_code}: {snippet}")
+
+        try:
+            data = response.json()
+        except ValueError as exc:
+            raise ApolloLookupError(f"invalid json: {exc}") from exc
+
+        person = data.get("person") if isinstance(data, dict) else None
+        phone = first_apollo_phone(person.get("phone_numbers")) if isinstance(person, dict) else None
+
+        # Don't regress an existing phone if Apollo had nothing for us.
+        if phone:
+            contact.phone = phone
+        contact.enriched_at = datetime.now(timezone.utc)
+
+        await db.commit()
+        await db.refresh(contact)
+        return contact
 
     @staticmethod
     def _guess_domains(company_name: str) -> list[str]:
