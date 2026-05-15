@@ -1345,9 +1345,13 @@ function PersonCard({
 }) {
   return (
     <div className="rounded-2xl bg-[var(--surface-2,#f1f6fd)] px-4 py-3 text-sm text-[var(--text-dim,#475569)]">
-      <p className="flex flex-wrap items-center font-semibold text-[var(--text,#0f172a)]">
+      <p className="flex flex-wrap items-center gap-2 font-semibold text-[var(--text,#0f172a)]">
         <span>{name}</span>
-        {contact ? <SourceBadge source={contact.source} /> : null}
+        {contact ? (
+          <span className="ml-auto">
+            <SourceBadge source={contact.source} />
+          </span>
+        ) : null}
       </p>
       {title ? <p className="mt-1">{title}</p> : null}
       {extra ? <p className="mt-1 text-xs text-[var(--text-muted,#94a3b8)]">{extra}</p> : null}
