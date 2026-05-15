@@ -207,6 +207,44 @@ jobs:
             -f frontend/Dockerfile frontend/
           docker push ${{ vars.GCP_REGISTRY }}/frontend --all-tags
 
+      # ── Apply Alembic migrations BEFORE Cloud Run gets the new image so
+      # the new code never sees the old schema. Schema drift between the
+      # backend code and the live DB has bitten us once already (PR #419's
+      # enriched_phone column was merged-and-deployed without ever being
+      # applied to the staging DB, leaving the /enrich endpoint failing on
+      # the missing column). A migration failure here aborts the deploy and
+      # leaves the old image running on the old schema — safer than a
+      # half-applied migration with new code.
+      - name: Set up Python for migrations
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+          cache-dependency-path: backend/requirements.txt
+
+      - name: Install backend deps for alembic
+        working-directory: backend
+        run: pip install -r requirements.txt
+
+      - name: Apply Alembic migrations
+        working-directory: backend
+        env:
+          # Picks the right connection string per environment. Add these to
+          # the repo Settings → Secrets and variables → Actions:
+          #   - STAGING_DATABASE_URL    (push to develop → staging deploy)
+          #   - PRODUCTION_DATABASE_URL (push to main    → production deploy)
+          # Both should be SQLAlchemy/asyncpg-compatible URLs.
+          DATABASE_URL: ${{ github.ref == 'refs/heads/main' && secrets.PRODUCTION_DATABASE_URL || secrets.STAGING_DATABASE_URL }}
+          # alembic env.py imports `from app.core.config import settings` —
+          # see the same note on the integration-test step above.
+          PYTHONPATH: "."
+        run: |
+          if [ -z "$DATABASE_URL" ]; then
+            echo "::error::Neither STAGING_DATABASE_URL nor PRODUCTION_DATABASE_URL is configured for env=$ENV. Add the repo secret under Settings → Secrets → Actions and rerun."
+            exit 1
+          fi
+          alembic upgrade head
+
       - name: Deploy backend to Cloud Run
         run: |
           # --timeout=3600 lets the /api/v1/alerts/stream SSE endpoint hold a
