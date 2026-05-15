@@ -36,6 +36,7 @@ from typing import Any
 import httpx
 
 from app.core.config import settings
+from app.services.contact_discovery._shared import first_apollo_phone
 from app.services.contact_discovery.base import (
     ContactDiscoveryProvider,
     DiscoveryResult,
@@ -115,7 +116,7 @@ class ApolloMatchProvider(ContactDiscoveryProvider):
         else:
             confidence = 0.0
 
-        phone = _first_phone(person.get("phone_numbers"))
+        phone = first_apollo_phone(person.get("phone_numbers"))
         linkedin_url = person.get("linkedin_url") or None
 
         return DiscoveryResult(
@@ -187,14 +188,3 @@ class ApolloMatchProvider(ContactDiscoveryProvider):
         )
 
 
-def _first_phone(phone_numbers: Any) -> str | None:
-    if not isinstance(phone_numbers, list) or not phone_numbers:
-        return None
-    first = phone_numbers[0]
-    if isinstance(first, dict):
-        value = first.get("sanitized_number") or first.get("raw_number")
-        if value:
-            return str(value).strip() or None
-    if isinstance(first, str):
-        return first.strip() or None
-    return None

@@ -40,6 +40,7 @@ class DiscoveredEmailResponse(BaseModel):
     enriched_title: str | None = None
     enriched_linkedin_url: str | None = None
     enriched_company: str | None = None
+    enriched_phone: str | None = None
     enriched_at: datetime | None = None
     enrichment_status: str = "not_enriched"
     created_at: datetime

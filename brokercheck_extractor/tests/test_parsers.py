@@ -34,6 +34,11 @@ def test_finra_identity(schwab_profile):
     assert schwab_profile.is_registered is True
 
 
+def test_finra_business_phone(schwab_profile):
+    """Main Office "Business Telephone Number" must be captured verbatim."""
+    assert schwab_profile.business_phone == "817-859-5000"
+
+
 def test_finra_history(schwab_profile):
     assert schwab_profile.history.formation_date.isoformat() == "1971-04-01"
     assert schwab_profile.history.registration_date.isoformat() == "1971-06-13"
