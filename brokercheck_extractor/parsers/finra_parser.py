@@ -116,6 +116,17 @@ def _parse_identity(text: str, profile: FirmProfile) -> None:
     ):
         profile.is_registered = False
 
+    # Main Office "Business Telephone Number". pdfplumber surfaces the field as
+    # either `Business Telephone Number\n817-859-5000` or `... | 817-859-5000`
+    # depending on whether the source page rendered as a table or paragraph.
+    m = re.search(
+        r"Business Telephone Number\s*[\|\n]\s*([\(\)\d][\(\)\d\-\.\s]{6,18}\d)",
+        text,
+        re.IGNORECASE,
+    )
+    if m:
+        profile.business_phone = m.group(1).strip()
+
 
 # ---------------------------------------------------------------------------
 # Officers

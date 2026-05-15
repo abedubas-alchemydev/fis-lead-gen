@@ -40,11 +40,14 @@ Extract the firm profile from this FINRA BrokerCheck Detailed Report and \
 return JSON matching the schema. Focus on these fields:
 
 - CRD number, SEC number, firm legal name, registration status
+- Business Telephone Number from the Main Office Location section (the
+  firm's main phone, not an officer's). Return verbatim as printed.
 - Firm History: formation state and date, first SEC/FINRA registration date, \
   termination date if applicable
 - All Direct Owners and Executive Officers: name, position (full multi-line \
   title joined with single spaces), ownership percentage code, position start \
-  date (MM/YYYY → YYYY-MM-DD with day=01)
+  date (MM/YYYY → YYYY-MM-DD with day=01), phone if explicitly listed for the \
+  officer (else null — do not substitute the firm's main phone)
 - Types of Business: total count and list of current services; any "Other \
   Types of Business" freeform text
 - Clearing Arrangements: the full paragraph verbatim plus a boolean \

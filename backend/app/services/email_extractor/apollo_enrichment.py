@@ -5,9 +5,10 @@ Per-row, user-triggered: the endpoint at
 Each call consumes one Apollo credit (paid), so the frontend gates it behind
 an explicit button per row to keep usage bounded to human clicks.
 
-Writes to the 6 enrichment columns added in Alembic 20260423_0013
+Writes to the enrichment columns added in Alembic 20260423_0013
 (enriched_name, enriched_title, enriched_linkedin_url, enriched_company,
-enriched_at, enrichment_status). Status maps:
+enriched_at, enrichment_status) plus ``enriched_phone`` (added in
+20260515_0041). Status maps:
 
 - `enriched`   — Apollo returned a person match; fields populated.
 - `no_match`   — Apollo returned 200 but no person object; fields stay null.
@@ -30,6 +31,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.config import settings
 from app.models.discovered_email import DiscoveredEmail
+from app.services.contact_discovery._shared import first_apollo_phone
 
 logger = logging.getLogger(__name__)
 
@@ -101,6 +103,7 @@ async def enrich_discovered_email(db: AsyncSession, discovered_email_id: int) ->
     organization = person.get("organization")
     if isinstance(organization, dict):
         row.enriched_company = _first_string(organization, ["name", "display_name"])
+    row.enriched_phone = first_apollo_phone(person.get("phone_numbers"))
     row.enriched_at = datetime.now(UTC)
     row.enrichment_status = "enriched"
 
