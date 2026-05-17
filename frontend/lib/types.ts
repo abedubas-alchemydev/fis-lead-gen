@@ -613,6 +613,46 @@ export type OutreachSendDetail = OutreachSendItem & {
   body: string;
 };
 
+// ── Admin per-user views (admin-only consumers) ──
+//
+// Mirrors backend/app/schemas/users_admin.py. The saved-firms payload
+// flattens both polymorphic item types — broker-dealers and investment
+// advisors — into one stream with an `item_type` discriminator so the
+// admin table renders a single sortable list. `lists` is the unfiltered
+// summary used by the filter-pill row.
+
+export type AdminUserBrief = {
+  id: string;
+  email: string;
+  name: string;
+};
+
+export type AdminSavedFirmListSummary = {
+  id: number;
+  name: string;
+  is_default: boolean;
+  item_count: number;
+};
+
+export type AdminSavedFirmRow = {
+  item_type: "broker_dealer" | "advisor";
+  target_id: number;
+  target_name: string;
+  list_id: number;
+  list_name: string;
+  list_is_default: boolean;
+  saved_at: string;
+};
+
+export type AdminUserSavedFirmsResponse = {
+  items: AdminSavedFirmRow[];
+  total: number;
+  limit: number;
+  offset: number;
+  lists: AdminSavedFirmListSummary[];
+  user: AdminUserBrief;
+};
+
 // ── Investment Advisor (Form ADV / 13F filer) types ──
 //
 // Mirrors backend/app/schemas/investment_advisor.py. Lives alongside the

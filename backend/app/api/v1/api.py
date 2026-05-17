@@ -14,6 +14,7 @@ from app.api.v1.endpoints import (
     pipeline,
     settings,
     stats,
+    users_admin,
     vault,
     vault_files,
     visits,
@@ -38,3 +39,4 @@ api_router.include_router(visits.router, tags=["visits"])
 api_router.include_router(vault.router, tags=["vault"])
 api_router.include_router(vault_files.router, tags=["vault-files"])
 api_router.include_router(outreach.router, tags=["outreach"])
+api_router.include_router(users_admin.router, tags=["users-admin"])

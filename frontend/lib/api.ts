@@ -99,6 +99,7 @@ import type {
   PaginatedFavoriteListItems
 } from "@/types/favorite-list";
 import type {
+  AdminUserSavedFirmsResponse,
   InvestorEnrichResponse,
   InvestorListResponse,
   OutreachDraft,
@@ -571,6 +572,22 @@ export async function getOutreachSend(
 ): Promise<OutreachSendDetail> {
   return apiRequest<OutreachSendDetail>(
     `/api/v1/outreach/sends/${sendId}`
+  );
+}
+
+// Admin-only flat view of every firm a target user has saved across all
+// their favorite lists. Backend gates with role === "admin"; a non-admin
+// caller will receive 403 from apiRequest as an ApiError.
+export async function getUserSavedFirms(
+  userId: string,
+  opts?: { limit?: number; offset?: number; listId?: number }
+): Promise<AdminUserSavedFirmsResponse> {
+  return apiRequest<AdminUserSavedFirmsResponse>(
+    buildApiPath(`/api/v1/users/${userId}/saved-firms`, {
+      limit: opts?.limit,
+      offset: opts?.offset,
+      list_id: opts?.listId
+    })
   );
 }
 
