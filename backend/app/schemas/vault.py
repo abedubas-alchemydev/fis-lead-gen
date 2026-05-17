@@ -63,3 +63,40 @@ class OutreachSendResponse(BaseModel):
     gmail_message_id: str
     sent_at: datetime
     status: str
+
+
+class OutreachSendItem(BaseModel):
+    """One row in the per-user "sent outreach" list.
+
+    Excludes ``body`` to keep the list payload small — fetch the full
+    body on demand via ``GET /outreach/sends/{send_id}`` when the user
+    expands a row.
+    """
+
+    id: int
+    sent_at: datetime
+    status: str
+    subject: str
+    gmail_message_id: str | None
+    error: str | None
+    broker_dealer_id: int
+    broker_dealer_name: str
+    contact_id: int
+    contact_name: str
+    contact_email: str | None
+    # Folder may be NULL if the service folder was deleted after the
+    # send. The send row stays so the audit history doesn't lose
+    # entries.
+    folder_id: int | None
+    folder_name: str | None
+
+
+class OutreachSendsListResponse(BaseModel):
+    items: list[OutreachSendItem]
+    total: int
+    limit: int
+    offset: int
+
+
+class OutreachSendDetailResponse(OutreachSendItem):
+    body: str

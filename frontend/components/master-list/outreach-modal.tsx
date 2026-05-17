@@ -1,6 +1,7 @@
 "use client";
 
 import Link from "next/link";
+import type { Route } from "next";
 import { useEffect, useMemo, useRef, useState } from "react";
 
 import {
@@ -371,14 +372,22 @@ export function OutreachModal({
               ) : null}
               . A copy is in your Gmail Sent folder.
             </p>
-            <a
-              href="https://mail.google.com/mail/u/0/#sent"
-              target="_blank"
-              rel="noopener noreferrer"
-              className="mt-3 inline-flex h-9 items-center rounded-xl border border-emerald-300 bg-white px-3 text-xs font-semibold text-emerald-700 transition hover:bg-emerald-50"
-            >
-              Open Gmail Sent folder
-            </a>
+            <div className="mt-3 flex flex-wrap items-center gap-2">
+              <a
+                href="https://mail.google.com/mail/u/0/#sent"
+                target="_blank"
+                rel="noopener noreferrer"
+                className="inline-flex h-9 items-center rounded-xl border border-emerald-300 bg-white px-3 text-xs font-semibold text-emerald-700 transition hover:bg-emerald-50"
+              >
+                Open Gmail Sent folder
+              </a>
+              <Link
+                href={"/outreach/sent" as Route}
+                className="inline-flex h-9 items-center rounded-xl border border-emerald-300 bg-white px-3 text-xs font-semibold text-emerald-700 transition hover:bg-emerald-50"
+              >
+                View all sent outreach
+              </Link>
+            </div>
           </div>
         ) : null}
 

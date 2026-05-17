@@ -155,6 +155,16 @@ function UsersIcon(props: IconProps) {
   );
 }
 
+// Paper-plane glyph for the per-user "sent outreach" history view.
+function SentOutreachIcon(props: IconProps) {
+  return (
+    <IconBase {...props}>
+      <path d="M22 2L11 13" />
+      <path d="M22 2l-7 20-4-9-9-4 20-7z" />
+    </IconBase>
+  );
+}
+
 type SessionUser = {
   name?: string | null;
   email?: string | null;
@@ -191,6 +201,7 @@ const workspaceNav: ReadonlyArray<NavEntry> = [
   { href: "/alerts", label: "Alerts", icon: AlertsIcon, badgeKey: "alerts" },
   { href: "/investors" as Route, label: "Investors", icon: InvestorsIcon, badgeKey: null, permissionKey: "investors" },
   { href: "/email-extractor", label: "Email Extractor", icon: EmailExtractorIcon, badgeKey: null },
+  { href: "/outreach/sent" as Route, label: "Sent Outreach", icon: SentOutreachIcon, badgeKey: null },
   { href: "/export", label: "Export", icon: ExportIcon, badgeKey: null },
   { href: "/my-favorites", label: "My Favorites", icon: FavoritesIcon, badgeKey: null },
   { href: "/visited-firms", label: "Visited Firms", icon: VisitedFirmsIcon, badgeKey: null }
