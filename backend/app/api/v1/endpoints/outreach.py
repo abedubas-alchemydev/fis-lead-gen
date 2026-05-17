@@ -22,6 +22,7 @@ from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.db.session import get_db_session
+from app.models.auth import AuthUser
 from app.models.broker_dealer import BrokerDealer
 from app.models.executive_contact import ExecutiveContact
 from app.models.outreach_send import OutreachSend
@@ -302,12 +303,22 @@ async def _record_failure(
     await db.commit()
 
 
-def _row_to_item(row: tuple) -> dict:
-    """Flatten a (OutreachSend, bd_name, contact_name, contact_email,
-    folder_name) row into the dict shape both list + detail responses
-    consume. Detail tacks ``body`` on after the fact."""
+def _ensure_admin(current_user: AuthenticatedUser) -> None:
+    """Mirror of settings.py:_ensure_admin — admins only past this gate."""
+    if current_user.role != "admin":
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Admin access required.",
+        )
+
+
+def _row_to_item(row: tuple, *, include_sender: bool) -> dict:
+    """Flatten a join row into the dict shape both list + detail responses
+    consume. When ``include_sender`` is True the row carries the extra
+    (sender_name, sender_email) pair appended by the admin-scope query so
+    the FE can render a Sender column. Detail tacks ``body`` on after."""
     send: OutreachSend = row[0]
-    return {
+    payload = {
         "id": send.id,
         "sent_at": send.sent_at,
         "status": send.status,
@@ -322,6 +333,37 @@ def _row_to_item(row: tuple) -> dict:
         "folder_id": send.folder_id,
         "folder_name": row[4],
     }
+    if include_sender:
+        payload["user_id"] = send.user_id
+        payload["sender_name"] = row[5]
+        payload["sender_email"] = row[6]
+    return payload
+
+
+def _base_send_select(*, include_sender: bool):
+    """Shared SELECT for list + detail. ``include_sender`` adds the
+    AuthUser join so the row tuple carries (..., sender_name,
+    sender_email) for the admin scope."""
+    columns = [
+        OutreachSend,
+        BrokerDealer.name,
+        ExecutiveContact.name,
+        ExecutiveContact.email,
+        VaultFolder.name,
+    ]
+    if include_sender:
+        columns.extend([AuthUser.name, AuthUser.email])
+    stmt = (
+        select(*columns)
+        .join(BrokerDealer, BrokerDealer.id == OutreachSend.broker_dealer_id)
+        .join(
+            ExecutiveContact, ExecutiveContact.id == OutreachSend.contact_id
+        )
+        .outerjoin(VaultFolder, VaultFolder.id == OutreachSend.folder_id)
+    )
+    if include_sender:
+        stmt = stmt.outerjoin(AuthUser, AuthUser.id == OutreachSend.user_id)
+    return stmt
 
 
 @router.get("/sends", response_model=OutreachSendsListResponse)
@@ -331,30 +373,27 @@ async def list_outreach_sends(
     status_filter: Literal["sent", "failed"] | None = Query(
         None, alias="status"
     ),
+    scope: Literal["mine", "all"] = Query("mine"),
     current_user: AuthenticatedUser = Depends(get_current_user),
     db: AsyncSession = Depends(get_db_session),
 ) -> OutreachSendsListResponse:
-    """Per-user paginated list of outreach attempts (success + failure).
+    """Paginated list of outreach attempts (success + failure).
 
-    Joins broker-dealer / contact / vault-folder metadata so the FE can
-    render a useful row without an N+1. Body is omitted from the list
-    payload — fetch via ``GET /outreach/sends/{send_id}`` on row expand.
+    Default scope ``mine`` returns the caller's own sends — unchanged
+    behavior. Scope ``all`` is admin-gated and returns every user's sends
+    with sender_name / sender_email joined in so the FE can render a
+    Sender column. Joins broker-dealer / contact / vault-folder metadata
+    so the FE renders rows without an N+1. Body is omitted from the
+    list payload — fetch via ``GET /outreach/sends/{send_id}`` on row
+    expand.
     """
-    base = (
-        select(
-            OutreachSend,
-            BrokerDealer.name,
-            ExecutiveContact.name,
-            ExecutiveContact.email,
-            VaultFolder.name,
-        )
-        .join(BrokerDealer, BrokerDealer.id == OutreachSend.broker_dealer_id)
-        .join(
-            ExecutiveContact, ExecutiveContact.id == OutreachSend.contact_id
-        )
-        .outerjoin(VaultFolder, VaultFolder.id == OutreachSend.folder_id)
-        .where(OutreachSend.user_id == current_user.id)
-    )
+    include_sender = scope == "all"
+    if include_sender:
+        _ensure_admin(current_user)
+
+    base = _base_send_select(include_sender=include_sender)
+    if not include_sender:
+        base = base.where(OutreachSend.user_id == current_user.id)
     if status_filter is not None:
         base = base.where(OutreachSend.status == status_filter)
 
@@ -366,7 +405,10 @@ async def list_outreach_sends(
     )
     rows = (await db.execute(rows_stmt)).all()
 
-    items = [OutreachSendItem(**_row_to_item(row)) for row in rows]
+    items = [
+        OutreachSendItem(**_row_to_item(row, include_sender=include_sender))
+        for row in rows
+    ]
     return OutreachSendsListResponse(
         items=items, total=total, limit=limit, offset=offset
     )
@@ -377,36 +419,31 @@ async def list_outreach_sends(
 )
 async def get_outreach_send(
     send_id: int,
+    scope: Literal["mine", "all"] = Query("mine"),
     current_user: AuthenticatedUser = Depends(get_current_user),
     db: AsyncSession = Depends(get_db_session),
 ) -> OutreachSendDetailResponse:
-    """Full body + metadata for one send, scoped to the caller.
+    """Full body + metadata for one send.
 
-    Returns 404 for both "id does not exist" and "id belongs to another
-    user" so a leaked id can't confirm cross-user existence.
+    Default scope ``mine`` returns 404 for both "id does not exist" and
+    "id belongs to another user" so a leaked id can't confirm cross-user
+    existence. Scope ``all`` is admin-gated and lets admins open any
+    user's send.
     """
-    stmt = (
-        select(
-            OutreachSend,
-            BrokerDealer.name,
-            ExecutiveContact.name,
-            ExecutiveContact.email,
-            VaultFolder.name,
-        )
-        .join(BrokerDealer, BrokerDealer.id == OutreachSend.broker_dealer_id)
-        .join(
-            ExecutiveContact, ExecutiveContact.id == OutreachSend.contact_id
-        )
-        .outerjoin(VaultFolder, VaultFolder.id == OutreachSend.folder_id)
-        .where(
-            OutreachSend.id == send_id,
-            OutreachSend.user_id == current_user.id,
-        )
+    include_sender = scope == "all"
+    if include_sender:
+        _ensure_admin(current_user)
+
+    stmt = _base_send_select(include_sender=include_sender).where(
+        OutreachSend.id == send_id
     )
+    if not include_sender:
+        stmt = stmt.where(OutreachSend.user_id == current_user.id)
+
     row = (await db.execute(stmt)).first()
     if row is None:
         raise HTTPException(status_code=404, detail="outreach_send_not_found")
 
-    payload = _row_to_item(row)
+    payload = _row_to_item(row, include_sender=include_sender)
     payload["body"] = row[0].body
     return OutreachSendDetailResponse(**payload)
