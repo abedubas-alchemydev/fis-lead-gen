@@ -109,6 +109,7 @@ import type {
   OutreachSendResponse,
   OutreachSendStatus,
   OutreachSendsListResponse,
+  OutreachSendsScope,
   PipelineRunItem,
   PipelineStatusResponse,
   PipelineTriggerResponse,
@@ -550,28 +551,33 @@ export async function sendOutreachEmail(
   });
 }
 
-// Per-user list of outreach sends (success + failure). Body is omitted
-// from the list response to keep the payload small for users with lots
-// of history — call getOutreachSend when expanding a row.
+// List of outreach sends (success + failure). Body is omitted from the
+// list response to keep the payload small — call getOutreachSend when
+// expanding a row. ``scope`` defaults to "mine" (caller's own sends);
+// admins can pass "all" to fetch every user's sends with a Sender
+// column populated.
 export async function listOutreachSends(opts: {
   limit?: number;
   offset?: number;
   status?: OutreachSendStatus;
+  scope?: OutreachSendsScope;
 }): Promise<OutreachSendsListResponse> {
   return apiRequest<OutreachSendsListResponse>(
     buildApiPath("/api/v1/outreach/sends", {
       limit: opts.limit,
       offset: opts.offset,
-      status: opts.status
+      status: opts.status,
+      scope: opts.scope
     })
   );
 }
 
 export async function getOutreachSend(
-  sendId: number
+  sendId: number,
+  scope?: OutreachSendsScope
 ): Promise<OutreachSendDetail> {
   return apiRequest<OutreachSendDetail>(
-    `/api/v1/outreach/sends/${sendId}`
+    buildApiPath(`/api/v1/outreach/sends/${sendId}`, { scope })
   );
 }
 

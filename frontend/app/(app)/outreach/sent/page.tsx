@@ -4,11 +4,11 @@ import { getRequiredSession } from "@/lib/auth-server";
 export const dynamic = "force-dynamic";
 
 export default async function OutreachSentPage() {
-  await getRequiredSession();
+  const session = await getRequiredSession();
 
   return (
     <div className="px-7 pb-12 pt-7 lg:px-9">
-      <OutreachSentClient />
+      <OutreachSentClient isAdmin={session.user.role === "admin"} />
     </div>
   );
 }
