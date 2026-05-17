@@ -47,6 +47,7 @@ class ExtractionRun(Base):
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now(), nullable=False)
     started_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     completed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    enrich_cancelled_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
 
     discovered_emails: Mapped[list[DiscoveredEmail]] = relationship(
         back_populates="run", cascade="all, delete-orphan", lazy="selectin"

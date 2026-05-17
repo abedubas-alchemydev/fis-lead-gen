@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from datetime import datetime, timezone
+
 from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, Query, status
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -141,6 +143,12 @@ async def enrich_all_for_scan(
     already = int((await db.execute(already_stmt)).scalar_one())
     queued = total - already
 
+    # Clear any prior cancel so a re-run isn't immediately short-circuited
+    # by the bulk loop's per-row cancel check.
+    if scan.enrich_cancelled_at is not None:
+        scan.enrich_cancelled_at = None
+        await db.commit()
+
     background_tasks.add_task(run_bulk_enrichment, run_id)
 
     return EnrichAllResponse(
@@ -150,6 +158,39 @@ async def enrich_all_for_scan(
         candidates_queued=queued,
         status="queued",
     )
+
+
+@router.post(
+    "/scans/{run_id}/enrich-all/cancel",
+    response_model=ScanResponse,
+)
+async def cancel_enrich_all_for_scan(
+    run_id: int,
+    db: AsyncSession = Depends(get_db_session),
+    current_user: AuthenticatedUser = Depends(get_current_user),
+) -> ExtractionRun:
+    """Stamp ``enrich_cancelled_at`` so the bulk enrichment loop exits
+    on its next iteration.
+
+    Idempotent: re-calling with an already-cancelled scan leaves the
+    original timestamp in place. Already-enriched rows are preserved by
+    the loop's design -- nothing here rolls back per-row state.
+    """
+    stmt = (
+        select(ExtractionRun)
+        .where(ExtractionRun.id == run_id)
+        .options(selectinload(ExtractionRun.discovered_emails))
+    )
+    scan = (await db.execute(stmt)).scalar_one_or_none()
+    if scan is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="scan not found")
+
+    if scan.enrich_cancelled_at is None:
+        scan.enrich_cancelled_at = datetime.now(timezone.utc)
+        await db.commit()
+        await db.refresh(scan)
+
+    return scan
 
 
 @router.get("/scans/{run_id}", response_model=ScanResponse)

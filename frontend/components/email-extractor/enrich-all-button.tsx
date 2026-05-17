@@ -1,11 +1,15 @@
 "use client";
 
-import { Loader2, Sparkles } from "lucide-react";
+import { Loader2, Sparkles, Square } from "lucide-react";
 import { useCallback, useEffect, useRef, useState } from "react";
 
 import { useToast } from "@/components/ui/use-toast";
 import { apiRequest } from "@/lib/api";
-import { enrichAll, type EnrichAllResponse } from "@/lib/email-extractor";
+import {
+  cancelEnrichAll,
+  enrichAll,
+  type EnrichAllResponse,
+} from "@/lib/email-extractor";
 
 const POLL_INTERVAL_MS = 3000;
 const MAX_POLLS = 100;
@@ -13,6 +17,7 @@ const MAX_POLLS = 100;
 type PollEnrichmentStatus = "not_enriched" | "enriched" | "no_match" | "error";
 
 interface PollScanShape {
+  enrich_cancelled_at: string | null;
   discovered_emails: Array<{ enrichment_status: PollEnrichmentStatus }>;
 }
 
@@ -21,6 +26,7 @@ export interface EnrichAllSummary {
   failedCount: number;
   total: number;
   timedOut: boolean;
+  cancelled?: boolean;
 }
 
 export interface EnrichAllButtonProps {
@@ -48,6 +54,7 @@ export function EnrichAllButton({
   onDone,
 }: EnrichAllButtonProps) {
   const [isRunning, setIsRunning] = useState(false);
+  const [isStopping, setIsStopping] = useState(false);
   const [optimisticQueued, setOptimisticQueued] = useState(0);
   const [statusText, setStatusText] = useState<string | null>(null);
   const toast = useToast();
@@ -74,6 +81,7 @@ export function EnrichAllButton({
   const handleClick = useCallback(async () => {
     if (isRunning || unenrichedCount <= 0) return;
     setIsRunning(true);
+    setIsStopping(false);
     setStatusText(`Enriching ${unenrichedCount}…`);
     setOptimisticQueued(unenrichedCount);
     pollCountRef.current = 0;
@@ -119,9 +127,32 @@ export function EnrichAllButton({
         );
         onProgress?.();
         const { enriched, failed, total } = countStatuses(scan);
+        const wasCancelled = scan.enrich_cancelled_at !== null;
+
         setStatusText(
-          `Enriched ${enriched} of ${total}${failed > 0 ? `, ${failed} failed` : ""}`,
+          wasCancelled
+            ? `Stopping — enriched ${enriched} of ${total}${failed > 0 ? `, ${failed} failed` : ""}…`
+            : `Enriched ${enriched} of ${total}${failed > 0 ? `, ${failed} failed` : ""}`,
         );
+
+        if (wasCancelled) {
+          stopPolling();
+          if (!mountedRef.current) return;
+          setIsRunning(false);
+          setIsStopping(false);
+          setOptimisticQueued(0);
+          setStatusText(
+            `Stopped — kept ${enriched} of ${total} extracted${failed > 0 ? `, ${failed} failed` : ""}.`,
+          );
+          onDone?.({
+            enrichedCount: enriched,
+            failedCount: failed,
+            total,
+            timedOut: false,
+            cancelled: true,
+          });
+          return;
+        }
 
         if (enriched + failed >= total) {
           stopPolling();
@@ -148,12 +179,26 @@ export function EnrichAllButton({
         stopPolling();
         if (!mountedRef.current) return;
         setIsRunning(false);
+        setIsStopping(false);
         setOptimisticQueued(0);
         setStatusText(null);
         toast.error("Lost connection while polling — please try again.");
       }
     }, POLL_INTERVAL_MS);
   }, [isRunning, onDone, onProgress, scanId, stopPolling, toast, unenrichedCount]);
+
+  const handleStop = useCallback(async () => {
+    if (!isRunning || isStopping) return;
+    setIsStopping(true);
+    setStatusText("Stopping…");
+    try {
+      await cancelEnrichAll(scanId);
+    } catch {
+      if (!mountedRef.current) return;
+      setIsStopping(false);
+      toast.error("Couldn't stop enrichment — please try again.");
+    }
+  }, [isRunning, isStopping, scanId, toast]);
 
   const disabled = isRunning || unenrichedCount <= 0;
   const disabledTitle =
@@ -163,21 +208,36 @@ export function EnrichAllButton({
 
   return (
     <div className="flex flex-col items-end gap-1">
-      <button
-        type="button"
-        onClick={() => void handleClick()}
-        disabled={disabled}
-        aria-busy={isRunning}
-        title={disabledTitle}
-        className="inline-flex items-center gap-2 rounded-xl bg-navy px-3 py-2 text-xs font-semibold text-white shadow-sm shadow-navy/15 transition hover:bg-[#112b54] hover:shadow-md hover:shadow-navy/20 focus:outline-none focus:ring-2 focus:ring-blue/30 disabled:cursor-not-allowed disabled:opacity-60"
-      >
+      <div className="flex items-center gap-2">
+        <button
+          type="button"
+          onClick={() => void handleClick()}
+          disabled={disabled}
+          aria-busy={isRunning}
+          title={disabledTitle}
+          className="inline-flex items-center gap-2 rounded-xl bg-navy px-3 py-2 text-xs font-semibold text-white shadow-sm shadow-navy/15 transition hover:bg-[#112b54] hover:shadow-md hover:shadow-navy/20 focus:outline-none focus:ring-2 focus:ring-blue/30 disabled:cursor-not-allowed disabled:opacity-60"
+        >
+          {isRunning ? (
+            <Loader2 className="h-4 w-4 animate-spin" aria-hidden />
+          ) : (
+            <Sparkles className="h-4 w-4" aria-hidden />
+          )}
+          {label}
+        </button>
         {isRunning ? (
-          <Loader2 className="h-4 w-4 animate-spin" aria-hidden />
-        ) : (
-          <Sparkles className="h-4 w-4" aria-hidden />
-        )}
-        {label}
-      </button>
+          <button
+            type="button"
+            onClick={() => void handleStop()}
+            disabled={isStopping}
+            aria-label="Stop enrichment"
+            title="Stop enrichment — keeps rows already extracted"
+            className="inline-flex items-center gap-2 rounded-xl border border-slate-300 bg-white px-3 py-2 text-xs font-semibold text-slate-700 shadow-sm transition hover:bg-slate-50 focus:outline-none focus:ring-2 focus:ring-slate-300 disabled:cursor-not-allowed disabled:opacity-60"
+          >
+            <Square className="h-4 w-4" aria-hidden />
+            {isStopping ? "Stopping…" : "Stop"}
+          </button>
+        ) : null}
+      </div>
       {statusText !== null ? (
         <span className="text-xs text-slate-600" aria-live="polite">
           {statusText}
