@@ -89,6 +89,12 @@ class OutreachSendItem(BaseModel):
     # entries.
     folder_id: int | None
     folder_name: str | None
+    # Populated only on the admin "all users" scope so the FE can show a
+    # Sender column. Omitted (None) on the per-user "mine" scope to keep
+    # the response shape backwards-compatible.
+    user_id: str | None = None
+    sender_name: str | None = None
+    sender_email: str | None = None
 
 
 class OutreachSendsListResponse(BaseModel):

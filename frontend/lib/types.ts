@@ -600,7 +600,14 @@ export type OutreachSendItem = {
   contact_email: string | null;
   folder_id: number | null;
   folder_name: string | null;
+  // Populated only when the admin "all users" scope is requested. Null
+  // on the per-user (default) scope.
+  user_id?: string | null;
+  sender_name?: string | null;
+  sender_email?: string | null;
 };
+
+export type OutreachSendsScope = "mine" | "all";
 
 export type OutreachSendsListResponse = {
   items: OutreachSendItem[];

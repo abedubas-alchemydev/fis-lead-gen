@@ -19,6 +19,7 @@ import type {
   OutreachSendItem,
   OutreachSendStatus,
   OutreachSendsListResponse,
+  OutreachSendsScope,
 } from "@/lib/types";
 
 const CARD =
@@ -40,11 +41,19 @@ const STATUS_FILTERS: { value: StatusFilter; label: string }[] = [
   { value: "failed", label: "Failed" },
 ];
 
-export function OutreachSentClient() {
+const SCOPE_FILTERS: { value: OutreachSendsScope; label: string }[] = [
+  { value: "mine", label: "My sends" },
+  { value: "all", label: "All users" },
+];
+
+export function OutreachSentClient({ isAdmin = false }: { isAdmin?: boolean }) {
   const [data, setData] = useState<OutreachSendsListResponse | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [statusFilter, setStatusFilter] = useState<StatusFilter>("all");
+  // Default to "mine" even for admins so the page doesn't change shape
+  // on them without an explicit click. Non-admins never see the toggle.
+  const [scope, setScope] = useState<OutreachSendsScope>("mine");
   const [offset, setOffset] = useState(0);
   const [expandedId, setExpandedId] = useState<number | null>(null);
   const [detailCache, setDetailCache] = useState<
@@ -61,6 +70,7 @@ export function OutreachSentClient() {
         limit: PAGE_SIZE,
         offset,
         status: statusFilter === "all" ? undefined : statusFilter,
+        scope: isAdmin && scope === "all" ? "all" : undefined,
       });
       setData(result);
     } catch (err) {
@@ -74,7 +84,7 @@ export function OutreachSentClient() {
     } finally {
       setLoading(false);
     }
-  }, [offset, statusFilter]);
+  }, [isAdmin, offset, scope, statusFilter]);
 
   useEffect(() => {
     void load();
@@ -90,7 +100,10 @@ export function OutreachSentClient() {
     if (detailCache[item.id]) return;
     setDetailLoading(item.id);
     try {
-      const detail = await getOutreachSend(item.id);
+      const detail = await getOutreachSend(
+        item.id,
+        isAdmin && scope === "all" ? "all" : undefined
+      );
       setDetailCache((prev) => ({ ...prev, [item.id]: detail }));
     } catch (err) {
       setDetailError(
@@ -111,6 +124,7 @@ export function OutreachSentClient() {
   const pageMax = Math.max(1, Math.ceil(total / PAGE_SIZE));
   const canPrev = offset > 0;
   const canNext = offset + PAGE_SIZE < total;
+  const showSenderColumn = isAdmin && scope === "all";
 
   return (
     <section className="space-y-6">
@@ -123,9 +137,9 @@ export function OutreachSentClient() {
             Sent outreach
           </h1>
           <p className="mt-2 max-w-3xl text-[13px] leading-5 text-[var(--text-dim,#475569)]">
-            Every outreach email you&apos;ve sent through Gmail, plus any
-            failed attempts and the reason they didn&apos;t go through. Click a
-            row to read the full message.
+            {showSenderColumn
+              ? "Every outreach email sent across all users, including failed attempts and the reason they didn't go through. Click a row to read the full message."
+              : "Every outreach email you've sent through Gmail, plus any failed attempts and the reason they didn't go through. Click a row to read the full message."}
           </p>
         </div>
       </div>
@@ -140,7 +154,9 @@ export function OutreachSentClient() {
       <div className={CARD}>
         <div className="flex flex-wrap items-center justify-between gap-3">
           <div>
-            <p className={EYEBROW}>Your sends</p>
+            <p className={EYEBROW}>
+              {showSenderColumn ? "All users' sends" : "Your sends"}
+            </p>
             <h2 className={CARD_TITLE}>
               {loading && !data
                 ? "Loading..."
@@ -149,14 +165,31 @@ export function OutreachSentClient() {
                   : `${total} ${total === 1 ? "message" : "messages"}`}
             </h2>
           </div>
-          <FilterPills
-            value={statusFilter}
-            onChange={(next) => {
-              setStatusFilter(next);
-              setOffset(0);
-              setExpandedId(null);
-            }}
-          />
+          <div className="flex flex-wrap items-center gap-2">
+            {isAdmin ? (
+              <ScopePills
+                value={scope}
+                onChange={(next) => {
+                  setScope(next);
+                  setOffset(0);
+                  setExpandedId(null);
+                  // Detail cache is keyed by id and can collide between
+                  // scopes (an admin's own send appears in both views),
+                  // so drop it to avoid serving a "mine" payload that
+                  // lacks sender fields when scope=all is active.
+                  setDetailCache({});
+                }}
+              />
+            ) : null}
+            <FilterPills
+              value={statusFilter}
+              onChange={(next) => {
+                setStatusFilter(next);
+                setOffset(0);
+                setExpandedId(null);
+              }}
+            />
+          </div>
         </div>
 
         {loading && !data ? (
@@ -167,7 +200,7 @@ export function OutreachSentClient() {
         ) : null}
 
         {!loading && total === 0 ? (
-          <EmptyState filter={statusFilter} />
+          <EmptyState filter={statusFilter} scope={scope} />
         ) : null}
 
         {data && total > 0 ? (
@@ -176,6 +209,7 @@ export function OutreachSentClient() {
               <thead className="bg-[var(--surface-2,#f1f6fd)] text-[10px] font-semibold uppercase tracking-[0.1em] text-[var(--text-muted,#94a3b8)]">
                 <tr>
                   <th className="px-5 py-3">Sent</th>
+                  {showSenderColumn ? <th className="px-5 py-3">Sender</th> : null}
                   <th className="px-5 py-3">Recipient</th>
                   <th className="px-5 py-3">Firm</th>
                   <th className="px-5 py-3">Service</th>
@@ -195,6 +229,7 @@ export function OutreachSentClient() {
                       detailLoading={detailLoading === item.id}
                       detailError={isExpanded ? detailError : null}
                       onToggle={() => void handleExpand(item)}
+                      showSender={showSenderColumn}
                     />
                   );
                 })}
@@ -272,6 +307,36 @@ function FilterPills({
   );
 }
 
+function ScopePills({
+  value,
+  onChange,
+}: {
+  value: OutreachSendsScope;
+  onChange: (next: OutreachSendsScope) => void;
+}) {
+  return (
+    <div className="inline-flex rounded-xl border border-[var(--border,rgba(30,64,175,0.1))] bg-[var(--surface-2,#f1f6fd)] p-1 text-[11px] font-semibold uppercase tracking-[0.06em]">
+      {SCOPE_FILTERS.map((option) => {
+        const active = option.value === value;
+        return (
+          <button
+            key={option.value}
+            type="button"
+            onClick={() => onChange(option.value)}
+            className={
+              active
+                ? "rounded-lg bg-white px-3 py-1.5 text-[var(--text,#0f172a)] shadow-[0_1px_3px_rgba(15,23,42,0.08)]"
+                : "rounded-lg px-3 py-1.5 text-[var(--text-muted,#94a3b8)] transition hover:text-[var(--text,#0f172a)]"
+            }
+          >
+            {option.label}
+          </button>
+        );
+      })}
+    </div>
+  );
+}
+
 function RowGroup({
   item,
   isExpanded,
@@ -279,6 +344,7 @@ function RowGroup({
   detailLoading,
   detailError,
   onToggle,
+  showSender,
 }: {
   item: OutreachSendItem;
   isExpanded: boolean;
@@ -286,6 +352,7 @@ function RowGroup({
   detailLoading: boolean;
   detailError: string | null;
   onToggle: () => void;
+  showSender: boolean;
 }) {
   const sentAt = useMemo(() => new Date(item.sent_at), [item.sent_at]);
   return (
@@ -304,6 +371,17 @@ function RowGroup({
             {sentAt.toLocaleDateString()}
           </span>
         </td>
+        {showSender ? (
+          <td className="px-5 py-4 text-[var(--text,#0f172a)]">
+            <div className="font-semibold">{item.sender_name || "—"}</div>
+            {item.sender_email ? (
+              <div className="mt-0.5 inline-flex items-center gap-1.5 text-xs text-[var(--text-dim,#475569)]">
+                <Mail className="h-3 w-3 text-[var(--text-muted,#94a3b8)]" aria-hidden />
+                {item.sender_email}
+              </div>
+            ) : null}
+          </td>
+        ) : null}
         <td className="px-5 py-4 text-[var(--text,#0f172a)]">
           <div className="font-semibold">{item.contact_name || "—"}</div>
           {item.contact_email ? (
@@ -336,7 +414,7 @@ function RowGroup({
       </tr>
       {isExpanded ? (
         <tr className="bg-[var(--surface-2,#f1f6fd)]/40">
-          <td colSpan={6} className="px-5 py-5">
+          <td colSpan={showSender ? 7 : 6} className="px-5 py-5">
             <ExpandedBody
               item={item}
               detail={detail}
@@ -445,7 +523,13 @@ function StatusPill({
   );
 }
 
-function EmptyState({ filter }: { filter: StatusFilter }) {
+function EmptyState({
+  filter,
+  scope,
+}: {
+  filter: StatusFilter;
+  scope: OutreachSendsScope;
+}) {
   if (filter === "failed") {
     return (
       <div className="mt-4 rounded-xl border border-dashed border-[var(--border-2,rgba(30,64,175,0.16))] px-4 py-8 text-center">
@@ -457,6 +541,21 @@ function EmptyState({ filter }: { filter: StatusFilter }) {
         </p>
         <p className="mt-1 text-xs text-[var(--text-dim,#475569)]">
           Failed attempts (OAuth issues, Gmail rejections) would show up here.
+        </p>
+      </div>
+    );
+  }
+  if (scope === "all") {
+    return (
+      <div className="mt-4 rounded-xl border border-dashed border-[var(--border-2,rgba(30,64,175,0.16))] px-4 py-8 text-center">
+        <div className="mx-auto grid h-10 w-10 place-items-center rounded-full bg-[var(--surface-2,#f1f6fd)] text-[var(--text-dim,#475569)]">
+          <Send className="h-6 w-6" strokeWidth={1.75} aria-hidden />
+        </div>
+        <p className="mt-3 text-sm font-semibold text-[var(--text,#0f172a)]">
+          No outreach has been sent yet
+        </p>
+        <p className="mt-1 text-xs text-[var(--text-dim,#475569)]">
+          No user has sent an outreach email through the platform.
         </p>
       </div>
     );
