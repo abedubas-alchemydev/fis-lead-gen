@@ -37,6 +37,24 @@ def _override_user(user_id: str) -> AuthenticatedUser:
     )
 
 
+def _override_user_with_advisors_feature(user_id: str) -> AuthenticatedUser:
+    """Override variant for /investment-advisors/{id}/favorite-lists.
+
+    That endpoint goes through ensure_feature(INVESTMENT_ADVISORS); the
+    base _override_user returns a viewer with no grants, which 403s.
+    Mirrors test_broker_dealers.py where the override carries
+    feature_permissions=["master_list"] for the same reason.
+    """
+    return AuthenticatedUser(
+        id=user_id,
+        name="Test User",
+        email=f"{user_id}@example.com",
+        role="viewer",
+        feature_permissions=["investment_advisors"],
+        session_expires_at=datetime(2099, 1, 1),
+    )
+
+
 async def _seed_user() -> str:
     user_id = f"test-user-{secrets.token_hex(6)}"
     async with SessionLocal() as session:
@@ -1177,7 +1195,9 @@ async def test_get_advisor_favorite_lists_returns_membership() -> None:
     advisor_id = await _seed_advisor(name="Membership-Advisor")
     await _seed_list_advisor_item(list_id, advisor_id)
 
-    app.dependency_overrides[get_current_user] = lambda: _override_user(user_id)
+    app.dependency_overrides[get_current_user] = (
+        lambda: _override_user_with_advisors_feature(user_id)
+    )
     try:
         async with _client() as client:
             response = await client.get(
@@ -1197,7 +1217,9 @@ async def test_get_advisor_favorite_lists_returns_membership() -> None:
 async def test_get_advisor_favorite_lists_404_for_unknown_advisor() -> None:
     user_id = await _seed_user()
     await _seed_default_list(user_id)
-    app.dependency_overrides[get_current_user] = lambda: _override_user(user_id)
+    app.dependency_overrides[get_current_user] = (
+        lambda: _override_user_with_advisors_feature(user_id)
+    )
     try:
         async with _client() as client:
             response = await client.get(

@@ -12,7 +12,7 @@ rewired onto ``favorite_list_item`` in PR #172.
 from __future__ import annotations
 
 from fastapi import APIRouter, Depends, HTTPException, Path, Query, Response, status
-from sqlalchemy import delete, func, select
+from sqlalchemy import delete, func, select, text
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -426,10 +426,16 @@ async def add_advisor_to_favorite_list(
         raise HTTPException(status_code=404, detail="Advisor not found")
     advisor_id, advisor_name = advisor_row
 
+    # uq_favorite_list_item_list_advisor is a PARTIAL unique index
+    # (WHERE advisor_id IS NOT NULL) from migration 0031. ON CONFLICT
+    # needs the matching index_where predicate to bind to the right index.
     upsert = (
         pg_insert(FavoriteListItem)
         .values(list_id=list_id, advisor_id=advisor_id, broker_dealer_id=None)
-        .on_conflict_do_nothing(index_elements=["list_id", "advisor_id"])
+        .on_conflict_do_nothing(
+            index_elements=["list_id", "advisor_id"],
+            index_where=text("advisor_id IS NOT NULL"),
+        )
         .returning(FavoriteListItem.id, FavoriteListItem.created_at)
     )
     inserted = (await db.execute(upsert)).first()
@@ -479,6 +485,7 @@ async def batch_add_advisors_to_favorite_list(
 
     added_count = 0
     if known_ids:
+        # See comment on the single-advisor upsert above re: partial index.
         upsert = (
             pg_insert(FavoriteListItem)
             .values(
@@ -491,7 +498,10 @@ async def batch_add_advisors_to_favorite_list(
                     for aid in known_ids
                 ]
             )
-            .on_conflict_do_nothing(index_elements=["list_id", "advisor_id"])
+            .on_conflict_do_nothing(
+                index_elements=["list_id", "advisor_id"],
+                index_where=text("advisor_id IS NOT NULL"),
+            )
             .returning(FavoriteListItem.id)
         )
         result = await db.execute(upsert)
