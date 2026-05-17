@@ -1,11 +1,14 @@
 "use client";
 
 import Link from "next/link";
+import type { Route } from "next";
 import { useRouter } from "next/navigation";
 import { useMemo, useState, useTransition } from "react";
 import {
   AlertCircle,
   ArrowLeft,
+  ArrowRight,
+  Bookmark,
   CheckCircle2,
   Loader2,
   Save,
@@ -217,6 +220,25 @@ export function UserDetailClient({
           </button>
         </div>
       </div>
+
+      <Link
+        href={`/settings/users/${user.id}/saved-firms` as Route}
+        className={`${CARD} flex items-center gap-4 transition hover:bg-[var(--surface-2,#f1f6fd)]/50`}
+      >
+        <div className="grid h-10 w-10 shrink-0 place-items-center rounded-xl bg-[var(--surface-2,#f1f6fd)] text-[var(--accent,#1e40af)]">
+          <Bookmark className="h-5 w-5" aria-hidden />
+        </div>
+        <div className="flex-1">
+          <p className={EYEBROW}>Saved firms</p>
+          <h2 className={CARD_TITLE}>
+            View the firms this user has saved
+          </h2>
+          <p className="mt-1 text-xs text-[var(--text-dim,#475569)]">
+            See every broker-dealer and investment advisor across their lists.
+          </p>
+        </div>
+        <ArrowRight className="h-4 w-4 text-[var(--text-muted,#94a3b8)]" aria-hidden />
+      </Link>
     </section>
   );
 }
