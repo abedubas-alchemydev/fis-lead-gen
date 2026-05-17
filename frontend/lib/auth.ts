@@ -101,6 +101,13 @@ export const auth = betterAuth({
         defaultValue: "pending",
         input: false,
         returned: true
+      },
+      feature_permissions: {
+        type: "string[]",
+        required: false,
+        defaultValue: [],
+        input: false,
+        returned: true
       }
     }
   },

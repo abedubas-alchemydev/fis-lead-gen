@@ -1,6 +1,7 @@
 "use client";
 
 import { useState, useTransition } from "react";
+import Link from "next/link";
 import { useRouter } from "next/navigation";
 import {
   AlertCircle,
@@ -9,9 +10,13 @@ import {
   Inbox,
   Loader2,
   Mail,
+  Settings2,
   ShieldAlert,
+  Users as UsersIcon,
   XCircle,
 } from "lucide-react";
+
+import { FEATURE_LABELS, type FeatureKey } from "@/lib/feature-permissions";
 
 const CARD =
   "rounded-2xl border border-[var(--border,rgba(30,64,175,0.1))] bg-[var(--surface,#ffffff)] p-6 shadow-[var(--shadow-card,0_1px_2px_rgba(15,23,42,0.04),0_4px_14px_rgba(15,23,42,0.05))]";
@@ -30,11 +35,30 @@ type PendingUser = {
   emailVerified: boolean;
 };
 
+type ActiveUser = {
+  id: string;
+  email: string;
+  name: string;
+  role: string;
+  createdAt: string;
+  featurePermissions: string[];
+};
+
+function summarizePermissions(role: string, perms: string[]): string {
+  if (role === "admin") return "All features (admin)";
+  if (perms.length === 0) return "None";
+  return perms
+    .map((k) => FEATURE_LABELS[k as FeatureKey] ?? k)
+    .join(", ");
+}
+
 export function UsersAdminClient({
   pendingUsers,
+  activeUsers,
   currentAdminId,
 }: {
   pendingUsers: PendingUser[];
+  activeUsers: ActiveUser[];
   currentAdminId: string;
 }) {
   const router = useRouter();
@@ -208,6 +232,81 @@ export function UsersAdminClient({
                             </button>
                           </div>
                         )}
+                      </td>
+                    </tr>
+                  );
+                })}
+              </tbody>
+            </table>
+          </div>
+        )}
+      </div>
+
+      <div className={CARD}>
+        <div className="flex items-center justify-between gap-3">
+          <div>
+            <p className={EYEBROW}>Active users</p>
+            <h2 className={CARD_TITLE}>
+              {activeUsers.length === 0
+                ? "No active accounts yet"
+                : `${activeUsers.length} ${activeUsers.length === 1 ? "account" : "accounts"} with workspace access`}
+            </h2>
+          </div>
+          <span className="inline-flex items-center gap-1.5 rounded-full border border-emerald-500/25 bg-emerald-500/12 px-2.5 py-0.5 text-[11px] font-semibold uppercase tracking-[0.04em] text-[var(--pill-green-text,#047857)]">
+            <UsersIcon className="h-3 w-3" strokeWidth={2.5} aria-hidden />
+            Active
+          </span>
+        </div>
+
+        {activeUsers.length === 0 ? (
+          <div className="mt-4 rounded-xl border border-dashed border-[var(--border-2,rgba(30,64,175,0.16))] px-4 py-8 text-center">
+            <p className="text-sm text-[var(--text-dim,#475569)]">
+              Approve a pending signup to start managing per-user feature access.
+            </p>
+          </div>
+        ) : (
+          <div className="mt-4 overflow-x-auto rounded-xl border border-[var(--border,rgba(30,64,175,0.1))]">
+            <table className="w-full text-left text-sm">
+              <thead className="bg-[var(--surface-2,#f1f6fd)] text-[10px] font-semibold uppercase tracking-[0.1em] text-[var(--text-muted,#94a3b8)]">
+                <tr>
+                  <th className="px-5 py-3">Name</th>
+                  <th className="px-5 py-3">Email</th>
+                  <th className="px-5 py-3">Role</th>
+                  <th className="px-5 py-3">Feature access</th>
+                  <th className="px-5 py-3 text-right">Manage</th>
+                </tr>
+              </thead>
+              <tbody className="divide-y divide-[var(--border,rgba(30,64,175,0.1))]">
+                {activeUsers.map((u) => {
+                  const isSelf = u.id === currentAdminId;
+                  return (
+                    <tr key={u.id} className="hover:bg-[var(--surface-2,#f1f6fd)]/50">
+                      <td className="px-5 py-4 font-semibold text-[var(--text,#0f172a)]">
+                        {u.name || "—"}
+                      </td>
+                      <td className="px-5 py-4 text-[var(--text-dim,#475569)]">
+                        <span className="inline-flex items-center gap-1.5">
+                          <Mail className="h-3.5 w-3.5 text-[var(--text-muted,#94a3b8)]" aria-hidden />
+                          {u.email}
+                        </span>
+                      </td>
+                      <td className="px-5 py-4">
+                        <span className="inline-flex items-center rounded-full border border-[var(--border-2,rgba(30,64,175,0.16))] bg-[var(--surface-2,#f1f6fd)] px-2.5 py-0.5 text-[11px] font-semibold capitalize text-[var(--text,#0f172a)]">
+                          {u.role}
+                        </span>
+                      </td>
+                      <td className="px-5 py-4 text-[var(--text-dim,#475569)]">
+                        {summarizePermissions(u.role, u.featurePermissions)}
+                      </td>
+                      <td className="px-5 py-4 text-right">
+                        <Link
+                          href={`/settings/users/${u.id}`}
+                          className="inline-flex items-center gap-1.5 rounded-xl border border-[var(--border-2,rgba(30,64,175,0.16))] bg-[var(--surface,#ffffff)] px-3 py-2 text-xs font-semibold text-[var(--text,#0f172a)] transition hover:bg-[var(--surface-2,#f1f6fd)]"
+                          aria-label={`Manage ${u.name || u.email}`}
+                        >
+                          <Settings2 className="h-3.5 w-3.5" aria-hidden />
+                          {isSelf ? "Manage (you)" : "Manage"}
+                        </Link>
                       </td>
                     </tr>
                   );

@@ -159,6 +159,7 @@ type SessionUser = {
   name?: string | null;
   email?: string | null;
   role?: string | null;
+  feature_permissions?: string[] | null;
 };
 
 type StatsLite = {
@@ -176,16 +177,17 @@ type NavEntry = {
   icon: NavIconComponent;
   badgeKey: BadgeKey;
   adminOnly?: boolean;
+  permissionKey?: string;
 };
 
 const workspaceNav: ReadonlyArray<NavEntry> = [
   { href: "/dashboard", label: "Dashboard", icon: DashboardIcon, badgeKey: null },
-  { href: "/master-list", label: "Master List", icon: MasterListIcon, badgeKey: "total" },
+  { href: "/master-list", label: "Master List", icon: MasterListIcon, badgeKey: "total", permissionKey: "master_list" },
   // ``as Route`` cast: Next's typed-routes type-gen runs on `next build`/`next
   // dev`, so a fresh route added in a tsc-only check (no Next pipeline run)
   // isn't yet known to the Route union. Removing once a build regenerates
   // .next/types is fine but cheap to leave for new sibling routes.
-  { href: "/advisor-list" as Route, label: "Investment Advisors", icon: AdvisorListIcon, badgeKey: null },
+  { href: "/advisor-list" as Route, label: "Investment Advisors", icon: AdvisorListIcon, badgeKey: null, permissionKey: "investment_advisors" },
   { href: "/alerts", label: "Alerts", icon: AlertsIcon, badgeKey: "alerts" },
   { href: "/investors" as Route, label: "Investors", icon: InvestorsIcon, badgeKey: null },
   { href: "/email-extractor", label: "Email Extractor", icon: EmailExtractorIcon, badgeKey: null },
@@ -276,8 +278,12 @@ export function AppShell({
   const displayRole = role.charAt(0).toUpperCase() + role.slice(1);
   const isAdmin = role === "admin";
 
-  const visibleWorkspaceNav = workspaceNav.filter((e) => !e.adminOnly || isAdmin);
-  const visibleAccountNav = accountNav.filter((e) => !e.adminOnly || isAdmin);
+  const userPerms = session.user.feature_permissions ?? [];
+  const allowed = (e: NavEntry) =>
+    (!e.adminOnly || isAdmin) &&
+    (!e.permissionKey || isAdmin || userPerms.includes(e.permissionKey));
+  const visibleWorkspaceNav = workspaceNav.filter(allowed);
+  const visibleAccountNav = accountNav.filter(allowed);
 
   function isActivePath(href: string) {
     if (pathname === href) return true;

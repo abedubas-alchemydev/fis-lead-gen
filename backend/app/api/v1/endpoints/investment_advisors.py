@@ -14,12 +14,20 @@ from app.schemas.investment_advisor import (
     InvestmentAdvisorListResponse,
     InvestmentAdvisorProfileResponse,
 )
-from app.services.auth import get_current_user
+from app.core.feature_permissions import INVESTMENT_ADVISORS
+from app.services.auth import ensure_feature, get_current_user
 from app.services.investment_advisors import InvestmentAdvisorRepository
 
 
 router = APIRouter(prefix="/investment-advisors")
 repository = InvestmentAdvisorRepository()
+
+
+def _require_investment_advisors(
+    user: AuthenticatedUser = Depends(get_current_user),
+) -> AuthenticatedUser:
+    ensure_feature(user, INVESTMENT_ADVISORS)
+    return user
 
 
 def _parse_csv_list(values: list[str] | None) -> list[str]:
@@ -55,7 +63,7 @@ async def list_investment_advisors(
     sort_dir: str = Query(default="desc", pattern="^(asc|desc)$"),
     page: int = Query(default=1, ge=1),
     limit: int = Query(default=25, ge=1, le=100),
-    _: AuthenticatedUser = Depends(get_current_user),
+    _: AuthenticatedUser = Depends(_require_investment_advisors),
     db: AsyncSession = Depends(get_db_session),
 ) -> InvestmentAdvisorListResponse:
     if (
@@ -98,7 +106,7 @@ async def list_investment_advisors(
 
 @router.get("/states", response_model=list[str])
 async def list_investment_advisor_states(
-    _: AuthenticatedUser = Depends(get_current_user),
+    _: AuthenticatedUser = Depends(_require_investment_advisors),
     db: AsyncSession = Depends(get_db_session),
 ) -> list[str]:
     return await repository.list_states(db)
@@ -106,7 +114,7 @@ async def list_investment_advisor_states(
 
 @router.get("/advisory-activities", response_model=list[AdvisoryActivityCount])
 async def list_advisory_activities(
-    _: AuthenticatedUser = Depends(get_current_user),
+    _: AuthenticatedUser = Depends(_require_investment_advisors),
     db: AsyncSession = Depends(get_db_session),
 ) -> list[AdvisoryActivityCount]:
     """Distinct Form ADV Item 5.G activities with per-type counts.
@@ -121,7 +129,7 @@ async def list_advisory_activities(
 
 @router.get("/client-types", response_model=list[ClientTypeCount])
 async def list_client_types(
-    _: AuthenticatedUser = Depends(get_current_user),
+    _: AuthenticatedUser = Depends(_require_investment_advisors),
     db: AsyncSession = Depends(get_db_session),
 ) -> list[ClientTypeCount]:
     """Distinct Form ADV Item 5.D client categories with per-type counts."""
@@ -133,7 +141,7 @@ async def list_client_types(
 @router.get("/{advisor_id}", response_model=InvestmentAdvisorDetail)
 async def get_investment_advisor(
     advisor_id: int,
-    _: AuthenticatedUser = Depends(get_current_user),
+    _: AuthenticatedUser = Depends(_require_investment_advisors),
     db: AsyncSession = Depends(get_db_session),
 ) -> InvestmentAdvisorDetail:
     advisor = await repository.get_investment_advisor(db, advisor_id)
@@ -148,7 +156,7 @@ async def get_investment_advisor(
 @router.get("/{advisor_id}/profile", response_model=InvestmentAdvisorProfileResponse)
 async def get_investment_advisor_profile(
     advisor_id: int,
-    _: AuthenticatedUser = Depends(get_current_user),
+    _: AuthenticatedUser = Depends(_require_investment_advisors),
     db: AsyncSession = Depends(get_db_session),
 ) -> InvestmentAdvisorProfileResponse:
     """Aggregate detail-page response.
