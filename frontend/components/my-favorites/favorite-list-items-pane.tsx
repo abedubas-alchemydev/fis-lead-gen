@@ -8,6 +8,10 @@ import { useEffect, useMemo, useState } from "react";
 import { getFavoriteListItems } from "@/lib/api";
 import { formatRelativeTime } from "@/lib/format";
 import {
+  ADVISOR_LIST_STATE_DEFAULTS,
+  encodeReturnParam as encodeAdvisorReturnParam,
+} from "@/lib/advisor-list-state";
+import {
   MASTER_LIST_STATE_DEFAULTS,
   encodeReturnParam,
 } from "@/lib/master-list-state";
@@ -66,10 +70,18 @@ export function FavoriteListItemsPane({
   }, [activeList.id, page, pageSize, reloadKey]);
 
   // Source param so the firm-detail Next-Prospect button walks favorites,
-  // matching the existing single-list behavior pre-#17.
-  const detailHrefSuffix = useMemo(() => {
+  // matching the existing single-list behavior pre-#17. Advisors have
+  // their own source envelope encoded against advisor-list defaults.
+  const bdDetailHrefSuffix = useMemo(() => {
     const env = encodeReturnParam({
       ...MASTER_LIST_STATE_DEFAULTS,
+      source: "favorites",
+    });
+    return env ? `?return=${env}` : "";
+  }, []);
+  const advisorDetailHrefSuffix = useMemo(() => {
+    const env = encodeAdvisorReturnParam({
+      ...ADVISOR_LIST_STATE_DEFAULTS,
       source: "favorites",
     });
     return env ? `?return=${env}` : "";
@@ -86,7 +98,7 @@ export function FavoriteListItemsPane({
             {activeList.name}
           </h2>
           <p className="mt-0.5 text-[12px] text-[var(--text-muted,#94a3b8)]">
-            {total.toLocaleString()} firm{total === 1 ? "" : "s"} in this list
+            {total.toLocaleString()} item{total === 1 ? "" : "s"} in this list
           </p>
         </div>
       </header>
@@ -105,16 +117,39 @@ export function FavoriteListItemsPane({
       ) : (
         <ul role="list" className="divide-y divide-[var(--border,rgba(30,64,175,0.1))]">
           {items.map((item) => {
-            const detailHref = `/master-list/${item.broker_dealer_id}${detailHrefSuffix}` as Route;
+            const isAdvisor = item.entity_type === "advisor";
+            const targetId = isAdvisor ? item.advisor_id : item.broker_dealer_id;
+            const targetName = isAdvisor
+              ? item.advisor_name
+              : item.broker_dealer_name;
+            const detailHref = (
+              isAdvisor
+                ? `/advisor-list/${targetId}${advisorDetailHrefSuffix}`
+                : `/master-list/${targetId}${bdDetailHrefSuffix}`
+            ) as Route;
             return (
-              <li key={item.broker_dealer_id} className="flex items-center gap-3 py-3">
+              <li
+                key={`${item.entity_type}-${targetId}`}
+                className="flex items-center gap-3 py-3"
+              >
                 <div className="min-w-0 flex-1">
-                  <Link
-                    href={detailHref}
-                    className="block truncate text-[14px] font-semibold text-[var(--text,#0f172a)] transition hover:text-[#6366f1]"
-                  >
-                    {item.broker_dealer_name}
-                  </Link>
+                  <div className="flex items-center gap-2">
+                    <Link
+                      href={detailHref}
+                      className="block truncate text-[14px] font-semibold text-[var(--text,#0f172a)] transition hover:text-[#6366f1]"
+                    >
+                      {targetName}
+                    </Link>
+                    <span
+                      className={`shrink-0 rounded-full px-1.5 py-0.5 text-[10px] font-semibold uppercase tracking-[0.06em] ${
+                        isAdvisor
+                          ? "bg-[rgba(16,185,129,0.12)] text-[#047857]"
+                          : "bg-[rgba(99,102,241,0.12)] text-[#4338ca]"
+                      }`}
+                    >
+                      {isAdvisor ? "RIA" : "BD"}
+                    </span>
+                  </div>
                   <p className="mt-0.5 text-[12px] text-[var(--text-muted,#94a3b8)]">
                     Added {formatRelativeTime(item.added_at)}
                   </p>

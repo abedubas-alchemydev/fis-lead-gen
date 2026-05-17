@@ -14,12 +14,18 @@ import { createPortal } from "react-dom";
 import { useToast } from "@/components/ui/use-toast";
 import {
   ApiError,
+  addAdvisorToList,
   addFirmToList,
   createFavoriteList,
+  getListsForAdvisor,
   getListsForFirm,
+  removeAdvisorFromList,
   removeFirmFromList,
 } from "@/lib/api";
-import type { FavoriteListWithMembership } from "@/types/favorite-list";
+import type {
+  FavoriteListEntityType,
+  FavoriteListWithMembership,
+} from "@/types/favorite-list";
 
 const MAX_NEW_LIST_NAME_LENGTH = 80;
 
@@ -49,8 +55,15 @@ const MAX_NEW_LIST_NAME_LENGTH = 80;
 export type ListPickerVariant = "row" | "detail";
 
 export interface ListPickerProps {
+  // The id of the broker-dealer or investment advisor the picker is
+  // saving. Combined with ``entityType`` it routes to the right BE
+  // endpoint. Pre-existing call sites that pass only ``firmId`` keep
+  // working — entityType defaults to "broker_dealer".
   firmId: number;
   variant: ListPickerVariant;
+  // Discriminates broker-dealer vs advisor. Defaults to "broker_dealer"
+  // so master-list / firm-detail callers don't have to change.
+  entityType?: FavoriteListEntityType;
   // Seeds the heart fill on variant="detail" before the picker has
   // fetched. Read from BrokerDealerProfileResponse.is_favorited which
   // mirrors default-list membership for the legacy single-favorite
@@ -61,8 +74,30 @@ export interface ListPickerProps {
 export function ListPicker({
   firmId,
   variant,
+  entityType = "broker_dealer",
   initialDefaultMember = false,
 }: ListPickerProps) {
+  const fetchLists = useCallback(
+    () =>
+      entityType === "advisor"
+        ? getListsForAdvisor(firmId)
+        : getListsForFirm(firmId),
+    [entityType, firmId],
+  );
+  const addToList = useCallback(
+    (listId: number) =>
+      entityType === "advisor"
+        ? addAdvisorToList(listId, firmId)
+        : addFirmToList(listId, firmId),
+    [entityType, firmId],
+  );
+  const removeFromList = useCallback(
+    (listId: number) =>
+      entityType === "advisor"
+        ? removeAdvisorFromList(listId, firmId)
+        : removeFirmFromList(listId, firmId),
+    [entityType, firmId],
+  );
   const [open, setOpen] = useState(false);
   const [lists, setLists] = useState<FavoriteListWithMembership[] | null>(null);
   const [fetchError, setFetchError] = useState<string | null>(null);
@@ -157,7 +192,7 @@ export function ListPicker({
     let active = true;
 
     setFetchError(null);
-    getListsForFirm(firmId)
+    fetchLists()
       .then((data) => {
         if (!active || controller.signal.aborted) return;
         // Sort: default first, then by created_at asc — same ordering
@@ -179,7 +214,7 @@ export function ListPicker({
       active = false;
       controller.abort();
     };
-  }, [open, lists, firmId]);
+  }, [open, lists, fetchLists]);
 
   // Default-list membership drives the trigger's filled-heart state on
   // variant="detail". Falls back to the seed before the first fetch.
@@ -216,9 +251,9 @@ export function ListPicker({
 
       try {
         if (next) {
-          await addFirmToList(list.id, firmId);
+          await addToList(list.id);
         } else {
-          await removeFirmFromList(list.id, firmId);
+          await removeFromList(list.id);
         }
       } catch (err: unknown) {
         // Revert
@@ -248,7 +283,7 @@ export function ListPicker({
         });
       }
     },
-    [firmId, pendingIds, toast],
+    [addToList, removeFromList, pendingIds, toast],
   );
 
   // Auto-focus the input the moment the inline form expands.
@@ -302,7 +337,7 @@ export function ListPicker({
         // so the user can retry the membership manually.
         let isMember = false;
         try {
-          await addFirmToList(created.id, firmId);
+          await addToList(created.id);
           isMember = true;
         } catch (err) {
           const message =
@@ -335,7 +370,7 @@ export function ListPicker({
         setNewListSubmitting(false);
       }
     },
-    [firmId, newListSubmitting, newListValue, toast],
+    [addToList, newListSubmitting, newListValue, toast],
   );
 
   const triggerLabel = useMemo(() => {

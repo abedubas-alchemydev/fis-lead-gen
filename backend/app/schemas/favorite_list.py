@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from datetime import datetime
+from typing import Literal
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 
@@ -24,12 +25,22 @@ class FavoriteListResponse(BaseModel):
 
 
 class FavoriteListItemResponse(BaseModel):
-    """One row in ``GET /api/v1/favorite-lists/{list_id}/items``."""
+    """One row in ``GET /api/v1/favorite-lists/{list_id}/items``.
+
+    Polymorphic shape: each row is either a broker-dealer or an investment
+    advisor, discriminated by ``entity_type``. The opposite entity's id /
+    name fields are ``None``. Keeping BD fields populated (and required-
+    shaped) for BD items preserves backwards compatibility with the FE
+    contract shipped before advisors landed.
+    """
 
     model_config = ConfigDict(from_attributes=True)
 
-    broker_dealer_id: int
-    broker_dealer_name: str
+    entity_type: Literal["broker_dealer", "advisor"]
+    broker_dealer_id: int | None = None
+    broker_dealer_name: str | None = None
+    advisor_id: int | None = None
+    advisor_name: str | None = None
     added_at: datetime
 
 
@@ -104,6 +115,37 @@ class FavoriteListItemBatchResponse(BaseModel):
     added: int
     skipped_existing: int
     skipped_unknown: list[int]
+
+
+class FavoriteListAdvisorItemCreate(BaseModel):
+    """Request body for ``POST /api/v1/favorite-lists/{list_id}/advisor-items``."""
+
+    advisor_id: int = Field(ge=1)
+
+
+class FavoriteListAdvisorItemBatchCreate(BaseModel):
+    """Request body for ``POST /api/v1/favorite-lists/{list_id}/advisor-items/batch``."""
+
+    advisor_ids: list[int] = Field(min_length=1, max_length=200)
+
+    @field_validator("advisor_ids")
+    @classmethod
+    def _dedupe_and_validate(cls, value: list[int]) -> list[int]:
+        deduped = list(dict.fromkeys(value))
+        for advisor_id in deduped:
+            if advisor_id < 1:
+                raise ValueError("advisor_ids must be positive integers")
+        return deduped
+
+
+class FavoriteListAdvisorItemResponse(BaseModel):
+    """Response shape for single-advisor add to a favorite list."""
+
+    model_config = ConfigDict(from_attributes=True)
+
+    advisor_id: int
+    advisor_name: str
+    added_at: datetime
 
 
 class FavoriteListWithMembership(FavoriteListResponse):
