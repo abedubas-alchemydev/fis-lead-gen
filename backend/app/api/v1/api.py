@@ -5,7 +5,6 @@ from app.api.v1.endpoints import (
     auth,
     broker_dealers,
     email_extractor,
-    export,
     favorite_lists,
     favorites,
     health,
@@ -27,7 +26,6 @@ api_router.include_router(broker_dealers.router, tags=["broker-dealers"])
 api_router.include_router(investment_advisors.router, tags=["investment-advisors"])
 api_router.include_router(alerts.router, tags=["alerts"])
 api_router.include_router(investors.router, tags=["investors"])
-api_router.include_router(export.router, tags=["export"])
 api_router.include_router(pipeline.router, tags=["pipeline"])
 api_router.include_router(pipeline.scheduled_router, tags=["pipeline"])
 api_router.include_router(pipeline.admin_destructive_router, tags=["pipeline"])

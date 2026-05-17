@@ -99,16 +99,6 @@ function EmailExtractorIcon(props: IconProps) {
   );
 }
 
-function ExportIcon(props: IconProps) {
-  return (
-    <IconBase {...props}>
-      <path d="M21 15v4a2 2 0 01-2 2H5a2 2 0 01-2-2v-4" />
-      <path d="M7 10l5 5 5-5" />
-      <path d="M12 15V3" />
-    </IconBase>
-  );
-}
-
 function SettingsIcon(props: IconProps) {
   return (
     <IconBase {...props}>
@@ -202,7 +192,6 @@ const workspaceNav: ReadonlyArray<NavEntry> = [
   { href: "/investors" as Route, label: "Investors", icon: InvestorsIcon, badgeKey: null, permissionKey: "investors" },
   { href: "/email-extractor", label: "Email Extractor", icon: EmailExtractorIcon, badgeKey: null },
   { href: "/outreach/sent" as Route, label: "Sent Outreach", icon: SentOutreachIcon, badgeKey: null },
-  { href: "/export", label: "Export", icon: ExportIcon, badgeKey: null },
   { href: "/my-favorites", label: "My Favorites", icon: FavoritesIcon, badgeKey: null },
   { href: "/visited-firms", label: "Visited Firms", icon: VisitedFirmsIcon, badgeKey: null }
 ];

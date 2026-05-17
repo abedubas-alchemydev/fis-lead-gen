@@ -5,7 +5,7 @@ import { Loader2, Search } from "lucide-react";
 // In-progress visual shown inside the "Discovered emails"
 // SectionPanel while the scan is queued or running and no provider
 // has reported back yet. Mirrors the medallion pattern shipped on
-// /alerts, /visited-firms, /my-favorites, /export, and /dashboard so
+// /alerts, /visited-firms, /my-favorites, and /dashboard so
 // the in-progress surface feels visually consistent.
 //
 // The four providers (Hunter, Snov, in-house crawler, theHarvester)

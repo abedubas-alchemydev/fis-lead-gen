@@ -7,8 +7,8 @@ import { ArrowRight, Target } from "lucide-react";
 // returns no firms inside the High Value Participant band ($5M–$100M
 // latest_net_capital). Mirrors the medallion pattern shipped on /alerts
 // (EmptyAlertsState), /visited-firms (EmptyVisitedState), /my-favorites
-// (EmptyItemsState), and /export (EmptyExportMatchesState) so the
-// dashboard tile feels visually consistent with the rest of the app.
+// (EmptyItemsState) so the dashboard tile feels visually consistent
+// with the rest of the app.
 export function EmptyTopProspectsState() {
   return (
     <div className="my-2 rounded-2xl bg-[var(--surface-2,#f1f6fd)] px-6 py-12 text-center">
