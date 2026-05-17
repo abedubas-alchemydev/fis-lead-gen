@@ -103,8 +103,11 @@ import type {
   InvestorListResponse,
   OutreachDraft,
   OutreachDraftRequest,
+  OutreachSendDetail,
   OutreachSendRequest,
   OutreachSendResponse,
+  OutreachSendStatus,
+  OutreachSendsListResponse,
   PipelineRunItem,
   PipelineStatusResponse,
   PipelineTriggerResponse,
@@ -544,6 +547,31 @@ export async function sendOutreachEmail(
     method: "POST",
     body: JSON.stringify(payload)
   });
+}
+
+// Per-user list of outreach sends (success + failure). Body is omitted
+// from the list response to keep the payload small for users with lots
+// of history — call getOutreachSend when expanding a row.
+export async function listOutreachSends(opts: {
+  limit?: number;
+  offset?: number;
+  status?: OutreachSendStatus;
+}): Promise<OutreachSendsListResponse> {
+  return apiRequest<OutreachSendsListResponse>(
+    buildApiPath("/api/v1/outreach/sends", {
+      limit: opts.limit,
+      offset: opts.offset,
+      status: opts.status
+    })
+  );
+}
+
+export async function getOutreachSend(
+  sendId: number
+): Promise<OutreachSendDetail> {
+  return apiRequest<OutreachSendDetail>(
+    `/api/v1/outreach/sends/${sendId}`
+  );
 }
 
 // ── Vault folder file uploads ─────────────────────────────────────────────

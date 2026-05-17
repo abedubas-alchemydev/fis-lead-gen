@@ -15,9 +15,10 @@ existence.
 from __future__ import annotations
 
 import logging
+from typing import Literal
 
-from fastapi import APIRouter, Depends, HTTPException, status
-from sqlalchemy import select
+from fastapi import APIRouter, Depends, HTTPException, Query, status
+from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.db.session import get_db_session
@@ -29,8 +30,11 @@ from app.schemas.auth import AuthenticatedUser
 from app.schemas.vault import (
     OutreachDraftRequest,
     OutreachDraftResponse,
+    OutreachSendDetailResponse,
+    OutreachSendItem,
     OutreachSendRequest,
     OutreachSendResponse,
+    OutreachSendsListResponse,
 )
 from app.services.auth import get_current_user
 from app.services.gmail_sender import (
@@ -296,3 +300,113 @@ async def _record_failure(
     audit.error = error_code
     db.add(audit)
     await db.commit()
+
+
+def _row_to_item(row: tuple) -> dict:
+    """Flatten a (OutreachSend, bd_name, contact_name, contact_email,
+    folder_name) row into the dict shape both list + detail responses
+    consume. Detail tacks ``body`` on after the fact."""
+    send: OutreachSend = row[0]
+    return {
+        "id": send.id,
+        "sent_at": send.sent_at,
+        "status": send.status,
+        "subject": send.subject,
+        "gmail_message_id": send.gmail_message_id,
+        "error": send.error,
+        "broker_dealer_id": send.broker_dealer_id,
+        "broker_dealer_name": row[1] or "",
+        "contact_id": send.contact_id,
+        "contact_name": row[2] or "",
+        "contact_email": row[3],
+        "folder_id": send.folder_id,
+        "folder_name": row[4],
+    }
+
+
+@router.get("/sends", response_model=OutreachSendsListResponse)
+async def list_outreach_sends(
+    limit: int = Query(50, ge=1, le=200),
+    offset: int = Query(0, ge=0),
+    status_filter: Literal["sent", "failed"] | None = Query(
+        None, alias="status"
+    ),
+    current_user: AuthenticatedUser = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db_session),
+) -> OutreachSendsListResponse:
+    """Per-user paginated list of outreach attempts (success + failure).
+
+    Joins broker-dealer / contact / vault-folder metadata so the FE can
+    render a useful row without an N+1. Body is omitted from the list
+    payload — fetch via ``GET /outreach/sends/{send_id}`` on row expand.
+    """
+    base = (
+        select(
+            OutreachSend,
+            BrokerDealer.name,
+            ExecutiveContact.name,
+            ExecutiveContact.email,
+            VaultFolder.name,
+        )
+        .join(BrokerDealer, BrokerDealer.id == OutreachSend.broker_dealer_id)
+        .join(
+            ExecutiveContact, ExecutiveContact.id == OutreachSend.contact_id
+        )
+        .outerjoin(VaultFolder, VaultFolder.id == OutreachSend.folder_id)
+        .where(OutreachSend.user_id == current_user.id)
+    )
+    if status_filter is not None:
+        base = base.where(OutreachSend.status == status_filter)
+
+    count_stmt = select(func.count()).select_from(base.subquery())
+    total = (await db.execute(count_stmt)).scalar_one()
+
+    rows_stmt = base.order_by(OutreachSend.sent_at.desc()).limit(limit).offset(
+        offset
+    )
+    rows = (await db.execute(rows_stmt)).all()
+
+    items = [OutreachSendItem(**_row_to_item(row)) for row in rows]
+    return OutreachSendsListResponse(
+        items=items, total=total, limit=limit, offset=offset
+    )
+
+
+@router.get(
+    "/sends/{send_id}", response_model=OutreachSendDetailResponse
+)
+async def get_outreach_send(
+    send_id: int,
+    current_user: AuthenticatedUser = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db_session),
+) -> OutreachSendDetailResponse:
+    """Full body + metadata for one send, scoped to the caller.
+
+    Returns 404 for both "id does not exist" and "id belongs to another
+    user" so a leaked id can't confirm cross-user existence.
+    """
+    stmt = (
+        select(
+            OutreachSend,
+            BrokerDealer.name,
+            ExecutiveContact.name,
+            ExecutiveContact.email,
+            VaultFolder.name,
+        )
+        .join(BrokerDealer, BrokerDealer.id == OutreachSend.broker_dealer_id)
+        .join(
+            ExecutiveContact, ExecutiveContact.id == OutreachSend.contact_id
+        )
+        .outerjoin(VaultFolder, VaultFolder.id == OutreachSend.folder_id)
+        .where(
+            OutreachSend.id == send_id,
+            OutreachSend.user_id == current_user.id,
+        )
+    )
+    row = (await db.execute(stmt)).first()
+    if row is None:
+        raise HTTPException(status_code=404, detail="outreach_send_not_found")
+
+    payload = _row_to_item(row)
+    payload["body"] = row[0].body
+    return OutreachSendDetailResponse(**payload)

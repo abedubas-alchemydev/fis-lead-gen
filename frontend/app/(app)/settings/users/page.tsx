@@ -18,6 +18,7 @@ type ActiveUserRow = {
   name: string;
   role: string;
   created_at: Date;
+  updated_at: Date;
   feature_permissions: string[] | null;
 };
 
@@ -56,7 +57,7 @@ export default async function SettingsUsersPage() {
       ["pending"]
     ),
     db.query<ActiveUserRow>(
-      'SELECT id, email, name, role, created_at, feature_permissions FROM "user" WHERE status = $1 ORDER BY created_at DESC LIMIT 200',
+      'SELECT id, email, name, role, created_at, updated_at, feature_permissions FROM "user" WHERE status = $1 ORDER BY created_at DESC LIMIT 200',
       ["active"]
     ),
   ]);
@@ -75,6 +76,7 @@ export default async function SettingsUsersPage() {
     name: r.name,
     role: r.role,
     createdAt: r.created_at.toISOString(),
+    updatedAt: r.updated_at.toISOString(),
     featurePermissions: Array.isArray(r.feature_permissions) ? r.feature_permissions : [],
   }));
 

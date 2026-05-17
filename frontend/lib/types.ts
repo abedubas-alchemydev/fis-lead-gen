@@ -594,6 +594,39 @@ export type OutreachSendResponse = {
   status: string;
 };
 
+// Per-user "sent outreach" history. Body is omitted from list payload to
+// keep response sizes down — fetch via OutreachSendDetail when the user
+// expands a row. folder_id/folder_name are nullable because folder
+// deletion sets ON DELETE SET NULL on the audit row.
+export type OutreachSendStatus = "sent" | "failed";
+
+export type OutreachSendItem = {
+  id: number;
+  sent_at: string;
+  status: string;
+  subject: string;
+  gmail_message_id: string | null;
+  error: string | null;
+  broker_dealer_id: number;
+  broker_dealer_name: string;
+  contact_id: number;
+  contact_name: string;
+  contact_email: string | null;
+  folder_id: number | null;
+  folder_name: string | null;
+};
+
+export type OutreachSendsListResponse = {
+  items: OutreachSendItem[];
+  total: number;
+  limit: number;
+  offset: number;
+};
+
+export type OutreachSendDetail = OutreachSendItem & {
+  body: string;
+};
+
 // ── Investment Advisor (Form ADV / 13F filer) types ──
 //
 // Mirrors backend/app/schemas/investment_advisor.py. Lives alongside the
