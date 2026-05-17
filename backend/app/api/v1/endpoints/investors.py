@@ -30,12 +30,20 @@ from app.schemas.investors import (
     InvestorListMeta,
     InvestorListResponse,
 )
-from app.services.auth import get_current_user
+from app.core.feature_permissions import INVESTORS
+from app.services.auth import ensure_feature, get_current_user
 from app.services.form4_apollo import match_form4_person
 from app.services.form4_transactions import Form4TransactionRepository
 
 router = APIRouter(prefix="/investors")
 repository = Form4TransactionRepository()
+
+
+def _require_investors(
+    user: AuthenticatedUser = Depends(get_current_user),
+) -> AuthenticatedUser:
+    ensure_feature(user, INVESTORS)
+    return user
 
 
 def _item_from_row(row: Form4Transaction) -> InvestorItem:
@@ -93,7 +101,7 @@ async def list_investors(
     ),
     page: int = Query(default=1, ge=1),
     limit: int = Query(default=20, ge=1, le=100),
-    _: AuthenticatedUser = Depends(get_current_user),
+    _: AuthenticatedUser = Depends(_require_investors),
     db: AsyncSession = Depends(get_db_session),
 ) -> InvestorListResponse:
     ad_code: Literal["A", "D"] | None
@@ -134,7 +142,7 @@ async def list_investors(
 @router.post("/{txn_id}/enrich", response_model=InvestorEnrichResponse)
 async def enrich_investor(
     txn_id: int,
-    _: AuthenticatedUser = Depends(get_current_user),
+    _: AuthenticatedUser = Depends(_require_investors),
     db: AsyncSession = Depends(get_db_session),
 ) -> InvestorEnrichResponse:
     row = await repository.get(db, txn_id)

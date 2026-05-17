@@ -2,7 +2,8 @@ from __future__ import annotations
 
 from datetime import datetime
 
-from sqlalchemy import Boolean, DateTime, ForeignKey, String, Text, func
+from sqlalchemy import Boolean, DateTime, ForeignKey, String, Text, func, text
+from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from app.db.base import Base
@@ -18,6 +19,12 @@ class AuthUser(Base):
     image: Mapped[str | None] = mapped_column(Text, nullable=True)
     role: Mapped[str] = mapped_column(String(32), default="viewer", nullable=False)
     status: Mapped[str] = mapped_column(String(16), nullable=False, index=True)
+    feature_permissions: Mapped[list[str]] = mapped_column(
+        JSONB,
+        default=list,
+        server_default=text("'[]'::jsonb"),
+        nullable=False,
+    )
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now(), nullable=False)
     updated_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True),

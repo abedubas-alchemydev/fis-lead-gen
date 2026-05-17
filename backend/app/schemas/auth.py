@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from datetime import datetime
 
-from pydantic import BaseModel, EmailStr
+from pydantic import BaseModel, EmailStr, Field
 
 
 class AuthenticatedUser(BaseModel):
@@ -10,5 +10,6 @@ class AuthenticatedUser(BaseModel):
     name: str
     email: EmailStr
     role: str
+    feature_permissions: list[str] = Field(default_factory=list)
     session_expires_at: datetime
 

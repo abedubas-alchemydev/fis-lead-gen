@@ -12,6 +12,15 @@ type PendingUserRow = {
   email_verified: boolean;
 };
 
+type ActiveUserRow = {
+  id: string;
+  email: string;
+  name: string;
+  role: string;
+  created_at: Date;
+  feature_permissions: string[] | null;
+};
+
 export const dynamic = "force-dynamic";
 
 export default async function SettingsUsersPage() {
@@ -41,12 +50,18 @@ export default async function SettingsUsersPage() {
     );
   }
 
-  const result = await db.query<PendingUserRow>(
-    'SELECT id, email, name, created_at, email_verified FROM "user" WHERE status = $1 ORDER BY created_at ASC LIMIT 50',
-    ["pending"]
-  );
+  const [pendingResult, activeResult] = await Promise.all([
+    db.query<PendingUserRow>(
+      'SELECT id, email, name, created_at, email_verified FROM "user" WHERE status = $1 ORDER BY created_at ASC LIMIT 50',
+      ["pending"]
+    ),
+    db.query<ActiveUserRow>(
+      'SELECT id, email, name, role, created_at, feature_permissions FROM "user" WHERE status = $1 ORDER BY created_at DESC LIMIT 200',
+      ["active"]
+    ),
+  ]);
 
-  const pendingUsers = result.rows.map((r) => ({
+  const pendingUsers = pendingResult.rows.map((r) => ({
     id: r.id,
     email: r.email,
     name: r.name,
@@ -54,10 +69,20 @@ export default async function SettingsUsersPage() {
     emailVerified: r.email_verified,
   }));
 
+  const activeUsers = activeResult.rows.map((r) => ({
+    id: r.id,
+    email: r.email,
+    name: r.name,
+    role: r.role,
+    createdAt: r.created_at.toISOString(),
+    featurePermissions: Array.isArray(r.feature_permissions) ? r.feature_permissions : [],
+  }));
+
   return (
     <div className="px-7 pb-12 pt-7 lg:px-9">
       <UsersAdminClient
         pendingUsers={pendingUsers}
+        activeUsers={activeUsers}
         currentAdminId={session.user.id}
       />
     </div>

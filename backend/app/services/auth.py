@@ -72,8 +72,19 @@ async def get_current_user(
         name=auth_session.user.name,
         email=auth_session.user.email,
         role=auth_session.user.role,
+        feature_permissions=list(auth_session.user.feature_permissions or []),
         session_expires_at=auth_session.expires_at,
     )
+
+
+def ensure_feature(user: AuthenticatedUser, feature_key: str) -> None:
+    if user.role == "admin":
+        return
+    if feature_key not in user.feature_permissions:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Feature access not granted.",
+        )
 
 
 async def get_current_user_optional(
