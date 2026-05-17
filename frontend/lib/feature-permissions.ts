@@ -19,11 +19,13 @@ export const FEATURE_LABELS: Record<FeatureKey, string> = {
   investors: "Investors",
 };
 
-// Keys with a working route+API today. `investors` is reserved for the
-// future page and stays disabled in the toggle UI ("Coming soon").
+// Keys with a working route+API today. Disabled keys render with a
+// "Coming soon" caption in the toggle UI; all three current keys ship a
+// real page so the set lists every key.
 export const ENABLED_FEATURE_KEYS: ReadonlySet<FeatureKey> = new Set([
   MASTER_LIST,
   INVESTMENT_ADVISORS,
+  INVESTORS,
 ]);
 
 export function hasFeature(

@@ -189,7 +189,7 @@ const workspaceNav: ReadonlyArray<NavEntry> = [
   // .next/types is fine but cheap to leave for new sibling routes.
   { href: "/advisor-list" as Route, label: "Investment Advisors", icon: AdvisorListIcon, badgeKey: null, permissionKey: "investment_advisors" },
   { href: "/alerts", label: "Alerts", icon: AlertsIcon, badgeKey: "alerts" },
-  { href: "/investors" as Route, label: "Investors", icon: InvestorsIcon, badgeKey: null },
+  { href: "/investors" as Route, label: "Investors", icon: InvestorsIcon, badgeKey: null, permissionKey: "investors" },
   { href: "/email-extractor", label: "Email Extractor", icon: EmailExtractorIcon, badgeKey: null },
   { href: "/export", label: "Export", icon: ExportIcon, badgeKey: null },
   { href: "/my-favorites", label: "My Favorites", icon: FavoritesIcon, badgeKey: null },
