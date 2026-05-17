@@ -1,7 +1,7 @@
 import { NextRequest, NextResponse } from "next/server";
 import { getSessionCookie } from "better-auth/cookies";
 
-const protectedPrefixes = ["/dashboard", "/master-list", "/alerts", "/export", "/settings"];
+const protectedPrefixes = ["/dashboard", "/master-list", "/alerts", "/settings"];
 
 export function middleware(request: NextRequest) {
   const requiresAuth = protectedPrefixes.some((prefix) =>
@@ -21,5 +21,5 @@ export function middleware(request: NextRequest) {
 }
 
 export const config = {
-  matcher: ["/dashboard/:path*", "/master-list/:path*", "/alerts/:path*", "/export/:path*", "/settings/:path*"]
+  matcher: ["/dashboard/:path*", "/master-list/:path*", "/alerts/:path*", "/settings/:path*"]
 };

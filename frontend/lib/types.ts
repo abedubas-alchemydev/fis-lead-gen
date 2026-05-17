@@ -492,20 +492,6 @@ export type DataRefreshResponse = {
   refreshed_broker_dealers: number;
 };
 
-export type ExportPreviewResponse = {
-  matching_records: number;
-  export_limit: number;
-  remaining_exports_today: number;
-  requested_records: number;
-};
-
-export type ExportCsvResponse = {
-  filename: string;
-  content: string;
-  exported_records: number;
-  remaining_exports_today: number;
-};
-
 export type FocusCeoExtractionResponse = {
   ceo_name: string | null;
   ceo_title: string | null;

@@ -6,7 +6,7 @@ import { ArrowLeft, MailX } from "lucide-react";
 // Empty state shown inside the "Discovered emails" SectionPanel on a
 // scan-detail page when the scan completed but no provider returned
 // an address. Mirrors the medallion pattern shipped on /alerts,
-// /visited-firms, /my-favorites, /export, and /dashboard so the
+// /visited-firms, /my-favorites, and /dashboard so the
 // "nothing here" surfaces feel visually consistent.
 export function EmptyScanResultsState() {
   return (
