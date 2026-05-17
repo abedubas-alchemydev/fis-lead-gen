@@ -65,6 +65,7 @@ class ScanResponse(BaseModel):
     created_at: datetime
     started_at: datetime | None
     completed_at: datetime | None
+    enrich_cancelled_at: datetime | None = None
     discovered_emails: list[DiscoveredEmailResponse] = Field(default_factory=list)
 
     model_config = ConfigDict(from_attributes=True)

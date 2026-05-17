@@ -28,6 +28,10 @@ def _patch_session(monkeypatch: pytest.MonkeyPatch, candidate_ids: list[int]) ->
 
     execute_result = MagicMock()
     execute_result.scalars.return_value = scalars_result
+    # Default: the ``_is_cancelled`` SELECT returns NULL so the loop runs
+    # to completion. Tests that want to exercise cancellation should patch
+    # ``bulk_enrichment._is_cancelled`` directly rather than fight this.
+    execute_result.scalar_one_or_none.return_value = None
 
     session = AsyncMock()
     session.execute = AsyncMock(return_value=execute_result)
@@ -107,9 +111,10 @@ async def test_candidate_query_filters_by_run_and_status(
 
     await bulk_enrichment.run_bulk_enrichment(scan_id=123)
 
-    assert session.execute.await_count == 1
-    stmt = session.execute.await_args.args[0]
-    compiled = str(stmt.compile(compile_kwargs={"literal_binds": True}))
+    # First execute() is the candidate resolution; subsequent calls are the
+    # per-row cancel-check SELECTs (one per candidate id).
+    candidate_stmt = session.execute.await_args_list[0].args[0]
+    compiled = str(candidate_stmt.compile(compile_kwargs={"literal_binds": True}))
     assert "discovered_email.run_id = 123" in compiled
     assert "discovered_email.enrichment_status != 'enriched'" in compiled
 
@@ -134,3 +139,56 @@ async def test_inter_row_pause_invoked_between_rows(monkeypatch: pytest.MonkeyPa
 
     assert len(sleep_calls) == 3
     assert all(seconds == bulk_enrichment.INTER_ROW_PAUSE_SECONDS for seconds in sleep_calls)
+
+
+async def test_cancellation_breaks_loop_before_next_row(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """After ``_is_cancelled`` flips True, no further rows are dispatched.
+
+    Already-enriched rows aren't touched here -- the candidate-id query
+    has already filtered them out. What we verify is that the loop honors
+    the cancel signal on its very next iteration.
+    """
+    _patch_session(monkeypatch, candidate_ids=[1, 2, 3, 4])
+    processed: list[int] = []
+
+    async def _record(_db: Any, email_id: int) -> None:
+        processed.append(email_id)
+
+    monkeypatch.setattr(bulk_enrichment, "enrich_discovered_email", _record)
+
+    # Cancel returns False for rows 1 and 2, True from row 3 onward.
+    call_count = {"n": 0}
+
+    async def _cancel_after_two(_db: Any, _scan_id: int) -> bool:
+        call_count["n"] += 1
+        return call_count["n"] > 2
+
+    monkeypatch.setattr(bulk_enrichment, "_is_cancelled", _cancel_after_two)
+
+    await bulk_enrichment.run_bulk_enrichment(scan_id=7)
+
+    assert processed == [1, 2]
+
+
+async def test_cancellation_polled_once_per_row(monkeypatch: pytest.MonkeyPatch) -> None:
+    """When never cancelled, ``_is_cancelled`` is invoked once per candidate."""
+    _patch_session(monkeypatch, candidate_ids=[10, 11, 12])
+
+    async def _noop(_db: Any, _email_id: int) -> None:
+        return None
+
+    monkeypatch.setattr(bulk_enrichment, "enrich_discovered_email", _noop)
+
+    poll_count = {"n": 0}
+
+    async def _never(_db: Any, _scan_id: int) -> bool:
+        poll_count["n"] += 1
+        return False
+
+    monkeypatch.setattr(bulk_enrichment, "_is_cancelled", _never)
+
+    await bulk_enrichment.run_bulk_enrichment(scan_id=42)
+
+    assert poll_count["n"] == 3
