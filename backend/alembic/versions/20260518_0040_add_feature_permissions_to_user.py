@@ -1,7 +1,7 @@
 """Add feature_permissions to user.
 
-Revision ID: 20260518_0037
-Revises: 20260509_0036
+Revision ID: 20260518_0040
+Revises: 20260511_0039
 Create Date: 2026-05-18
 
 Adds a per-user feature-permissions array so admins can grant individual
@@ -33,8 +33,8 @@ from sqlalchemy.dialects import postgresql
 from alembic import op
 
 
-revision: str = "20260518_0037"
-down_revision: str | None = "20260509_0036"
+revision: str = "20260518_0040"
+down_revision: str | None = "20260511_0039"
 branch_labels: str | Sequence[str] | None = None
 depends_on: str | Sequence[str] | None = None
 

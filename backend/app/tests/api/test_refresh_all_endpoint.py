@@ -49,6 +49,7 @@ def _viewer_user() -> AuthenticatedUser:
         name="Viewer User",
         email="viewer@example.com",
         role="viewer",
+        feature_permissions=["master_list"],
         session_expires_at=datetime(2099, 1, 1, tzinfo=timezone.utc),
     )
 
