@@ -38,6 +38,7 @@ def _override_user(user_id: str) -> AuthenticatedUser:
         name="Test User",
         email=f"{user_id}@example.com",
         role="viewer",
+        feature_permissions=["master_list"],
         session_expires_at=datetime(2099, 1, 1),
     )
 
