@@ -246,6 +246,56 @@ export async function addFirmsToListBatch(
   );
 }
 
+// ── Investment-advisor variants (favorites for advisor-list) ──────────────
+// Parallel to the BD-side helpers above. The BE has separate endpoints
+// at /advisor-items (vs /items) so the polymorphic XOR check on
+// favorite_list_item is satisfied: advisor rows write advisor_id and
+// leave broker_dealer_id NULL.
+
+export async function getListsForAdvisor(
+  advisorId: number
+): Promise<FavoriteListWithMembership[]> {
+  return apiRequest<FavoriteListWithMembership[]>(
+    `/api/v1/investment-advisors/${advisorId}/favorite-lists`
+  );
+}
+
+export async function addAdvisorToList(
+  listId: number,
+  advisorId: number
+): Promise<void> {
+  await apiRequest<void>(
+    `/api/v1/favorite-lists/${listId}/advisor-items`,
+    {
+      method: "POST",
+      body: JSON.stringify({ advisor_id: advisorId }),
+    }
+  );
+}
+
+export async function removeAdvisorFromList(
+  listId: number,
+  advisorId: number
+): Promise<void> {
+  await apiRequest<void>(
+    `/api/v1/favorite-lists/${listId}/advisor-items/${advisorId}`,
+    { method: "DELETE" }
+  );
+}
+
+export async function addAdvisorsToListBatch(
+  listId: number,
+  advisorIds: number[]
+): Promise<AddFirmsToListBatchResponse> {
+  return apiRequest<AddFirmsToListBatchResponse>(
+    `/api/v1/favorite-lists/${listId}/advisor-items/batch`,
+    {
+      method: "POST",
+      body: JSON.stringify({ advisor_ids: advisorIds }),
+    }
+  );
+}
+
 // ── Tier 2 pipeline triggers ──────────────────────────────────────────────
 // Pairs with cli01 BE PR feature/be-pipeline-endpoints-tier2 which exposes
 // admin-OR-SA-OIDC trigger endpoints for the three long-running pipelines.

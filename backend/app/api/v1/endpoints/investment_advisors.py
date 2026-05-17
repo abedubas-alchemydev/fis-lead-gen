@@ -3,10 +3,14 @@ from __future__ import annotations
 from datetime import date
 
 from fastapi import APIRouter, Depends, HTTPException, Query, status
+from sqlalchemy import exists, func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.db.session import get_db_session
+from app.models.favorite_list import FavoriteList, FavoriteListItem
+from app.models.investment_advisor import InvestmentAdvisor
 from app.schemas.auth import AuthenticatedUser
+from app.schemas.favorite_list import FavoriteListWithMembership
 from app.schemas.investment_advisor import (
     AdvisoryActivityCount,
     ClientTypeCount,
@@ -136,6 +140,71 @@ async def list_client_types(
 
     rows = await repository.list_client_types(db)
     return [ClientTypeCount(type=row["type"], count=int(row["count"])) for row in rows]
+
+
+@router.get(
+    "/{advisor_id}/favorite-lists",
+    response_model=list[FavoriteListWithMembership],
+)
+async def get_advisor_favorite_lists(
+    advisor_id: int,
+    current_user: AuthenticatedUser = Depends(_require_investment_advisors),
+    db: AsyncSession = Depends(get_db_session),
+) -> list[FavoriteListWithMembership]:
+    """Return the calling user's lists with an ``is_member`` flag for ``advisor_id``.
+
+    Mirror of ``GET /broker-dealers/{firm_id}/favorite-lists`` — same query
+    shape, just keyed on ``advisor_id`` instead of ``broker_dealer_id``.
+    Powers the FE list-picker on advisor-list rows + the advisor-detail
+    page.
+    """
+
+    advisor_check = await db.execute(
+        select(InvestmentAdvisor.id).where(InvestmentAdvisor.id == advisor_id)
+    )
+    if advisor_check.scalar_one_or_none() is None:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND, detail="Advisor not found."
+        )
+
+    item_count_sq = (
+        select(
+            FavoriteListItem.list_id.label("list_id"),
+            func.count(FavoriteListItem.id).label("count"),
+        )
+        .group_by(FavoriteListItem.list_id)
+        .subquery()
+    )
+    is_member_expr = (
+        exists()
+        .where(
+            FavoriteListItem.list_id == FavoriteList.id,
+            FavoriteListItem.advisor_id == advisor_id,
+        )
+        .label("is_member")
+    )
+    stmt = (
+        select(
+            FavoriteList,
+            func.coalesce(item_count_sq.c.count, 0).label("item_count"),
+            is_member_expr,
+        )
+        .outerjoin(item_count_sq, FavoriteList.id == item_count_sq.c.list_id)
+        .where(FavoriteList.user_id == current_user.id)
+        .order_by(FavoriteList.is_default.desc(), FavoriteList.created_at.asc())
+    )
+    rows = (await db.execute(stmt)).all()
+    return [
+        FavoriteListWithMembership(
+            id=fl.id,
+            name=fl.name,
+            is_default=fl.is_default,
+            item_count=int(count),
+            created_at=fl.created_at,
+            is_member=bool(is_member),
+        )
+        for fl, count, is_member in rows
+    ]
 
 
 @router.get("/{advisor_id}", response_model=InvestmentAdvisorDetail)

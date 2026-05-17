@@ -1,11 +1,11 @@
 "use client";
 
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import Link from "next/link";
 import type { Route } from "next";
 import { useRouter, useSearchParams } from "next/navigation";
 
-import { ArrowDown, ArrowUp, Search, X } from "lucide-react";
+import { ArrowDown, ArrowUp, ChevronDown, Heart, Search, X } from "lucide-react";
 
 import { apiRequest, buildApiPath } from "@/lib/api";
 import { formatCurrency, formatDate, formatRelativeTime } from "@/lib/format";
@@ -26,8 +26,11 @@ import { RegulatoryAumRangeFilter } from "@/components/advisor-list/filters/regu
 // list owns it today. Future cleanup: move shared range/date filters to
 // components/ui/filters/ so neither side imports across module boundaries.
 import { RegistrationDateRangeFilter } from "@/components/master-list/filters/registration-date-range-filter";
+import { BulkListPicker } from "@/components/list-picker/bulk-list-picker";
+import { ListPicker } from "@/components/list-picker/list-picker";
 import { Combo } from "@/components/ui/combo";
 import { Pill } from "@/components/ui/pill";
+import { Tag } from "@/components/ui/tag";
 import { ThemeToggle } from "@/components/ui/theme-toggle";
 import type {
   InvestmentAdvisorListItem,
@@ -45,15 +48,20 @@ const COLUMNS = [
   { key: "last_filing_date", label: "Last Filing" },
 ] as const;
 
-// Sort options shown in the toolbar Combo. Subset of COLUMNS — drops
-// "state" (low signal) and "files_13f" (boolean; the 13F-only filter
-// already pins the page to true filers).
+// Sort options shown in the toolbar Combo. Backed by the BE-recognized
+// sort_by keys in /api/v1/investment-advisors. Drops "state" (low signal)
+// and "files_13f" (boolean; the 13F-only filter already pins the page).
 const SORT_OPTIONS = [
   { key: "name", label: "Firm Name" },
+  { key: "cik", label: "CIK" },
   { key: "crd_number", label: "CRD" },
   { key: "regulatory_aum", label: "Regulatory AUM" },
+  { key: "discretionary_aum", label: "Discretionary AUM" },
   { key: "total_clients", label: "Clients" },
+  { key: "registration_date", label: "Registration Date" },
   { key: "last_filing_date", label: "Last Filing" },
+  { key: "latest_13f_filing_date", label: "Latest 13F" },
+  { key: "status", label: "Status" },
 ] as const;
 
 // ── Pagination helper ─────────────────────────────────────────────────────
@@ -114,10 +122,24 @@ export function AdvisorListWorkspaceClient() {
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
 
+  // Bulk-select state (page-scoped, ephemeral). Mirrors the master-list
+  // pattern: URL-backing would loop because every URL change refetches
+  // items, which then clears the set. Scope is "the current page" — the
+  // set resets on items change.
+  const [selectedIds, setSelectedIds] = useState<ReadonlySet<number>>(
+    () => new Set(),
+  );
+  const [bulkPickerOpen, setBulkPickerOpen] = useState(false);
+  const headerCheckboxRef = useRef<HTMLInputElement | null>(null);
+  const bulkActionTriggerRef = useRef<HTMLButtonElement | null>(null);
+
   const updateState = useCallback(
     (next: Partial<AdvisorListQueryState>) => {
       const merged = { ...state, ...next };
-      router.push(buildAdvisorListUrl(merged) as Route);
+      // router.replace (vs push) — prevents the back button from
+      // replaying every filter toggle. Detail-page back-nav still
+      // restores filter state because it lives in the URL.
+      router.replace(buildAdvisorListUrl(merged) as Route);
     },
     [router, state],
   );
@@ -202,15 +224,61 @@ export function AdvisorListWorkspaceClient() {
     state.limit,
   ]);
 
-  const items = data?.items ?? [];
+  // Memoize so identity is stable across renders where `data` didn't
+  // change — the bulk-selection effect depends on items, and a fresh
+  // [] each render would clear the user's selection unexpectedly.
+  const items = useMemo(() => data?.items ?? [], [data]);
   const meta = data?.meta;
   const filtersActive = hasActiveFilters(state);
   const activeFilterCount = countActiveFilters(state);
 
+  // Selection scope = current page. Every items refetch (filter, sort,
+  // pagination) clears the set so a bulk action never operates on off-
+  // page rows the user can't see.
+  useEffect(() => {
+    setSelectedIds(new Set());
+  }, [items]);
+
+  // Auto-close the bulk picker when selection drops to zero (Clear,
+  // refetch, etc.).
+  useEffect(() => {
+    if (selectedIds.size === 0) setBulkPickerOpen(false);
+  }, [selectedIds]);
+
+  const allOnPageSelected =
+    items.length > 0 && selectedIds.size === items.length;
+  const someOnPageSelected =
+    selectedIds.size > 0 && selectedIds.size < items.length;
+
+  // <input> doesn't have an indeterminate prop — it has to be set
+  // imperatively on the DOM node. The checked=true + indeterminate=true
+  // combination reads as "indeterminate" in the browser.
+  useEffect(() => {
+    if (headerCheckboxRef.current) {
+      headerCheckboxRef.current.indeterminate = someOnPageSelected;
+    }
+  }, [someOnPageSelected]);
+
+  const toggleRow = useCallback((id: number) => {
+    setSelectedIds((current) => {
+      const next = new Set(current);
+      if (next.has(id)) next.delete(id);
+      else next.add(id);
+      return next;
+    });
+  }, []);
+
+  const toggleAllOnPage = useCallback(() => {
+    setSelectedIds((current) => {
+      if (current.size === items.length) return new Set();
+      return new Set(items.map((item) => item.id));
+    });
+  }, [items]);
+
   function handleClearFilters() {
     const cleared = clearAllFilters(state);
     setSearchInput("");
-    router.push(buildAdvisorListUrl(cleared) as Route);
+    router.replace(buildAdvisorListUrl(cleared) as Route);
   }
 
   // Encoded return-URL appended to every detail link so the detail page
@@ -381,6 +449,98 @@ export function AdvisorListWorkspaceClient() {
             }
           />
         </div>
+
+        {/* Active-filter tags strip — one dismissible chip per applied
+            filter. Mirrors the master-list pattern so users can drop a
+            single filter without diving back into the dropdown. */}
+        {activeFilterCount > 0 ? (
+          <div className="mt-4 flex flex-wrap items-center gap-2 border-t border-dashed border-[var(--border,rgba(30,64,175,0.1))] pt-3">
+            <span className="text-[11px] font-semibold uppercase tracking-[0.08em] text-[var(--text-muted,#94a3b8)]">
+              Active
+            </span>
+            {state.search !== "" ? (
+              <Tag
+                onDismiss={() => {
+                  setSearchInput("");
+                  updateState({ search: "", page: 1 });
+                }}
+              >
+                Search: {state.search}
+              </Tag>
+            ) : null}
+            {state.state !== "" ? (
+              <Tag onDismiss={() => updateState({ state: "", page: 1 })}>
+                State: {state.state}
+              </Tag>
+            ) : null}
+            {state.advisoryActivities.map((activity) => (
+              <Tag
+                key={`activity-${activity}`}
+                onDismiss={() =>
+                  updateState({
+                    advisoryActivities: state.advisoryActivities.filter(
+                      (value) => value !== activity,
+                    ),
+                    page: 1,
+                  })
+                }
+              >
+                Activity: {activity}
+              </Tag>
+            ))}
+            {state.clientTypes.map((clientType) => (
+              <Tag
+                key={`ctype-${clientType}`}
+                onDismiss={() =>
+                  updateState({
+                    clientTypes: state.clientTypes.filter(
+                      (value) => value !== clientType,
+                    ),
+                    page: 1,
+                  })
+                }
+              >
+                Client type: {clientType}
+              </Tag>
+            ))}
+            {state.minRegulatoryAum !== null ? (
+              <Tag
+                onDismiss={() =>
+                  updateState({ minRegulatoryAum: null, page: 1 })
+                }
+              >
+                AUM ≥ {formatCurrency(state.minRegulatoryAum)}
+              </Tag>
+            ) : null}
+            {state.maxRegulatoryAum !== null ? (
+              <Tag
+                onDismiss={() =>
+                  updateState({ maxRegulatoryAum: null, page: 1 })
+                }
+              >
+                AUM ≤ {formatCurrency(state.maxRegulatoryAum)}
+              </Tag>
+            ) : null}
+            {state.registeredAfter !== null ? (
+              <Tag
+                onDismiss={() =>
+                  updateState({ registeredAfter: null, page: 1 })
+                }
+              >
+                Registered after {state.registeredAfter}
+              </Tag>
+            ) : null}
+            {state.registeredBefore !== null ? (
+              <Tag
+                onDismiss={() =>
+                  updateState({ registeredBefore: null, page: 1 })
+                }
+              >
+                Registered before {state.registeredBefore}
+              </Tag>
+            ) : null}
+          </div>
+        ) : null}
       </div>
 
       {/* ── Toolbar card (search + sort + direction + page-size) ─────────── */}
@@ -498,7 +658,51 @@ export function AdvisorListWorkspaceClient() {
               Investment-advisor list
             </h3>
           </div>
-          {meta ? (
+          {selectedIds.size > 0 ? (
+            <div className="flex items-center gap-3">
+              <span
+                className="text-[12px] font-semibold text-[var(--text-dim,#475569)]"
+                aria-live="polite"
+              >
+                {selectedIds.size} selected
+              </span>
+              <button
+                type="button"
+                onClick={() => setSelectedIds(new Set())}
+                className="rounded-[6px] border border-[var(--border-2,rgba(30,64,175,0.16))] bg-transparent px-2.5 py-1 text-[11px] font-semibold text-[var(--text-dim,#475569)] transition hover:bg-[var(--surface-2,#f1f6fd)]"
+              >
+                Clear
+              </button>
+              <button
+                ref={bulkActionTriggerRef}
+                type="button"
+                onClick={() => setBulkPickerOpen((v) => !v)}
+                aria-haspopup="dialog"
+                aria-expanded={bulkPickerOpen}
+                className="inline-flex items-center gap-1.5 rounded-[8px] border border-[rgba(99,102,241,0.4)] bg-gradient-to-br from-[#6366f1] to-[#8b5cf6] px-3 py-1.5 text-[12px] font-semibold text-white shadow-[0_6px_16px_rgba(99,102,241,0.35)]"
+              >
+                <Heart className="h-3.5 w-3.5" strokeWidth={2.5} aria-hidden />
+                Save to list
+                <ChevronDown
+                  className="h-3.5 w-3.5"
+                  strokeWidth={2.5}
+                  aria-hidden
+                />
+              </button>
+              {bulkPickerOpen ? (
+                <BulkListPicker
+                  selectedIds={Array.from(selectedIds)}
+                  entityType="advisor"
+                  anchorRef={bulkActionTriggerRef}
+                  onAdded={() => {
+                    setBulkPickerOpen(false);
+                    setSelectedIds(new Set());
+                  }}
+                  onDismiss={() => setBulkPickerOpen(false)}
+                />
+              ) : null}
+            </div>
+          ) : meta ? (
             <span className="text-[12px] text-[var(--text-muted,#94a3b8)]">
               {meta.total.toLocaleString()} firm{meta.total === 1 ? "" : "s"}
             </span>
@@ -506,9 +710,27 @@ export function AdvisorListWorkspaceClient() {
         </div>
 
         <div className="overflow-x-auto">
-          <table className="w-full min-w-[960px] text-left">
+          <table className="w-full min-w-[1000px] text-left">
             <thead>
               <tr>
+                <th
+                  scope="col"
+                  className="w-[44px] whitespace-nowrap border-b border-[var(--border,rgba(30,64,175,0.1))] bg-[var(--surface-2,#f1f6fd)] px-5 py-3"
+                >
+                  <input
+                    ref={headerCheckboxRef}
+                    type="checkbox"
+                    aria-label={
+                      allOnPageSelected
+                        ? "Deselect all advisors on this page"
+                        : "Select all advisors on this page"
+                    }
+                    checked={allOnPageSelected}
+                    onChange={toggleAllOnPage}
+                    disabled={loading || items.length === 0}
+                    className="h-4 w-4 rounded border-[var(--border-2,rgba(30,64,175,0.16))] text-[var(--accent,#6366f1)] focus:ring-[var(--accent,#6366f1)]"
+                  />
+                </th>
                 {COLUMNS.map((column) => {
                   const isSorted = state.sortBy === column.key;
                   return (
@@ -543,6 +765,9 @@ export function AdvisorListWorkspaceClient() {
                       key={`loading-${index}`}
                       className="border-t border-[var(--border,rgba(30,64,175,0.1))]"
                     >
+                      <td className="px-5 py-3.5">
+                        <div className="h-4 w-4 animate-pulse rounded bg-[var(--surface-2,#f1f6fd)]" />
+                      </td>
                       {COLUMNS.map((column) => (
                         <td key={column.key} className="px-5 py-3.5">
                           <div className="h-4 w-full animate-pulse rounded bg-[var(--surface-2,#f1f6fd)]" />
@@ -554,7 +779,7 @@ export function AdvisorListWorkspaceClient() {
               ) : items.length === 0 ? (
                 <tr>
                   <td
-                    colSpan={COLUMNS.length}
+                    colSpan={COLUMNS.length + 1}
                     className="px-5 py-12 text-center text-sm text-[var(--text-muted,#94a3b8)]"
                   >
                     No advisors match the current filters.
@@ -566,6 +791,8 @@ export function AdvisorListWorkspaceClient() {
                     key={row.id}
                     row={row}
                     href={detailHref(row.id)}
+                    selected={selectedIds.has(row.id)}
+                    onToggleSelect={() => toggleRow(row.id)}
                   />
                 ))
               )}
@@ -641,21 +868,37 @@ export function AdvisorListWorkspaceClient() {
 function AdvisorRow({
   row,
   href,
+  selected,
+  onToggleSelect,
 }: {
   row: InvestmentAdvisorListItem;
   href: Route;
+  selected: boolean;
+  onToggleSelect: () => void;
 }) {
   const location = [row.city, row.state].filter(Boolean).join(", ");
 
   return (
     <tr className="border-t border-[var(--border,rgba(30,64,175,0.1))] align-top transition hover:bg-[var(--row-hover,rgba(99,102,241,0.04))]">
+      <td className="px-5 py-3.5">
+        <input
+          type="checkbox"
+          aria-label={`${selected ? "Deselect" : "Select"} ${row.name}`}
+          checked={selected}
+          onChange={onToggleSelect}
+          className="h-4 w-4 rounded border-[var(--border-2,rgba(30,64,175,0.16))] text-[var(--accent,#6366f1)] focus:ring-[var(--accent,#6366f1)]"
+        />
+      </td>
       <td className="min-w-[220px] px-5 py-3.5">
-        <Link
-          href={href}
-          className="block font-semibold text-[var(--text,#0f172a)] transition hover:text-[var(--accent,#6366f1)]"
-        >
-          {row.name}
-        </Link>
+        <div className="flex items-start justify-between gap-2">
+          <Link
+            href={href}
+            className="block font-semibold text-[var(--text,#0f172a)] transition hover:text-[var(--accent,#6366f1)]"
+          >
+            {row.name}
+          </Link>
+          <ListPicker variant="row" entityType="advisor" firmId={row.id} />
+        </div>
         {location ? (
           <div className="mt-0.5 text-[12px] text-[var(--text-muted,#94a3b8)]">
             {location}

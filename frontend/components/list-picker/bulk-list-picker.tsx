@@ -16,11 +16,15 @@ import { useToast } from "@/components/ui/use-toast";
 import {
   ApiError,
   type AddFirmsToListBatchResponse,
+  addAdvisorsToListBatch,
   addFirmsToListBatch,
   createFavoriteList,
   getFavoriteLists,
 } from "@/lib/api";
-import type { FavoriteList } from "@/types/favorite-list";
+import type {
+  FavoriteList,
+  FavoriteListEntityType,
+} from "@/types/favorite-list";
 
 const MAX_NEW_LIST_NAME_LENGTH = 80;
 
@@ -37,6 +41,9 @@ export interface BulkListPickerProps {
   anchorRef: RefObject<HTMLButtonElement | null>;
   onAdded: (listName: string, response: AddFirmsToListBatchResponse) => void;
   onDismiss: () => void;
+  // BD vs advisor. Defaults to "broker_dealer" so the master-list call
+  // site doesn't need to change.
+  entityType?: FavoriteListEntityType;
 }
 
 export function BulkListPicker({
@@ -44,7 +51,16 @@ export function BulkListPicker({
   anchorRef,
   onAdded,
   onDismiss,
+  entityType = "broker_dealer",
 }: BulkListPickerProps) {
+  const batchAdd = useCallback(
+    (listId: number) =>
+      entityType === "advisor"
+        ? addAdvisorsToListBatch(listId, selectedIds)
+        : addFirmsToListBatch(listId, selectedIds),
+    [entityType, selectedIds],
+  );
+  const itemNoun = entityType === "advisor" ? "advisor" : "firm";
   const [lists, setLists] = useState<FavoriteList[] | null>(null);
   const [fetchError, setFetchError] = useState<string | null>(null);
   const [pendingListId, setPendingListId] = useState<number | null>(null);
@@ -139,18 +155,18 @@ export function BulkListPicker({
       response: AddFirmsToListBatchResponse,
     ): { variant: "success" | "error"; body: string } => {
       const { added, skipped_existing, skipped_unknown } = response;
-      // No firms actually landed AND we couldn't find the rest — tell the
+      // No items actually landed AND we couldn't find the rest — tell the
       // user something went wrong rather than masking it as a success.
       if (added === 0 && skipped_unknown.length > 0 && skipped_existing === 0) {
         return {
           variant: "error",
-          body: `${skipped_unknown.length} firm${
+          body: `${skipped_unknown.length} ${itemNoun}${
             skipped_unknown.length === 1 ? "" : "s"
           } could not be found.`,
         };
       }
       const parts: string[] = [
-        `Added ${added} firm${added === 1 ? "" : "s"} to '${listName}'`,
+        `Added ${added} ${itemNoun}${added === 1 ? "" : "s"} to '${listName}'`,
       ];
       const trailers: string[] = [];
       if (skipped_existing > 0) {
@@ -166,7 +182,7 @@ export function BulkListPicker({
       }
       return { variant: "success", body: parts.join("") };
     },
-    [],
+    [itemNoun],
   );
 
   const handlePickList = useCallback(
@@ -174,7 +190,7 @@ export function BulkListPicker({
       if (pendingListId !== null) return;
       setPendingListId(list.id);
       try {
-        const response = await addFirmsToListBatch(list.id, selectedIds);
+        const response = await batchAdd(list.id);
         const { variant, body } = buildSuccessMessage(list.name, response);
         if (variant === "success") {
           toast.success(body);
@@ -186,13 +202,13 @@ export function BulkListPicker({
         const message =
           err instanceof Error
             ? err.message
-            : "Couldn't add firms to the list.";
+            : `Couldn't add ${itemNoun}s to the list.`;
         toast.error(message);
       } finally {
         setPendingListId(null);
       }
     },
-    [buildSuccessMessage, onAdded, pendingListId, selectedIds, toast],
+    [batchAdd, buildSuccessMessage, itemNoun, onAdded, pendingListId, toast],
   );
 
   const closeNewListForm = useCallback(() => {
@@ -222,9 +238,9 @@ export function BulkListPicker({
       try {
         const created = await createFavoriteList(trimmed);
         try {
-          const response = await addFirmsToListBatch(created.id, selectedIds);
+          const response = await batchAdd(created.id);
           toast.success(
-            `Created '${created.name}' and added ${response.added} firm${
+            `Created '${created.name}' and added ${response.added} ${itemNoun}${
               response.added === 1 ? "" : "s"
             }.`,
           );
@@ -233,7 +249,7 @@ export function BulkListPicker({
           const message =
             err instanceof Error
               ? err.message
-              : `List created, but couldn't add firms — try selecting '${created.name}' from the picker.`;
+              : `List created, but couldn't add ${itemNoun}s — try selecting '${created.name}' from the picker.`;
           toast.error(message);
           // Append the empty list so the user sees their successful create
           // even though the add leg failed.
@@ -253,7 +269,7 @@ export function BulkListPicker({
         setNewListSubmitting(false);
       }
     },
-    [newListSubmitting, newListValue, onAdded, selectedIds, toast],
+    [batchAdd, itemNoun, newListSubmitting, newListValue, onAdded, toast],
   );
 
   const popoverPanel = useMemo(() => {
@@ -272,8 +288,8 @@ export function BulkListPicker({
       >
         <div className="border-b border-[var(--border,rgba(30,64,175,0.1))] px-3 py-2">
           <p className="text-[11px] font-semibold uppercase tracking-[0.08em] text-[var(--text-muted,#94a3b8)]">
-            Save {selectedIds.length} firm{selectedIds.length === 1 ? "" : "s"}{" "}
-            to…
+            Save {selectedIds.length} {itemNoun}
+            {selectedIds.length === 1 ? "" : "s"} to…
           </p>
         </div>
 
@@ -417,6 +433,7 @@ export function BulkListPicker({
     fetchError,
     handleCreateList,
     handlePickList,
+    itemNoun,
     lists,
     newListError,
     newListSubmitting,
