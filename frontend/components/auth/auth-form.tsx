@@ -70,8 +70,8 @@ export function AuthForm({ mode }: { mode: AuthFormMode }) {
       <GoogleButton mode={mode} />
 
       <div className="relative" aria-hidden>
-        <div className="absolute inset-x-0 top-1/2 h-px bg-slate-200" />
-        <div className="relative mx-auto w-fit bg-white px-3 text-xs uppercase tracking-[0.2em] text-slate-400">
+        <div className="absolute inset-x-0 top-1/2 h-px bg-[var(--border,rgba(30,64,175,0.1))]" />
+        <div className="relative mx-auto w-fit bg-[var(--bg,#eaf3ff)] px-3 text-xs uppercase tracking-[0.2em] text-[var(--text-muted,#94a3b8)]">
           or continue with email
         </div>
       </div>
@@ -91,7 +91,7 @@ export function AuthForm({ mode }: { mode: AuthFormMode }) {
           autoComplete={mode === "signup" ? "new-password" : "current-password"}
         />
         {mode === "signup" ? (
-          <p className="mt-1.5 text-xs text-slate-400">Must be at least 8 characters</p>
+          <p className="mt-1.5 text-xs text-[var(--text-muted,#94a3b8)]">Must be at least 8 characters</p>
         ) : null}
       </div>
 
@@ -109,15 +109,15 @@ export function AuthForm({ mode }: { mode: AuthFormMode }) {
         // rememberMe is visual-only — better-auth 1.3.6 signIn.email() does not accept this flag.
         // Session lifetime is controlled server-side via betterAuth({ session: { expiresIn } }).
         <div className="flex items-center justify-between text-sm">
-          <label className="inline-flex cursor-pointer items-center gap-2 text-slate-600">
+          <label className="inline-flex cursor-pointer items-center gap-2 text-[var(--text-dim,#475569)]">
             <input
               type="checkbox"
               name="rememberMe"
-              className="h-4 w-4 rounded border-slate-300 text-navy focus:ring-2 focus:ring-blue/20"
+              className="h-4 w-4 rounded border-[var(--border-2,rgba(30,64,175,0.16))] text-[var(--accent,#6366f1)] focus:ring-2 focus:ring-[var(--accent,#6366f1)]/20"
             />
             Remember me
           </label>
-          <Link href="/forgot-password" className="font-medium text-slate-500 transition hover:text-blue">
+          <Link href="/forgot-password" className="font-medium text-[var(--text-muted,#94a3b8)] transition hover:text-[var(--accent,#6366f1)]">
             Forgot password?
           </Link>
         </div>
@@ -149,14 +149,14 @@ export function AuthForm({ mode }: { mode: AuthFormMode }) {
       {mode === "login" ? (
         <>
           <div className="relative pt-2">
-            <div className="absolute inset-x-0 top-1/2 h-px bg-slate-200" aria-hidden />
-            <div className="relative mx-auto w-fit bg-white px-3 text-xs uppercase tracking-[0.2em] text-slate-400">
+            <div className="absolute inset-x-0 top-1/2 h-px bg-[var(--border,rgba(30,64,175,0.1))]" aria-hidden />
+            <div className="relative mx-auto w-fit bg-[var(--bg,#eaf3ff)] px-3 text-xs uppercase tracking-[0.2em] text-[var(--text-muted,#94a3b8)]">
               Need access?
             </div>
           </div>
           <Link
             href="/signup"
-            className="block w-full rounded-xl border border-slate-200 bg-white px-4 py-3 text-center text-sm font-medium text-navy transition hover:border-slate-300 hover:bg-slate-50"
+            className="block w-full rounded-xl border border-[var(--border,rgba(30,64,175,0.1))] bg-[var(--surface,#ffffff)] px-4 py-3 text-center text-sm font-medium text-[var(--text,#0f172a)] transition hover:border-[var(--border-2,rgba(30,64,175,0.16))] hover:bg-[var(--surface-2,#f1f6fd)]"
           >
             Request an invite
           </Link>

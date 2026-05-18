@@ -28,16 +28,16 @@ export function VaultInstructionsEditor({
 
   if (!expanded) {
     return (
-      <div className="rounded-xl border border-dashed border-slate-300 bg-slate-50/60 px-4 py-3">
+      <div className="rounded-xl border border-dashed border-[var(--border-2,rgba(30,64,175,0.16))] bg-[var(--surface-2,#f1f6fd)]/60 px-4 py-3">
         <button
           type="button"
           onClick={() => setExpanded(true)}
           disabled={disabled}
-          className="text-xs font-medium text-blue underline-offset-4 transition hover:underline disabled:cursor-not-allowed disabled:opacity-60"
+          className="text-xs font-medium text-[var(--accent,#6366f1)] underline-offset-4 transition hover:underline disabled:cursor-not-allowed disabled:opacity-60"
         >
           + Add outreach instructions
         </button>
-        <p className="mt-1 text-[11px] leading-4 text-slate-500">
+        <p className="mt-1 text-[11px] leading-4 text-[var(--text-muted,#94a3b8)]">
           Optional permanent guidance the AI follows on every draft for this
           service — e.g. tone, length caps, must-mention items.
         </p>
@@ -46,7 +46,7 @@ export function VaultInstructionsEditor({
   }
 
   return (
-    <label className="block text-xs font-medium uppercase tracking-[0.18em] text-slate-500">
+    <label className="block text-xs font-medium uppercase tracking-[0.18em] text-[var(--text-muted,#94a3b8)]">
       Outreach instructions
       <textarea
         value={value}
@@ -55,9 +55,9 @@ export function VaultInstructionsEditor({
         rows={4}
         disabled={disabled}
         placeholder='e.g. "Keep emails under 100 words. Always mention 24-hour turnaround. Tone: formal, never casual."'
-        className="mt-2 block w-full rounded-xl border border-slate-200 bg-white px-3 py-2 text-sm leading-6 text-navy outline-none transition focus:border-blue focus:ring-2 focus:ring-blue/20 disabled:cursor-not-allowed disabled:opacity-60"
+        className="mt-2 block w-full rounded-xl border border-[var(--border,rgba(30,64,175,0.1))] bg-[var(--surface,#ffffff)] px-3 py-2 text-sm leading-6 text-[var(--text,#0f172a)] outline-none transition focus:border-[var(--accent,#6366f1)] focus:ring-2 focus:ring-[var(--accent,#6366f1)]/20 disabled:cursor-not-allowed disabled:opacity-60"
       />
-      <span className="mt-1 block text-[11px] text-slate-400">
+      <span className="mt-1 block text-[11px] text-[var(--text-muted,#94a3b8)]">
         Permanent prompt guidance — the AI follows this on every draft for
         this service. {value.length.toLocaleString()} /{" "}
         {maxLength.toLocaleString()} characters.

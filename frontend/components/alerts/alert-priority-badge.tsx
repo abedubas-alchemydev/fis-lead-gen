@@ -3,8 +3,8 @@
 const toneMap: Record<string, string> = {
   critical: "bg-red-100 text-danger",
   high: "bg-amber-100 text-amber-700",
-  medium: "bg-blue-100 text-blue",
-  low: "bg-slate-100 text-slate-600"
+  medium: "bg-blue-100 text-[var(--blue,#3b82f6)]",
+  low: "bg-[var(--surface-3,#dbeafe)] text-[var(--text-dim,#475569)]"
 };
 
 export function AlertPriorityBadge({ priority }: { priority: string }) {

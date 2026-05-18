@@ -24,17 +24,17 @@ export default function VaultFolderDetailPage({
     <div className="px-7 pb-12 pt-7 lg:px-9">
       <div className="mb-7 flex flex-wrap items-center gap-4">
         <div className="min-w-0">
-          <p className="text-[12px] uppercase tracking-[0.06em] text-slate-400">
-            Account <span className="text-slate-600">/</span>{" "}
+          <p className="text-[12px] uppercase tracking-[0.06em] text-[var(--text-muted,#94a3b8)]">
+            Account <span className="text-[var(--text-dim,#475569)]">/</span>{" "}
             <a
               href="/vault"
-              className="transition hover:text-slate-700 hover:underline"
+              className="transition hover:text-[var(--text-dim,#475569)] hover:underline"
             >
               Vault
             </a>{" "}
-            <span className="text-slate-600">/</span> Service
+            <span className="text-[var(--text-dim,#475569)]">/</span> Service
           </p>
-          <h1 className="mt-1 text-[24px] font-bold tracking-[-0.02em] text-slate-900">
+          <h1 className="mt-1 text-[24px] font-bold tracking-[-0.02em] text-[var(--text,#0f172a)]">
             Service detail
           </h1>
         </div>

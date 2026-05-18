@@ -2,7 +2,7 @@ const toneMap: Record<string, string> = {
   healthy: "bg-success/15 text-success border-success/20",
   ok: "bg-warning/15 text-warning border-warning/20",
   at_risk: "bg-danger/15 text-danger border-danger/20",
-  unknown: "bg-slate-100 text-slate-600 border-slate-200"
+  unknown: "bg-[var(--surface-3,#dbeafe)] text-[var(--text-dim,#475569)] border-[var(--border,rgba(30,64,175,0.1))]"
 };
 
 const labelMap: Record<string, string> = {

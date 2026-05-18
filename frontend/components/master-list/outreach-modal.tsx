@@ -212,29 +212,29 @@ export function OutreachModal({
         }}
         className="absolute inset-0 bg-[rgba(15,23,42,0.55)] backdrop-blur-sm"
       />
-      <div className="relative w-full max-w-[640px] rounded-2xl border border-slate-200 bg-white p-6 shadow-[0_24px_48px_-16px_rgba(15,23,42,0.45)]">
+      <div className="relative w-full max-w-[640px] rounded-2xl border border-[var(--border,rgba(30,64,175,0.1))] bg-[var(--surface,#ffffff)] p-6 shadow-[0_24px_48px_-16px_rgba(15,23,42,0.45)]">
         <div className="flex items-start justify-between gap-4">
           <div>
-            <p className="text-[11px] uppercase tracking-[0.18em] text-slate-500">
+            <p className="text-[11px] uppercase tracking-[0.18em] text-[var(--text-muted,#94a3b8)]">
               Compose outreach
             </p>
             <h2
               id="outreach-modal-title"
-              className="mt-1 text-lg font-semibold tracking-tight text-navy"
+              className="mt-1 text-lg font-semibold tracking-tight text-[var(--text,#0f172a)]"
             >
               {contact.name}{" "}
-              <span className="text-sm font-medium text-slate-500">
+              <span className="text-sm font-medium text-[var(--text-muted,#94a3b8)]">
                 - {contact.title}
               </span>
             </h2>
-            <p className="mt-1 text-xs text-slate-500">
-              At <span className="font-medium text-slate-700">{brokerDealerName}</span>
+            <p className="mt-1 text-xs text-[var(--text-muted,#94a3b8)]">
+              At <span className="font-medium text-[var(--text-dim,#475569)]">{brokerDealerName}</span>
               {contact.email ? (
                 <>
                   {" "}-{" "}
                   <a
                     href={`mailto:${contact.email}`}
-                    className="text-blue underline-offset-4 hover:underline"
+                    className="text-[var(--accent,#6366f1)] underline-offset-4 hover:underline"
                   >
                     {contact.email}
                   </a>
@@ -242,8 +242,8 @@ export function OutreachModal({
               ) : null}
             </p>
             {senderEmail && (stage === "draft" || stage === "sending") ? (
-              <p className="mt-1 text-[11px] text-slate-400">
-                Sending as <span className="text-slate-600">{senderEmail}</span>
+              <p className="mt-1 text-[11px] text-[var(--text-muted,#94a3b8)]">
+                Sending as <span className="text-[var(--text-dim,#475569)]">{senderEmail}</span>
               </p>
             ) : null}
           </div>
@@ -251,7 +251,7 @@ export function OutreachModal({
             type="button"
             onClick={onClose}
             disabled={stage === "generating" || stage === "sending"}
-            className="rounded-full p-1 text-slate-400 transition hover:bg-slate-100 hover:text-slate-600 disabled:cursor-not-allowed"
+            className="rounded-full p-1 text-[var(--text-muted,#94a3b8)] transition hover:bg-[var(--surface-2,#f1f6fd)] hover:text-[var(--text-dim,#475569)] disabled:cursor-not-allowed"
             aria-label="Close outreach modal"
           >
             <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden>
@@ -261,19 +261,19 @@ export function OutreachModal({
         </div>
 
         {stage === "loading_folders" ? (
-          <p className="mt-6 text-sm text-slate-500">Loading your services...</p>
+          <p className="mt-6 text-sm text-[var(--text-muted,#94a3b8)]">Loading your services...</p>
         ) : null}
 
         {(stage === "ready" || stage === "generating") && folders.length === 0 ? (
-          <div className="mt-5 rounded-xl border border-amber-200 bg-amber-50/70 px-4 py-4 text-sm text-slate-700">
-            <p className="font-medium text-navy">No services in your Vault yet.</p>
-            <p className="mt-1 text-xs leading-5 text-slate-600">
+          <div className="mt-5 rounded-xl border border-amber-200 bg-amber-50/70 px-4 py-4 text-sm text-[var(--text-dim,#475569)]">
+            <p className="font-medium text-[var(--text,#0f172a)]">No services in your Vault yet.</p>
+            <p className="mt-1 text-xs leading-5 text-[var(--text-dim,#475569)]">
               Add a service (e.g. &ldquo;Custody&rdquo;, &ldquo;Stock Loan&rdquo;) with a
               short description before generating drafts.
             </p>
             <Link
               href="/vault"
-              className="mt-3 inline-flex h-9 items-center rounded-xl bg-navy px-3 text-xs font-semibold text-white transition hover:bg-[#112b54]"
+              className="mt-3 inline-flex h-9 items-center rounded-xl bg-[var(--accent,#6366f1)] px-3 text-xs font-semibold text-white transition hover:bg-[var(--accent-2,#8b5cf6)]"
             >
               Open the Vault
             </Link>
@@ -282,13 +282,13 @@ export function OutreachModal({
 
         {(stage === "ready" || stage === "generating") && folders.length > 0 ? (
           <div className="mt-5 space-y-3">
-            <label className="block text-xs font-medium uppercase tracking-[0.18em] text-slate-500">
+            <label className="block text-xs font-medium uppercase tracking-[0.18em] text-[var(--text-muted,#94a3b8)]">
               Service to pitch
               <select
                 value={folderId ?? ""}
                 onChange={(event) => setFolderId(Number(event.target.value))}
                 disabled={stage === "generating"}
-                className="mt-2 block w-full rounded-xl border border-slate-200 bg-white px-3 py-2 text-sm text-navy outline-none transition focus:border-blue focus:ring-2 focus:ring-blue/20 disabled:cursor-not-allowed disabled:opacity-60"
+                className="mt-2 block w-full rounded-xl border border-[var(--border,rgba(30,64,175,0.1))] bg-[var(--surface,#ffffff)] px-3 py-2 text-sm text-[var(--text,#0f172a)] outline-none transition focus:border-[var(--accent,#6366f1)] focus:ring-2 focus:ring-[var(--accent,#6366f1)]/20 disabled:cursor-not-allowed disabled:opacity-60"
               >
                 {folders.map((folder) => (
                   <option key={folder.id} value={folder.id}>
@@ -298,11 +298,11 @@ export function OutreachModal({
               </select>
             </label>
             {selectedFolder?.description ? (
-              <p className="rounded-xl bg-slate-50 px-3 py-2 text-xs leading-5 text-slate-600">
+              <p className="rounded-xl bg-[var(--surface-2,#f1f6fd)] px-3 py-2 text-xs leading-5 text-[var(--text-dim,#475569)]">
                 {selectedFolder.description}
               </p>
             ) : (
-              <p className="text-xs text-slate-400">
+              <p className="text-xs text-[var(--text-muted,#94a3b8)]">
                 This service has no description - drafts will be more generic.
               </p>
             )}
@@ -313,13 +313,13 @@ export function OutreachModal({
           <div className="mt-5 space-y-4">
             <div>
               <div className="flex items-center justify-between">
-                <label className="text-xs font-medium uppercase tracking-[0.18em] text-slate-500">
+                <label className="text-xs font-medium uppercase tracking-[0.18em] text-[var(--text-muted,#94a3b8)]">
                   Subject
                 </label>
                 <button
                   type="button"
                   onClick={() => void handleCopy("subject")}
-                  className="text-xs font-medium text-blue underline-offset-4 transition hover:underline"
+                  className="text-xs font-medium text-[var(--accent,#6366f1)] underline-offset-4 transition hover:underline"
                 >
                   {copyState === "subject" ? "Copied" : "Copy"}
                 </button>
@@ -329,18 +329,18 @@ export function OutreachModal({
                 value={subject}
                 onChange={(event) => setSubject(event.target.value)}
                 disabled={stage === "sending"}
-                className="mt-1 block w-full rounded-xl border border-slate-200 bg-white px-3 py-2 text-sm text-navy outline-none transition focus:border-blue focus:ring-2 focus:ring-blue/20 disabled:cursor-not-allowed disabled:opacity-60"
+                className="mt-1 block w-full rounded-xl border border-[var(--border,rgba(30,64,175,0.1))] bg-[var(--surface,#ffffff)] px-3 py-2 text-sm text-[var(--text,#0f172a)] outline-none transition focus:border-[var(--accent,#6366f1)] focus:ring-2 focus:ring-[var(--accent,#6366f1)]/20 disabled:cursor-not-allowed disabled:opacity-60"
               />
             </div>
             <div>
               <div className="flex items-center justify-between">
-                <label className="text-xs font-medium uppercase tracking-[0.18em] text-slate-500">
+                <label className="text-xs font-medium uppercase tracking-[0.18em] text-[var(--text-muted,#94a3b8)]">
                   Body
                 </label>
                 <button
                   type="button"
                   onClick={() => void handleCopy("body")}
-                  className="text-xs font-medium text-blue underline-offset-4 transition hover:underline"
+                  className="text-xs font-medium text-[var(--accent,#6366f1)] underline-offset-4 transition hover:underline"
                 >
                   {copyState === "body" ? "Copied" : "Copy"}
                 </button>
@@ -350,22 +350,22 @@ export function OutreachModal({
                 onChange={(event) => setBody(event.target.value)}
                 disabled={stage === "sending"}
                 rows={10}
-                className="mt-1 block w-full rounded-xl border border-slate-200 bg-white px-3 py-2 text-sm leading-6 text-navy outline-none transition focus:border-blue focus:ring-2 focus:ring-blue/20 disabled:cursor-not-allowed disabled:opacity-60"
+                className="mt-1 block w-full rounded-xl border border-[var(--border,rgba(30,64,175,0.1))] bg-[var(--surface,#ffffff)] px-3 py-2 text-sm leading-6 text-[var(--text,#0f172a)] outline-none transition focus:border-[var(--accent,#6366f1)] focus:ring-2 focus:ring-[var(--accent,#6366f1)]/20 disabled:cursor-not-allowed disabled:opacity-60"
               />
             </div>
           </div>
         ) : null}
 
         {stage === "sent" ? (
-          <div className="mt-6 rounded-xl border border-emerald-200 bg-emerald-50/70 px-4 py-5 text-sm text-slate-700">
+          <div className="mt-6 rounded-xl border border-emerald-200 bg-emerald-50/70 px-4 py-5 text-sm text-[var(--text-dim,#475569)]">
             <p className="font-semibold text-emerald-700">Email sent.</p>
-            <p className="mt-1 text-xs leading-5 text-slate-600">
+            <p className="mt-1 text-xs leading-5 text-[var(--text-dim,#475569)]">
               Delivered to{" "}
-              <span className="font-medium text-slate-700">{contact.email}</span>
+              <span className="font-medium text-[var(--text-dim,#475569)]">{contact.email}</span>
               {senderEmail ? (
                 <>
                   {" "}from{" "}
-                  <span className="font-medium text-slate-700">
+                  <span className="font-medium text-[var(--text-dim,#475569)]">
                     {senderEmail}
                   </span>
                 </>
@@ -417,7 +417,7 @@ export function OutreachModal({
                 setLinkActionNeeded(false);
                 setStage("ready");
               }}
-              className="inline-flex h-10 items-center rounded-xl border border-slate-200 bg-white px-4 text-sm font-medium text-slate-700 transition hover:border-slate-300 hover:bg-slate-50"
+              className="inline-flex h-10 items-center rounded-xl border border-[var(--border,rgba(30,64,175,0.1))] bg-[var(--surface,#ffffff)] px-4 text-sm font-medium text-[var(--text-dim,#475569)] transition hover:border-[var(--border-2,rgba(30,64,175,0.16))] hover:bg-[var(--surface-2,#f1f6fd)]"
             >
               Regenerate
             </button>
@@ -426,7 +426,7 @@ export function OutreachModal({
             type="button"
             onClick={onClose}
             disabled={stage === "generating" || stage === "sending"}
-            className="inline-flex h-10 items-center rounded-xl border border-slate-200 bg-white px-4 text-sm font-medium text-slate-700 transition hover:border-slate-300 hover:bg-slate-50 disabled:cursor-not-allowed disabled:opacity-60"
+            className="inline-flex h-10 items-center rounded-xl border border-[var(--border,rgba(30,64,175,0.1))] bg-[var(--surface,#ffffff)] px-4 text-sm font-medium text-[var(--text-dim,#475569)] transition hover:border-[var(--border-2,rgba(30,64,175,0.16))] hover:bg-[var(--surface-2,#f1f6fd)] disabled:cursor-not-allowed disabled:opacity-60"
           >
             {stage === "draft" || stage === "sent" ? "Done" : "Cancel"}
           </button>
@@ -439,7 +439,7 @@ export function OutreachModal({
                 folders.length === 0 ||
                 folderId === null
               }
-              className="inline-flex h-10 items-center rounded-xl bg-navy px-4 text-sm font-semibold text-white shadow-lg shadow-navy/15 transition hover:bg-[#112b54] disabled:cursor-not-allowed disabled:opacity-60"
+              className="inline-flex h-10 items-center rounded-xl bg-[var(--accent,#6366f1)] px-4 text-sm font-semibold text-white shadow-lg shadow-[var(--accent,#6366f1)]/20 transition hover:bg-[var(--accent-2,#8b5cf6)] disabled:cursor-not-allowed disabled:opacity-60"
             >
               {stage === "generating" ? "Generating..." : "Generate draft"}
             </button>
@@ -451,7 +451,7 @@ export function OutreachModal({
               disabled={
                 stage === "sending" || !subject.trim() || !body.trim()
               }
-              className="inline-flex h-10 items-center rounded-xl bg-navy px-4 text-sm font-semibold text-white shadow-lg shadow-navy/15 transition hover:bg-[#112b54] disabled:cursor-not-allowed disabled:opacity-60"
+              className="inline-flex h-10 items-center rounded-xl bg-[var(--accent,#6366f1)] px-4 text-sm font-semibold text-white shadow-lg shadow-[var(--accent,#6366f1)]/20 transition hover:bg-[var(--accent-2,#8b5cf6)] disabled:cursor-not-allowed disabled:opacity-60"
             >
               {stage === "sending" ? "Sending..." : "Send"}
             </button>

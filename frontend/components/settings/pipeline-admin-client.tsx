@@ -69,8 +69,8 @@ const STATUS_STYLE: Record<
   },
   idle: {
     label: "Idle",
-    pill: "bg-slate-100 text-slate-600 border-slate-200",
-    dot: "bg-slate-400",
+    pill: "bg-[var(--surface-3,#dbeafe)] text-[var(--text-dim,#475569)] border-[var(--border,rgba(30,64,175,0.1))]",
+    dot: "bg-[var(--text-muted,#94a3b8)]",
     pulse: false
   }
 };
