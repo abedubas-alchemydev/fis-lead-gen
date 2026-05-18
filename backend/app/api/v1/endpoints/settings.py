@@ -27,7 +27,10 @@ from app.schemas.settings import (
 from app.services.auth import get_current_user
 from app.services.broker_dealers import BrokerDealerRepository
 from app.services.classification import apply_classification_to_all
-from app.services.clearing_partner_clustering import run_clustering_pass
+from app.services.clearing_partner_clustering import (
+    count_unmatched_partners,
+    run_clustering_pass,
+)
 from app.services.competitors import CompetitorProviderService
 from app.services.filing_monitor import FilingMonitorService
 from app.services.finra import FinraService
@@ -284,6 +287,7 @@ async def list_clearing_partner_suggestions(
     return ClearingPartnerMergeSuggestionList(
         items=[ClearingPartnerMergeSuggestionItem.model_validate(row) for row in rows],
         pending_count=await _pending_count(db),
+        unmatched_count=await count_unmatched_partners(db),
     )
 
 
@@ -301,6 +305,7 @@ async def run_clearing_partner_clustering(
     return ClearingPartnerClusteringRunResponse(
         new_pending_count=new_count,
         total_pending_count=await _pending_count(db),
+        unmatched_count=await count_unmatched_partners(db),
     )
 
 
