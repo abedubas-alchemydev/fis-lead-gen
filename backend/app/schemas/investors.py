@@ -41,6 +41,7 @@ class InvestorItem(BaseModel):
     shares: float | None
     price_per_share: float | None
     transaction_value: float | None
+    txn_count: int
 
     enriched_phone: str | None
     enriched_email: str | None
@@ -65,13 +66,19 @@ class InvestorListResponse(BaseModel):
 class InvestorEnrichResponse(BaseModel):
     """Returned by ``POST /investors/{id}/enrich``.
 
-    ``enriched_at`` is always populated after a successful Apollo call
-    (even when Apollo returns no match), so the FE can distinguish
-    "never enriched" from "enriched, came back empty" and avoid
-    re-triggering on every render.
+    Returns just the enrichment fields — the FE merges them into the
+    consolidated row it already has. ``enriched_at`` is always populated
+    after a successful Apollo call (even when Apollo returns no match)
+    so the FE can distinguish "never enriched" from "enriched, came back
+    empty" and avoid re-triggering on every render. ``txn_id`` echoes the
+    leader transaction id the FE called with so the FE knows which row
+    in its list to patch.
     """
 
-    item: InvestorItem
+    txn_id: int
+    enriched_phone: str | None
+    enriched_email: str | None
+    enriched_at: datetime
     matched: bool
 
 

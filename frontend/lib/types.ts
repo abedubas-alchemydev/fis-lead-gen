@@ -194,6 +194,7 @@ export type InvestorItem = {
   shares: number | null;
   price_per_share: number | null;
   transaction_value: number | null;
+  txn_count: number;
 
   enriched_phone: string | null;
   enriched_email: string | null;
@@ -214,7 +215,10 @@ export type InvestorListResponse = {
 };
 
 export type InvestorEnrichResponse = {
-  item: InvestorItem;
+  txn_id: number;
+  enriched_phone: string | null;
+  enriched_email: string | null;
+  enriched_at: string;
   matched: boolean;
 };
 

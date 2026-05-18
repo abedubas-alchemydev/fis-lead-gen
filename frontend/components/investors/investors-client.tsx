@@ -129,7 +129,16 @@ export function InvestorsClient() {
     try {
       const result: InvestorEnrichResponse = await enrichInvestor(id);
       setItems((current) =>
-        current.map((row) => (row.id === id ? result.item : row))
+        current.map((row) =>
+          row.id === id
+            ? {
+                ...row,
+                enriched_phone: result.enriched_phone,
+                enriched_email: result.enriched_email,
+                enriched_at: result.enriched_at
+              }
+            : row
+        )
       );
       if (!result.matched) {
         setError("No contact match returned by Apollo for this person.");
@@ -472,7 +481,7 @@ function InvestorRow({
           </span>
           <span className="ml-1 text-[var(--text-muted,#94a3b8)]">
             ({row.shares?.toLocaleString() ?? "—"} sh
-            {row.price_per_share
+            {row.txn_count === 1 && row.price_per_share
               ? ` @ ${formatCurrency(row.price_per_share)}`
               : ""}
             )
