@@ -64,3 +64,33 @@ class AdminUserSavedFirmsResponse(BaseModel):
     offset: int
     lists: list[AdminSavedFirmListSummary]
     user: AdminUserBrief
+
+
+class AdminUserActivityRow(BaseModel):
+    """One row in the unified user-activity feed.
+
+    ``event_type`` discriminates the source and shapes the FE row glyph +
+    tooltip. ``target_type`` / ``target_id`` / ``target_name`` are set
+    when the activity is bound to a firm (view, save, outreach) and are
+    ``None`` for login / logout. ``details`` carries event-specific
+    extras (login → IP + user_agent; save → list name; view → visit
+    count; outreach → send status + error code) — the FE renders a
+    tooltip from it.
+    """
+
+    event_type: Literal["login", "logout", "view", "save", "outreach"]
+    timestamp: datetime
+    target_type: Literal["broker_dealer", "advisor", "institutional_investor"] | None = None
+    target_id: int | None = None
+    target_name: str | None = None
+    details: dict | None = None
+
+
+class AdminUserActivitiesResponse(BaseModel):
+    """``GET /api/v1/users/{user_id}/activities`` payload."""
+
+    items: list[AdminUserActivityRow]
+    total: int
+    limit: int
+    offset: int
+    user: AdminUserBrief

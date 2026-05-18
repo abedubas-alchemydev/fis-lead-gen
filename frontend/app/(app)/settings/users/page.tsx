@@ -20,6 +20,7 @@ type ActiveUserRow = {
   created_at: Date;
   updated_at: Date;
   feature_permissions: string[] | null;
+  last_activity_at: Date | null;
 };
 
 export const dynamic = "force-dynamic";
@@ -57,7 +58,14 @@ export default async function SettingsUsersPage() {
       ["pending"]
     ),
     db.query<ActiveUserRow>(
-      'SELECT id, email, name, role, created_at, updated_at, feature_permissions FROM "user" WHERE status = $1 ORDER BY created_at DESC LIMIT 200',
+      `SELECT u.id, u.email, u.name, u.role, u.created_at, u.updated_at, u.feature_permissions,
+              MAX(s.last_activity_at) AS last_activity_at
+       FROM "user" u
+       LEFT JOIN "session" s ON s.user_id = u.id
+       WHERE u.status = $1
+       GROUP BY u.id
+       ORDER BY u.created_at DESC
+       LIMIT 200`,
       ["active"]
     ),
   ]);
@@ -78,6 +86,7 @@ export default async function SettingsUsersPage() {
     createdAt: r.created_at.toISOString(),
     updatedAt: r.updated_at.toISOString(),
     featurePermissions: Array.isArray(r.feature_permissions) ? r.feature_permissions : [],
+    lastActivityAt: r.last_activity_at ? r.last_activity_at.toISOString() : null,
   }));
 
   return (

@@ -660,6 +660,41 @@ export type AdminUserSavedFirmsResponse = {
   user: AdminUserBrief;
 };
 
+// Unified per-user activity feed used by /settings/users/{id}/activities.
+// `event_type` discriminates the row glyph + tooltip. `target_*` is set
+// when the activity is bound to a firm (view, save, outreach); login /
+// logout rows leave it null. `details` carries event-specific extras
+// (login → ip + user_agent; save → list_name; view → visit_count;
+// outreach → status + error + subject).
+export type AdminUserActivityEventType =
+  | "login"
+  | "logout"
+  | "view"
+  | "save"
+  | "outreach";
+
+export type AdminUserActivityTargetType =
+  | "broker_dealer"
+  | "advisor"
+  | "institutional_investor";
+
+export type AdminUserActivityRow = {
+  event_type: AdminUserActivityEventType;
+  timestamp: string;
+  target_type: AdminUserActivityTargetType | null;
+  target_id: number | null;
+  target_name: string | null;
+  details: Record<string, unknown> | null;
+};
+
+export type AdminUserActivitiesResponse = {
+  items: AdminUserActivityRow[];
+  total: number;
+  limit: number;
+  offset: number;
+  user: AdminUserBrief;
+};
+
 // ── Investment Advisor (Form ADV / 13F filer) types ──
 //
 // Mirrors backend/app/schemas/investment_advisor.py. Lives alongside the
