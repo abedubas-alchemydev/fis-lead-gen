@@ -84,10 +84,16 @@ a {
   background-size: 200% 200%;
 }
 
+@keyframes bar-grow {
+  from { width: 0; }
+  to   { width: var(--bar-w); }
+}
+
 @media (prefers-reduced-motion: no-preference) {
-  .animate-float    { animation: float 6s ease-in-out infinite; }
-  .animate-shimmer  { animation: shimmer 3s linear infinite; }
-  .animate-gradient { animation: gradient-shift 8s ease infinite; }
+  .animate-float     { animation: float 6s ease-in-out infinite; }
+  .animate-shimmer   { animation: shimmer 3s linear infinite; }
+  .animate-gradient  { animation: gradient-shift 8s ease infinite; }
+  .animate-bar-grow  { animation: bar-grow 900ms cubic-bezier(0.16,1,0.3,1) both; }
 }
 
 .delay-75  { animation-delay: 75ms; }
