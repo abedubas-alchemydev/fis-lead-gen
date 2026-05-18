@@ -206,16 +206,14 @@ export function DashboardHomeClient() {
           Mockup .topbar: display:flex; align-items:center; gap:16px; margin-bottom:28px. */}
       <div className="mb-7 flex flex-wrap items-center gap-4">
         <div className="min-w-0">
-          {/* .crumbs: 12px, text-muted (slate-400), uppercase, 0.06em tracking.
-              Only the "/" separator is in a span with text-dim (slate-600). */}
-          <p className="text-[12px] uppercase tracking-[0.06em] text-slate-400">
-            Enterprise Dashboard <span className="text-slate-600">/</span> Prospect Intelligence
+          {/* .crumbs: 12px uppercase, 0.06em tracking, token-driven so the
+              palette flips in dark mode. Separator uses --text-dim. */}
+          <p className="text-[12px] uppercase tracking-[0.06em] text-[var(--text-muted,#94a3b8)]">
+            Enterprise Dashboard <span className="text-[var(--text-dim,#475569)]">/</span> Prospect Intelligence
           </p>
-          {/* .page-title: font-size 24px, weight 700, tracking -0.02em,
-              margin-top 4px. No line-height → inherits body 1.5 (36px line-box).
-              Using text-[24px] instead of text-2xl because text-2xl also
-              applies line-height: 32px which shrinks the visible gap. */}
-          <h1 className="mt-1 text-[24px] font-bold tracking-[-0.02em] text-slate-900">
+          {/* .page-title: 24px / 700 / -0.02em tracking, margin-top 4px.
+              text-[24px] (not text-2xl) so body's 1.5 line-height applies. */}
+          <h1 className="mt-1 text-[24px] font-bold tracking-[-0.02em] text-[var(--text,#0f172a)]">
             Prospect Intelligence Workspace
           </h1>
         </div>
@@ -320,11 +318,11 @@ export function DashboardHomeClient() {
             // alongside it instead of modifying the AlertFeedCard signature.
             // Wrap in the same surface chrome AlertFeedCard uses so the
             // tile slot keeps a stable visual footprint.
-            <article className="rounded-2xl border border-slate-200/70 bg-white p-5 shadow-[0_1px_2px_rgba(15,23,42,0.04),0_4px_14px_rgba(15,23,42,0.05)]">
+            <article className="rounded-2xl border border-[var(--border,rgba(30,64,175,0.1))] bg-[var(--surface,#ffffff)] p-5 shadow-[var(--shadow-card,0_1px_2px_rgba(15,23,42,0.04),0_4px_14px_rgba(15,23,42,0.05))]">
               <div className="mb-4 flex items-start justify-between gap-4">
                 <div>
-                  <h2 className="text-[15px] font-semibold tracking-[-0.01em] text-slate-900">Activity feed</h2>
-                  <p className="mt-0.5 text-xs text-slate-500">Recent filing alerts</p>
+                  <h2 className="text-[15px] font-semibold tracking-[-0.01em] text-[var(--text,#0f172a)]">Activity feed</h2>
+                  <p className="mt-0.5 text-xs text-[var(--text-muted,#94a3b8)]">Recent filing alerts</p>
                 </div>
               </div>
               <DashboardErrorCard

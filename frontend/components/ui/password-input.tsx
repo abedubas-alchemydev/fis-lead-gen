@@ -14,15 +14,15 @@ export function PasswordInput({ className, label, ...props }: PasswordInputProps
 
   return (
     <label className="block space-y-2">
-      <span className="text-sm font-medium text-slate-700">{label}</span>
+      <span className="text-sm font-medium text-[var(--text-dim,#475569)]">{label}</span>
       <div className="relative">
         <input
           type={visible ? "text" : "password"}
           className={clsx(
-            "w-full rounded-xl border border-slate-200 bg-white px-4 py-3 pr-12 text-sm text-slate-900 shadow-sm outline-none transition",
-            "placeholder:text-slate-400",
-            "hover:border-slate-300",
-            "focus:border-blue focus:ring-2 focus:ring-blue/15 focus:shadow-md focus:shadow-blue/5",
+            "w-full rounded-xl border border-[var(--border,rgba(30,64,175,0.1))] bg-[var(--surface,#ffffff)] px-4 py-3 pr-12 text-sm text-[var(--text,#0f172a)] shadow-sm outline-none transition",
+            "placeholder:text-[var(--text-muted,#94a3b8)]",
+            "hover:border-[var(--border-2,rgba(30,64,175,0.16))]",
+            "focus:border-[var(--accent,#6366f1)] focus:ring-2 focus:ring-[var(--accent,#6366f1)]/15 focus:shadow-md focus:shadow-[var(--accent,#6366f1)]/5",
             className,
           )}
           {...props}
@@ -32,7 +32,7 @@ export function PasswordInput({ className, label, ...props }: PasswordInputProps
           onClick={() => setVisible((v) => !v)}
           aria-label={visible ? "Hide password" : "Show password"}
           aria-pressed={visible}
-          className="absolute inset-y-0 right-0 flex w-12 items-center justify-center text-slate-400 transition hover:text-slate-700 focus:text-blue focus:outline-none"
+          className="absolute inset-y-0 right-0 flex w-12 items-center justify-center text-[var(--text-muted,#94a3b8)] transition hover:text-[var(--text-dim,#475569)] focus:text-[var(--accent,#6366f1)] focus:outline-none"
         >
           {visible ? <EyeOff className="h-4 w-4" aria-hidden /> : <Eye className="h-4 w-4" aria-hidden />}
         </button>

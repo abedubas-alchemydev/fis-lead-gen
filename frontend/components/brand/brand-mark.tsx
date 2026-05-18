@@ -8,7 +8,7 @@ export function BrandMark({ size = 36, className }: BrandMarkProps) {
   return (
     <div
       className={
-        "grid shrink-0 place-items-center rounded-[10px] bg-navy text-white shadow-[0_6px_20px_rgba(10,31,63,0.25)] " +
+        "grid shrink-0 place-items-center rounded-[10px] bg-[var(--accent,#6366f1)] text-white shadow-[0_6px_20px_rgba(99,102,241,0.35)] " +
         (className ?? "")
       }
       style={{

@@ -8,13 +8,13 @@ type InputProps = InputHTMLAttributes<HTMLInputElement> & {
 export function Input({ className, label, ...props }: InputProps) {
   return (
     <label className="block space-y-2">
-      <span className="text-sm font-medium text-slate-700">{label}</span>
+      <span className="text-sm font-medium text-[var(--text-dim,#475569)]">{label}</span>
       <input
         className={clsx(
-          "w-full rounded-xl border border-slate-200 bg-white px-4 py-3 text-sm text-slate-900 shadow-sm outline-none transition",
-          "placeholder:text-slate-400",
-          "hover:border-slate-300",
-          "focus:border-blue focus:ring-2 focus:ring-blue/15 focus:shadow-md focus:shadow-blue/5",
+          "w-full rounded-xl border border-[var(--border,rgba(30,64,175,0.1))] bg-[var(--surface,#ffffff)] px-4 py-3 text-sm text-[var(--text,#0f172a)] shadow-sm outline-none transition",
+          "placeholder:text-[var(--text-muted,#94a3b8)]",
+          "hover:border-[var(--border-2,rgba(30,64,175,0.16))]",
+          "focus:border-[var(--accent,#6366f1)] focus:ring-2 focus:ring-[var(--accent,#6366f1)]/15 focus:shadow-md focus:shadow-[var(--accent,#6366f1)]/5",
           className,
         )}
         {...props}

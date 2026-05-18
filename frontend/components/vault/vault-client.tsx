@@ -94,7 +94,7 @@ export function VaultClient() {
 
   if (loading) {
     return (
-      <div className="rounded-[30px] border border-white/80 bg-white/88 p-10 text-sm text-slate-500 shadow-shell backdrop-blur">
+      <div className="rounded-[30px] border border-[var(--border,rgba(30,64,175,0.1))] bg-[var(--surface,#ffffff)]/95 p-10 text-sm text-[var(--text-muted,#94a3b8)] shadow-shell backdrop-blur">
         Loading services...
       </div>
     );
@@ -117,14 +117,14 @@ export function VaultClient() {
   return (
     <div className="space-y-5">
       <div className="flex items-center justify-between">
-        <p className="text-xs uppercase tracking-[0.18em] text-slate-500">
+        <p className="text-xs uppercase tracking-[0.18em] text-[var(--text-muted,#94a3b8)]">
           {folders.length} service{folders.length === 1 ? "" : "s"}
         </p>
         {editState.mode !== "create" ? (
           <button
             type="button"
             onClick={() => setEditState({ mode: "create" })}
-            className="inline-flex h-9 items-center rounded-xl bg-navy px-3 text-xs font-semibold text-white shadow-lg shadow-navy/15 transition hover:bg-[#112b54]"
+            className="inline-flex h-9 items-center rounded-xl bg-[var(--accent,#6366f1)] px-3 text-xs font-semibold text-white shadow-lg shadow-[var(--accent,#6366f1)]/20 transition hover:bg-[var(--accent-2,#8b5cf6)]"
           >
             New service
           </button>
@@ -183,9 +183,9 @@ export function VaultClient() {
 
 function EmptyState({ onCreate }: { onCreate: () => void }) {
   return (
-    <div className="flex min-h-[340px] flex-col items-center justify-center rounded-[30px] border border-white/80 bg-white/88 p-10 text-center shadow-shell backdrop-blur">
-      <h2 className="text-lg font-semibold text-navy">No services yet</h2>
-      <p className="mt-2 max-w-md text-sm text-slate-600">
+    <div className="flex min-h-[340px] flex-col items-center justify-center rounded-[30px] border border-[var(--border,rgba(30,64,175,0.1))] bg-[var(--surface,#ffffff)]/95 p-10 text-center shadow-shell backdrop-blur">
+      <h2 className="text-lg font-semibold text-[var(--text,#0f172a)]">No services yet</h2>
+      <p className="mt-2 max-w-md text-sm text-[var(--text-dim,#475569)]">
         Add the first service you offer — for example, &ldquo;Custody&rdquo;,
         &ldquo;Stock Loan&rdquo;, or &ldquo;Margin Financing&rdquo;. A short
         description helps the AI write more credible cold-email drafts.
@@ -193,7 +193,7 @@ function EmptyState({ onCreate }: { onCreate: () => void }) {
       <button
         type="button"
         onClick={onCreate}
-        className="mt-6 inline-flex h-10 items-center rounded-xl bg-navy px-4 text-sm font-semibold text-white shadow-lg shadow-navy/15 transition hover:bg-[#112b54]"
+        className="mt-6 inline-flex h-10 items-center rounded-xl bg-[var(--accent,#6366f1)] px-4 text-sm font-semibold text-white shadow-lg shadow-[var(--accent,#6366f1)]/20 transition hover:bg-[var(--accent-2,#8b5cf6)]"
       >
         Add your first service
       </button>
@@ -217,14 +217,14 @@ function FolderCard({
   onConfirmDelete: () => void;
 }) {
   return (
-    <article className="flex flex-col rounded-2xl border border-slate-200 bg-white p-5 shadow-sm">
-      <h3 className="text-base font-semibold text-navy">{folder.name}</h3>
-      <p className="mt-2 flex-1 whitespace-pre-wrap text-sm leading-6 text-slate-600">
+    <article className="flex flex-col rounded-2xl border border-[var(--border,rgba(30,64,175,0.1))] bg-[var(--surface,#ffffff)] p-5 shadow-sm">
+      <h3 className="text-base font-semibold text-[var(--text,#0f172a)]">{folder.name}</h3>
+      <p className="mt-2 flex-1 whitespace-pre-wrap text-sm leading-6 text-[var(--text-dim,#475569)]">
         {folder.description ? folder.description : (
-          <span className="italic text-slate-400">No description.</span>
+          <span className="italic text-[var(--text-muted,#94a3b8)]">No description.</span>
         )}
       </p>
-      <p className="mt-3 text-[11px] uppercase tracking-[0.1em] text-slate-400">
+      <p className="mt-3 text-[11px] uppercase tracking-[0.1em] text-[var(--text-muted,#94a3b8)]">
         Updated {formatTimestamp(folder.updated_at)}
       </p>
       {isDeleting ? (
@@ -236,7 +236,7 @@ function FolderCard({
             <button
               type="button"
               onClick={onCancelDelete}
-              className="text-xs font-medium text-slate-600 underline-offset-4 hover:underline"
+              className="text-xs font-medium text-[var(--text-dim,#475569)] underline-offset-4 hover:underline"
             >
               Cancel
             </button>
@@ -253,14 +253,14 @@ function FolderCard({
         <div className="mt-4 flex justify-end gap-3">
           <Link
             href={`/vault/${folder.id}`}
-            className="text-xs font-medium text-blue underline-offset-4 transition hover:underline"
+            className="text-xs font-medium text-[var(--accent,#6366f1)] underline-offset-4 transition hover:underline"
           >
             Manage files & instructions →
           </Link>
           <button
             type="button"
             onClick={onAskDelete}
-            className="text-xs font-medium text-slate-500 underline-offset-4 transition hover:text-danger hover:underline"
+            className="text-xs font-medium text-[var(--text-muted,#94a3b8)] underline-offset-4 transition hover:text-danger hover:underline"
           >
             Delete
           </button>
@@ -314,13 +314,13 @@ function FolderForm({
   return (
     <form
       onSubmit={handleSubmit}
-      className="rounded-2xl border border-slate-200 bg-white p-5 shadow-sm md:col-span-2 xl:col-span-3"
+      className="rounded-2xl border border-[var(--border,rgba(30,64,175,0.1))] bg-[var(--surface,#ffffff)] p-5 shadow-sm md:col-span-2 xl:col-span-3"
     >
-      <h3 className="text-sm font-semibold text-navy">
+      <h3 className="text-sm font-semibold text-[var(--text,#0f172a)]">
         {mode === "create" ? "New service" : "Edit service"}
       </h3>
       <div className="mt-3 space-y-3">
-        <label className="block text-xs font-medium uppercase tracking-[0.18em] text-slate-500">
+        <label className="block text-xs font-medium uppercase tracking-[0.18em] text-[var(--text-muted,#94a3b8)]">
           Name
           <input
             type="text"
@@ -329,10 +329,10 @@ function FolderForm({
             maxLength={NAME_MAX}
             placeholder="Custody"
             autoFocus
-            className="mt-2 block w-full rounded-xl border border-slate-200 bg-white px-3 py-2 text-sm text-navy outline-none transition focus:border-blue focus:ring-2 focus:ring-blue/20"
+            className="mt-2 block w-full rounded-xl border border-[var(--border,rgba(30,64,175,0.1))] bg-[var(--surface,#ffffff)] px-3 py-2 text-sm text-[var(--text,#0f172a)] outline-none transition focus:border-[var(--accent,#6366f1)] focus:ring-2 focus:ring-[var(--accent,#6366f1)]/20"
           />
         </label>
-        <label className="block text-xs font-medium uppercase tracking-[0.18em] text-slate-500">
+        <label className="block text-xs font-medium uppercase tracking-[0.18em] text-[var(--text-muted,#94a3b8)]">
           Description
           <textarea
             value={description}
@@ -340,9 +340,9 @@ function FolderForm({
             maxLength={DESCRIPTION_MAX}
             rows={6}
             placeholder="What you offer, your differentiators, typical client profile, pricing posture..."
-            className="mt-2 block w-full rounded-xl border border-slate-200 bg-white px-3 py-2 text-sm leading-6 text-navy outline-none transition focus:border-blue focus:ring-2 focus:ring-blue/20"
+            className="mt-2 block w-full rounded-xl border border-[var(--border,rgba(30,64,175,0.1))] bg-[var(--surface,#ffffff)] px-3 py-2 text-sm leading-6 text-[var(--text,#0f172a)] outline-none transition focus:border-[var(--accent,#6366f1)] focus:ring-2 focus:ring-[var(--accent,#6366f1)]/20"
           />
-          <span className="mt-1 block text-[11px] text-slate-400">
+          <span className="mt-1 block text-[11px] text-[var(--text-muted,#94a3b8)]">
             {description.length.toLocaleString()} / {DESCRIPTION_MAX.toLocaleString()}{" "}
             characters
           </span>
@@ -360,14 +360,14 @@ function FolderForm({
           type="button"
           onClick={onCancel}
           disabled={submitting}
-          className="inline-flex h-10 items-center rounded-xl border border-slate-200 bg-white px-4 text-sm font-medium text-slate-700 transition hover:border-slate-300 hover:bg-slate-50 disabled:cursor-not-allowed disabled:opacity-60"
+          className="inline-flex h-10 items-center rounded-xl border border-[var(--border,rgba(30,64,175,0.1))] bg-[var(--surface,#ffffff)] px-4 text-sm font-medium text-[var(--text-dim,#475569)] transition hover:border-[var(--border-2,rgba(30,64,175,0.16))] hover:bg-[var(--surface-2,#f1f6fd)] disabled:cursor-not-allowed disabled:opacity-60"
         >
           Cancel
         </button>
         <button
           type="submit"
           disabled={submitting}
-          className="inline-flex h-10 items-center rounded-xl bg-navy px-4 text-sm font-semibold text-white shadow-lg shadow-navy/15 transition hover:bg-[#112b54] disabled:cursor-not-allowed disabled:opacity-60"
+          className="inline-flex h-10 items-center rounded-xl bg-[var(--accent,#6366f1)] px-4 text-sm font-semibold text-white shadow-lg shadow-[var(--accent,#6366f1)]/20 transition hover:bg-[var(--accent-2,#8b5cf6)] disabled:cursor-not-allowed disabled:opacity-60"
         >
           {submitting ? "Saving..." : mode === "create" ? "Create service" : "Save changes"}
         </button>

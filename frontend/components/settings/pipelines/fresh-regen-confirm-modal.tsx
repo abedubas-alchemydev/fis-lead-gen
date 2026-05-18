@@ -323,10 +323,10 @@ export function FreshRegenConfirmModal({
         }}
         className="absolute inset-0 bg-[rgba(15,23,42,0.55)] backdrop-blur-sm"
       />
-      <div className="relative w-full max-w-[520px] rounded-2xl border border-slate-200 bg-white p-6 shadow-[0_24px_48px_-16px_rgba(15,23,42,0.45)]">
+      <div className="relative w-full max-w-[520px] rounded-2xl border border-[var(--border,rgba(30,64,175,0.1))] bg-[var(--surface,#ffffff)] p-6 shadow-[0_24px_48px_-16px_rgba(15,23,42,0.45)]">
         <h2
           id="fresh-regen-title"
-          className="text-lg font-semibold tracking-tight text-navy"
+          className="text-lg font-semibold tracking-tight text-[var(--text,#0f172a)]"
         >
           {stage === "done" ? "Regen complete" : "Confirm Fresh Regen"}
         </h2>
@@ -389,16 +389,16 @@ function TypingBody({
 }) {
   return (
     <div className="mt-3 space-y-4">
-      <p className="text-sm leading-6 text-slate-700">
+      <p className="text-sm leading-6 text-[var(--text-dim,#475569)]">
         This wipes <span className="font-semibold">all</span> broker-dealer
         data (~3,002 firms) and re-fetches them from FINRA + SEC. Cannot be
         undone. ~1–2 hours wall-clock.
       </p>
       <div className="space-y-2">
-        <p className="text-xs font-medium uppercase tracking-[0.18em] text-slate-500">
+        <p className="text-xs font-medium uppercase tracking-[0.18em] text-[var(--text-muted,#94a3b8)]">
           Type the exact string below to proceed
         </p>
-        <code className="block w-full select-all rounded-xl border border-slate-200 bg-slate-50 px-3 py-2 font-mono text-sm tracking-wide text-navy">
+        <code className="block w-full select-all rounded-xl border border-[var(--border,rgba(30,64,175,0.1))] bg-[var(--surface-2,#f1f6fd)] px-3 py-2 font-mono text-sm tracking-wide text-[var(--text,#0f172a)]">
           {expected}
         </code>
         <input
@@ -409,24 +409,24 @@ function TypingBody({
           placeholder={expected}
           autoComplete="off"
           spellCheck={false}
-          className="block w-full rounded-xl border border-slate-200 bg-white px-3 py-2 font-mono text-sm text-navy outline-none transition focus:border-blue focus:ring-2 focus:ring-blue/20"
+          className="block w-full rounded-xl border border-[var(--border,rgba(30,64,175,0.1))] bg-[var(--surface,#ffffff)] px-3 py-2 font-mono text-sm text-[var(--text,#0f172a)] outline-none transition focus:border-[var(--accent,#6366f1)] focus:ring-2 focus:ring-[var(--accent,#6366f1)]/20"
         />
       </div>
-      <div className="rounded-xl border border-slate-200 bg-slate-50/60 px-3 py-3">
+      <div className="rounded-xl border border-[var(--border,rgba(30,64,175,0.1))] bg-[var(--surface-2,#f1f6fd)]/60 px-3 py-3">
         <label className="flex cursor-pointer items-start gap-3">
           <input
             type="checkbox"
             checked={useFilesApi}
             onChange={(event) => onUseFilesApiChange(event.target.checked)}
-            className="mt-0.5 h-4 w-4 shrink-0 rounded border-slate-300 text-blue focus:ring-blue/30"
+            className="mt-0.5 h-4 w-4 shrink-0 rounded border-[var(--border-2,rgba(30,64,175,0.16))] text-[var(--accent,#6366f1)] focus:ring-[var(--accent,#6366f1)]/30"
           />
           <span className="space-y-1">
-            <span className="block text-sm font-medium text-navy">
+            <span className="block text-sm font-medium text-[var(--text,#0f172a)]">
               Use streaming Files API (recommended)
             </span>
-            <span className="block text-xs leading-5 text-slate-600">
+            <span className="block text-xs leading-5 text-[var(--text-dim,#475569)]">
               When enabled, the regen flips{" "}
-              <code className="font-mono text-[11px] text-slate-700">
+              <code className="font-mono text-[11px] text-[var(--text-dim,#475569)]">
                 LLM_USE_FILES_API=true
               </code>{" "}
               and rolls out a new backend revision (~60–90s) before
@@ -441,7 +441,7 @@ function TypingBody({
           {error}
         </div>
       ) : stage === "failed" ? (
-        <p className="text-xs text-slate-500">
+        <p className="text-xs text-[var(--text-muted,#94a3b8)]">
           Adjust the input above and submit again to retry.
         </p>
       ) : null}
@@ -459,15 +459,15 @@ function DoneBody({
   populateRunId: number | null;
 }) {
   return (
-    <div className="mt-5 rounded-2xl border border-emerald-200 bg-emerald-50/70 px-4 py-3 text-sm text-slate-700">
-      <p className="font-medium text-navy">
+    <div className="mt-5 rounded-2xl border border-emerald-200 bg-emerald-50/70 px-4 py-3 text-sm text-[var(--text-dim,#475569)]">
+      <p className="font-medium text-[var(--text,#0f172a)]">
         Fresh regen finished end-to-end.
       </p>
-      <ul className="mt-2 space-y-1 text-xs text-slate-600">
+      <ul className="mt-2 space-y-1 text-xs text-[var(--text-dim,#475569)]">
         {wipeResult ? (
           <li>
             Wipe audit log id:{" "}
-            <span className="font-mono text-navy">
+            <span className="font-mono text-[var(--text,#0f172a)]">
               #{wipeResult.audit_log_id}
             </span>{" "}
             ({wipeResult.rows_deleted.toLocaleString()} rows across{" "}
@@ -477,17 +477,17 @@ function DoneBody({
         {initialLoadRunId !== null ? (
           <li>
             Initial load run id:{" "}
-            <span className="font-mono text-navy">#{initialLoadRunId}</span>
+            <span className="font-mono text-[var(--text,#0f172a)]">#{initialLoadRunId}</span>
           </li>
         ) : null}
         {populateRunId !== null ? (
           <li>
             Populate-all run id:{" "}
-            <span className="font-mono text-navy">#{populateRunId}</span>
+            <span className="font-mono text-[var(--text,#0f172a)]">#{populateRunId}</span>
           </li>
         ) : null}
       </ul>
-      <p className="mt-2 text-xs text-slate-500">
+      <p className="mt-2 text-xs text-[var(--text-muted,#94a3b8)]">
         See the recent-runs table below for the full history.
       </p>
     </div>
@@ -518,7 +518,7 @@ function ModalActions({
           ref={cancelRef}
           type="button"
           onClick={onCancel}
-          className="inline-flex h-10 items-center rounded-xl bg-navy px-4 text-sm font-semibold text-white shadow-lg shadow-navy/15 transition hover:bg-[#112b54]"
+          className="inline-flex h-10 items-center rounded-xl bg-[var(--accent,#6366f1)] px-4 text-sm font-semibold text-white shadow-lg shadow-[var(--accent,#6366f1)]/20 transition hover:bg-[var(--accent-2,#8b5cf6)]"
         >
           Close
         </button>
@@ -532,11 +532,11 @@ function ModalActions({
         <button
           type="button"
           onClick={onCancel}
-          className="text-xs font-medium text-slate-500 underline-offset-4 transition hover:text-slate-700 hover:underline"
+          className="text-xs font-medium text-[var(--text-muted,#94a3b8)] underline-offset-4 transition hover:text-[var(--text-dim,#475569)] hover:underline"
         >
           Close (regen continues server-side)
         </button>
-        <p className="text-[11px] text-slate-400">
+        <p className="text-[11px] text-[var(--text-muted,#94a3b8)]">
           Closing only stops live updates here. The backend keeps running.
         </p>
       </div>
@@ -550,7 +550,7 @@ function ModalActions({
         ref={cancelRef}
         type="button"
         onClick={onCancel}
-        className="inline-flex h-10 items-center rounded-xl border border-slate-200 bg-white px-4 text-sm font-medium text-slate-700 transition hover:border-slate-300 hover:bg-slate-50"
+        className="inline-flex h-10 items-center rounded-xl border border-[var(--border,rgba(30,64,175,0.1))] bg-[var(--surface,#ffffff)] px-4 text-sm font-medium text-[var(--text-dim,#475569)] transition hover:border-[var(--border-2,rgba(30,64,175,0.16))] hover:bg-[var(--surface-2,#f1f6fd)]"
       >
         Cancel
       </button>

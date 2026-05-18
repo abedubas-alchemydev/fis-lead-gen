@@ -1,8 +1,8 @@
 const toneMap: Record<string, string> = {
-  self_clearing: "border-navy/20 bg-navy text-white",
-  fully_disclosed: "border-blue/20 bg-blue text-white",
-  omnibus: "border-slate-200 bg-slate-200 text-slate-700",
-  unknown: "border-dashed border-slate-300 bg-white text-slate-500"
+  self_clearing: "border-[var(--accent,#6366f1)]/20 bg-[var(--accent,#6366f1)] text-white",
+  fully_disclosed: "border-[var(--blue,#3b82f6)]/20 bg-[var(--blue,#3b82f6)] text-white",
+  omnibus: "border-[var(--surface-3,#dbeafe)] bg-[var(--surface-3,#dbeafe)] text-[var(--text-dim,#475569)]",
+  unknown: "border-dashed border-[var(--border-2,rgba(30,64,175,0.16))] bg-[var(--surface,#ffffff)] text-[var(--text-muted,#94a3b8)]"
 };
 
 const labelMap: Record<string, string> = {

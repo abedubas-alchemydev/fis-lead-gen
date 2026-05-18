@@ -22,17 +22,17 @@ const VARIANT_STYLES: Record<
   { container: string; icon: string; Icon: typeof Check }
 > = {
   success: {
-    container: "border-emerald-200 bg-white text-slate-800",
+    container: "border-emerald-200 bg-[var(--surface,#ffffff)] text-[var(--text,#0f172a)]",
     icon: "text-emerald-500",
     Icon: Check,
   },
   error: {
-    container: "border-red-200 bg-white text-slate-800",
+    container: "border-red-200 bg-[var(--surface,#ffffff)] text-[var(--text,#0f172a)]",
     icon: "text-red-500",
     Icon: AlertTriangle,
   },
   info: {
-    container: "border-sky-200 bg-white text-slate-800",
+    container: "border-sky-200 bg-[var(--surface,#ffffff)] text-[var(--text,#0f172a)]",
     icon: "text-sky-500",
     Icon: Info,
   },
@@ -81,18 +81,18 @@ export function Toast({ variant, title, body, durationMs = 5000, onDismiss }: To
       aria-live="polite"
       onMouseEnter={() => setPaused(true)}
       onMouseLeave={() => setPaused(false)}
-      className={`pointer-events-auto flex w-full items-start gap-3 rounded-2xl border px-4 py-3 shadow-lg shadow-slate-900/10 ${styles.container}`}
+      className={`pointer-events-auto flex w-full items-start gap-3 rounded-2xl border px-4 py-3 shadow-lg shadow-black/10 ${styles.container}`}
     >
       <Icon className={`mt-0.5 h-5 w-5 shrink-0 ${styles.icon}`} aria-hidden />
       <div className="min-w-0 flex-1 text-sm">
-        {title ? <div className="font-semibold text-navy">{title}</div> : null}
-        <div className="leading-snug text-slate-700">{body}</div>
+        {title ? <div className="font-semibold text-[var(--text,#0f172a)]">{title}</div> : null}
+        <div className="leading-snug text-[var(--text-dim,#475569)]">{body}</div>
       </div>
       <button
         type="button"
         onClick={onDismiss}
         aria-label="Dismiss notification"
-        className="-m-1 rounded-md p-1 text-slate-400 transition hover:bg-slate-100 hover:text-slate-700 focus:outline-none focus:ring-2 focus:ring-blue/30"
+        className="-m-1 rounded-md p-1 text-[var(--text-muted,#94a3b8)] transition hover:bg-[var(--surface-2,#f1f6fd)] hover:text-[var(--text-dim,#475569)] focus:outline-none focus:ring-2 focus:ring-[var(--accent,#6366f1)]/30"
       >
         <X className="h-4 w-4" aria-hidden />
       </button>

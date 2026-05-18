@@ -415,7 +415,7 @@ export function AppShell({
         <div className="canvas-surface flex h-full min-w-0 flex-1 flex-col">
           {/* Mobile pill nav (visible below lg) — desktop has the sidebar instead. */}
           <nav
-            className="flex shrink-0 gap-2 overflow-x-auto border-b border-slate-200/70 bg-white/80 px-4 py-3 lg:hidden"
+            className="flex shrink-0 gap-2 overflow-x-auto border-b border-[var(--border,rgba(30,64,175,0.1))] bg-[var(--surface,#ffffff)]/80 px-4 py-3 lg:hidden"
             aria-label="Primary mobile"
           >
             {[...visibleWorkspaceNav, ...visibleAccountNav].map(({ href, label }) => {
@@ -426,7 +426,7 @@ export function AppShell({
                   key={href}
                   href={liveHref}
                   className={`whitespace-nowrap rounded-full px-4 py-2 text-sm ${
-                    active ? "bg-indigo-500/15 text-indigo-600" : "bg-slate-100 text-slate-700"
+                    active ? "bg-[var(--accent,#6366f1)]/15 text-[var(--accent,#6366f1)]" : "bg-[var(--surface-3,#dbeafe)] text-[var(--text-dim,#475569)]"
                   }`}
                 >
                   {label}

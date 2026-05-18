@@ -2,8 +2,8 @@
 
 const toneMap: Record<string, { label: string; stars: string; className: string }> = {
   hot: { label: "Hot", stars: "***", className: "bg-amber-100 text-amber-700" },
-  warm: { label: "Warm", stars: "**", className: "bg-blue-100 text-blue" },
-  cold: { label: "Cold", stars: "*", className: "bg-slate-100 text-slate-600" }
+  warm: { label: "Warm", stars: "**", className: "bg-blue-100 text-[var(--blue,#3b82f6)]" },
+  cold: { label: "Cold", stars: "*", className: "bg-[var(--surface-3,#dbeafe)] text-[var(--text-dim,#475569)]" }
 };
 
 export function ProspectPriorityBadge({
@@ -14,7 +14,7 @@ export function ProspectPriorityBadge({
   score: number | null;
 }) {
   if (!priority) {
-    return <span className="text-sm text-slate-400">Not scored</span>;
+    return <span className="text-sm text-[var(--text-muted,#94a3b8)]">Not scored</span>;
   }
 
   const tone = toneMap[priority] ?? toneMap.cold;

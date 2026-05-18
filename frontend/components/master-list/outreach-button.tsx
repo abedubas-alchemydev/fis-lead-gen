@@ -23,7 +23,7 @@ export function OutreachButton({
       <button
         type="button"
         onClick={() => setOpen(true)}
-        className="inline-flex items-center gap-1 rounded-full bg-navy px-3 py-1 text-xs font-medium text-white transition hover:bg-[#112b54]"
+        className="inline-flex items-center gap-1 rounded-full bg-[var(--accent,#6366f1)] px-3 py-1 text-xs font-medium text-white transition hover:bg-[var(--accent-2,#8b5cf6)]"
       >
         Outreach
       </button>

@@ -90,35 +90,35 @@ function paletteFor(status: PhaseStatus) {
   switch (status) {
     case "running":
       return {
-        surface: "border-blue/30 bg-blue/5",
-        icon: "text-blue",
-        label: "text-navy",
-        detail: "text-slate-600",
-        badge: "border-blue/30 bg-blue/10 text-blue"
+        surface: "border-[var(--accent,#6366f1)]/30 bg-[var(--accent,#6366f1)]/5",
+        icon: "text-[var(--accent,#6366f1)]",
+        label: "text-[var(--text,#0f172a)]",
+        detail: "text-[var(--text-dim,#475569)]",
+        badge: "border-[var(--accent,#6366f1)]/30 bg-[var(--accent,#6366f1)]/10 text-[var(--accent,#6366f1)]"
       };
     case "done":
       return {
         surface: "border-emerald-200 bg-emerald-50/70",
         icon: "text-success",
-        label: "text-navy",
-        detail: "text-slate-600",
+        label: "text-[var(--text,#0f172a)]",
+        detail: "text-[var(--text-dim,#475569)]",
         badge: "border-emerald-200 bg-emerald-50 text-success"
       };
     case "failed":
       return {
         surface: "border-red-200 bg-red-50",
         icon: "text-danger",
-        label: "text-navy",
+        label: "text-[var(--text,#0f172a)]",
         detail: "text-danger",
         badge: "border-red-200 bg-red-50 text-danger"
       };
     default:
       return {
-        surface: "border-slate-200 bg-slate-50/60",
-        icon: "text-slate-400",
-        label: "text-slate-700",
-        detail: "text-slate-500",
-        badge: "border-slate-200 bg-white text-slate-500"
+        surface: "border-[var(--border,rgba(30,64,175,0.1))] bg-[var(--surface-2,#f1f6fd)]/60",
+        icon: "text-[var(--text-muted,#94a3b8)]",
+        label: "text-[var(--text-dim,#475569)]",
+        detail: "text-[var(--text-muted,#94a3b8)]",
+        badge: "border-[var(--border,rgba(30,64,175,0.1))] bg-[var(--surface,#ffffff)] text-[var(--text-muted,#94a3b8)]"
       };
   }
 }

@@ -215,7 +215,7 @@ export function EnrichAllButton({
           disabled={disabled}
           aria-busy={isRunning}
           title={disabledTitle}
-          className="inline-flex items-center gap-2 rounded-xl bg-navy px-3 py-2 text-xs font-semibold text-white shadow-sm shadow-navy/15 transition hover:bg-[#112b54] hover:shadow-md hover:shadow-navy/20 focus:outline-none focus:ring-2 focus:ring-blue/30 disabled:cursor-not-allowed disabled:opacity-60"
+          className="inline-flex items-center gap-2 rounded-xl bg-[var(--accent,#6366f1)] px-3 py-2 text-xs font-semibold text-white shadow-sm shadow-[var(--accent,#6366f1)]/20 transition hover:bg-[var(--accent-2,#8b5cf6)] hover:shadow-md hover:shadow-[var(--accent,#6366f1)]/25 focus:outline-none focus:ring-2 focus:ring-[var(--accent,#6366f1)]/30 disabled:cursor-not-allowed disabled:opacity-60"
         >
           {isRunning ? (
             <Loader2 className="h-4 w-4 animate-spin" aria-hidden />
@@ -231,7 +231,7 @@ export function EnrichAllButton({
             disabled={isStopping}
             aria-label="Stop enrichment"
             title="Stop enrichment — keeps rows already extracted"
-            className="inline-flex items-center gap-2 rounded-xl border border-slate-300 bg-white px-3 py-2 text-xs font-semibold text-slate-700 shadow-sm transition hover:bg-slate-50 focus:outline-none focus:ring-2 focus:ring-slate-300 disabled:cursor-not-allowed disabled:opacity-60"
+            className="inline-flex items-center gap-2 rounded-xl border border-[var(--border-2,rgba(30,64,175,0.16))] bg-[var(--surface,#ffffff)] px-3 py-2 text-xs font-semibold text-[var(--text-dim,#475569)] shadow-sm transition hover:bg-[var(--surface-2,#f1f6fd)] focus:outline-none focus:ring-2 focus:ring-[var(--border-2,rgba(30,64,175,0.16))] disabled:cursor-not-allowed disabled:opacity-60"
           >
             <Square className="h-4 w-4" aria-hidden />
             {isStopping ? "Stopping…" : "Stop"}
@@ -239,7 +239,7 @@ export function EnrichAllButton({
         ) : null}
       </div>
       {statusText !== null ? (
-        <span className="text-xs text-slate-600" aria-live="polite">
+        <span className="text-xs text-[var(--text-dim,#475569)]" aria-live="polite">
           {statusText}
         </span>
       ) : null}

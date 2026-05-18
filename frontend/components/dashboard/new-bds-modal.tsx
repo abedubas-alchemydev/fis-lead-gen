@@ -68,26 +68,26 @@ export function NewBdsModal({ onClose }: NewBdsModalProps) {
         onClick={onClose}
         className="absolute inset-0 bg-[rgba(15,23,42,0.55)] backdrop-blur-sm"
       />
-      <div className="relative flex max-h-[80vh] w-full max-w-[640px] flex-col rounded-2xl border border-slate-200 bg-white shadow-[0_24px_48px_-16px_rgba(15,23,42,0.45)]">
-        <div className="flex items-start justify-between gap-4 border-b border-slate-200 px-6 py-5">
+      <div className="relative flex max-h-[80vh] w-full max-w-[640px] flex-col rounded-2xl border border-[var(--border,rgba(30,64,175,0.1))] bg-[var(--surface,#ffffff)] shadow-[0_24px_48px_-16px_rgba(15,23,42,0.45)]">
+        <div className="flex items-start justify-between gap-4 border-b border-[var(--border,rgba(30,64,175,0.1))] px-6 py-5">
           <div>
-            <p className="text-[11px] uppercase tracking-[0.18em] text-slate-500">
+            <p className="text-[11px] uppercase tracking-[0.18em] text-[var(--text-muted,#94a3b8)]">
               New BDs · 30 days
             </p>
             <h2
               id="new-bds-modal-title"
-              className="mt-1 text-lg font-semibold tracking-tight text-slate-900"
+              className="mt-1 text-lg font-semibold tracking-tight text-[var(--text,#0f172a)]"
             >
               Recent registrations
             </h2>
-            <p className="mt-1 text-xs text-slate-500">
+            <p className="mt-1 text-xs text-[var(--text-muted,#94a3b8)]">
               Broker-dealers registered on or after {formatDate(isoDateNDaysAgo(30))}.
             </p>
           </div>
           <button
             type="button"
             onClick={onClose}
-            className="rounded-full p-1 text-slate-400 transition hover:bg-slate-100 hover:text-slate-600"
+            className="rounded-full p-1 text-[var(--text-muted,#94a3b8)] transition hover:bg-[var(--surface-3,#dbeafe)] hover:text-[var(--text-dim,#475569)]"
             aria-label="Close"
           >
             <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden>
@@ -102,12 +102,12 @@ export function NewBdsModal({ onClose }: NewBdsModalProps) {
               {Array.from({ length: 3 }).map((_, i) => (
                 <div
                   key={i}
-                  className="flex items-center gap-3 rounded-xl border border-slate-200 px-3 py-3"
+                  className="flex items-center gap-3 rounded-xl border border-[var(--border,rgba(30,64,175,0.1))] px-3 py-3"
                 >
-                  <div className="h-9 w-9 animate-pulse rounded-lg bg-slate-100" />
+                  <div className="h-9 w-9 animate-pulse rounded-lg bg-[var(--surface-3,#dbeafe)]" />
                   <div className="flex-1">
-                    <div className="h-4 w-48 animate-pulse rounded bg-slate-100" />
-                    <div className="mt-2 h-3 w-32 animate-pulse rounded bg-slate-100" />
+                    <div className="h-4 w-48 animate-pulse rounded bg-[var(--surface-3,#dbeafe)]" />
+                    <div className="mt-2 h-3 w-32 animate-pulse rounded bg-[var(--surface-3,#dbeafe)]" />
                   </div>
                 </div>
               ))}
@@ -117,7 +117,7 @@ export function NewBdsModal({ onClose }: NewBdsModalProps) {
               {error}
             </div>
           ) : items.length === 0 ? (
-            <div className="rounded-xl border border-dashed border-slate-200 bg-slate-50 px-4 py-8 text-center text-sm text-slate-500">
+            <div className="rounded-xl border border-dashed border-[var(--border,rgba(30,64,175,0.1))] bg-[var(--surface-2,#f1f6fd)] px-4 py-8 text-center text-sm text-[var(--text-muted,#94a3b8)]">
               No new broker-dealers registered in the last 30 days.
             </div>
           ) : (
@@ -127,7 +127,7 @@ export function NewBdsModal({ onClose }: NewBdsModalProps) {
                   <Link
                     href={`/master-list/${item.id}`}
                     onClick={onClose}
-                    className="flex items-center gap-3 rounded-xl border border-slate-200 px-3 py-3 transition hover:border-violet-300 hover:bg-violet-50/40"
+                    className="flex items-center gap-3 rounded-xl border border-[var(--border,rgba(30,64,175,0.1))] px-3 py-3 transition hover:border-violet-300 hover:bg-violet-50/40"
                   >
                     <div
                       className="grid h-9 w-9 shrink-0 place-items-center rounded-lg text-[12px] font-bold text-white"
@@ -136,17 +136,17 @@ export function NewBdsModal({ onClose }: NewBdsModalProps) {
                       {initialsFromName(item.name)}
                     </div>
                     <div className="min-w-0 flex-1">
-                      <div className="truncate text-[13.5px] font-semibold text-slate-900">
+                      <div className="truncate text-[13.5px] font-semibold text-[var(--text,#0f172a)]">
                         {item.name}
                       </div>
-                      <div className="mt-0.5 truncate text-[11px] text-slate-500">
+                      <div className="mt-0.5 truncate text-[11px] text-[var(--text-muted,#94a3b8)]">
                         {item.crd_number ? `CRD #${item.crd_number}` : "No CRD"}
                         {item.state ? ` · ${item.state}` : ""}
                         {item.is_deficient ? " · Deficient" : ""}
                       </div>
                     </div>
-                    <div className="text-right text-[11px] text-slate-500">
-                      <div className="font-medium text-slate-700">
+                    <div className="text-right text-[11px] text-[var(--text-muted,#94a3b8)]">
+                      <div className="font-medium text-[var(--text-dim,#475569)]">
                         {formatDate(item.registration_date)}
                       </div>
                       <div className="mt-0.5">Registered</div>
