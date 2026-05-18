@@ -3,8 +3,17 @@
 from __future__ import annotations
 
 from datetime import datetime
+from typing import Literal
 
 from pydantic import BaseModel, ConfigDict, Field
+
+
+# Which transport actually ran (or should run) an outreach send. New
+# wire field on the three send-request schemas + the historical
+# OutreachSendItem rows so admins can see which provider was used.
+# Defaults to "google" on request shapes so existing FE callers stay
+# functional during the staged rollout.
+EmailProviderId = Literal["google", "microsoft", "yahoo"]
 
 
 class VaultFolderResponse(BaseModel):
@@ -56,6 +65,7 @@ class OutreachSendRequest(BaseModel):
     # ceiling — no realistic draft is anywhere near it.
     subject: str = Field(..., min_length=1, max_length=998)
     body: str = Field(..., min_length=1, max_length=100_000)
+    provider: EmailProviderId = "google"
 
 
 # ── Advisor + Investor parallels ──────────────────────────────────────
@@ -77,6 +87,7 @@ class OutreachAdvisorSendRequest(BaseModel):
     folder_id: int = Field(..., gt=0)
     subject: str = Field(..., min_length=1, max_length=998)
     body: str = Field(..., min_length=1, max_length=100_000)
+    provider: EmailProviderId = "google"
 
 
 class OutreachInvestorDraftRequest(BaseModel):
@@ -91,6 +102,7 @@ class OutreachInvestorSendRequest(BaseModel):
     folder_id: int = Field(..., gt=0)
     subject: str = Field(..., min_length=1, max_length=998)
     body: str = Field(..., min_length=1, max_length=100_000)
+    provider: EmailProviderId = "google"
 
 
 class OutreachSendResponse(BaseModel):
@@ -118,6 +130,11 @@ class OutreachSendItem(BaseModel):
     sent_at: datetime
     status: str
     subject: str
+    # Transport that actually ran the send. Pre-PR-C rows are all
+    # "google" by definition (Gmail was the only transport then) so
+    # the migration backfilled them. Default keeps test fixtures that
+    # build OutreachSendItem by hand still working.
+    provider: EmailProviderId = "google"
     gmail_message_id: str | None
     error: str | None
     firm_type: str = "broker_dealer"
@@ -155,3 +172,25 @@ class OutreachSendsListResponse(BaseModel):
 
 class OutreachSendDetailResponse(OutreachSendItem):
     body: str
+
+
+class LinkedProviderItem(BaseModel):
+    """One linked OAuth account for the calling user.
+
+    Returned by ``GET /api/v1/auth/me/linked-providers`` so the
+    Outreach modal can decide whether to render a provider picker
+    (2+ linked) or a "Connect <provider>" CTA (0 linked).
+    """
+
+    provider: EmailProviderId
+    scope: str | None
+    # True iff the linked account has the send scope already granted
+    # (``gmail.send`` / ``Mail.Send`` / ``mail-w`` per provider). FE
+    # uses this to decide between a normal Send call and a re-consent
+    # ``linkSocial`` first.
+    has_send_scope: bool
+    linked_at: datetime
+
+
+class LinkedProvidersResponse(BaseModel):
+    items: list[LinkedProviderItem]

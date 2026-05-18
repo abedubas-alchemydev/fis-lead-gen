@@ -573,6 +573,7 @@ export type OutreachSendRequest = {
   folder_id: number;
   subject: string;
   body: string;
+  provider?: EmailProviderId;
 };
 
 export type OutreachSendResponse = {
@@ -588,11 +589,20 @@ export type OutreachSendResponse = {
 // deletion sets ON DELETE SET NULL on the audit row.
 export type OutreachSendStatus = "sent" | "failed";
 
+// Per-user send transport. Drives the provider picker on the Outreach
+// modal and the per-row provider badge on the Sent Outreach view.
+// Apple is intentionally absent — iCloud SMTP is app-specific-password
+// only (no OAuth), which breaks the refresh-token flow.
+export type EmailProviderId = "google" | "microsoft" | "yahoo";
+
 export type OutreachSendItem = {
   id: number;
   sent_at: string;
   status: string;
   subject: string;
+  // Which transport ran this send. Backfilled to "google" on the
+  // migration 0049 upgrade, so pre-PR-C rows are all google.
+  provider: EmailProviderId;
   gmail_message_id: string | null;
   error: string | null;
   broker_dealer_id: number;
@@ -607,6 +617,21 @@ export type OutreachSendItem = {
   user_id?: string | null;
   sender_name?: string | null;
   sender_email?: string | null;
+};
+
+// GET /api/v1/outreach/linked-providers — used by the Outreach modal to
+// decide whether to render a provider picker (2+ linked), a "Connect"
+// CTA (0 linked), or just use the only linked provider implicitly
+// (1 linked).
+export type LinkedProviderItem = {
+  provider: EmailProviderId;
+  scope: string | null;
+  has_send_scope: boolean;
+  linked_at: string;
+};
+
+export type LinkedProvidersResponse = {
+  items: LinkedProviderItem[];
 };
 
 export type OutreachSendsScope = "mine" | "all";
@@ -939,6 +964,7 @@ export type OutreachAdvisorDraftRequest = {
 export type OutreachAdvisorSendRequest = OutreachAdvisorDraftRequest & {
   subject: string;
   body: string;
+  provider?: EmailProviderId;
 };
 
 export type OutreachInvestorDraftRequest = {
@@ -950,4 +976,5 @@ export type OutreachInvestorDraftRequest = {
 export type OutreachInvestorSendRequest = OutreachInvestorDraftRequest & {
   subject: string;
   body: string;
+  provider?: EmailProviderId;
 };

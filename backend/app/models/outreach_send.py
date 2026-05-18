@@ -88,6 +88,16 @@ class OutreachSend(Base):
     )
     subject: Mapped[str] = mapped_column(String(998), nullable=False)
     body: Mapped[str] = mapped_column(Text, nullable=False)
+    # Which transport actually ran the send: "google" (Gmail API),
+    # "microsoft" (MS Graph users.sendMail), or "yahoo" (SMTP+XOAUTH2
+    # via aiosmtplib). Backfilled to "google" on the migration 0049
+    # upgrade. New rows MUST set this explicitly.
+    provider: Mapped[str] = mapped_column(String(16), nullable=False)
+    # Provider-side message id. For Gmail this is the real
+    # users.messages.send response id; for Microsoft/Yahoo it's a
+    # synthetic "{provider}-{iso8601}" placeholder (those transports
+    # don't return a server-side id we can rely on). Column name is
+    # legacy from the Gmail-only era — cleanup can rename later.
     gmail_message_id: Mapped[str | None] = mapped_column(
         String(255), nullable=True
     )
