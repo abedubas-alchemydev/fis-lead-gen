@@ -61,6 +61,15 @@ export const ENABLED_FEATURE_KEYS: ReadonlySet<FeatureKey> = new Set([
   VAULT,
 ]);
 
+// Keys whose nav entry is admin-only at the sidebar level. The Feature
+// Access picker still lists them so the picker mirrors the sidebar 1:1,
+// but the row renders disabled with an "Admin only" caption since the
+// checkbox has no effect: viewers can't reach the surface regardless,
+// and admins bypass every feature gate.
+export const ADMIN_ONLY_FEATURE_KEYS: ReadonlySet<FeatureKey> = new Set([
+  USERS,
+]);
+
 export function hasFeature(
   user: { role?: string | null; feature_permissions?: string[] | null },
   feature: FeatureKey,
