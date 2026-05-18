@@ -3,7 +3,7 @@
 import Link from "next/link";
 import type { Route } from "next";
 import type { ReactNode } from "react";
-import { useEffect, useMemo, useState } from "react";
+import { Fragment, useEffect, useMemo, useState } from "react";
 import { usePathname, useRouter, useSearchParams } from "next/navigation";
 
 import { apiRequest } from "@/lib/api";
@@ -180,26 +180,54 @@ type NavEntry = {
   permissionKey?: string;
 };
 
-const workspaceNav: ReadonlyArray<NavEntry> = [
-  { href: "/dashboard", label: "Dashboard", icon: DashboardIcon, badgeKey: null },
-  { href: "/master-list", label: "Master List", icon: MasterListIcon, badgeKey: "total", permissionKey: "master_list" },
-  // ``as Route`` cast: Next's typed-routes type-gen runs on `next build`/`next
-  // dev`, so a fresh route added in a tsc-only check (no Next pipeline run)
-  // isn't yet known to the Route union. Removing once a build regenerates
-  // .next/types is fine but cheap to leave for new sibling routes.
-  { href: "/advisor-list" as Route, label: "Investment Advisors", icon: AdvisorListIcon, badgeKey: null, permissionKey: "investment_advisors" },
-  { href: "/alerts", label: "Alerts", icon: AlertsIcon, badgeKey: "alerts", permissionKey: "alerts" },
-  { href: "/investors" as Route, label: "Investors", icon: InvestorsIcon, badgeKey: null, permissionKey: "investors" },
-  { href: "/email-extractor", label: "Email Extractor", icon: EmailExtractorIcon, badgeKey: null, permissionKey: "email_extractor" },
-  { href: "/outreach/sent" as Route, label: "Sent Outreach", icon: SentOutreachIcon, badgeKey: null, permissionKey: "sent_outreach" },
-  { href: "/my-favorites", label: "My Favorites", icon: FavoritesIcon, badgeKey: null, permissionKey: "my_favorites" },
-  { href: "/visited-firms", label: "Visited Firms", icon: VisitedFirmsIcon, badgeKey: null, permissionKey: "visited_firms" }
-];
+type NavSection = {
+  label: string;
+  items: ReadonlyArray<NavEntry>;
+};
 
-const accountNav: ReadonlyArray<NavEntry> = [
-  { href: "/settings", label: "Settings", icon: SettingsIcon, badgeKey: null },
-  { href: "/settings/users" as Route, label: "Users", icon: UsersIcon, badgeKey: null, adminOnly: true },
-  { href: "/vault", label: "Vault", icon: VaultIcon, badgeKey: null }
+// ``as Route`` casts on /advisor-list, /investors, /outreach/sent, and
+// /settings/users: Next's typed-routes type-gen runs on `next build`/`next
+// dev`, so a fresh route added in a tsc-only check (no Next pipeline run)
+// isn't yet known to the Route union. Removing once a build regenerates
+// .next/types is fine but cheap to leave for new sibling routes.
+const navSections: ReadonlyArray<NavSection> = [
+  {
+    label: "Overview",
+    items: [
+      { href: "/dashboard", label: "Dashboard", icon: DashboardIcon, badgeKey: null },
+      { href: "/alerts", label: "Alerts", icon: AlertsIcon, badgeKey: "alerts", permissionKey: "alerts" }
+    ]
+  },
+  {
+    label: "Lists",
+    items: [
+      { href: "/master-list", label: "Master List", icon: MasterListIcon, badgeKey: "total", permissionKey: "master_list" },
+      { href: "/advisor-list" as Route, label: "Investment Advisors", icon: AdvisorListIcon, badgeKey: null, permissionKey: "investment_advisors" },
+      { href: "/investors" as Route, label: "Investors", icon: InvestorsIcon, badgeKey: null, permissionKey: "investors" }
+    ]
+  },
+  {
+    label: "Outreach",
+    items: [
+      { href: "/email-extractor", label: "Email Extractor", icon: EmailExtractorIcon, badgeKey: null, permissionKey: "email_extractor" },
+      { href: "/outreach/sent" as Route, label: "Sent Outreach", icon: SentOutreachIcon, badgeKey: null, permissionKey: "sent_outreach" }
+    ]
+  },
+  {
+    label: "Personal",
+    items: [
+      { href: "/my-favorites", label: "My Favorites", icon: FavoritesIcon, badgeKey: null, permissionKey: "my_favorites" },
+      { href: "/visited-firms", label: "Visited Firms", icon: VisitedFirmsIcon, badgeKey: null, permissionKey: "visited_firms" }
+    ]
+  },
+  {
+    label: "Account",
+    items: [
+      { href: "/settings", label: "Settings", icon: SettingsIcon, badgeKey: null },
+      { href: "/settings/users" as Route, label: "Users", icon: UsersIcon, badgeKey: null, adminOnly: true },
+      { href: "/vault", label: "Vault", icon: VaultIcon, badgeKey: null }
+    ]
+  }
 ];
 
 function initialsFromName(name: string | null | undefined): string {
@@ -282,16 +310,20 @@ export function AppShell({
   const allowed = (e: NavEntry) =>
     (!e.adminOnly || isAdmin) &&
     (!e.permissionKey || isAdmin || userPerms.includes(e.permissionKey));
-  const visibleWorkspaceNav = workspaceNav.filter(allowed);
-  const visibleAccountNav = accountNav.filter(allowed);
+  // Filter each section's items by permission, then drop any section that
+  // ends up with zero visible items (e.g. Lists for a non-admin with none of
+  // the master_list / investment_advisors / investors flags).
+  const visibleSections = navSections
+    .map((s) => ({ ...s, items: s.items.filter(allowed) }))
+    .filter((s) => s.items.length > 0);
+  const allVisibleEntries = visibleSections.flatMap((s) => s.items);
 
   function isActivePath(href: string) {
     if (pathname === href) return true;
     if (!pathname.startsWith(`${href}/`)) return false;
     // If a sibling nav entry has a longer matching href, defer to it. Stops
     // /settings from staying highlighted while on /settings/users.
-    const all = [...visibleWorkspaceNav, ...visibleAccountNav];
-    return !all.some(
+    return !allVisibleEntries.some(
       (e) =>
         e.href !== href &&
         e.href.length > href.length &&
@@ -331,37 +363,30 @@ export function AppShell({
             </div>
           </div>
 
-          {/* Workspace section */}
-          <SidebarSectionLabel>Workspace</SidebarSectionLabel>
-          <nav className="flex flex-col" aria-label="Workspace">
-            {visibleWorkspaceNav.map((entry) => {
-              const live =
-                entry.href === "/master-list"
-                  ? { ...entry, href: masterListHref }
-                  : entry;
-              return (
-                <SidebarNavLink
-                  key={entry.href}
-                  entry={live}
-                  active={isActivePath(entry.href)}
-                  badge={entry.badgeKey ? badges[entry.badgeKey] : null}
-                />
-              );
-            })}
-          </nav>
-
-          {/* Account section */}
-          <SidebarSectionLabel>Account</SidebarSectionLabel>
-          <nav className="flex flex-col" aria-label="Account">
-            {visibleAccountNav.map((entry) => (
-              <SidebarNavLink
-                key={entry.href}
-                entry={entry}
-                active={isActivePath(entry.href)}
-                badge={null}
-              />
-            ))}
-          </nav>
+          {/* Nav sections — grouped by function (Overview, Lists, Outreach,
+              Personal, Account). Each renders its label + a <nav> with its
+              filtered items. Empty sections are dropped upstream. */}
+          {visibleSections.map((section) => (
+            <Fragment key={section.label}>
+              <SidebarSectionLabel>{section.label}</SidebarSectionLabel>
+              <nav className="flex flex-col" aria-label={section.label}>
+                {section.items.map((entry) => {
+                  const live =
+                    entry.href === "/master-list"
+                      ? { ...entry, href: masterListHref }
+                      : entry;
+                  return (
+                    <SidebarNavLink
+                      key={entry.href}
+                      entry={live}
+                      active={isActivePath(entry.href)}
+                      badge={entry.badgeKey ? badges[entry.badgeKey] : null}
+                    />
+                  );
+                })}
+              </nav>
+            </Fragment>
+          ))}
 
           {/* User card — pinned to bottom of sidebar. Matches mockup
               .user-card exactly: avatar + user-name + user-role, plus a
@@ -418,7 +443,7 @@ export function AppShell({
             className="flex shrink-0 gap-2 overflow-x-auto border-b border-[var(--border,rgba(30,64,175,0.1))] bg-[var(--surface,#ffffff)]/80 px-4 py-3 lg:hidden"
             aria-label="Primary mobile"
           >
-            {[...visibleWorkspaceNav, ...visibleAccountNav].map(({ href, label }) => {
+            {allVisibleEntries.map(({ href, label }) => {
               const active = isActivePath(href);
               const liveHref = href === "/master-list" ? masterListHref : href;
               return (
