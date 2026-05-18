@@ -18,7 +18,13 @@ import { authClient } from "@/lib/auth-client";
  * send scope, the SMTP XOAUTH2 backend uses it) is requested only on
  * the first Send click via ``authClient.linkSocial``.
  */
-export function YahooButton({ mode }: { mode: "login" | "signup" }) {
+export function YahooButton({
+  mode,
+  enabled = true
+}: {
+  mode: "login" | "signup";
+  enabled?: boolean;
+}) {
   const [isPending, setIsPending] = useState(false);
 
   async function handleClick() {
@@ -32,6 +38,26 @@ export function YahooButton({ mode }: { mode: "login" | "signup" }) {
     } catch {
       setIsPending(false);
     }
+  }
+
+  if (!enabled) {
+    return (
+      <button
+        type="button"
+        disabled
+        aria-disabled
+        title="Yahoo sign-in is being set up. Available soon."
+        className="flex w-full cursor-not-allowed items-center justify-center gap-3 rounded-xl border border-[var(--border,rgba(30,64,175,0.1))] bg-[var(--surface,#ffffff)] px-4 py-3 text-sm font-medium text-[var(--text-muted,#94a3b8)] opacity-60 shadow-sm"
+      >
+        <YahooLogo />
+        <span>
+          {mode === "signup" ? "Sign up with Yahoo" : "Continue with Yahoo"}
+        </span>
+        <span className="ml-1 rounded-full bg-[var(--surface-2,#f1f6fd)] px-2 py-0.5 text-[10px] font-semibold uppercase tracking-[0.06em] text-[var(--text-dim,#475569)]">
+          Coming soon
+        </span>
+      </button>
+    );
   }
 
   return (

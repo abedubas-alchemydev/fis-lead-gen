@@ -16,7 +16,15 @@ import { authClient } from "@/lib/auth-client";
 
 type AuthFormMode = "login" | "signup";
 
-export function AuthForm({ mode }: { mode: AuthFormMode }) {
+export function AuthForm({
+  mode,
+  microsoftEnabled = true,
+  yahooEnabled = true
+}: {
+  mode: AuthFormMode;
+  microsoftEnabled?: boolean;
+  yahooEnabled?: boolean;
+}) {
   const router = useRouter();
   const [error, setError] = useState<string | null>(null);
   const [isPending, startTransition] = useTransition();
@@ -71,8 +79,8 @@ export function AuthForm({ mode }: { mode: AuthFormMode }) {
     <form onSubmit={handleSubmit} className="space-y-5">
       <div className="space-y-2">
         <GoogleButton mode={mode} />
-        <MicrosoftButton mode={mode} />
-        <YahooButton mode={mode} />
+        <MicrosoftButton mode={mode} enabled={microsoftEnabled} />
+        <YahooButton mode={mode} enabled={yahooEnabled} />
       </div>
 
       <div className="relative" aria-hidden>
