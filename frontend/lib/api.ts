@@ -101,6 +101,7 @@ import type {
 import type {
   AdjacentResponse,
   AdminUserSavedFirmsResponse,
+  LinkedProvidersResponse,
   ContactSearchResponse,
   InstitutionalInvestorListResponse,
   InstitutionalInvestorProfileResponse,
@@ -768,13 +769,14 @@ export async function generateOutreachDraft(
   });
 }
 
-// ── Send outreach via the user's Gmail ─────────────────────────────────────
+// ── Send outreach via the user's chosen provider ──────────────────────────
 // POST /api/v1/outreach/send transmits the (possibly user-edited) draft
-// through Gmail's API using the OAuth token Better Auth stored when the
-// user signed in via Google. 412 responses are recoverable by the modal:
-//   - "google_account_not_linked" → linkSocial with no extra scopes
-//   - "gmail_scope_required" → linkSocial with the gmail.send scope
-// Both flows trigger Google's incremental consent popup.
+// through the provider the user picked (or Gmail by default if no
+// provider is set). 412 responses are recoverable by the modal — each
+// provider has its own pair:
+//   - "<provider>_account_not_linked" → linkSocial without the send scope
+//   - "<provider>_scope_required" / "gmail_scope_required" → linkSocial WITH the send scope
+// Both flows trigger the provider's incremental consent popup.
 export async function sendOutreachEmail(
   payload: OutreachSendRequest
 ): Promise<OutreachSendResponse> {
@@ -782,6 +784,14 @@ export async function sendOutreachEmail(
     method: "POST",
     body: JSON.stringify(payload)
   });
+}
+
+// Which email providers the caller has linked + whether each one
+// already has the send scope. Drives the Outreach modal picker.
+export async function getLinkedProviders(): Promise<LinkedProvidersResponse> {
+  return apiRequest<LinkedProvidersResponse>(
+    "/api/v1/outreach/linked-providers"
+  );
 }
 
 // List of outreach sends (success + failure). Body is omitted from the

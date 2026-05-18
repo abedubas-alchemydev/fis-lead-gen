@@ -190,6 +190,31 @@ class Settings(BaseSettings):
     google_client_id: str | None = None
     google_client_secret: str | None = None
 
+    # Microsoft OAuth — used by:
+    #   1. Better Auth (frontend) for "Continue with Outlook" via the
+    #      ``microsoft`` social provider against tenant ``common`` so
+    #      both work / school AD accounts and consumer outlook.com /
+    #      hotmail.com / live.com accounts can sign in.
+    #   2. Backend (services/email_providers/microsoft_oauth.py) for
+    #      refreshing access tokens used by the Microsoft Graph
+    #      ``users.sendMail`` call in the outreach send path.
+    # Required scope at consent: ``openid email profile offline_access
+    # Mail.Send``. Both can be unset until the Azure AD app
+    # registration lands; the send endpoint surfaces a clean 503 then.
+    microsoft_client_id: str | None = None
+    microsoft_client_secret: str | None = None
+
+    # Yahoo OAuth — used by:
+    #   1. Better Auth (frontend) via the ``genericOAuth`` plugin pointed
+    #      at Yahoo's OIDC discovery URL.
+    #   2. Backend (services/email_providers/yahoo_oauth.py) for
+    #      refreshing access tokens used by the Yahoo SMTP XOAUTH2 send
+    #      path in services/email_providers/yahoo.py.
+    # Required scope at consent: ``openid email profile mail-w``. Both
+    # can be unset until the Yahoo Developer app registration lands.
+    yahoo_client_id: str | None = None
+    yahoo_client_secret: str | None = None
+
     # Email extractor — discovery providers (Hunter, Snov, theHarvester, site crawler).
     # Apollo provider is intentionally absent: upstream module ships without it.
     # All keys are optional; missing credentials short-circuit to a provider-level

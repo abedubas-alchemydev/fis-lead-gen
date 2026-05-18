@@ -23,7 +23,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.db.session import get_db_session
 from app.models.advisor_contact import AdvisorContact
-from app.models.auth import AuthUser
+from app.models.auth import Account, AuthUser
 from app.models.broker_dealer import BrokerDealer
 from app.models.executive_contact import ExecutiveContact
 from app.models.institutional_investor import InstitutionalInvestor
@@ -33,6 +33,8 @@ from app.models.outreach_send import OutreachSend
 from app.models.vault_folder import VaultFolder
 from app.schemas.auth import AuthenticatedUser
 from app.schemas.vault import (
+    LinkedProviderItem,
+    LinkedProvidersResponse,
     OutreachAdvisorDraftRequest,
     OutreachAdvisorSendRequest,
     OutreachDraftRequest,
@@ -46,16 +48,12 @@ from app.schemas.vault import (
     OutreachSendsListResponse,
 )
 from app.services.auth import get_current_user
-from app.services.gmail_sender import (
-    GMAIL_SEND_SCOPE,
-    GmailScopeRequired,
-    GmailSendError,
-    send_gmail,
-)
-from app.services.google_oauth import (
-    GoogleAccountNotLinked,
-    GoogleOAuthConfigurationError,
-    get_fresh_google_access_token,
+from app.services.email_providers import (
+    PROVIDERS,
+    EmailAccountNotLinked,
+    EmailProviderConfigurationError,
+    EmailScopeRequired,
+    EmailSendError,
 )
 from app.services.outreach import (
     ContactContext,
@@ -66,6 +64,22 @@ from app.services.outreach import (
     generate_outreach_draft,
 )
 from app.services.vault_retrieval import retrieve_chunks
+
+
+# Pre-PR-C error codes the FE already handles. Preserved so the modal's
+# existing recovery flow (linkSocial with the send scope) keeps working
+# without an FE change for the Gmail path. Microsoft + Yahoo emit the
+# provider-prefixed variants below.
+_SCOPE_ERROR_CODE: dict[str, str] = {
+    "google": "gmail_scope_required",
+    "microsoft": "microsoft_scope_required",
+    "yahoo": "yahoo_scope_required",
+}
+_API_ERROR_CODE: dict[str, str] = {
+    "google": "gmail_api_error",
+    "microsoft": "microsoft_api_error",
+    "yahoo": "yahoo_api_error",
+}
 
 logger = logging.getLogger(__name__)
 
@@ -241,58 +255,16 @@ async def send_outreach(
         subject=payload.subject,
         body=payload.body,
         status="failed",
+        provider=payload.provider,
     )
-
-    try:
-        access_token, scopes = await get_fresh_google_access_token(
-            db=db, user_id=current_user.id
-        )
-    except GoogleAccountNotLinked as exc:
-        await _record_failure(db, audit, "google_account_not_linked")
-        raise HTTPException(
-            status_code=412, detail="google_account_not_linked"
-        ) from exc
-    except GoogleOAuthConfigurationError as exc:
-        logger.error("Google OAuth not configured: %s", exc)
-        await _record_failure(db, audit, "google_oauth_not_configured")
-        raise HTTPException(
-            status_code=503, detail="google_oauth_not_configured"
-        ) from exc
-
-    if GMAIL_SEND_SCOPE not in scopes:
-        await _record_failure(db, audit, "gmail_scope_required")
-        raise HTTPException(status_code=412, detail="gmail_scope_required")
-
-    try:
-        gmail_message_id = await send_gmail(
-            access_token=access_token,
-            sender_email=current_user.email,
-            to_email=contact.email,
-            subject=payload.subject,
-            body=payload.body,
-        )
-    except GmailScopeRequired as exc:
-        await _record_failure(db, audit, "gmail_scope_required")
-        raise HTTPException(
-            status_code=412, detail="gmail_scope_required"
-        ) from exc
-    except GmailSendError as exc:
-        logger.warning("Gmail send failed: %s", exc)
-        await _record_failure(db, audit, "gmail_api_error")
-        raise HTTPException(status_code=502, detail="gmail_api_error") from exc
-
-    audit.status = "sent"
-    audit.gmail_message_id = gmail_message_id
-    audit.error = None
-    db.add(audit)
-    await db.commit()
-    await db.refresh(audit)
-
-    return OutreachSendResponse(
-        id=audit.id,
-        gmail_message_id=gmail_message_id,
-        sent_at=audit.sent_at,
-        status=audit.status,
+    return await _provider_send_and_record(
+        db=db,
+        current_user=current_user,
+        audit=audit,
+        recipient_email=contact.email,
+        subject=payload.subject,
+        body=payload.body,
+        provider_id=payload.provider,
     )
 
 
@@ -531,6 +503,7 @@ def _row_to_item(row: tuple, *, include_sender: bool) -> dict:
         "sent_at": send.sent_at,
         "status": send.status,
         "subject": send.subject,
+        "provider": send.provider,
         "gmail_message_id": send.gmail_message_id,
         "error": send.error,
         "firm_type": firm_type,
@@ -675,14 +648,16 @@ async def send_advisor_outreach(
         subject=payload.subject,
         body=payload.body,
         status="failed",
+        provider=payload.provider,
     )
-    return await _gmail_send_and_record(
+    return await _provider_send_and_record(
         db=db,
         current_user=current_user,
         audit=audit,
         recipient_email=contact.email,
         subject=payload.subject,
         body=payload.body,
+        provider_id=payload.provider,
     )
 
 
@@ -742,18 +717,20 @@ async def send_investor_outreach(
         subject=payload.subject,
         body=payload.body,
         status="failed",
+        provider=payload.provider,
     )
-    return await _gmail_send_and_record(
+    return await _provider_send_and_record(
         db=db,
         current_user=current_user,
         audit=audit,
         recipient_email=contact.email,
         subject=payload.subject,
         body=payload.body,
+        provider_id=payload.provider,
     )
 
 
-async def _gmail_send_and_record(
+async def _provider_send_and_record(
     *,
     db: AsyncSession,
     current_user: AuthenticatedUser,
@@ -761,56 +738,75 @@ async def _gmail_send_and_record(
     recipient_email: str,
     subject: str,
     body: str,
+    provider_id: str,
 ) -> OutreachSendResponse:
-    """Shared Gmail send + audit-row commit path.
+    """Dispatch the send to the right provider + commit the audit row.
 
-    Pulled out so BD/advisor/investor /send handlers don't re-implement
-    the Gmail OAuth handshake, scope validation, and audit-failure paths.
-    Raises the same 412/502/503 HTTPExceptions the BD /send raises;
-    persists an OutreachSend row on every outcome (success + each
-    failure code).
+    Replaces the Gmail-only ``_gmail_send_and_record`` helper from the
+    pre-multi-provider era. Looks up the provider implementation in
+    :data:`PROVIDERS`, runs the token refresh + scope check + send,
+    and surfaces typed errors as HTTPExceptions with provider-prefixed
+    detail codes so the FE knows which "Connect X" CTA to render.
+
+    Error-code shape: the Gmail path keeps its legacy ``gmail_*`` codes
+    for FE back-compat; Microsoft + Yahoo emit ``<provider>_*`` codes
+    (see :data:`_SCOPE_ERROR_CODE` / :data:`_API_ERROR_CODE`).
     """
 
+    provider = PROVIDERS.get(provider_id)
+    if provider is None:
+        await _record_failure(db, audit, "unknown_provider")
+        raise HTTPException(status_code=400, detail="unknown_provider")
+
+    not_linked_code = f"{provider_id}_account_not_linked"
+    not_configured_code = f"{provider_id}_oauth_not_configured"
+    scope_required_code = _SCOPE_ERROR_CODE[provider_id]
+    api_error_code = _API_ERROR_CODE[provider_id]
+
     try:
-        access_token, scopes = await get_fresh_google_access_token(
+        access_token, scopes = await provider.get_fresh_token(
             db=db, user_id=current_user.id
         )
-    except GoogleAccountNotLinked as exc:
-        await _record_failure(db, audit, "google_account_not_linked")
+    except EmailAccountNotLinked as exc:
+        await _record_failure(db, audit, not_linked_code)
         raise HTTPException(
-            status_code=412, detail="google_account_not_linked"
+            status_code=412, detail=not_linked_code
         ) from exc
-    except GoogleOAuthConfigurationError as exc:
-        logger.error("Google OAuth not configured: %s", exc)
-        await _record_failure(db, audit, "google_oauth_not_configured")
+    except EmailProviderConfigurationError as exc:
+        logger.error(
+            "Provider %s OAuth not configured: %s", provider_id, exc
+        )
+        await _record_failure(db, audit, not_configured_code)
         raise HTTPException(
-            status_code=503, detail="google_oauth_not_configured"
+            status_code=503, detail=not_configured_code
         ) from exc
 
-    if GMAIL_SEND_SCOPE not in scopes:
-        await _record_failure(db, audit, "gmail_scope_required")
-        raise HTTPException(status_code=412, detail="gmail_scope_required")
+    if provider.send_scope not in scopes:
+        await _record_failure(db, audit, scope_required_code)
+        raise HTTPException(status_code=412, detail=scope_required_code)
 
     try:
-        gmail_message_id = await send_gmail(
+        message_id = await provider.send(
             access_token=access_token,
             sender_email=current_user.email,
             to_email=recipient_email,
             subject=subject,
             body=body,
         )
-    except GmailScopeRequired as exc:
-        await _record_failure(db, audit, "gmail_scope_required")
+    except EmailScopeRequired as exc:
+        await _record_failure(db, audit, scope_required_code)
         raise HTTPException(
-            status_code=412, detail="gmail_scope_required"
+            status_code=412, detail=scope_required_code
         ) from exc
-    except GmailSendError as exc:
-        logger.warning("Gmail send failed: %s", exc)
-        await _record_failure(db, audit, "gmail_api_error")
-        raise HTTPException(status_code=502, detail="gmail_api_error") from exc
+    except EmailSendError as exc:
+        logger.warning("%s send failed: %s", provider_id, exc)
+        await _record_failure(db, audit, api_error_code)
+        raise HTTPException(
+            status_code=502, detail=api_error_code
+        ) from exc
 
     audit.status = "sent"
-    audit.gmail_message_id = gmail_message_id
+    audit.gmail_message_id = message_id
     audit.error = None
     db.add(audit)
     await db.commit()
@@ -818,7 +814,7 @@ async def _gmail_send_and_record(
 
     return OutreachSendResponse(
         id=audit.id,
-        gmail_message_id=gmail_message_id,
+        gmail_message_id=message_id,
         sent_at=audit.sent_at,
         status=audit.status,
     )
@@ -905,3 +901,55 @@ async def get_outreach_send(
     payload = _row_to_item(row, include_sender=include_sender)
     payload["body"] = row[0].body
     return OutreachSendDetailResponse(**payload)
+
+
+@router.get(
+    "/linked-providers", response_model=LinkedProvidersResponse
+)
+async def list_linked_providers(
+    current_user: AuthenticatedUser = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db_session),
+) -> LinkedProvidersResponse:
+    """Which email providers the calling user has linked + whether each
+    one already has the send scope granted.
+
+    Used by the Outreach modal to drive the provider picker:
+      - 0 linked: render "Connect Gmail / Outlook / Yahoo" buttons.
+      - 1 linked: hide picker, use it implicitly.
+      - 2+ linked: render a small "Send from:" dropdown.
+
+    Returns rows ordered by ``linked_at`` ascending (oldest first) so
+    the modal can pick a deterministic default when more than one is
+    linked. Only the three supported providers are surfaced; any other
+    ``account.provider_id`` rows (e.g. legacy migrations) are filtered
+    out.
+    """
+
+    stmt = (
+        select(Account)
+        .where(Account.user_id == current_user.id)
+        .where(Account.provider_id.in_(("google", "microsoft", "yahoo")))
+        .order_by(Account.created_at.asc())
+    )
+    accounts = (await db.execute(stmt)).scalars().all()
+
+    items: list[LinkedProviderItem] = []
+    for account in accounts:
+        # provider_id is already validated by the WHERE clause above, but
+        # cast through dict lookup so a future provider_id added at the
+        # DB level can't sneak past the Literal type. Note: PROVIDERS
+        # may be subset-mocked in tests.
+        provider = PROVIDERS.get(account.provider_id)
+        if provider is None:
+            continue
+        scopes = (account.scope or "").replace(",", " ").split()
+        has_send_scope = provider.send_scope in scopes
+        items.append(
+            LinkedProviderItem(
+                provider=account.provider_id,  # type: ignore[arg-type]
+                scope=account.scope,
+                has_send_scope=has_send_scope,
+                linked_at=account.created_at,
+            )
+        )
+    return LinkedProvidersResponse(items=items)

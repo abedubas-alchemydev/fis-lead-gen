@@ -10,6 +10,8 @@ import { Input } from "@/components/ui/input";
 import { Button } from "@/components/ui/button";
 import { PasswordInput } from "@/components/ui/password-input";
 import { GoogleButton } from "@/components/auth/google-button";
+import { MicrosoftButton } from "@/components/auth/microsoft-button";
+import { YahooButton } from "@/components/auth/yahoo-button";
 import { authClient } from "@/lib/auth-client";
 
 type AuthFormMode = "login" | "signup";
@@ -67,7 +69,11 @@ export function AuthForm({ mode }: { mode: AuthFormMode }) {
 
   return (
     <form onSubmit={handleSubmit} className="space-y-5">
-      <GoogleButton mode={mode} />
+      <div className="space-y-2">
+        <GoogleButton mode={mode} />
+        <MicrosoftButton mode={mode} />
+        <YahooButton mode={mode} />
+      </div>
 
       <div className="relative" aria-hidden>
         <div className="absolute inset-x-0 top-1/2 h-px bg-[var(--border,rgba(30,64,175,0.1))]" />

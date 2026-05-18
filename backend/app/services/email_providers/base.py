@@ -1,0 +1,101 @@
+"""Email-provider Protocol + shared exceptions.
+
+Pulled out so :mod:`app.api.v1.endpoints.outreach` can dispatch on
+``account.provider_id`` without importing provider-specific modules
+and so each concrete provider in this package can raise the same
+typed exceptions for the endpoint's 412 / 502 / 503 mapping.
+"""
+
+from __future__ import annotations
+
+from typing import Protocol, runtime_checkable
+
+from sqlalchemy.ext.asyncio import AsyncSession
+
+
+class EmailAccountNotLinked(RuntimeError):
+    """No ``account`` row for this provider, or the refresh token is dead.
+
+    Maps to ``412 <provider>_account_not_linked`` so the frontend can
+    surface a "Connect <Provider>" CTA and trigger
+    ``authClient.linkSocial`` (Google/Microsoft) or
+    ``authClient.signIn.oauth2`` (Yahoo via the generic OAuth plugin).
+    """
+
+
+class EmailScopeRequired(RuntimeError):
+    """Account linked but missing the send scope.
+
+    Maps to ``412 <provider>_scope_required``. The FE prompts the same
+    link flow with the send scope included.
+    """
+
+
+class EmailSendError(RuntimeError):
+    """Provider's send API rejected the request for a non-auth reason.
+
+    Maps to ``502 <provider>_api_error``. Examples: rate limited, mailbox
+    over quota, recipient bounced fast-fail, SMTP transient.
+    """
+
+
+class EmailProviderConfigurationError(RuntimeError):
+    """Provider client_id / client_secret are missing from env.
+
+    Maps to ``503 <provider>_oauth_not_configured``. Surfaces when the
+    deploy is missing the env values the OAuth refresh path needs.
+    """
+
+
+@runtime_checkable
+class EmailProvider(Protocol):
+    """Contract every transport in this package implements.
+
+    Kept as a Protocol (not an abstract base class) so the concrete
+    classes don't need to inherit — just match the shape. ``provider_id``
+    is the discriminator stored on ``outreach_sends.provider`` and used
+    as the dispatch key in :data:`PROVIDERS`.
+    """
+
+    provider_id: str
+    send_scope: str
+    """The OAuth scope required to send. Frontend uses this to drive the
+    incremental-consent ``linkSocial`` call when a 412 *_scope_required
+    is returned."""
+
+    async def get_fresh_token(
+        self, db: AsyncSession, user_id: str
+    ) -> tuple[str, list[str]]:
+        """Refresh and return ``(access_token, scopes)`` for this user.
+
+        Raises :class:`EmailAccountNotLinked` when there is no account
+        row or the refresh token is revoked;
+        :class:`EmailProviderConfigurationError` when the env config is
+        missing. Concrete implementations may also raise the bare
+        ``httpx`` errors for transient network failures, which the
+        endpoint maps to 502 :class:`EmailSendError`.
+        """
+        ...
+
+    async def send(
+        self,
+        *,
+        access_token: str,
+        sender_email: str,
+        to_email: str,
+        subject: str,
+        body: str,
+    ) -> str:
+        """Send the email and return a provider-side message id.
+
+        Gmail returns the real Gmail message id. Microsoft Graph and
+        Yahoo SMTP don't return an id we can rely on; those providers
+        return a synthetic ``{provider_id}-{iso8601}`` placeholder so
+        the audit row's ``gmail_message_id`` column always has
+        something searchable.
+
+        Raises :class:`EmailScopeRequired` when the provider rejects the
+        send for a missing scope, :class:`EmailSendError` for any other
+        provider failure.
+        """
+        ...

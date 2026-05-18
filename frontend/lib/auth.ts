@@ -1,5 +1,6 @@
 import { betterAuth } from "better-auth";
 import { APIError } from "better-auth/api";
+import { genericOAuth } from "better-auth/plugins";
 import { Pool } from "pg";
 
 import {
@@ -67,8 +68,46 @@ export const auth = betterAuth({
       clientSecret: process.env.GOOGLE_CLIENT_SECRET ?? "",
       accessType: "offline",
       prompt: "consent"
+    },
+    // "Continue with Outlook" — Microsoft work / school AD accounts AND
+    // consumer Microsoft accounts (outlook.com, hotmail.com, live.com).
+    // tenant ``common`` accepts both. ``offline_access`` + ``prompt: consent``
+    // mirror the Google flow so the FE reliably receives a refresh_token
+    // that the backend's microsoft_oauth.py can use to refresh the
+    // bearer token before each MS Graph send. The Mail.Send scope stays
+    // out of the initial consent — the Outreach modal's linkSocial flow
+    // requests it the first time the user clicks Send, matching the
+    // Gmail incremental-consent pattern.
+    microsoft: {
+      clientId: process.env.MICROSOFT_CLIENT_ID ?? "",
+      clientSecret: process.env.MICROSOFT_CLIENT_SECRET ?? "",
+      scope: ["openid", "email", "profile", "offline_access"],
+      prompt: "consent"
     }
   },
+  // Yahoo isn't a Better Auth first-party social provider in 1.3.6, so
+  // it's wired via the genericOAuth plugin against Yahoo's OIDC
+  // discovery URL. The backend's yahoo_oauth.py refresh path is the same
+  // shape as the Google / Microsoft helpers; the only Yahoo-specific
+  // wrinkle is that the SEND path is SMTP+XOAUTH2 (no REST send API).
+  plugins: [
+    genericOAuth({
+      config: [
+        {
+          providerId: "yahoo",
+          clientId: process.env.YAHOO_CLIENT_ID ?? "",
+          clientSecret: process.env.YAHOO_CLIENT_SECRET ?? "",
+          discoveryUrl:
+            "https://api.login.yahoo.com/.well-known/openid-configuration",
+          scopes: ["openid", "email", "profile"],
+          // mail-w is the send scope — requested on demand from the
+          // outreach modal via authClient.linkSocial, same as the
+          // gmail.send incremental-consent flow.
+          prompt: "consent"
+        }
+      ]
+    })
+  ],
   emailVerification: {
     sendOnSignUp: true,
     // Off on purpose: session.create.before blocks non-active users, so an

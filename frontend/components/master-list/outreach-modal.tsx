@@ -7,11 +7,17 @@ import { useEffect, useMemo, useRef, useState } from "react";
 import {
   ApiError,
   generateOutreachDraft,
+  getLinkedProviders,
   listVaultFolders,
   sendOutreachEmail
 } from "@/lib/api";
 import { authClient } from "@/lib/auth-client";
-import type { ExecutiveContactItem, VaultFolder } from "@/lib/types";
+import type {
+  EmailProviderId,
+  ExecutiveContactItem,
+  LinkedProviderItem,
+  VaultFolder
+} from "@/lib/types";
 
 // Modal that powers the per-contact "Outreach" button on the firm-detail
 // panel. Loads the caller's vault folders, lets them pick a service,
@@ -38,14 +44,66 @@ type Stage =
   | "sent"
   | "error";
 
-const GMAIL_SEND_SCOPE = "https://www.googleapis.com/auth/gmail.send";
+// Per-provider send scopes the backend expects in account.scope after
+// the user's first Send click. Mirrors
+// backend/app/services/email_providers/<provider>.py:SEND_SCOPE (or
+// GMAIL_SEND_SCOPE for Google) so the FE incremental-consent flow asks
+// for exactly the scope the BE checks for.
+const SEND_SCOPE_BY_PROVIDER: Record<EmailProviderId, string> = {
+  google: "https://www.googleapis.com/auth/gmail.send",
+  microsoft: "Mail.Send",
+  yahoo: "mail-w"
+};
 
-// Backend 412 detail codes — kept here as constants so the recovery
-// flow doesn't typo a string compare.
-const LINK_RECOVERABLE_CODES = new Set([
+const PROVIDER_LABEL: Record<EmailProviderId, string> = {
+  google: "Gmail",
+  microsoft: "Outlook",
+  yahoo: "Yahoo Mail"
+};
+
+// Backend 412 detail codes per provider. The Gmail path keeps its
+// legacy codes ("google_account_not_linked" / "gmail_scope_required")
+// for back-compat; Microsoft + Yahoo use the provider-prefixed
+// variants. ``decodeLinkAction`` parses these to drive linkSocial
+// with the right provider + scope when a 412 lands.
+const LINK_RECOVERABLE_CODES = new Set<string>([
   "google_account_not_linked",
-  "gmail_scope_required"
+  "gmail_scope_required",
+  "microsoft_account_not_linked",
+  "microsoft_scope_required",
+  "yahoo_account_not_linked",
+  "yahoo_scope_required"
 ]);
+
+function decodeLinkAction(
+  detail: string,
+  fallback: EmailProviderId
+): { provider: EmailProviderId; needsSendScope: boolean } | null {
+  if (detail === "google_account_not_linked") {
+    return { provider: "google", needsSendScope: false };
+  }
+  if (detail === "gmail_scope_required") {
+    return { provider: "google", needsSendScope: true };
+  }
+  if (detail === "microsoft_account_not_linked") {
+    return { provider: "microsoft", needsSendScope: false };
+  }
+  if (detail === "microsoft_scope_required") {
+    return { provider: "microsoft", needsSendScope: true };
+  }
+  if (detail === "yahoo_account_not_linked") {
+    return { provider: "yahoo", needsSendScope: false };
+  }
+  if (detail === "yahoo_scope_required") {
+    return { provider: "yahoo", needsSendScope: true };
+  }
+  // Future-proof: any other LINK_RECOVERABLE_CODES entry defaults to
+  // the currently selected provider with send scope.
+  if (LINK_RECOVERABLE_CODES.has(detail)) {
+    return { provider: fallback, needsSendScope: true };
+  }
+  return null;
+}
 
 export function OutreachModal({
   brokerDealerId,
@@ -60,10 +118,20 @@ export function OutreachModal({
   const [body, setBody] = useState("");
   const [error, setError] = useState<string | null>(null);
   const [copyState, setCopyState] = useState<"idle" | "subject" | "body">("idle");
-  // Toggled when the BE returns 412 google_account_not_linked /
-  // gmail_scope_required so the error block renders a "Grant Gmail
-  // access" CTA alongside the message.
+  // Toggled when the BE returns 412 <provider>_account_not_linked /
+  // <provider>_scope_required so the error block renders a
+  // "Grant <provider> access" CTA. ``linkActionProvider`` carries the
+  // provider the action targets (may differ from the currently selected
+  // provider on the rare case where the BE flips it).
   const [linkActionNeeded, setLinkActionNeeded] = useState(false);
+  const [linkActionProvider, setLinkActionProvider] =
+    useState<EmailProviderId | null>(null);
+  // Linked-provider state — drives the "Send from:" dropdown when 2+
+  // providers are linked, and the "Connect <provider>" CTAs when 0.
+  const [linkedProviders, setLinkedProviders] = useState<LinkedProviderItem[]>(
+    []
+  );
+  const [providerId, setProviderId] = useState<EmailProviderId>("google");
   const session = authClient.useSession();
   const senderEmail = session.data?.user?.email ?? null;
 
@@ -109,6 +177,34 @@ export function OutreachModal({
     };
   }, []);
 
+  // Linked-providers fetch — runs in parallel with the folders fetch so
+  // the dropdown is ready by the time the user clicks Generate.
+  // Failures here are non-fatal: if the call 500s we keep ``providerId``
+  // at its "google" default and the user can still send (assuming Gmail
+  // is linked); the BE's 412 path catches the not-linked case.
+  useEffect(() => {
+    let cancelled = false;
+    (async () => {
+      try {
+        const result = await getLinkedProviders();
+        if (cancelled || !isMountedRef.current) return;
+        setLinkedProviders(result.items);
+        // Default to the first linked provider that has the send scope
+        // already granted (so the user's Send click doesn't need a
+        // round-trip through linkSocial). Falls back to the first
+        // linked provider, then "google" if nothing is linked.
+        const withScope = result.items.find((p) => p.has_send_scope);
+        const fallback = result.items[0]?.provider ?? "google";
+        setProviderId(withScope?.provider ?? fallback);
+      } catch {
+        // Swallow — keep "google" default, BE's 412 will guide the user.
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+
   const selectedFolder = useMemo(
     () => folders.find((f) => f.id === folderId) ?? null,
     [folders, folderId]
@@ -140,47 +236,81 @@ export function OutreachModal({
     setStage("sending");
     setError(null);
     setLinkActionNeeded(false);
+    setLinkActionProvider(null);
     try {
       await sendOutreachEmail({
         broker_dealer_id: brokerDealerId,
         contact_id: contact.id,
         folder_id: folderId ?? 0,
         subject,
-        body
+        body,
+        provider: providerId
       });
       if (!isMountedRef.current) return;
       setStage("sent");
     } catch (err) {
       if (!isMountedRef.current) return;
-      const message = buildSendErrorMessage(err);
-      const recoverable =
-        err instanceof ApiError &&
-        err.status === 412 &&
-        LINK_RECOVERABLE_CODES.has(err.detail);
+      const message = buildSendErrorMessage(err, providerId);
+      const action =
+        err instanceof ApiError && err.status === 412
+          ? decodeLinkAction(err.detail, providerId)
+          : null;
       setError(message);
-      setLinkActionNeeded(recoverable);
+      setLinkActionNeeded(action !== null);
+      setLinkActionProvider(action?.provider ?? null);
       // Roll back to draft so the user can edit + retry; the error
       // block above the action row carries the explanation.
       setStage("draft");
     }
   }
 
-  async function handleLinkGmail() {
-    // Triggers Google's incremental-consent flow for the gmail.send
+  async function handleLinkProvider(target: EmailProviderId) {
+    // Triggers the provider's incremental-consent flow for its send
     // scope. Better Auth merges the new scope onto the existing
     // ``account`` row server-side, then redirects back to callbackURL.
     // The page reloads, so any unsaved edits to subject/body are lost
     // — flagged in the inline message above so the user knows to
-    // copy-out first if needed.
+    // copy-out first if needed. Microsoft uses the same linkSocial
+    // helper as Google; Yahoo (genericOAuth) uses linkOAuth2.
+    const sendScope = SEND_SCOPE_BY_PROVIDER[target];
     try {
+      if (target === "yahoo") {
+        // Better Auth 1.3.6 generic-OAuth client plugin: linkOAuth2 if
+        // available, else fall back to signIn.oauth2 which Better Auth
+        // treats as a link when the user is already signed in.
+        const maybeLink = (authClient as unknown as {
+          linkOAuth2?: (args: {
+            providerId: string;
+            scopes?: string[];
+            callbackURL?: string;
+          }) => Promise<unknown>;
+        }).linkOAuth2;
+        if (maybeLink) {
+          await maybeLink({
+            providerId: "yahoo",
+            scopes: [sendScope],
+            callbackURL: window.location.href
+          });
+        } else {
+          await authClient.signIn.oauth2({
+            providerId: "yahoo",
+            callbackURL: window.location.href
+          });
+        }
+        return;
+      }
       await authClient.linkSocial({
-        provider: "google",
-        scopes: [GMAIL_SEND_SCOPE],
+        provider: target,
+        scopes: [sendScope],
         callbackURL: window.location.href
       });
     } catch (err) {
       if (!isMountedRef.current) return;
-      setError(err instanceof Error ? err.message : "Failed to open Google.");
+      setError(
+        err instanceof Error
+          ? err.message
+          : `Failed to open ${PROVIDER_LABEL[target]}.`
+      );
     }
   }
 
@@ -243,7 +373,11 @@ export function OutreachModal({
             </p>
             {senderEmail && (stage === "draft" || stage === "sending") ? (
               <p className="mt-1 text-[11px] text-[var(--text-muted,#94a3b8)]">
-                Sending as <span className="text-[var(--text-dim,#475569)]">{senderEmail}</span>
+                Sending as <span className="text-[var(--text-dim,#475569)]">{senderEmail}</span>{" "}
+                via{" "}
+                <span className="text-[var(--text-dim,#475569)]">
+                  {PROVIDER_LABEL[providerId]}
+                </span>
               </p>
             ) : null}
           </div>
@@ -306,6 +440,52 @@ export function OutreachModal({
                 This service has no description - drafts will be more generic.
               </p>
             )}
+            {linkedProviders.length >= 2 ? (
+              <label className="block text-xs font-medium uppercase tracking-[0.18em] text-[var(--text-muted,#94a3b8)]">
+                Send from
+                <select
+                  value={providerId}
+                  onChange={(event) =>
+                    setProviderId(event.target.value as EmailProviderId)
+                  }
+                  disabled={stage === "generating"}
+                  className="mt-2 block w-full rounded-xl border border-[var(--border,rgba(30,64,175,0.1))] bg-[var(--surface,#ffffff)] px-3 py-2 text-sm text-[var(--text,#0f172a)] outline-none transition focus:border-[var(--accent,#6366f1)] focus:ring-2 focus:ring-[var(--accent,#6366f1)]/20 disabled:cursor-not-allowed disabled:opacity-60"
+                >
+                  {linkedProviders.map((p) => (
+                    <option key={p.provider} value={p.provider}>
+                      {PROVIDER_LABEL[p.provider]}
+                      {p.has_send_scope ? "" : " (will request send access)"}
+                    </option>
+                  ))}
+                </select>
+              </label>
+            ) : null}
+            {linkedProviders.length === 0 ? (
+              <div className="rounded-xl border border-amber-200 bg-amber-50/70 px-3 py-3 text-xs leading-5 text-[var(--text-dim,#475569)]">
+                <p className="font-medium text-[var(--text,#0f172a)]">
+                  No email accounts connected yet.
+                </p>
+                <p className="mt-1">
+                  Connect a provider so Send can transmit through your own
+                  mailbox. You can also click Generate now and connect at the
+                  Send step.
+                </p>
+                <div className="mt-2 flex flex-wrap items-center gap-2">
+                  {(
+                    ["google", "microsoft", "yahoo"] as const satisfies readonly EmailProviderId[]
+                  ).map((p) => (
+                    <button
+                      key={p}
+                      type="button"
+                      onClick={() => void handleLinkProvider(p)}
+                      className="inline-flex h-8 items-center rounded-xl border border-amber-300 bg-white px-3 text-[11px] font-semibold text-amber-800 transition hover:bg-amber-50"
+                    >
+                      Connect {PROVIDER_LABEL[p]}
+                    </button>
+                  ))}
+                </div>
+              </div>
+            ) : null}
           </div>
         ) : null}
 
@@ -397,10 +577,12 @@ export function OutreachModal({
             {linkActionNeeded ? (
               <button
                 type="button"
-                onClick={() => void handleLinkGmail()}
+                onClick={() =>
+                  void handleLinkProvider(linkActionProvider ?? providerId)
+                }
                 className="mt-2 inline-flex h-8 items-center rounded-xl bg-danger px-3 text-xs font-semibold text-white transition hover:bg-red-700"
               >
-                Grant Gmail access
+                Grant {PROVIDER_LABEL[linkActionProvider ?? providerId]} access
               </button>
             ) : null}
           </div>
@@ -481,23 +663,39 @@ function buildGenerateErrorMessage(error: unknown): string {
   return errorMessage(error);
 }
 
-function buildSendErrorMessage(error: unknown): string {
+function buildSendErrorMessage(
+  error: unknown,
+  providerId: EmailProviderId
+): string {
   if (error instanceof ApiError && error.status === 412) {
-    if (error.detail === "google_account_not_linked") {
-      return "Connect your Google account to send outreach from your Gmail.";
+    if (
+      error.detail === "google_account_not_linked" ||
+      error.detail === "microsoft_account_not_linked" ||
+      error.detail === "yahoo_account_not_linked"
+    ) {
+      const target = error.detail.startsWith("google")
+        ? "Google"
+        : error.detail.startsWith("microsoft")
+          ? "Microsoft"
+          : "Yahoo";
+      return `Connect your ${target} account to send outreach from ${PROVIDER_LABEL[providerId]}.`;
     }
-    if (error.detail === "gmail_scope_required") {
-      return "We need permission to send email on your behalf. Grant access below to continue.";
+    if (
+      error.detail === "gmail_scope_required" ||
+      error.detail === "microsoft_scope_required" ||
+      error.detail === "yahoo_scope_required"
+    ) {
+      return `We need permission to send email on your behalf via ${PROVIDER_LABEL[providerId]}. Grant access below to continue.`;
     }
   }
   if (error instanceof ApiError && error.status === 400 && error.detail === "recipient_no_email") {
     return "This contact has no email on file.";
   }
   if (error instanceof ApiError && error.status === 502) {
-    return "Gmail rejected the message. Try again in a moment.";
+    return `${PROVIDER_LABEL[providerId]} rejected the message. Try again in a moment.`;
   }
   if (error instanceof ApiError && error.status === 503) {
-    return "Outreach sending is not configured. Contact an administrator.";
+    return `${PROVIDER_LABEL[providerId]} sending is not configured. Contact an administrator.`;
   }
   if (error instanceof ApiError && error.status === 404) {
     return "We couldn't find the firm, contact, or service for this send.";
