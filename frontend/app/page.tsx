@@ -3,6 +3,7 @@ import { redirect } from "next/navigation";
 import { Activity, BarChart3, Lock, Shield, Target, Zap } from "lucide-react";
 
 import { BrandMark } from "@/components/brand/brand-mark";
+import { LiveDashboardMockup } from "@/components/landing/live-dashboard-mockup";
 import { getOptionalSession } from "@/lib/auth-server";
 
 export default async function HomePage() {
@@ -59,23 +60,23 @@ export default async function HomePage() {
                 </span>
               </h1>
               <p className="animate-fade-in delay-300 mt-6 max-w-lg text-lg leading-relaxed text-[var(--text-dim,#475569)]">
-                Aggregate SEC and FINRA data. Map clearing relationships.
-                Score and surface high-value prospects for firms offering settlement
-                and clearing services.
+                See every new broker-dealer, FOCUS filing, and clearing-partner
+                change the moment it hits SEC or FINRA — ranked by who&apos;s worth
+                your next call.
               </p>
               <div className="animate-fade-in delay-400 mt-10 flex flex-wrap items-center gap-4">
                 <Link
                   href="/signup"
                   className="group relative overflow-hidden rounded-2xl bg-[var(--accent,#6366f1)] px-7 py-4 text-sm font-semibold text-white shadow-lg shadow-[var(--accent,#6366f1)]/25 transition hover:-translate-y-0.5 hover:shadow-xl hover:shadow-[var(--accent,#6366f1)]/30"
                 >
-                  <span className="relative z-10">Start free trial</span>
+                  <span className="relative z-10">See live prospects</span>
                   <div className="absolute inset-0 bg-gradient-to-r from-[var(--accent,#6366f1)] to-[var(--accent-2,#8b5cf6)] opacity-0 transition-opacity group-hover:opacity-100" />
                 </Link>
                 <Link
                   href="/login"
                   className="rounded-2xl border border-[var(--border,rgba(30,64,175,0.1))] bg-[var(--surface,#ffffff)] px-7 py-4 text-sm font-semibold text-[var(--text,#0f172a)] shadow-sm transition hover:-translate-y-0.5 hover:border-[var(--accent,#6366f1)]/30 hover:shadow-md"
                 >
-                  Sign in to dashboard
+                  Sign in
                 </Link>
               </div>
 
@@ -83,11 +84,11 @@ export default async function HomePage() {
               <div className="animate-fade-in delay-600 mt-14 flex flex-wrap items-center gap-6 border-t border-[var(--border,rgba(30,64,175,0.1))] pt-8">
                 <div className="flex items-center gap-2 text-sm text-[var(--text-muted,#94a3b8)]">
                   <Shield className="h-4 w-4 text-success" />
-                  SOC 2 ready architecture
+                  SOC 2-ready architecture
                 </div>
                 <div className="flex items-center gap-2 text-sm text-[var(--text-muted,#94a3b8)]">
                   <Lock className="h-4 w-4 text-success" />
-                  Encrypted at rest
+                  AES-256 encryption at rest
                 </div>
                 <div className="flex items-center gap-2 text-sm text-[var(--text-muted,#94a3b8)]">
                   <Activity className="h-4 w-4 text-success" />
@@ -97,51 +98,28 @@ export default async function HomePage() {
             </div>
 
             {/* Right: Dashboard preview card */}
-            <div className="animate-fade-in-right delay-300 relative hidden lg:block">
-              <div className="animate-float relative rounded-[28px] border border-[var(--border,rgba(30,64,175,0.1))] bg-[var(--surface,#ffffff)]/80 p-2 shadow-2xl shadow-[var(--accent,#6366f1)]/10 backdrop-blur">
-                <div className="rounded-[22px] bg-gradient-to-br from-navy via-[#0f2d52] to-[#163768] p-8">
-                  {/* Mini dashboard mockup */}
-                  <div className="mb-6 flex items-center justify-between">
-                    <div>
-                      <p className="text-[10px] uppercase tracking-[0.3em] text-white/50">Live Platform</p>
-                      <p className="mt-1 text-sm font-semibold text-white">DOX Intelligence Workspace</p>
-                    </div>
-                    <div className="h-2 w-2 rounded-full bg-success animate-pulse" />
-                  </div>
-                  <div className="grid grid-cols-2 gap-3">
-                    {[
-                      { label: "Active BDs", value: "3,847", color: "bg-white/10" },
-                      { label: "New (30d)", value: "127", color: "bg-blue/20" },
-                      { label: "Hot Prospects", value: "312", color: "bg-gold/20" },
-                      { label: "Deficiencies", value: "18", color: "bg-danger/20" },
-                    ].map((kpi) => (
-                      <div key={kpi.label} className={`rounded-2xl ${kpi.color} p-4 backdrop-blur`}>
-                        <p className="text-[10px] uppercase tracking-[0.2em] text-white/50">{kpi.label}</p>
-                        <p className="mt-2 text-xl font-bold text-white">{kpi.value}</p>
-                      </div>
-                    ))}
-                  </div>
-                  <div className="mt-4 rounded-2xl bg-white/5 p-4">
-                    <p className="text-[10px] uppercase tracking-[0.2em] text-white/40">Clearing Distribution</p>
-                    <div className="mt-3 flex gap-1">
-                      {[40, 25, 15, 12, 8].map((w, i) => (
-                        <div
-                          key={i}
-                          className="h-2 rounded-full"
-                          style={{
-                            width: `${w}%`,
-                            backgroundColor: ["#1B5E9E", "#2d7fd3", "#E8A838", "#6d8097", "#27AE60"][i],
-                          }}
-                        />
-                      ))}
-                    </div>
-                  </div>
-                </div>
-              </div>
-              {/* Glow behind card */}
-              <div className="pointer-events-none absolute -inset-4 -z-10 rounded-[36px] bg-gradient-to-br from-blue/15 via-transparent to-gold/10 blur-2xl" />
-            </div>
+            <LiveDashboardMockup />
           </div>
+        </div>
+      </section>
+
+      {/* ── Social proof strip ──────────────────────────────── */}
+      <section className="animate-fade-in border-y border-[var(--border,rgba(30,64,175,0.1))] bg-[var(--surface,#ffffff)]/50 py-10 backdrop-blur-sm">
+        <div className="mx-auto grid max-w-7xl grid-cols-2 gap-y-8 px-6 md:grid-cols-4">
+          {[
+            { metric: "3,800+", label: "broker-dealers tracked across SEC + FINRA" },
+            { metric: "Daily", label: "Form BD + 17a-11 deficiency scans" },
+            { metric: "X-17A-5", label: "clearing relationships extracted via LLM" },
+            { metric: "< 24h", label: "from filing to scored prospect" },
+          ].map((pillar) => (
+            <div
+              key={pillar.metric}
+              className="flex flex-col gap-1 md:border-r md:border-[var(--border,rgba(30,64,175,0.1))] md:pr-6 md:last:border-r-0"
+            >
+              <p className="text-2xl font-bold tracking-tight text-[var(--text,#0f172a)]">{pillar.metric}</p>
+              <p className="text-xs leading-snug text-[var(--text-muted,#94a3b8)]">{pillar.label}</p>
+            </div>
+          ))}
         </div>
       </section>
 
@@ -215,41 +193,6 @@ export default async function HomePage() {
                 <p className="mt-2 text-sm leading-relaxed text-[var(--text-muted,#94a3b8)]">{feature.desc}</p>
               </div>
             ))}
-          </div>
-        </div>
-      </section>
-
-      {/* ── CTA ─────────────────────────────────────────────── */}
-      <section className="py-24">
-        <div className="mx-auto max-w-7xl px-6">
-          <div className="relative overflow-hidden rounded-[32px] bg-gradient-to-br from-[var(--accent,#6366f1)] via-[#5b58e8] to-[var(--accent-2,#8b5cf6)] px-8 py-16 text-center text-white shadow-2xl shadow-[var(--accent,#6366f1)]/25 sm:px-16">
-            <div className="pointer-events-none absolute -right-20 -top-20 h-72 w-72 rounded-full bg-blue/10 blur-3xl" />
-            <div className="pointer-events-none absolute -bottom-10 -left-10 h-56 w-56 rounded-full bg-gold/10 blur-3xl" />
-            <p className="relative text-sm font-semibold uppercase tracking-[0.25em] text-white/60">Ready to start</p>
-            <h2 className="relative mt-4 text-3xl font-bold sm:text-4xl">
-              Surface your next{" "}
-              <span className="bg-gradient-to-r from-gold to-[#f0c060] bg-clip-text text-transparent">
-                $22M deal
-              </span>
-            </h2>
-            <p className="relative mx-auto mt-4 max-w-lg text-base text-white/70">
-              DOX has surfaced eight-figure clearing opportunities through similar intelligence.
-              Every clearing prospect starts with a signal you can see first.
-            </p>
-            <div className="relative mt-10 flex flex-wrap items-center justify-center gap-4">
-              <Link
-                href="/signup"
-                className="rounded-2xl bg-white px-8 py-4 text-sm font-semibold text-[var(--accent,#6366f1)] shadow-lg transition hover:-translate-y-0.5 hover:shadow-xl"
-              >
-                Create your account
-              </Link>
-              <Link
-                href="/login"
-                className="rounded-2xl border border-white/20 px-8 py-4 text-sm font-semibold text-white transition hover:-translate-y-0.5 hover:border-white/40 hover:bg-white/5"
-              >
-                Sign in
-              </Link>
-            </div>
           </div>
         </div>
       </section>
