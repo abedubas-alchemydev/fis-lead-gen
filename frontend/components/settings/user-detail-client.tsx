@@ -5,6 +5,7 @@ import type { Route } from "next";
 import { useRouter } from "next/navigation";
 import { useMemo, useState, useTransition } from "react";
 import {
+  Activity,
   AlertCircle,
   ArrowLeft,
   ArrowRight,
@@ -235,6 +236,25 @@ export function UserDetailClient({
           </h2>
           <p className="mt-1 text-xs text-[var(--text-dim,#475569)]">
             See every broker-dealer and investment advisor across their lists.
+          </p>
+        </div>
+        <ArrowRight className="h-4 w-4 text-[var(--text-muted,#94a3b8)]" aria-hidden />
+      </Link>
+
+      <Link
+        href={`/settings/users/${user.id}/activities` as Route}
+        className={`${CARD} flex items-center gap-4 transition hover:bg-[var(--surface-2,#f1f6fd)]/50`}
+      >
+        <div className="grid h-10 w-10 shrink-0 place-items-center rounded-xl bg-[var(--surface-2,#f1f6fd)] text-[var(--accent,#1e40af)]">
+          <Activity className="h-5 w-5" aria-hidden />
+        </div>
+        <div className="flex-1">
+          <p className={EYEBROW}>Activity</p>
+          <h2 className={CARD_TITLE}>
+            View this user&apos;s activity feed
+          </h2>
+          <p className="mt-1 text-xs text-[var(--text-dim,#475569)]">
+            Login history, firm views, saves, and outreach sends — one timestamp-ordered stream.
           </p>
         </div>
         <ArrowRight className="h-4 w-4 text-[var(--text-muted,#94a3b8)]" aria-hidden />

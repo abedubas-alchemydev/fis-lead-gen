@@ -44,7 +44,22 @@ type ActiveUser = {
   createdAt: string;
   updatedAt: string;
   featurePermissions: string[];
+  lastActivityAt: string | null;
 };
+
+// "Online" = any session for this user touched in the last 5 minutes.
+// 5 min matches the Better Auth cookie-cache window so an idling tab
+// still counts as online while the cookie is valid, even if the user
+// isn't actively clicking. The 60-second skew gate on the BE bump
+// keeps writes off the hot path.
+const ONLINE_WINDOW_MS = 5 * 60 * 1000;
+
+function isOnlineNow(lastActivityAt: string | null): boolean {
+  if (!lastActivityAt) return false;
+  const ts = new Date(lastActivityAt).getTime();
+  if (!Number.isFinite(ts)) return false;
+  return Date.now() - ts < ONLINE_WINDOW_MS;
+}
 
 type Action = "approve" | "reject" | "deactivate";
 
@@ -298,7 +313,16 @@ export function UsersAdminClient({
                   return (
                     <tr key={u.id} className="hover:bg-[var(--surface-2,#f1f6fd)]/50">
                       <td className="px-5 py-4 font-semibold text-[var(--text,#0f172a)]">
-                        {u.name || "—"}
+                        <span className="inline-flex items-center gap-2">
+                          {isOnlineNow(u.lastActivityAt) ? (
+                            <span
+                              className="inline-block h-2 w-2 shrink-0 rounded-full bg-[var(--pill-green-text,#047857)] shadow-[0_0_0_2px_rgba(16,185,129,0.18)]"
+                              title="Online — active within the last 5 minutes"
+                              aria-label="Online"
+                            />
+                          ) : null}
+                          {u.name || "—"}
+                        </span>
                       </td>
                       <td className="px-5 py-4 text-[var(--text-dim,#475569)]">
                         <span className="inline-flex items-center gap-1.5">

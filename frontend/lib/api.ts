@@ -100,6 +100,8 @@ import type {
 } from "@/types/favorite-list";
 import type {
   AdjacentResponse,
+  AdminUserActivitiesResponse,
+  AdminUserActivityEventType,
   AdminUserSavedFirmsResponse,
   ContactSearchResponse,
   InstitutionalInvestorListResponse,
@@ -826,6 +828,27 @@ export async function getUserSavedFirms(
       limit: opts?.limit,
       offset: opts?.offset,
       list_id: opts?.listId
+    })
+  );
+}
+
+// Admin-only unified activity feed for one user (logins/logouts, firm
+// views, saves, outreach sends). `type` collapses login + logout under
+// one filter chip BE-side; the row's own event_type preserves the
+// discriminator for the FE glyph. 403 if the caller isn't an admin.
+export async function getUserActivities(
+  userId: string,
+  opts?: {
+    limit?: number;
+    offset?: number;
+    type?: Exclude<AdminUserActivityEventType, "logout"> | undefined;
+  }
+): Promise<AdminUserActivitiesResponse> {
+  return apiRequest<AdminUserActivitiesResponse>(
+    buildApiPath(`/api/v1/users/${userId}/activities`, {
+      limit: opts?.limit,
+      offset: opts?.offset,
+      type: opts?.type
     })
   );
 }

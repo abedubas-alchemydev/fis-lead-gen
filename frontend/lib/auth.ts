@@ -197,6 +197,48 @@ export const auth = betterAuth({
               message: "Your account is pending admin approval."
             });
           }
+        },
+        // Login event capture for the admin user-activity feed. Fires after
+        // the session row commits — the only reliable "login completed"
+        // signal that covers both email/password and OAuth paths. Cookie
+        // cache renewals do not write a session row, so this only fires on
+        // actual login. Errors here must never block login: wrap and log.
+        after: async (session) => {
+          try {
+            await database.query(
+              `INSERT INTO audit_log (user_id, action, details, timestamp)
+               VALUES ($1, 'login', $2, NOW())`,
+              [
+                session.userId,
+                JSON.stringify({
+                  ip: session.ipAddress ?? null,
+                  user_agent: session.userAgent ?? null,
+                  session_id: session.id
+                })
+              ]
+            );
+          } catch (err) {
+            console.error("[ACTIVITY] Failed to record login audit row:", err);
+          }
+        }
+      },
+      delete: {
+        after: async (session) => {
+          try {
+            await database.query(
+              `INSERT INTO audit_log (user_id, action, details, timestamp)
+               VALUES ($1, 'logout', $2, NOW())`,
+              [
+                session.userId,
+                JSON.stringify({
+                  ip: session.ipAddress ?? null,
+                  session_id: session.id
+                })
+              ]
+            );
+          } catch (err) {
+            console.error("[ACTIVITY] Failed to record logout audit row:", err);
+          }
         }
       }
     }
