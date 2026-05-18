@@ -188,9 +188,8 @@ const workspaceNav: ReadonlyArray<NavEntry> = [
   // isn't yet known to the Route union. Removing once a build regenerates
   // .next/types is fine but cheap to leave for new sibling routes.
   { href: "/advisor-list" as Route, label: "Investment Advisors", icon: AdvisorListIcon, badgeKey: null, permissionKey: "investment_advisors" },
-  { href: "/investors" as Route, label: "Institutional Investors", icon: InvestorsIcon, badgeKey: null, permissionKey: "institutional_investors" },
   { href: "/alerts", label: "Alerts", icon: AlertsIcon, badgeKey: "alerts" },
-  { href: "/insider-transactions" as Route, label: "Insider Transactions", icon: InvestorsIcon, badgeKey: null, permissionKey: "investors" },
+  { href: "/investors" as Route, label: "Investors", icon: InvestorsIcon, badgeKey: null, permissionKey: "investors" },
   { href: "/email-extractor", label: "Email Extractor", icon: EmailExtractorIcon, badgeKey: null },
   { href: "/outreach/sent" as Route, label: "Sent Outreach", icon: SentOutreachIcon, badgeKey: null },
   { href: "/my-favorites", label: "My Favorites", icon: FavoritesIcon, badgeKey: null },

@@ -132,6 +132,9 @@ export function FavoriteListItemsPane({
               : isAdvisor
                 ? item.advisor_name
                 : item.broker_dealer_name;
+            // TODO: institutional_investor rows dead-link — /investors is now
+            // the Form 4 feed (no id-keyed detail). Cleanup once any stale
+            // favorites from PR #432 are pruned or repointed.
             const detailHref = (
               isInvestor
                 ? `/investors/${targetId}`
