@@ -17,6 +17,7 @@ import {
 } from "lucide-react";
 
 import {
+  ADMIN_ONLY_FEATURE_KEYS,
   ALL_FEATURE_KEYS,
   ENABLED_FEATURE_KEYS,
   FEATURE_LABELS,
@@ -170,8 +171,10 @@ export function UserDetailClient({
         <ul className="mt-4 divide-y divide-[var(--border,rgba(30,64,175,0.1))] rounded-xl border border-[var(--border,rgba(30,64,175,0.1))]">
           {ALL_FEATURE_KEYS.map((key) => {
             const enabled = ENABLED_FEATURE_KEYS.has(key);
-            const disabled = isAdmin || !enabled || isPending;
+            const adminOnly = ADMIN_ONLY_FEATURE_KEYS.has(key);
+            const disabled = isAdmin || !enabled || isPending || adminOnly;
             const checked = isAdmin || selected.has(key);
+            const caption = adminOnly ? "Admin only" : !enabled ? "Coming soon" : null;
             return (
               <li key={key} className="flex items-center gap-3 px-4 py-3">
                 <input
@@ -188,9 +191,9 @@ export function UserDetailClient({
                 >
                   {FEATURE_LABELS[key]}
                 </label>
-                {!enabled ? (
+                {caption ? (
                   <span className="text-[11px] uppercase tracking-[0.04em] text-[var(--text-muted,#94a3b8)]">
-                    Coming soon
+                    {caption}
                   </span>
                 ) : null}
               </li>
