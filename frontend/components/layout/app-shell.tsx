@@ -155,6 +155,19 @@ function SentOutreachIcon(props: IconProps) {
   );
 }
 
+// Double-chevron used by the sidebar collapse toggle. Rotated 180° when
+// the sidebar is collapsed so a single icon serves both states.
+function ChevronsLeftIcon(props: IconProps) {
+  return (
+    <IconBase {...props}>
+      <polyline points="11 17 6 12 11 7" />
+      <polyline points="18 17 13 12 18 7" />
+    </IconBase>
+  );
+}
+
+const SIDEBAR_COLLAPSED_STORAGE_KEY = "dox-sidebar-collapsed";
+
 type SessionUser = {
   name?: string | null;
   email?: string | null;
@@ -263,6 +276,27 @@ export function AppShell({
   }, [pathname, searchParams]);
   const [stats, setStats] = useState<StatsLite | null>(null);
   const [signingOut, setSigningOut] = useState(false);
+  // Sidebar collapsed (icon-rail) state. Persisted to localStorage so the
+  // preference survives navigation/reload. We init `false` on the server
+  // and sync from storage in an effect to avoid a hydration mismatch — a
+  // brief expanded flash on first paint is preferable to mismatched SSR.
+  const [collapsed, setCollapsed] = useState(false);
+  useEffect(() => {
+    try {
+      if (window.localStorage.getItem(SIDEBAR_COLLAPSED_STORAGE_KEY) === "1") {
+        setCollapsed(true);
+      }
+    } catch {
+      /* storage unavailable — keep default */
+    }
+  }, []);
+  useEffect(() => {
+    try {
+      window.localStorage.setItem(SIDEBAR_COLLAPSED_STORAGE_KEY, collapsed ? "1" : "0");
+    } catch {
+      /* swallow — non-fatal */
+    }
+  }, [collapsed]);
 
   async function handleSignOut() {
     if (signingOut) return;
@@ -338,11 +372,19 @@ export function AppShell({
             Colors use var(--token, fallback) so non-dashboard routes (no
             .dashboard-theme on html) keep their existing light-only look via
             fallbacks, while the dashboard route gets themed values. */}
-        <aside className="hidden h-full w-[260px] shrink-0 flex-col border-r border-[var(--border,rgba(30,64,175,0.1))] bg-gradient-to-b from-[var(--sidebar-a,#ffffff)] to-[var(--sidebar-b,#ffffff)] px-4 py-6 backdrop-blur-[10px] lg:flex">
-          {/* Brand */}
-          <div className="mb-5 flex items-center gap-3 border-b border-[var(--border,rgba(30,64,175,0.1))] px-2.5 pb-6 pt-2">
+        <aside
+          className={`hidden h-full shrink-0 flex-col border-r border-[var(--border,rgba(30,64,175,0.1))] bg-gradient-to-b from-[var(--sidebar-a,#ffffff)] to-[var(--sidebar-b,#ffffff)] py-6 backdrop-blur-[10px] transition-[width] duration-200 ease-out lg:flex ${
+            collapsed ? "w-[72px] px-2" : "w-[260px] px-4"
+          }`}
+        >
+          {/* Brand. Collapsed: just the [d] mark, centered. */}
+          <div
+            className={`mb-3 flex items-center border-b border-[var(--border,rgba(30,64,175,0.1))] pb-5 pt-2 ${
+              collapsed ? "justify-center" : "gap-3 px-2.5"
+            }`}
+          >
             <div
-              className="grid h-9 w-9 place-items-center rounded-[10px] text-[18px] font-extrabold text-white shadow-[0_6px_20px_rgba(10,31,63,0.35)]"
+              className="grid h-9 w-9 shrink-0 place-items-center rounded-[10px] text-[18px] font-extrabold text-white shadow-[0_6px_20px_rgba(10,31,63,0.35)]"
               style={{
                 background: "linear-gradient(135deg, #0A1F3F, #1B5E9E)",
                 fontFamily: "system-ui, -apple-system, BlinkMacSystemFont, 'Segoe UI', Inter, sans-serif",
@@ -353,22 +395,53 @@ export function AppShell({
             >
               d
             </div>
-            <div className="min-w-0">
-              <div className="truncate text-[15px] font-bold tracking-[-0.01em] text-[var(--text,#0f172a)]">
-                DOX
+            {!collapsed ? (
+              <div className="min-w-0">
+                <div className="truncate text-[15px] font-bold tracking-[-0.01em] text-[var(--text,#0f172a)]">
+                  DOX
+                </div>
+                <div className="truncate text-[11px] uppercase tracking-[0.04em] text-[var(--text-muted,#94a3b8)]">
+                  Institutional Finance Intelligence
+                </div>
               </div>
-              <div className="truncate text-[11px] uppercase tracking-[0.04em] text-[var(--text-muted,#94a3b8)]">
-                Institutional Finance Intelligence
-              </div>
-            </div>
+            ) : null}
+          </div>
+
+          {/* Collapse / expand toggle. Single icon, rotated 180° when
+              collapsed. Right-aligned when expanded; centered when collapsed. */}
+          <div className={`mb-1 flex ${collapsed ? "justify-center" : "justify-end"}`}>
+            <button
+              type="button"
+              onClick={() => setCollapsed((c) => !c)}
+              aria-label={collapsed ? "Expand sidebar" : "Collapse sidebar"}
+              aria-expanded={!collapsed}
+              title={collapsed ? "Expand sidebar" : "Collapse sidebar"}
+              className="grid h-8 w-8 place-items-center rounded-[8px] text-[var(--text-muted,#94a3b8)] transition hover:bg-[var(--nav-hover,rgba(15,23,42,0.04))] hover:text-[var(--text,#0f172a)]"
+            >
+              <ChevronsLeftIcon
+                className={`h-4 w-4 transition-transform duration-200 ${collapsed ? "rotate-180" : ""}`}
+                strokeWidth={2}
+              />
+            </button>
           </div>
 
           {/* Nav sections — grouped by function (Overview, Lists, Outreach,
               Personal, Account). Each renders its label + a <nav> with its
-              filtered items. Empty sections are dropped upstream. */}
-          {visibleSections.map((section) => (
+              filtered items. Empty sections are dropped upstream. When
+              collapsed, the text label is replaced by a thin divider between
+              groups (no divider above the first section). */}
+          {visibleSections.map((section, idx) => (
             <Fragment key={section.label}>
-              <SidebarSectionLabel>{section.label}</SidebarSectionLabel>
+              {collapsed ? (
+                idx > 0 ? (
+                  <div
+                    className="mx-2 my-1.5 h-px bg-[var(--border,rgba(30,64,175,0.1))]"
+                    aria-hidden
+                  />
+                ) : null
+              ) : (
+                <SidebarSectionLabel>{section.label}</SidebarSectionLabel>
+              )}
               <nav className="flex flex-col" aria-label={section.label}>
                 {section.items.map((entry) => {
                   const live =
@@ -381,6 +454,7 @@ export function AppShell({
                       entry={live}
                       active={isActivePath(entry.href)}
                       badge={entry.badgeKey ? badges[entry.badgeKey] : null}
+                      collapsed={collapsed}
                     />
                   );
                 })}
@@ -390,22 +464,30 @@ export function AppShell({
 
           {/* User card — pinned to bottom of sidebar. Matches mockup
               .user-card exactly: avatar + user-name + user-role, plus a
-              sign-out icon button on the right (added 2026-05-04). */}
-          <div className="mt-auto flex items-center gap-3 rounded-[14px] border border-[var(--border,rgba(30,64,175,0.1))] bg-[var(--surface-2,#f1f6fd)] p-3.5">
+              sign-out icon button on the right (added 2026-05-04). When
+              collapsed, name/role hide and the avatar + sign-out stack
+              vertically. */}
+          <div
+            className={`mt-auto flex rounded-[14px] border border-[var(--border,rgba(30,64,175,0.1))] bg-[var(--surface-2,#f1f6fd)] ${
+              collapsed ? "flex-col items-center gap-2 p-2" : "items-center gap-3 p-3.5"
+            }`}
+          >
             <div
               className="grid h-[38px] w-[38px] shrink-0 place-items-center rounded-full text-[14px] font-bold text-white"
               style={{ background: "linear-gradient(135deg, #10b981, #06b6d4)" }}
             >
               {initials}
             </div>
-            <div className="min-w-0 flex-1">
-              <div className="truncate text-[13px] font-semibold text-[var(--text,#0f172a)]">
-                {session.user.name ?? "Authenticated User"}
+            {!collapsed ? (
+              <div className="min-w-0 flex-1">
+                <div className="truncate text-[13px] font-semibold text-[var(--text,#0f172a)]">
+                  {session.user.name ?? "Authenticated User"}
+                </div>
+                <div className="truncate text-[11px] text-[var(--text-muted,#94a3b8)]">
+                  {displayRole} · DOX Clearing
+                </div>
               </div>
-              <div className="truncate text-[11px] text-[var(--text-muted,#94a3b8)]">
-                {displayRole} · DOX Clearing
-              </div>
-            </div>
+            ) : null}
             <button
               type="button"
               onClick={handleSignOut}
@@ -481,11 +563,13 @@ function SidebarSectionLabel({ children }: { children: ReactNode }) {
 function SidebarNavLink({
   entry,
   active,
-  badge
+  badge,
+  collapsed
 }: {
   entry: NavEntry;
   active: boolean;
   badge: string | null;
+  collapsed: boolean;
 }) {
   const Icon = entry.icon;
 
@@ -493,30 +577,51 @@ function SidebarNavLink({
     <Link
       href={entry.href}
       aria-current={active ? "page" : undefined}
+      title={collapsed ? entry.label : undefined}
       style={active ? { background: "var(--nav-active-bg, rgba(37,99,235,0.12))" } : undefined}
-      className={`relative flex items-center gap-3 rounded-[10px] px-3 py-2.5 text-[13.5px] font-medium transition ${
+      className={`relative flex items-center rounded-[10px] py-2.5 text-[13.5px] font-medium transition ${
+        collapsed ? "justify-center px-0" : "gap-3 px-3"
+      } ${
         active
           ? "text-[var(--nav-active-text,#312e81)] shadow-[inset_0_0_0_1px_rgba(99,102,241,0.3)]"
           : "text-[var(--text-dim,#475569)] hover:bg-[var(--nav-hover,rgba(15,23,42,0.04))] hover:text-[var(--text,#0f172a)]"
       }`}
     >
-      {active ? (
+      {/* Active rail — only when expanded; the bg tint alone reads as
+          "active" in icon-rail mode and the -left-4 offset stops lining up
+          with the narrower px-2 sidebar padding. */}
+      {active && !collapsed ? (
         <span
           aria-hidden
           className="absolute -left-4 bottom-2 top-2 w-[3px] rounded-r-[3px]"
           style={{ background: "linear-gradient(180deg, #6366f1, #8b5cf6)" }}
         />
       ) : null}
-      <Icon className="h-[18px] w-[18px] opacity-90" strokeWidth={2} />
-      <span className="flex-1 truncate">{entry.label}</span>
-      {badge ? (
-        // .badge spec: padding 2px 8px, 11px, font-weight 600, 1px border,
-        // rounded 999px. Mockup uses the red-emphasis variant for both
-        // Master List and Alerts badges; `var(--pill-red-text)` swaps to
-        // #fca5a5 in dark mode automatically.
-        <span className="rounded-full border border-red-500/30 bg-red-500/15 px-2 py-0.5 text-[11px] font-semibold text-[var(--pill-red-text,#b91c1c)]">
-          {badge}
-        </span>
+      <span className="relative">
+        <Icon className="h-[18px] w-[18px] opacity-90" strokeWidth={2} />
+        {/* Collapsed mode swaps the text badge for a small red dot in the
+            icon's top-right corner, so unread/total counts still register
+            without taking width. */}
+        {collapsed && badge ? (
+          <span
+            aria-hidden
+            className="absolute -right-1 -top-1 h-2 w-2 rounded-full bg-red-500 ring-2 ring-[var(--sidebar-a,#ffffff)]"
+          />
+        ) : null}
+      </span>
+      {!collapsed ? (
+        <>
+          <span className="flex-1 truncate">{entry.label}</span>
+          {badge ? (
+            // .badge spec: padding 2px 8px, 11px, font-weight 600, 1px border,
+            // rounded 999px. Mockup uses the red-emphasis variant for both
+            // Master List and Alerts badges; `var(--pill-red-text)` swaps to
+            // #fca5a5 in dark mode automatically.
+            <span className="rounded-full border border-red-500/30 bg-red-500/15 px-2 py-0.5 text-[11px] font-semibold text-[var(--pill-red-text,#b91c1c)]">
+              {badge}
+            </span>
+          ) : null}
+        </>
       ) : null}
     </Link>
   );
