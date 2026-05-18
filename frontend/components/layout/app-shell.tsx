@@ -188,12 +188,12 @@ const workspaceNav: ReadonlyArray<NavEntry> = [
   // isn't yet known to the Route union. Removing once a build regenerates
   // .next/types is fine but cheap to leave for new sibling routes.
   { href: "/advisor-list" as Route, label: "Investment Advisors", icon: AdvisorListIcon, badgeKey: null, permissionKey: "investment_advisors" },
-  { href: "/alerts", label: "Alerts", icon: AlertsIcon, badgeKey: "alerts" },
+  { href: "/alerts", label: "Alerts", icon: AlertsIcon, badgeKey: "alerts", permissionKey: "alerts" },
   { href: "/investors" as Route, label: "Investors", icon: InvestorsIcon, badgeKey: null, permissionKey: "investors" },
-  { href: "/email-extractor", label: "Email Extractor", icon: EmailExtractorIcon, badgeKey: null },
-  { href: "/outreach/sent" as Route, label: "Sent Outreach", icon: SentOutreachIcon, badgeKey: null },
-  { href: "/my-favorites", label: "My Favorites", icon: FavoritesIcon, badgeKey: null },
-  { href: "/visited-firms", label: "Visited Firms", icon: VisitedFirmsIcon, badgeKey: null }
+  { href: "/email-extractor", label: "Email Extractor", icon: EmailExtractorIcon, badgeKey: null, permissionKey: "email_extractor" },
+  { href: "/outreach/sent" as Route, label: "Sent Outreach", icon: SentOutreachIcon, badgeKey: null, permissionKey: "sent_outreach" },
+  { href: "/my-favorites", label: "My Favorites", icon: FavoritesIcon, badgeKey: null, permissionKey: "my_favorites" },
+  { href: "/visited-firms", label: "Visited Firms", icon: VisitedFirmsIcon, badgeKey: null, permissionKey: "visited_firms" }
 ];
 
 const accountNav: ReadonlyArray<NavEntry> = [

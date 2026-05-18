@@ -47,7 +47,8 @@ from app.schemas.vault import (
     OutreachSendResponse,
     OutreachSendsListResponse,
 )
-from app.services.auth import get_current_user
+from app.core.feature_permissions import SENT_OUTREACH
+from app.services.auth import ensure_feature, get_current_user
 from app.services.email_providers import (
     PROVIDERS,
     EmailAccountNotLinked,
@@ -84,6 +85,13 @@ _API_ERROR_CODE: dict[str, str] = {
 logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/outreach")
+
+
+def _require_sent_outreach(
+    user: AuthenticatedUser = Depends(get_current_user),
+) -> AuthenticatedUser:
+    ensure_feature(user, SENT_OUTREACH)
+    return user
 
 
 async def _load_outreach_inputs(
@@ -828,7 +836,7 @@ async def list_outreach_sends(
         None, alias="status"
     ),
     scope: Literal["mine", "all"] = Query("mine"),
-    current_user: AuthenticatedUser = Depends(get_current_user),
+    current_user: AuthenticatedUser = Depends(_require_sent_outreach),
     db: AsyncSession = Depends(get_db_session),
 ) -> OutreachSendsListResponse:
     """Paginated list of outreach attempts (success + failure).
@@ -874,7 +882,7 @@ async def list_outreach_sends(
 async def get_outreach_send(
     send_id: int,
     scope: Literal["mine", "all"] = Query("mine"),
-    current_user: AuthenticatedUser = Depends(get_current_user),
+    current_user: AuthenticatedUser = Depends(_require_sent_outreach),
     db: AsyncSession = Depends(get_db_session),
 ) -> OutreachSendDetailResponse:
     """Full body + metadata for one send.

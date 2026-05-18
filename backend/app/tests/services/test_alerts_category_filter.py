@@ -186,6 +186,7 @@ def _user() -> AuthenticatedUser:
         name="Test Viewer",
         email="viewer@example.com",
         role="viewer",
+        feature_permissions=["alerts"],
         session_expires_at=datetime(2099, 1, 1),
     )
 

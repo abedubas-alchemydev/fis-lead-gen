@@ -38,7 +38,7 @@ def _override_user(user_id: str) -> AuthenticatedUser:
         name="Test User",
         email=f"{user_id}@example.com",
         role="viewer",
-        feature_permissions=["master_list"],
+        feature_permissions=["master_list", "my_favorites"],
         session_expires_at=datetime(2099, 1, 1),
     )
 
@@ -91,6 +91,28 @@ async def test_get_favorites_401_without_session_cookie() -> None:
     async with _client() as client:
         response = await client.get("/api/v1/favorites")
     assert response.status_code == 401
+
+
+async def test_get_favorites_403_without_my_favorites_feature() -> None:
+    user_id = f"test-viewer-{secrets.token_hex(6)}"
+
+    def _ungated() -> AuthenticatedUser:
+        return AuthenticatedUser(
+            id=user_id,
+            name="Ungated Viewer",
+            email=f"{user_id}@example.com",
+            role="viewer",
+            feature_permissions=["master_list"],
+            session_expires_at=datetime(2099, 1, 1),
+        )
+
+    app.dependency_overrides[get_current_user] = _ungated
+    try:
+        async with _client() as client:
+            response = await client.get("/api/v1/favorites")
+        assert response.status_code == 403
+    finally:
+        app.dependency_overrides.clear()
 
 
 async def test_post_favorite_404_when_bd_missing() -> None:
