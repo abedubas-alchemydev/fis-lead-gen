@@ -207,7 +207,7 @@ const navSections: ReadonlyArray<NavSection> = [
   {
     label: "Overview",
     items: [
-      { href: "/dashboard", label: "Dashboard", icon: DashboardIcon, badgeKey: null },
+      { href: "/dashboard", label: "Dashboard", icon: DashboardIcon, badgeKey: null, permissionKey: "dashboard" },
       { href: "/alerts", label: "Alerts", icon: AlertsIcon, badgeKey: "alerts", permissionKey: "alerts" }
     ]
   },
@@ -236,9 +236,9 @@ const navSections: ReadonlyArray<NavSection> = [
   {
     label: "Account",
     items: [
-      { href: "/settings", label: "Settings", icon: SettingsIcon, badgeKey: null },
-      { href: "/settings/users" as Route, label: "Users", icon: UsersIcon, badgeKey: null, adminOnly: true },
-      { href: "/vault", label: "Vault", icon: VaultIcon, badgeKey: null }
+      { href: "/settings", label: "Settings", icon: SettingsIcon, badgeKey: null, permissionKey: "settings" },
+      { href: "/settings/users" as Route, label: "Users", icon: UsersIcon, badgeKey: null, adminOnly: true, permissionKey: "users" },
+      { href: "/vault", label: "Vault", icon: VaultIcon, badgeKey: null, permissionKey: "vault" }
     ]
   }
 ];

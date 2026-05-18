@@ -19,6 +19,10 @@ EMAIL_EXTRACTOR = "email_extractor"
 SENT_OUTREACH = "sent_outreach"
 MY_FAVORITES = "my_favorites"
 VISITED_FIRMS = "visited_firms"
+DASHBOARD = "dashboard"
+SETTINGS = "settings"
+USERS = "users"
+VAULT = "vault"
 
 ALL_FEATURE_KEYS: frozenset[str] = frozenset(
     {
@@ -31,5 +35,9 @@ ALL_FEATURE_KEYS: frozenset[str] = frozenset(
         SENT_OUTREACH,
         MY_FAVORITES,
         VISITED_FIRMS,
+        DASHBOARD,
+        SETTINGS,
+        USERS,
+        VAULT,
     }
 )
