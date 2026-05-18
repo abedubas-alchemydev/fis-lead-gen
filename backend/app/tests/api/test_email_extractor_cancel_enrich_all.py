@@ -32,6 +32,7 @@ def _override_user() -> AuthenticatedUser:
         name="Test User",
         email="cancel-enrich-all-test@example.com",
         role="viewer",
+        feature_permissions=["email_extractor"],
         session_expires_at=datetime(2099, 1, 1),
     )
 
