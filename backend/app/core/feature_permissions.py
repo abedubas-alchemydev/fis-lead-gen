@@ -14,6 +14,11 @@ MASTER_LIST = "master_list"
 INVESTMENT_ADVISORS = "investment_advisors"
 INVESTORS = "investors"
 INSTITUTIONAL_INVESTORS = "institutional_investors"
+ALERTS = "alerts"
+EMAIL_EXTRACTOR = "email_extractor"
+SENT_OUTREACH = "sent_outreach"
+MY_FAVORITES = "my_favorites"
+VISITED_FIRMS = "visited_firms"
 
 ALL_FEATURE_KEYS: frozenset[str] = frozenset(
     {
@@ -21,5 +26,10 @@ ALL_FEATURE_KEYS: frozenset[str] = frozenset(
         INVESTMENT_ADVISORS,
         INVESTORS,
         INSTITUTIONAL_INVESTORS,
+        ALERTS,
+        EMAIL_EXTRACTOR,
+        SENT_OUTREACH,
+        MY_FAVORITES,
+        VISITED_FIRMS,
     }
 )

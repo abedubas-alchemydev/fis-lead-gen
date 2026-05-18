@@ -23,10 +23,11 @@ from app.schemas.alerts import (
     AlertsBulkReadResponse,
     FilingMonitorRunResponse,
 )
+from app.core.feature_permissions import ALERTS
 from app.schemas.auth import AuthenticatedUser
 from app.services.alert_events import alert_event_bus
 from app.services.alerts import AlertRepository
-from app.services.auth import get_current_user
+from app.services.auth import ensure_feature, get_current_user
 from app.services.filing_monitor import FilingMonitorService
 
 logger = logging.getLogger(__name__)
@@ -42,6 +43,13 @@ _STREAM_KEEPALIVE_SECONDS = 25
 # Cap replayed alerts on reconnect — if the client missed more than this we
 # defer to its REST fallback rather than blast a giant catch-up batch.
 _STREAM_REPLAY_LIMIT = 100
+
+
+def _require_alerts(
+    user: AuthenticatedUser = Depends(get_current_user),
+) -> AuthenticatedUser:
+    ensure_feature(user, ALERTS)
+    return user
 
 
 def _parse_values(values: list[str] | None) -> list[str]:
@@ -63,7 +71,7 @@ async def list_alerts(
     category: Literal["form_bd", "deficiency", "all"] | None = Query(default=None),
     page: int = Query(default=1, ge=1),
     limit: int = Query(default=20, ge=1, le=100),
-    _: AuthenticatedUser = Depends(get_current_user),
+    _: AuthenticatedUser = Depends(_require_alerts),
     db: AsyncSession = Depends(get_db_session),
 ) -> AlertListResponse:
     return await repository.list_alerts(
@@ -81,7 +89,7 @@ async def list_alerts(
 @router.patch("/{alert_id}/read", response_model=AlertReadResponse)
 async def mark_alert_read(
     alert_id: int,
-    _: AuthenticatedUser = Depends(get_current_user),
+    _: AuthenticatedUser = Depends(_require_alerts),
     db: AsyncSession = Depends(get_db_session),
 ) -> AlertReadResponse:
     alert = await repository.mark_alert_read(db, alert_id, is_read=True)
@@ -95,7 +103,7 @@ async def mark_all_alerts_read(
     form_type: list[str] | None = Query(default=None),
     priority: list[str] | None = Query(default=None),
     broker_dealer_id: int | None = Query(default=None),
-    _: AuthenticatedUser = Depends(get_current_user),
+    _: AuthenticatedUser = Depends(_require_alerts),
     db: AsyncSession = Depends(get_db_session),
 ) -> AlertsBulkReadResponse:
     updated_count = await repository.mark_all_read(
@@ -147,7 +155,9 @@ async def _authenticate_stream_request(request: Request) -> AuthenticatedUser:
     alerts.
     """
     async with SessionLocal() as db:
-        return await get_current_user(request, db)
+        user = await get_current_user(request, db)
+    ensure_feature(user, ALERTS)
+    return user
 
 
 async def _hydrate_alerts(alert_ids: list[int]) -> list[AlertListItem]:
