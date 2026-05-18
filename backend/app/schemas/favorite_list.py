@@ -27,20 +27,23 @@ class FavoriteListResponse(BaseModel):
 class FavoriteListItemResponse(BaseModel):
     """One row in ``GET /api/v1/favorite-lists/{list_id}/items``.
 
-    Polymorphic shape: each row is either a broker-dealer or an investment
-    advisor, discriminated by ``entity_type``. The opposite entity's id /
-    name fields are ``None``. Keeping BD fields populated (and required-
-    shaped) for BD items preserves backwards compatibility with the FE
-    contract shipped before advisors landed.
+    Polymorphic shape across three firm types: broker_dealer, advisor,
+    institutional_investor. Each row sets exactly one id/name pair
+    matching its ``entity_type`` discriminator; the other two pairs are
+    ``None``. Keeping legacy BD + advisor field names populated preserves
+    backwards compatibility with the FE contracts shipped before
+    institutional investors landed.
     """
 
     model_config = ConfigDict(from_attributes=True)
 
-    entity_type: Literal["broker_dealer", "advisor"]
+    entity_type: Literal["broker_dealer", "advisor", "institutional_investor"]
     broker_dealer_id: int | None = None
     broker_dealer_name: str | None = None
     advisor_id: int | None = None
     advisor_name: str | None = None
+    institutional_investor_id: int | None = None
+    institutional_investor_name: str | None = None
     added_at: datetime
 
 
@@ -145,6 +148,39 @@ class FavoriteListAdvisorItemResponse(BaseModel):
 
     advisor_id: int
     advisor_name: str
+    added_at: datetime
+
+
+class FavoriteListInvestorItemCreate(BaseModel):
+    """Request body for ``POST /api/v1/favorite-lists/{list_id}/investor-items``."""
+
+    institutional_investor_id: int = Field(ge=1)
+
+
+class FavoriteListInvestorItemBatchCreate(BaseModel):
+    """Request body for ``POST /api/v1/favorite-lists/{list_id}/investor-items/batch``."""
+
+    institutional_investor_ids: list[int] = Field(min_length=1, max_length=200)
+
+    @field_validator("institutional_investor_ids")
+    @classmethod
+    def _dedupe_and_validate(cls, value: list[int]) -> list[int]:
+        deduped = list(dict.fromkeys(value))
+        for investor_id in deduped:
+            if investor_id < 1:
+                raise ValueError(
+                    "institutional_investor_ids must be positive integers"
+                )
+        return deduped
+
+
+class FavoriteListInvestorItemResponse(BaseModel):
+    """Response shape for single-investor add to a favorite list."""
+
+    model_config = ConfigDict(from_attributes=True)
+
+    institutional_investor_id: int
+    institutional_investor_name: str
     added_at: datetime
 
 

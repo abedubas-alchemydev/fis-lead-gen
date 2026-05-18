@@ -99,11 +99,19 @@ import type {
   PaginatedFavoriteListItems
 } from "@/types/favorite-list";
 import type {
+  AdjacentResponse,
   AdminUserSavedFirmsResponse,
+  ContactSearchResponse,
+  InstitutionalInvestorListResponse,
+  InstitutionalInvestorProfileResponse,
   InvestorEnrichResponse,
   InvestorListResponse,
+  OutreachAdvisorDraftRequest,
+  OutreachAdvisorSendRequest,
   OutreachDraft,
   OutreachDraftRequest,
+  OutreachInvestorDraftRequest,
+  OutreachInvestorSendRequest,
   OutreachSendDetail,
   OutreachSendRequest,
   OutreachSendResponse,
@@ -294,6 +302,181 @@ export async function addAdvisorsToListBatch(
       body: JSON.stringify({ advisor_ids: advisorIds }),
     }
   );
+}
+
+// ── Institutional Investor variants (favorites for /investors firm list) ──
+// Parallel to BD + advisor helpers; the BE has /investor-items endpoints
+// that satisfy the 3-way XOR on favorite_list_item by writing
+// institutional_investor_id and leaving the other two FKs NULL.
+
+export async function getListsForInstitutionalInvestor(
+  investorId: number
+): Promise<FavoriteListWithMembership[]> {
+  return apiRequest<FavoriteListWithMembership[]>(
+    `/api/v1/institutional-investors/${investorId}/favorite-lists`
+  );
+}
+
+export async function addInstitutionalInvestorToList(
+  listId: number,
+  investorId: number
+): Promise<void> {
+  await apiRequest<void>(
+    `/api/v1/favorite-lists/${listId}/investor-items`,
+    {
+      method: "POST",
+      body: JSON.stringify({ institutional_investor_id: investorId }),
+    }
+  );
+}
+
+export async function removeInstitutionalInvestorFromList(
+  listId: number,
+  investorId: number
+): Promise<void> {
+  await apiRequest<void>(
+    `/api/v1/favorite-lists/${listId}/investor-items/${investorId}`,
+    { method: "DELETE" }
+  );
+}
+
+export async function addInstitutionalInvestorsToListBatch(
+  listId: number,
+  investorIds: number[]
+): Promise<AddFirmsToListBatchResponse> {
+  return apiRequest<AddFirmsToListBatchResponse>(
+    `/api/v1/favorite-lists/${listId}/investor-items/batch`,
+    {
+      method: "POST",
+      body: JSON.stringify({ institutional_investor_ids: investorIds }),
+    }
+  );
+}
+
+// ── Cross-entity contact search ────────────────────────────────────────
+// Both POST endpoints accept JSON bodies. find-by-email optionally
+// triggers an Apollo /people/match fallback when ``enrich_via_apollo``
+// is true and no local hit was found -- caller opts in to spend.
+
+export async function findContactsByEmail(
+  email: string,
+  options?: { enrichViaApollo?: boolean }
+): Promise<ContactSearchResponse> {
+  return apiRequest<ContactSearchResponse>("/api/v1/contacts/find-by-email", {
+    method: "POST",
+    body: JSON.stringify({
+      email,
+      enrich_via_apollo: options?.enrichViaApollo ?? false,
+    }),
+  });
+}
+
+export async function findContactsByDomain(
+  domain: string
+): Promise<ContactSearchResponse> {
+  return apiRequest<ContactSearchResponse>("/api/v1/contacts/find-by-domain", {
+    method: "POST",
+    body: JSON.stringify({ domain }),
+  });
+}
+
+// ── Adjacent-entity navigation (Next button on detail pages) ──────────
+// All three endpoints return {prev_id, next_id} walking the default
+// sorted list for their respective firm type. FE detail pages call
+// these as a fallback when no return-envelope reconstructs the user's
+// filtered list.
+
+export async function getAdjacentAdvisor(advisorId: number): Promise<AdjacentResponse> {
+  return apiRequest<AdjacentResponse>(
+    `/api/v1/investment-advisors/${advisorId}/adjacent`
+  );
+}
+
+export async function getAdjacentInstitutionalInvestor(
+  investorId: number
+): Promise<AdjacentResponse> {
+  return apiRequest<AdjacentResponse>(
+    `/api/v1/institutional-investors/${investorId}/adjacent`
+  );
+}
+
+// ── Polymorphic outreach (advisor + investor) ──────────────────────────
+// Parallel to the BD-side outreach helpers in lib/email-extractor.ts /
+// existing draft helpers. Each pair (draft + send) targets the matching
+// /outreach/{advisor,investor}-{draft,send} endpoint.
+
+export async function generateAdvisorOutreachDraft(
+  payload: OutreachAdvisorDraftRequest
+): Promise<OutreachDraft> {
+  return apiRequest<OutreachDraft>("/api/v1/outreach/advisor-draft", {
+    method: "POST",
+    body: JSON.stringify(payload),
+  });
+}
+
+export async function sendAdvisorOutreach(
+  payload: OutreachAdvisorSendRequest
+): Promise<OutreachSendResponse> {
+  return apiRequest<OutreachSendResponse>("/api/v1/outreach/advisor-send", {
+    method: "POST",
+    body: JSON.stringify(payload),
+  });
+}
+
+export async function generateInvestorOutreachDraft(
+  payload: OutreachInvestorDraftRequest
+): Promise<OutreachDraft> {
+  return apiRequest<OutreachDraft>("/api/v1/outreach/investor-draft", {
+    method: "POST",
+    body: JSON.stringify(payload),
+  });
+}
+
+export async function sendInvestorOutreach(
+  payload: OutreachInvestorSendRequest
+): Promise<OutreachSendResponse> {
+  return apiRequest<OutreachSendResponse>("/api/v1/outreach/investor-send", {
+    method: "POST",
+    body: JSON.stringify(payload),
+  });
+}
+
+// ── Institutional Investors list + profile ─────────────────────────────
+// Mirrors the advisor-list helpers. Filters are query-string params; the
+// list endpoint defaults to total_aum-DESC ordering, the FE workspace
+// client overrides per user preference.
+
+export async function fetchInstitutionalInvestors(
+  params: {
+    q?: string;
+    state?: string[];
+    status?: string[];
+    min_total_aum?: number;
+    max_total_aum?: number;
+    filed_13f_after?: string;
+    filed_13f_before?: string;
+    only_with_advisor_link?: boolean;
+    sort_by?: string;
+    sort_dir?: "asc" | "desc";
+    page?: number;
+    limit?: number;
+  } = {}
+): Promise<InstitutionalInvestorListResponse> {
+  return apiRequest<InstitutionalInvestorListResponse>(
+    buildApiPath("/api/v1/institutional-investors", params as Record<string, string | number | boolean | string[] | undefined>)
+  );
+}
+
+export async function fetchInstitutionalInvestorProfile(
+  investorId: number | string
+): Promise<InstitutionalInvestorProfileResponse> {
+  return apiRequest<InstitutionalInvestorProfileResponse>(
+    `/api/v1/institutional-investors/${investorId}/profile`
+  );
+}
+
+export async function fetchInstitutionalInvestorStates(): Promise<string[]> {
+  return apiRequest<string[]>("/api/v1/institutional-investors/states");
 }
 
 // ── Tier 2 pipeline triggers ──────────────────────────────────────────────

@@ -20,6 +20,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.db.session import get_db_session
 from app.models.broker_dealer import BrokerDealer
 from app.models.favorite_list import FavoriteList, FavoriteListItem
+from app.models.institutional_investor import InstitutionalInvestor
 from app.models.investment_advisor import InvestmentAdvisor
 from app.schemas.auth import AuthenticatedUser
 from app.schemas.favorite_list import (
@@ -27,6 +28,9 @@ from app.schemas.favorite_list import (
     FavoriteListAdvisorItemCreate,
     FavoriteListAdvisorItemResponse,
     FavoriteListCreate,
+    FavoriteListInvestorItemBatchCreate,
+    FavoriteListInvestorItemCreate,
+    FavoriteListInvestorItemResponse,
     FavoriteListItemBatchCreate,
     FavoriteListItemBatchResponse,
     FavoriteListItemCreate,
@@ -119,6 +123,8 @@ async def list_favorite_list_items(
             BrokerDealer.name.label("broker_dealer_name"),
             FavoriteListItem.advisor_id,
             InvestmentAdvisor.name.label("advisor_name"),
+            FavoriteListItem.institutional_investor_id,
+            InstitutionalInvestor.name.label("institutional_investor_name"),
             FavoriteListItem.created_at,
         )
         .outerjoin(
@@ -128,6 +134,10 @@ async def list_favorite_list_items(
             InvestmentAdvisor,
             InvestmentAdvisor.id == FavoriteListItem.advisor_id,
         )
+        .outerjoin(
+            InstitutionalInvestor,
+            InstitutionalInvestor.id == FavoriteListItem.institutional_investor_id,
+        )
         .where(FavoriteListItem.list_id == list_id)
         .order_by(FavoriteListItem.created_at.desc(), FavoriteListItem.id.desc())
         .offset(offset)
@@ -136,7 +146,16 @@ async def list_favorite_list_items(
     rows = (await db.execute(data_stmt)).all()
 
     items: list[FavoriteListItemResponse] = []
-    for _item_id, bd_id, bd_name, advisor_id, advisor_name, added_at in rows:
+    for (
+        _item_id,
+        bd_id,
+        bd_name,
+        advisor_id,
+        advisor_name,
+        investor_id,
+        investor_name,
+        added_at,
+    ) in rows:
         if bd_id is not None:
             items.append(
                 FavoriteListItemResponse(
@@ -146,12 +165,21 @@ async def list_favorite_list_items(
                     added_at=added_at,
                 )
             )
-        else:
+        elif advisor_id is not None:
             items.append(
                 FavoriteListItemResponse(
                     entity_type="advisor",
                     advisor_id=advisor_id,
                     advisor_name=advisor_name,
+                    added_at=added_at,
+                )
+            )
+        else:
+            items.append(
+                FavoriteListItemResponse(
+                    entity_type="institutional_investor",
+                    institutional_investor_id=investor_id,
+                    institutional_investor_name=investor_name,
                     added_at=added_at,
                 )
             )
@@ -532,6 +560,163 @@ async def remove_advisor_from_favorite_list(
         delete(FavoriteListItem).where(
             FavoriteListItem.list_id == list_id,
             FavoriteListItem.advisor_id == advisor_id,
+        )
+    )
+    if result.rowcount == 0:
+        raise HTTPException(status_code=404, detail="favorite_list_item_not_found")
+    await db.commit()
+    return Response(status_code=status.HTTP_204_NO_CONTENT)
+
+
+# ── Institutional-investor parallels ──────────────────────────────────────
+# Same shape as the BD + advisor endpoints above, but they write/delete
+# rows where ``institutional_investor_id`` is set and the other two FK
+# columns are NULL. The 3-way XOR check constraint
+# (``ck_favorite_list_item_exactly_one_target``, rewritten in migration
+# 0045) is the DB-side backstop; the explicit ``broker_dealer_id = None``
+# and ``advisor_id = None`` on inserts satisfies it.
+
+
+@router.post(
+    "/{list_id}/investor-items",
+    response_model=FavoriteListInvestorItemResponse,
+)
+async def add_investor_to_favorite_list(
+    payload: FavoriteListInvestorItemCreate,
+    list_id: int = Path(..., ge=1),
+    current_user: AuthenticatedUser = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db_session),
+) -> FavoriteListInvestorItemResponse:
+    """Add an institutional investor to a list owned by the calling user.
+
+    Idempotent -- re-POSTing the same id returns the existing row's
+    ``added_at`` instead of raising on the partial unique index.
+    """
+    await _get_owned_list(db, list_id, current_user.id)
+
+    investor_check = await db.execute(
+        select(InstitutionalInvestor.id, InstitutionalInvestor.name).where(
+            InstitutionalInvestor.id == payload.institutional_investor_id
+        )
+    )
+    investor_row = investor_check.first()
+    if investor_row is None:
+        raise HTTPException(status_code=404, detail="Investor not found")
+    investor_id, investor_name = investor_row
+
+    # uq_favorite_list_item_list_investor is a PARTIAL unique index
+    # (WHERE institutional_investor_id IS NOT NULL) from migration 0045.
+    # ON CONFLICT needs the matching index_where predicate to bind to
+    # the right index.
+    upsert = (
+        pg_insert(FavoriteListItem)
+        .values(
+            list_id=list_id,
+            institutional_investor_id=investor_id,
+            broker_dealer_id=None,
+            advisor_id=None,
+        )
+        .on_conflict_do_nothing(
+            index_elements=["list_id", "institutional_investor_id"],
+            index_where=text("institutional_investor_id IS NOT NULL"),
+        )
+        .returning(FavoriteListItem.id, FavoriteListItem.created_at)
+    )
+    inserted = (await db.execute(upsert)).first()
+    if inserted is None:
+        existing = await db.execute(
+            select(FavoriteListItem.created_at).where(
+                FavoriteListItem.list_id == list_id,
+                FavoriteListItem.institutional_investor_id == investor_id,
+            )
+        )
+        added_at = existing.scalar_one()
+    else:
+        added_at = inserted[1]
+    await db.commit()
+
+    return FavoriteListInvestorItemResponse(
+        institutional_investor_id=investor_id,
+        institutional_investor_name=investor_name,
+        added_at=added_at,
+    )
+
+
+@router.post(
+    "/{list_id}/investor-items/batch",
+    response_model=FavoriteListItemBatchResponse,
+)
+async def batch_add_investors_to_favorite_list(
+    payload: FavoriteListInvestorItemBatchCreate,
+    list_id: int = Path(..., ge=1),
+    current_user: AuthenticatedUser = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db_session),
+) -> FavoriteListItemBatchResponse:
+    """Add many institutional investors to a list in one transaction.
+
+    Mirrors the BD + advisor batch endpoints: idempotent, with
+    ``skipped_existing`` / ``skipped_unknown`` accounting.
+    """
+    await _get_owned_list(db, list_id, current_user.id)
+
+    requested_ids = payload.institutional_investor_ids
+    known_rows = await db.execute(
+        select(InstitutionalInvestor.id).where(
+            InstitutionalInvestor.id.in_(requested_ids)
+        )
+    )
+    known_ids = {row[0] for row in known_rows}
+    skipped_unknown = [iid for iid in requested_ids if iid not in known_ids]
+
+    added_count = 0
+    if known_ids:
+        upsert = (
+            pg_insert(FavoriteListItem)
+            .values(
+                [
+                    {
+                        "list_id": list_id,
+                        "broker_dealer_id": None,
+                        "advisor_id": None,
+                        "institutional_investor_id": iid,
+                    }
+                    for iid in known_ids
+                ]
+            )
+            .on_conflict_do_nothing(
+                index_elements=["list_id", "institutional_investor_id"],
+                index_where=text("institutional_investor_id IS NOT NULL"),
+            )
+            .returning(FavoriteListItem.id)
+        )
+        result = await db.execute(upsert)
+        added_count = len(result.fetchall())
+
+    await db.commit()
+    return FavoriteListItemBatchResponse(
+        added=added_count,
+        skipped_existing=len(known_ids) - added_count,
+        skipped_unknown=skipped_unknown,
+    )
+
+
+@router.delete(
+    "/{list_id}/investor-items/{investor_id}",
+    status_code=204,
+)
+async def remove_investor_from_favorite_list(
+    list_id: int = Path(..., ge=1),
+    investor_id: int = Path(..., ge=1),
+    current_user: AuthenticatedUser = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db_session),
+) -> Response:
+    """Remove an institutional investor from the list."""
+    await _get_owned_list(db, list_id, current_user.id)
+
+    result = await db.execute(
+        delete(FavoriteListItem).where(
+            FavoriteListItem.list_id == list_id,
+            FavoriteListItem.institutional_investor_id == investor_id,
         )
     )
     if result.rowcount == 0:

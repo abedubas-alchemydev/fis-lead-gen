@@ -16,7 +16,10 @@ from app.models.filing_alert import FilingAlert
 from app.models.form4_transaction import Form4Transaction
 from app.models.industry_arrangement import IndustryArrangement
 from app.models.introducing_arrangement import IntroducingArrangement
+from app.models.institutional_investor import InstitutionalInvestor
 from app.models.investment_advisor import InvestmentAdvisor
+from app.models.investor_contact import InvestorContact
+from app.models.investor_filing import InvestorFiling
 from app.models.outreach_send import OutreachSend
 from app.models.pipeline_run import PipelineRun
 from app.models.scoring_setting import ScoringSetting
@@ -47,8 +50,11 @@ __all__ = [
     "FilingAlert",
     "Form4Transaction",
     "IndustryArrangement",
+    "InstitutionalInvestor",
     "IntroducingArrangement",
     "InvestmentAdvisor",
+    "InvestorContact",
+    "InvestorFiling",
     "OutreachSend",
     "PipelineRun",
     "ScoringSetting",
