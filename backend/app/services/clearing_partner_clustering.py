@@ -29,11 +29,13 @@ Algorithm:
    "RBC Capital Markets" to a Custody string just because the parent
    parenthetical mentions "RBC Capital").
 4. Within each block, ``rapidfuzz.fuzz.token_set_ratio`` over every
-   pair of normalized values. Threshold default 85 — at this level
+   pair of normalized values. Threshold default 80 — at this level
    "RBC Capital Markets, LLC" / "RBC Capital Markets LLC" / "RBC
    Capital Markets Corp" cluster together, the two RBC Clearing &
    Custody variants cluster together, and the two families stay
-   distinct (cross-family scores ≤44).
+   distinct (cross-family scores ≤44). Was 85 originally; lowered
+   to 80 in PR D so legitimate near-misses surface as pending
+   suggestions instead of slipping through as "unmatched" long-tail.
 4. Union-find clusters at the threshold, drop singletons. Each cluster's
    ``cluster_signature`` is sha256 of its sorted variants joined by
    newline; this is the dedup key when persisting so a re-run never
@@ -65,7 +67,7 @@ from app.services.clearing_consolidation import (
 logger = logging.getLogger(__name__)
 
 
-DEFAULT_THRESHOLD = 85
+DEFAULT_THRESHOLD = 80
 MAX_BLOCK_SIZE = 50
 
 # Strips corporate-subtitle clauses like ", a Division of …",
@@ -281,6 +283,21 @@ async def _distinct_unmatched_partners(db: AsyncSession) -> list[str]:
         if is_unmatched(raw, providers):
             unmatched.append(raw.strip())  # type: ignore[union-attr]
     return unmatched
+
+
+async def count_unmatched_partners(db: AsyncSession) -> int:
+    """How many distinct raw clearing-partner strings still aren't
+    consolidated to a registry entry.
+
+    Surfaced on the settings page (alongside ``pending_count``) so the
+    admin sees how much long-tail work remains even before clicking
+    "Run scan". Cheap wrapper around ``_distinct_unmatched_partners`` —
+    if the unmatched set ever grows large enough that ``COUNT(*)`` over
+    the alias-match Python loop becomes a bottleneck, swap for a direct
+    SQL count of values not present in any provider's alias list.
+    """
+
+    return len(await _distinct_unmatched_partners(db))
 
 
 def cluster_partners(

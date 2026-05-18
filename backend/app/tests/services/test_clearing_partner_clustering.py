@@ -91,13 +91,15 @@ def test_threshold_tuning_separates_brands_at_default() -> None:
         "Citibank N.A.",
     ]
     clusters = cluster_partners(values)
-    assert clusters == [], "Distinct brands sharing only the parent token must not cluster at default T=85."
+    assert clusters == [], (
+        f"Distinct brands sharing only the parent token must not cluster at default T={DEFAULT_THRESHOLD}."
+    )
 
 
 def test_threshold_lowered_does_cluster_more() -> None:
-    """Sanity check the threshold parameter is wired — at T=50 the
-    above pair joins. (Not a recommended setting; pinned only to prove
-    the knob works.)"""
+    """Sanity check the threshold parameter is wired — at T=50 these
+    join more aggressively than at the default. (Not a recommended
+    setting; pinned only to prove the knob works.)"""
 
     values = [
         "Goldman Sachs",

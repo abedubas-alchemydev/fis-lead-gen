@@ -146,6 +146,11 @@ async def test_run_clustering_admin_happy_path() -> None:
                 "_pending_count",
                 new=AsyncMock(return_value=7),
             ),
+            patch.object(
+                settings_endpoints,
+                "count_unmatched_partners",
+                new=AsyncMock(return_value=12),
+            ),
         ):
             async with _client() as client:
                 response = await client.post(
@@ -153,7 +158,11 @@ async def test_run_clustering_admin_happy_path() -> None:
                 )
         assert response.status_code == 200
         body = response.json()
-        assert body == {"new_pending_count": 3, "total_pending_count": 7}
+        assert body == {
+            "new_pending_count": 3,
+            "total_pending_count": 7,
+            "unmatched_count": 12,
+        }
         mock_db.commit.assert_awaited_once()
     finally:
         app.dependency_overrides.pop(get_current_user, None)

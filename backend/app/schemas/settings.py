@@ -61,6 +61,7 @@ class ClearingPartnerMergeSuggestionItem(BaseModel):
 class ClearingPartnerMergeSuggestionList(BaseModel):
     items: list[ClearingPartnerMergeSuggestionItem]
     pending_count: int
+    unmatched_count: int
 
 
 class ClearingPartnerClusteringRunResponse(BaseModel):
@@ -70,6 +71,7 @@ class ClearingPartnerClusteringRunResponse(BaseModel):
 
     new_pending_count: int
     total_pending_count: int
+    unmatched_count: int
 
 
 class ClearingPartnerMergeSuggestionAccept(BaseModel):

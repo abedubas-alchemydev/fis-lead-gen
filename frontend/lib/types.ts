@@ -472,11 +472,13 @@ export type ClearingPartnerMergeSuggestionItem = {
 export type ClearingPartnerMergeSuggestionList = {
   items: ClearingPartnerMergeSuggestionItem[];
   pending_count: number;
+  unmatched_count: number;
 };
 
 export type ClearingPartnerClusteringRunResponse = {
   new_pending_count: number;
   total_pending_count: number;
+  unmatched_count: number;
 };
 
 export type ClearingPartnerMergeSuggestionAccept = {
