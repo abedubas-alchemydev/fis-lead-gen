@@ -20,7 +20,13 @@ import { authClient } from "@/lib/auth-client";
  * the Outreach modal — mirrors the Gmail incremental-consent flow so
  * users who never send outreach aren't asked for the restricted scope.
  */
-export function MicrosoftButton({ mode }: { mode: "login" | "signup" }) {
+export function MicrosoftButton({
+  mode,
+  enabled = true
+}: {
+  mode: "login" | "signup";
+  enabled?: boolean;
+}) {
   const [isPending, setIsPending] = useState(false);
 
   async function handleClick() {
@@ -34,6 +40,30 @@ export function MicrosoftButton({ mode }: { mode: "login" | "signup" }) {
     } catch {
       setIsPending(false);
     }
+  }
+
+  if (!enabled) {
+    // Outlook OAuth code is shipped but the Azure AD app registration
+    // hasn't landed yet (MICROSOFT_CLIENT_ID/SECRET unset). Render the
+    // button disabled with a "Coming soon" hint so users know it's on
+    // the way without getting an empty-client_id redirect to Microsoft.
+    return (
+      <button
+        type="button"
+        disabled
+        aria-disabled
+        title="Outlook sign-in is being set up. Available soon."
+        className="flex w-full cursor-not-allowed items-center justify-center gap-3 rounded-xl border border-[var(--border,rgba(30,64,175,0.1))] bg-[var(--surface,#ffffff)] px-4 py-3 text-sm font-medium text-[var(--text-muted,#94a3b8)] opacity-60 shadow-sm"
+      >
+        <MicrosoftLogo />
+        <span>
+          {mode === "signup" ? "Sign up with Outlook" : "Continue with Outlook"}
+        </span>
+        <span className="ml-1 rounded-full bg-[var(--surface-2,#f1f6fd)] px-2 py-0.5 text-[10px] font-semibold uppercase tracking-[0.06em] text-[var(--text-dim,#475569)]">
+          Coming soon
+        </span>
+      </button>
+    );
   }
 
   return (

@@ -1,5 +1,17 @@
 import { AuthForm } from "@/components/auth/auth-form";
 
+// Outlook + Yahoo OAuth buttons render disabled with a "Coming soon"
+// hint when the corresponding credentials aren't configured yet. Reading
+// server-side here (env vars are not NEXT_PUBLIC_*) and passing flags
+// down means once the secrets land in Cloud Run, the buttons light up
+// without any code change.
+const microsoftEnabled = Boolean(
+  process.env.MICROSOFT_CLIENT_ID && process.env.MICROSOFT_CLIENT_SECRET
+);
+const yahooEnabled = Boolean(
+  process.env.YAHOO_CLIENT_ID && process.env.YAHOO_CLIENT_SECRET
+);
+
 export default function LoginPage() {
   return (
     <div className="animate-fade-in">
@@ -10,7 +22,11 @@ export default function LoginPage() {
           Resume your research across the clearing layer.
         </p>
       </div>
-      <AuthForm mode="login" />
+      <AuthForm
+        mode="login"
+        microsoftEnabled={microsoftEnabled}
+        yahooEnabled={yahooEnabled}
+      />
     </div>
   );
 }
