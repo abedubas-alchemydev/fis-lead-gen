@@ -259,3 +259,42 @@ export async function sendApprovalNotificationEmail({
     throw new Error(`Email delivery failed: ${message}`);
   }
 }
+
+// ─── Reactivation Notification (to the reactivated user) ────────────
+export async function sendReactivationNotificationEmail({
+  user,
+  loginUrl,
+}: {
+  user: { email: string; name: string };
+  loginUrl: string;
+}) {
+  const html = buildHtml({
+    preheader: "Your account has been reactivated — you can sign in again.",
+    heading: "You're back in",
+    body: `
+      <p>Hi ${user.name || "there"},</p>
+      <p>An admin has reactivated your DOX account. Workspace access has been restored and you can sign in again.</p>
+      <p>Your saved lists, favorites, and feature permissions are preserved.</p>
+    `,
+    ctaUrl: loginUrl,
+    ctaLabel: "Sign in",
+    footer:
+      "If you did not expect this, or if you believe your account should remain deactivated, please contact support.",
+  });
+
+  try {
+    const info = await getTransporter().sendMail({
+      from: fromAddress,
+      to: user.email,
+      subject: "Your DOX account has been reactivated",
+      html,
+    });
+    console.log(
+      `[EMAIL][user-reactivated] sent ok messageId=${info.messageId} to=${user.email}`
+    );
+  } catch (error: unknown) {
+    console.error(`[EMAIL][user-reactivated] FAIL to=${user.email}:`, error);
+    const message = error instanceof Error ? error.message : String(error);
+    throw new Error(`Email delivery failed: ${message}`);
+  }
+}

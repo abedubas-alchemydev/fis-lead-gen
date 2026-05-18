@@ -10,9 +10,11 @@ import {
   Inbox,
   Loader2,
   Mail,
+  RotateCcw,
   Settings2,
   ShieldAlert,
   UserMinus,
+  UserX,
   Users as UsersIcon,
   XCircle,
 } from "lucide-react";
@@ -47,6 +49,23 @@ type ActiveUser = {
   lastActivityAt: string | null;
 };
 
+type RemovedAction = "user_deactivated" | "user_rejected";
+
+type RemovedUser = {
+  id: string;
+  email: string;
+  name: string;
+  role: string;
+  createdAt: string;
+  featurePermissions: string[];
+  removedAt: string | null;
+  removedAction: RemovedAction | null;
+  removedByName: string | null;
+  removedByEmail: string | null;
+};
+
+type RemovedTab = "deactivated" | "rejected";
+
 // "Online" = any session for this user touched in the last 5 minutes.
 // 5 min matches the Better Auth cookie-cache window so an idling tab
 // still counts as online while the cookie is valid, even if the user
@@ -61,7 +80,7 @@ function isOnlineNow(lastActivityAt: string | null): boolean {
   return Date.now() - ts < ONLINE_WINDOW_MS;
 }
 
-type Action = "approve" | "reject" | "deactivate";
+type Action = "approve" | "reject" | "deactivate" | "reactivate";
 
 function summarizePermissions(role: string, perms: string[]): string {
   if (role === "admin") return "All features (admin)";
@@ -74,16 +93,19 @@ function summarizePermissions(role: string, perms: string[]): string {
 export function UsersAdminClient({
   pendingUsers,
   activeUsers,
+  removedUsers,
   currentAdminId,
 }: {
   pendingUsers: PendingUser[];
   activeUsers: ActiveUser[];
+  removedUsers: RemovedUser[];
   currentAdminId: string;
 }) {
   const router = useRouter();
   const [isPending, startTransition] = useTransition();
   const [actingId, setActingId] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
+  const [removedTab, setRemovedTab] = useState<RemovedTab>("deactivated");
 
   async function act(userId: string, action: Action) {
     setError(null);
@@ -121,8 +143,37 @@ export function UsersAdminClient({
     void act(user.id, "deactivate");
   }
 
+  function handleReactivate(user: RemovedUser) {
+    const ok = window.confirm(
+      `Reactivate ${user.email}? They will be able to sign in again and we'll email them a notification.`
+    );
+    if (!ok) return;
+    void act(user.id, "reactivate");
+  }
+
+  function handleApproveRemoved(user: RemovedUser) {
+    const ok = window.confirm(
+      `Approve ${user.email}? They will be able to sign in and we'll email them a notification.`
+    );
+    if (!ok) return;
+    void act(user.id, "approve");
+  }
+
   const headlineCount = pendingUsers.length;
   const activeCount = activeUsers.length;
+
+  // Bucket removed users by the most recent removal event in audit_log.
+  // Rows with no audit row (legacy / direct DB inserts) fall into the
+  // rejected-signups bucket as a defensive default.
+  const deactivatedUsers = removedUsers.filter(
+    (u) => u.removedAction === "user_deactivated"
+  );
+  const rejectedUsers = removedUsers.filter(
+    (u) => u.removedAction !== "user_deactivated"
+  );
+  const removedCount = removedUsers.length;
+  const visibleRemoved =
+    removedTab === "deactivated" ? deactivatedUsers : rejectedUsers;
 
   return (
     <section className="space-y-6">
@@ -375,6 +426,162 @@ export function UsersAdminClient({
                             </button>
                           )}
                         </div>
+                      </td>
+                    </tr>
+                  );
+                })}
+              </tbody>
+            </table>
+          </div>
+        )}
+      </div>
+
+      <div className={CARD}>
+        <div className="flex flex-wrap items-center justify-between gap-3">
+          <div>
+            <p className={EYEBROW}>Removed accounts</p>
+            <h2 className={CARD_TITLE}>
+              {removedCount === 0
+                ? "No removed accounts"
+                : `${removedCount} ${removedCount === 1 ? "account" : "accounts"} removed`}
+            </h2>
+          </div>
+          <div
+            role="tablist"
+            aria-label="Removed account category"
+            className="inline-flex items-center gap-1 rounded-xl border border-[var(--border,rgba(30,64,175,0.1))] bg-[var(--surface-2,#f1f6fd)] p-1"
+          >
+            <button
+              type="button"
+              role="tab"
+              aria-selected={removedTab === "deactivated"}
+              onClick={() => setRemovedTab("deactivated")}
+              className={`inline-flex items-center gap-1.5 rounded-[8px] px-3 py-1.5 text-[12px] font-semibold transition ${
+                removedTab === "deactivated"
+                  ? "bg-[var(--surface,#ffffff)] text-[var(--text,#0f172a)] shadow-[0_1px_2px_rgba(15,23,42,0.06)]"
+                  : "text-[var(--text-dim,#475569)] hover:text-[var(--text,#0f172a)]"
+              }`}
+            >
+              <UserX className="h-3.5 w-3.5" aria-hidden />
+              Deactivated
+              <span className="ml-1 inline-flex h-4 min-w-[16px] items-center justify-center rounded-full bg-[var(--border,rgba(30,64,175,0.1))] px-1 text-[10px] font-semibold tabular-nums text-[var(--text,#0f172a)]">
+                {deactivatedUsers.length}
+              </span>
+            </button>
+            <button
+              type="button"
+              role="tab"
+              aria-selected={removedTab === "rejected"}
+              onClick={() => setRemovedTab("rejected")}
+              className={`inline-flex items-center gap-1.5 rounded-[8px] px-3 py-1.5 text-[12px] font-semibold transition ${
+                removedTab === "rejected"
+                  ? "bg-[var(--surface,#ffffff)] text-[var(--text,#0f172a)] shadow-[0_1px_2px_rgba(15,23,42,0.06)]"
+                  : "text-[var(--text-dim,#475569)] hover:text-[var(--text,#0f172a)]"
+              }`}
+            >
+              <XCircle className="h-3.5 w-3.5" aria-hidden />
+              Rejected signups
+              <span className="ml-1 inline-flex h-4 min-w-[16px] items-center justify-center rounded-full bg-[var(--border,rgba(30,64,175,0.1))] px-1 text-[10px] font-semibold tabular-nums text-[var(--text,#0f172a)]">
+                {rejectedUsers.length}
+              </span>
+            </button>
+          </div>
+        </div>
+
+        {visibleRemoved.length === 0 ? (
+          <div className="mt-4 rounded-xl border border-dashed border-[var(--border-2,rgba(30,64,175,0.16))] px-4 py-8 text-center">
+            <div className="mx-auto grid h-10 w-10 place-items-center rounded-full bg-[var(--surface-2,#f1f6fd)] text-[var(--text-dim,#475569)]">
+              <Inbox className="h-6 w-6" strokeWidth={1.75} aria-hidden />
+            </div>
+            <p className="mt-3 text-sm font-semibold text-[var(--text,#0f172a)]">
+              {removedTab === "deactivated"
+                ? "No deactivated accounts"
+                : "No rejected signups"}
+            </p>
+            <p className="mt-1 text-xs text-[var(--text-dim,#475569)]">
+              {removedTab === "deactivated"
+                ? "Users you deactivate from the Active list will appear here."
+                : "Pending signups you reject will appear here."}
+            </p>
+          </div>
+        ) : (
+          <div className="mt-4 overflow-x-auto rounded-xl border border-[var(--border,rgba(30,64,175,0.1))]">
+            <table className="w-full text-left text-sm">
+              <thead className="bg-[var(--surface-2,#f1f6fd)] text-[10px] font-semibold uppercase tracking-[0.1em] text-[var(--text-muted,#94a3b8)]">
+                <tr>
+                  <th className="px-5 py-3">Name</th>
+                  <th className="px-5 py-3">Email</th>
+                  <th className="px-5 py-3">Role</th>
+                  <th className="px-5 py-3">
+                    {removedTab === "deactivated" ? "Deactivated" : "Rejected"}
+                  </th>
+                  <th className="px-5 py-3">
+                    {removedTab === "deactivated" ? "Deactivated by" : "Rejected by"}
+                  </th>
+                  <th className="px-5 py-3 text-right">Actions</th>
+                </tr>
+              </thead>
+              <tbody className="divide-y divide-[var(--border,rgba(30,64,175,0.1))]">
+                {visibleRemoved.map((u) => {
+                  const isActing = actingId === u.id && isPending;
+                  const actorLabel = u.removedByName || u.removedByEmail || "—";
+                  return (
+                    <tr key={u.id} className="hover:bg-[var(--surface-2,#f1f6fd)]/50">
+                      <td className="px-5 py-4 font-semibold text-[var(--text,#0f172a)]">
+                        {u.name || "—"}
+                      </td>
+                      <td className="px-5 py-4 text-[var(--text-dim,#475569)]">
+                        <span className="inline-flex items-center gap-1.5">
+                          <Mail className="h-3.5 w-3.5 text-[var(--text-muted,#94a3b8)]" aria-hidden />
+                          {u.email}
+                        </span>
+                      </td>
+                      <td className="px-5 py-4">
+                        <span className="inline-flex items-center rounded-full border border-[var(--border-2,rgba(30,64,175,0.16))] bg-[var(--surface-2,#f1f6fd)] px-2.5 py-0.5 text-[11px] font-semibold capitalize text-[var(--text,#0f172a)]">
+                          {u.role}
+                        </span>
+                      </td>
+                      <td className="px-5 py-4 text-[var(--text-muted,#94a3b8)]">
+                        <span className="inline-flex items-center gap-1.5">
+                          <Clock className="h-3.5 w-3.5" aria-hidden />
+                          {u.removedAt
+                            ? new Date(u.removedAt).toLocaleString()
+                            : "Unknown"}
+                        </span>
+                      </td>
+                      <td className="px-5 py-4 text-[var(--text-dim,#475569)]">
+                        {actorLabel}
+                      </td>
+                      <td className="px-5 py-4 text-right">
+                        {removedTab === "deactivated" ? (
+                          <button
+                            type="button"
+                            onClick={() => handleReactivate(u)}
+                            disabled={isActing}
+                            className="inline-flex items-center gap-1.5 rounded-xl bg-emerald-500 px-3 py-2 text-xs font-semibold text-white shadow-[0_6px_16px_rgba(16,185,129,0.35)] transition hover:brightness-110 disabled:cursor-not-allowed disabled:opacity-60 disabled:shadow-none"
+                          >
+                            {isActing ? (
+                              <Loader2 className="h-3.5 w-3.5 animate-spin" aria-hidden />
+                            ) : (
+                              <RotateCcw className="h-3.5 w-3.5" aria-hidden />
+                            )}
+                            Reactivate
+                          </button>
+                        ) : (
+                          <button
+                            type="button"
+                            onClick={() => handleApproveRemoved(u)}
+                            disabled={isActing}
+                            className="inline-flex items-center gap-1.5 rounded-xl bg-emerald-500 px-3 py-2 text-xs font-semibold text-white shadow-[0_6px_16px_rgba(16,185,129,0.35)] transition hover:brightness-110 disabled:cursor-not-allowed disabled:opacity-60 disabled:shadow-none"
+                          >
+                            {isActing ? (
+                              <Loader2 className="h-3.5 w-3.5 animate-spin" aria-hidden />
+                            ) : (
+                              <CheckCircle2 className="h-3.5 w-3.5" aria-hidden />
+                            )}
+                            Approve
+                          </button>
+                        )}
                       </td>
                     </tr>
                   );
