@@ -246,6 +246,66 @@ class Form4TransactionRecord:
 
 
 @dataclass(slots=True)
+class ConsolidatedPersonRow:
+    """One aggregated person × issuer × ad_code row for the Investors tab.
+
+    Built by ``Form4TransactionRepository.list_consolidated_persons`` by
+    collapsing every ``form4_transactions`` row matching the filter window
+    into one row per ``(issuer_cik, reporting_owner_cik, ad_code)`` group.
+    ``shares`` / ``transaction_value`` are sums across the group; the
+    representative-row fields (name, title, address, security_title, the
+    filing pointer, enrichment) come from the most recently filed
+    transaction in the group, picked by ROW_NUMBER over
+    ``(filed_at DESC, transaction_date DESC, id DESC)``.
+
+    ``price_per_share`` is intentionally None when ``txn_count > 1`` —
+    a weighted average would be misleading and the FE relies on the None
+    to know whether to render the "@ price" decoration.
+    """
+
+    # Leader (most-recent) row identifiers
+    id: int
+    accession_number: str
+    is_derivative: bool
+
+    issuer_cik: str
+    issuer_name: str
+    issuer_ticker: str | None
+
+    reporting_owner_cik: str
+    reporting_owner_name: str
+    reporting_owner_title: str | None
+    reporting_owner_is_director: bool
+    reporting_owner_is_officer: bool
+    reporting_owner_is_ten_pct: bool
+    reporting_owner_street1: str | None
+    reporting_owner_street2: str | None
+    reporting_owner_city: str | None
+    reporting_owner_state: str | None
+    reporting_owner_zip: str | None
+
+    security_title: str | None
+    transaction_date: date
+    transaction_code: str | None
+    ad_code: str
+
+    # Aggregates
+    shares: float | None
+    price_per_share: float | None
+    transaction_value: float | None
+    txn_count: int
+
+    # Enrichment (pulled from the leader row; the by-person enrich flow
+    # writes the same values to every underlying row so this is authoritative)
+    enriched_phone: str | None
+    enriched_email: str | None
+    enriched_at: datetime | None
+
+    source_filing_url: str | None
+    filed_at: datetime
+
+
+@dataclass(slots=True)
 class DownloadedPdfRecord:
     bd_id: int
     filing_year: int

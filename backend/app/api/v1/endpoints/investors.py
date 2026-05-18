@@ -1,14 +1,20 @@
 """Investors tab endpoints.
 
 ``GET /api/v1/investors`` — paginated, partitioned reporting-person list
-sourced from ``form4_transactions``. Default visibility is the last 90
-days (the product brief's "three months") with the $50K floor applied
-at query time.
+sourced from ``form4_transactions``. Rows are consolidated per
+``(issuer, person, ad_code)``: shares and transaction value are summed
+across every Form 4 the person filed in the visibility window, and the
+leader row (most recent filing) supplies the name, title, address, and
+"View Form 4" pointer. Default visibility is the last 90 days (the
+product brief's "three months") with the $50K floor applied per
+underlying transaction at query time.
 
-``POST /api/v1/investors/{id}/enrich`` — on-demand Apollo match for a
-single reporting person. Surfaces phone/email back into the row so
-the FE can render them in place. ``enriched_at`` is set on every
-successful Apollo round-trip even when the match comes back empty.
+``POST /api/v1/investors/{id}/enrich`` — on-demand Apollo match for the
+person identified by the leader transaction id. The match is persisted
+to every ``form4_transactions`` row sharing the same
+``reporting_owner_cik`` so the enrichment shows up wherever that person
+appears (other issuers, the "All" tab, etc.). The response returns just
+the enrichment fields; the FE merges them into the row it already has.
 """
 
 from __future__ import annotations
@@ -22,7 +28,6 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.config import settings
 from app.db.session import get_db_session
-from app.models.form4_transaction import Form4Transaction
 from app.schemas.auth import AuthenticatedUser
 from app.schemas.investors import (
     InvestorEnrichResponse,
@@ -34,6 +39,7 @@ from app.core.feature_permissions import INVESTORS
 from app.services.auth import ensure_feature, get_current_user
 from app.services.form4_apollo import match_form4_person
 from app.services.form4_transactions import Form4TransactionRepository
+from app.services.service_models import ConsolidatedPersonRow
 
 router = APIRouter(prefix="/investors")
 repository = Form4TransactionRepository()
@@ -46,7 +52,7 @@ def _require_investors(
     return user
 
 
-def _item_from_row(row: Form4Transaction) -> InvestorItem:
+def _item_from_consolidated(row: ConsolidatedPersonRow) -> InvestorItem:
     return InvestorItem(
         id=row.id,
         accession_number=row.accession_number,
@@ -69,13 +75,10 @@ def _item_from_row(row: Form4Transaction) -> InvestorItem:
         transaction_date=row.transaction_date,
         transaction_code=row.transaction_code,
         ad_code=row.ad_code,
-        shares=float(row.shares) if row.shares is not None else None,
-        price_per_share=(
-            float(row.price_per_share) if row.price_per_share is not None else None
-        ),
-        transaction_value=(
-            float(row.transaction_value) if row.transaction_value is not None else None
-        ),
+        shares=row.shares,
+        price_per_share=row.price_per_share,
+        transaction_value=row.transaction_value,
+        txn_count=row.txn_count,
         enriched_phone=row.enriched_phone,
         enriched_email=row.enriched_email,
         enriched_at=row.enriched_at,
@@ -119,7 +122,7 @@ async def list_investors(
         else Decimal(str(settings.form4_min_transaction_value))
     )
 
-    rows, total = await repository.list_transactions(
+    rows, total = await repository.list_consolidated_persons(
         db,
         ad_code=ad_code,
         ticker=ticker,
@@ -129,7 +132,7 @@ async def list_investors(
         limit=limit,
     )
     return InvestorListResponse(
-        items=[_item_from_row(row) for row in rows],
+        items=[_item_from_consolidated(row) for row in rows],
         meta=InvestorListMeta(
             page=page,
             limit=limit,
@@ -155,12 +158,16 @@ async def enrich_investor(
         full_name=row.reporting_owner_name,
         issuer_name=row.issuer_name,
     )
-    updated = await repository.attach_enrichment(
-        db, txn_id, phone=match.phone, email=match.email
+    _, enriched_at = await repository.attach_enrichment_by_person(
+        db,
+        reporting_owner_cik=row.reporting_owner_cik,
+        phone=match.phone,
+        email=match.email,
     )
-    if updated is None:
-        # Race: row deleted between GET and UPDATE. Surface as 404.
-        raise HTTPException(
-            status_code=status.HTTP_404_NOT_FOUND, detail="Investor row not found."
-        )
-    return InvestorEnrichResponse(item=_item_from_row(updated), matched=match.matched)
+    return InvestorEnrichResponse(
+        txn_id=txn_id,
+        enriched_phone=match.phone,
+        enriched_email=match.email,
+        enriched_at=enriched_at,
+        matched=match.matched,
+    )
