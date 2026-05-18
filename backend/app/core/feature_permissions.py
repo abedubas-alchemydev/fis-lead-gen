@@ -13,11 +13,13 @@ from __future__ import annotations
 MASTER_LIST = "master_list"
 INVESTMENT_ADVISORS = "investment_advisors"
 INVESTORS = "investors"
+INSTITUTIONAL_INVESTORS = "institutional_investors"
 
 ALL_FEATURE_KEYS: frozenset[str] = frozenset(
     {
         MASTER_LIST,
         INVESTMENT_ADVISORS,
         INVESTORS,
+        INSTITUTIONAL_INVESTORS,
     }
 )

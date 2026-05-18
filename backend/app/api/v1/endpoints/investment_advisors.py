@@ -207,6 +207,44 @@ async def get_advisor_favorite_lists(
     ]
 
 
+@router.get("/{advisor_id}/adjacent")
+async def get_adjacent_advisors(
+    advisor_id: int,
+    _: AuthenticatedUser = Depends(_require_investment_advisors),
+    db: AsyncSession = Depends(get_db_session),
+) -> dict[str, int | None]:
+    """Return the previous and next advisor IDs for the Next button.
+
+    Walks the advisor master-list's default view: ``files_13f = TRUE``
+    ordered by ``name ASC NULLS LAST, id ASC``. The frontend has a
+    separate return-envelope path that walks whatever filter/sort the
+    user actually had on screen; this endpoint is the fallback for
+    direct-link / bookmark visits, so it should match what the user
+    would see if they navigated to ``/advisor-list`` fresh.
+
+    Mirror of ``GET /broker-dealers/{id}/adjacent`` -- same shape.
+    """
+
+    ordered_ids = (
+        await db.execute(
+            select(InvestmentAdvisor.id)
+            .where(InvestmentAdvisor.files_13f.is_(True))
+            .order_by(InvestmentAdvisor.name.asc().nullslast(), InvestmentAdvisor.id.asc())
+        )
+    ).scalars().all()
+
+    try:
+        idx = ordered_ids.index(advisor_id)
+    except ValueError:
+        # Advisor exists but is filtered out of the default 13F-only view.
+        # Surface no neighbours rather than guess.
+        return {"prev_id": None, "next_id": None}
+
+    prev_id = ordered_ids[idx - 1] if idx > 0 else None
+    next_id = ordered_ids[idx + 1] if idx < len(ordered_ids) - 1 else None
+    return {"prev_id": prev_id, "next_id": next_id}
+
+
 @router.get("/{advisor_id}", response_model=InvestmentAdvisorDetail)
 async def get_investment_advisor(
     advisor_id: int,

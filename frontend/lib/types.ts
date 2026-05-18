@@ -770,3 +770,147 @@ export type ClientTypeCount = {
   type: string;
   count: number;
 };
+
+// ── Institutional Investor (13F filer) types ──
+//
+// Mirrors backend/app/schemas/institutional_investor.py. ``advisor_id``
+// is populated when the same CIK also appears as a registered RIA in
+// ``investment_advisors`` -- the FE renders a "View as Investment
+// Advisor ->" cross-link in that case.
+
+export type InstitutionalInvestorListItem = {
+  id: number;
+  cik: string | null;
+  advisor_id: number | null;
+  name: string;
+  legal_name: string | null;
+  city: string | null;
+  state: string | null;
+  status: string;
+  matched_source: string;
+  website: string | null;
+  website_source: string | null;
+  latest_13f_filing_date: string | null;
+  total_aum: number | null;
+  holdings_count: number | null;
+  filings_index_url: string | null;
+  last_enrich_attempt_at: string | null;
+  created_at: string;
+  updated_at: string;
+};
+
+export type InstitutionalInvestorDetail = InstitutionalInvestorListItem;
+
+export type InstitutionalInvestorListMeta = {
+  page: number;
+  limit: number;
+  total: number;
+  total_pages: number;
+  pipeline_refreshed_at: string | null;
+};
+
+export type InstitutionalInvestorListResponse = {
+  items: InstitutionalInvestorListItem[];
+  meta: InstitutionalInvestorListMeta;
+};
+
+export type InvestorContactItem = {
+  id: number;
+  investor_id: number;
+  name: string;
+  title: string;
+  email: string | null;
+  phone: string | null;
+  linkedin_url: string | null;
+  source: string;
+  discovery_source: string | null;
+  discovery_confidence: number | null;
+  enriched_at: string;
+};
+
+export type InvestorFilingItem = {
+  id: number;
+  investor_id: number;
+  form_type: string;
+  priority: string;
+  filed_at: string;
+  summary: string;
+  source_filing_url: string | null;
+  is_read: boolean;
+};
+
+export type InstitutionalInvestorProfileResponse = {
+  investor: InstitutionalInvestorDetail;
+  contacts: InvestorContactItem[];
+  filings: InvestorFilingItem[];
+  is_favorited: boolean;
+};
+
+export type AdjacentResponse = {
+  prev_id: number | null;
+  next_id: number | null;
+};
+
+// ── Cross-entity contact search ──
+//
+// Mirrors backend/app/schemas/contact_search.py. Hits surface a
+// ``firm_type`` discriminator (or null when no firm context, e.g. a
+// raw discovered_email row not yet attributed to a firm) so the FE
+// can render a deep-link to the right detail page.
+
+export type ContactSearchSource =
+  | "executive_contact"
+  | "advisor_contact"
+  | "investor_contact"
+  | "discovered_email"
+  | "apollo";
+
+export type ContactSearchFirmType =
+  | "broker_dealer"
+  | "advisor"
+  | "institutional_investor";
+
+export type ContactSearchHit = {
+  source: ContactSearchSource;
+  firm_type: ContactSearchFirmType | null;
+  firm_id: number | null;
+  firm_name: string | null;
+  contact_id: number | null;
+  name: string | null;
+  title: string | null;
+  email: string | null;
+  phone: string | null;
+  linkedin_url: string | null;
+};
+
+export type ContactSearchResponse = {
+  hits: ContactSearchHit[];
+  count: number;
+};
+
+// ── Polymorphic outreach ──
+//
+// Advisor/investor draft + send requests. Same shape as the BD variants
+// but keyed on the right firm + contact IDs.
+
+export type OutreachAdvisorDraftRequest = {
+  advisor_id: number;
+  advisor_contact_id: number;
+  folder_id: number;
+};
+
+export type OutreachAdvisorSendRequest = OutreachAdvisorDraftRequest & {
+  subject: string;
+  body: string;
+};
+
+export type OutreachInvestorDraftRequest = {
+  institutional_investor_id: number;
+  investor_contact_id: number;
+  folder_id: number;
+};
+
+export type OutreachInvestorSendRequest = OutreachInvestorDraftRequest & {
+  subject: string;
+  body: string;
+};

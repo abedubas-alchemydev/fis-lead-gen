@@ -117,16 +117,34 @@ export function FavoriteListItemsPane({
       ) : (
         <ul role="list" className="divide-y divide-[var(--border,rgba(30,64,175,0.1))]">
           {items.map((item) => {
+            // Resolve target (id, name, route prefix, pill label) based on
+            // entity_type. The three pills (BD/RIA/INV) use the same
+            // styling family with different accent colors.
             const isAdvisor = item.entity_type === "advisor";
-            const targetId = isAdvisor ? item.advisor_id : item.broker_dealer_id;
-            const targetName = isAdvisor
-              ? item.advisor_name
-              : item.broker_dealer_name;
+            const isInvestor = item.entity_type === "institutional_investor";
+            const targetId = isInvestor
+              ? item.institutional_investor_id
+              : isAdvisor
+                ? item.advisor_id
+                : item.broker_dealer_id;
+            const targetName = isInvestor
+              ? item.institutional_investor_name
+              : isAdvisor
+                ? item.advisor_name
+                : item.broker_dealer_name;
             const detailHref = (
-              isAdvisor
-                ? `/advisor-list/${targetId}${advisorDetailHrefSuffix}`
-                : `/master-list/${targetId}${bdDetailHrefSuffix}`
+              isInvestor
+                ? `/investors/${targetId}`
+                : isAdvisor
+                  ? `/advisor-list/${targetId}${advisorDetailHrefSuffix}`
+                  : `/master-list/${targetId}${bdDetailHrefSuffix}`
             ) as Route;
+            const pillLabel = isInvestor ? "INV" : isAdvisor ? "RIA" : "BD";
+            const pillClass = isInvestor
+              ? "bg-[rgba(245,158,11,0.12)] text-[#b45309]"
+              : isAdvisor
+                ? "bg-[rgba(16,185,129,0.12)] text-[#047857]"
+                : "bg-[rgba(99,102,241,0.12)] text-[#4338ca]";
             return (
               <li
                 key={`${item.entity_type}-${targetId}`}
@@ -141,13 +159,9 @@ export function FavoriteListItemsPane({
                       {targetName}
                     </Link>
                     <span
-                      className={`shrink-0 rounded-full px-1.5 py-0.5 text-[10px] font-semibold uppercase tracking-[0.06em] ${
-                        isAdvisor
-                          ? "bg-[rgba(16,185,129,0.12)] text-[#047857]"
-                          : "bg-[rgba(99,102,241,0.12)] text-[#4338ca]"
-                      }`}
+                      className={`shrink-0 rounded-full px-1.5 py-0.5 text-[10px] font-semibold uppercase tracking-[0.06em] ${pillClass}`}
                     >
-                      {isAdvisor ? "RIA" : "BD"}
+                      {pillLabel}
                     </span>
                   </div>
                   <p className="mt-0.5 text-[12px] text-[var(--text-muted,#94a3b8)]">

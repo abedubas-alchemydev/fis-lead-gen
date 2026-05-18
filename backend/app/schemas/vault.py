@@ -58,6 +58,41 @@ class OutreachSendRequest(BaseModel):
     body: str = Field(..., min_length=1, max_length=100_000)
 
 
+# ── Advisor + Investor parallels ──────────────────────────────────────
+# Same shape as OutreachDraftRequest / OutreachSendRequest, just keyed
+# on the right (firm, contact) pair for the advisor and investor
+# detail-page surfaces. Kept as parallel schemas rather than a
+# discriminated union so the existing BD wire format stays unchanged.
+
+
+class OutreachAdvisorDraftRequest(BaseModel):
+    advisor_id: int = Field(..., gt=0)
+    advisor_contact_id: int = Field(..., gt=0)
+    folder_id: int = Field(..., gt=0)
+
+
+class OutreachAdvisorSendRequest(BaseModel):
+    advisor_id: int = Field(..., gt=0)
+    advisor_contact_id: int = Field(..., gt=0)
+    folder_id: int = Field(..., gt=0)
+    subject: str = Field(..., min_length=1, max_length=998)
+    body: str = Field(..., min_length=1, max_length=100_000)
+
+
+class OutreachInvestorDraftRequest(BaseModel):
+    institutional_investor_id: int = Field(..., gt=0)
+    investor_contact_id: int = Field(..., gt=0)
+    folder_id: int = Field(..., gt=0)
+
+
+class OutreachInvestorSendRequest(BaseModel):
+    institutional_investor_id: int = Field(..., gt=0)
+    investor_contact_id: int = Field(..., gt=0)
+    folder_id: int = Field(..., gt=0)
+    subject: str = Field(..., min_length=1, max_length=998)
+    body: str = Field(..., min_length=1, max_length=100_000)
+
+
 class OutreachSendResponse(BaseModel):
     id: int
     gmail_message_id: str
@@ -71,6 +106,12 @@ class OutreachSendItem(BaseModel):
     Excludes ``body`` to keep the list payload small — fetch the full
     body on demand via ``GET /outreach/sends/{send_id}`` when the user
     expands a row.
+
+    Polymorphic across firm types: ``firm_type`` discriminates
+    broker_dealer / advisor / institutional_investor. The matching pair
+    of id/name fields is populated; the others are None. Legacy
+    ``broker_dealer_id`` + ``broker_dealer_name`` stay populated for BD
+    rows for FE backwards compatibility.
     """
 
     id: int
@@ -79,11 +120,19 @@ class OutreachSendItem(BaseModel):
     subject: str
     gmail_message_id: str | None
     error: str | None
-    broker_dealer_id: int
-    broker_dealer_name: str
-    contact_id: int
-    contact_name: str
-    contact_email: str | None
+    firm_type: str = "broker_dealer"
+    broker_dealer_id: int | None = None
+    broker_dealer_name: str | None = None
+    advisor_id: int | None = None
+    advisor_name: str | None = None
+    institutional_investor_id: int | None = None
+    institutional_investor_name: str | None = None
+    contact_type: str = "executive_contact"
+    contact_id: int | None = None
+    advisor_contact_id: int | None = None
+    investor_contact_id: int | None = None
+    contact_name: str = ""
+    contact_email: str | None = None
     # Folder may be NULL if the service folder was deleted after the
     # send. The send row stays so the audit history doesn't lose
     # entries.

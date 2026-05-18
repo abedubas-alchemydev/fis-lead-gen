@@ -25,12 +25,14 @@ export interface FavoriteListWithMembership extends FavoriteList {
   is_member: boolean;
 }
 
-// Polymorphic item: a list can contain broker-dealers and investment
-// advisors. ``entity_type`` discriminates; the opposite entity's fields
-// are null. Pre-existing BD callers can still read ``broker_dealer_id`` /
-// ``broker_dealer_name`` directly, but should now gate on ``entity_type``
-// to avoid rendering broken links when an advisor row shows up.
-export type FavoriteListEntityType = "broker_dealer" | "advisor";
+// Polymorphic item across three firm types: broker_dealer, advisor,
+// institutional_investor. ``entity_type`` discriminates; the unused
+// id/name pairs are null. Pre-existing BD/advisor callers can still
+// read the typed fields directly but should gate on ``entity_type``.
+export type FavoriteListEntityType =
+  | "broker_dealer"
+  | "advisor"
+  | "institutional_investor";
 
 export interface FavoriteListItem {
   entity_type: FavoriteListEntityType;
@@ -38,6 +40,8 @@ export interface FavoriteListItem {
   broker_dealer_name: string | null;
   advisor_id: number | null;
   advisor_name: string | null;
+  institutional_investor_id: number | null;
+  institutional_investor_name: string | null;
   added_at: string;
 }
 
