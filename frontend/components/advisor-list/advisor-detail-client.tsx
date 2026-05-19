@@ -416,7 +416,6 @@ export function AdvisorDetailClient({ advisorId }: { advisorId: string }) {
                   name={contact.name}
                   title={contact.title}
                   email={contact.email}
-                  source={`${contact.source} · ${formatDate(contact.enriched_at)}`}
                 />
               ))}
             </PeopleSubGroup>
