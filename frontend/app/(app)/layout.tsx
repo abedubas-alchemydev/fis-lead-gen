@@ -1,6 +1,7 @@
 import type { ReactNode } from "react";
 
 import { AppShell } from "@/components/layout/app-shell";
+import { SecurityShield } from "@/components/security/security-shield";
 import { Toaster } from "@/components/ui/toaster";
 import { getRequiredSession } from "@/lib/auth-server";
 
@@ -9,6 +10,11 @@ export default async function ProtectedAppLayout({ children }: { children: React
 
   return (
     <>
+      <SecurityShield
+        userEmail={session.user.email}
+        userId={session.user.id}
+        userName={session.user.name ?? undefined}
+      />
       <AppShell session={session}>{children}</AppShell>
       <Toaster />
     </>

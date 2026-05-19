@@ -509,6 +509,7 @@ export function OutreachModal({
                 value={subject}
                 onChange={(event) => setSubject(event.target.value)}
                 disabled={stage === "sending"}
+                data-allow-copy
                 className="mt-1 block w-full rounded-xl border border-[var(--border,rgba(30,64,175,0.1))] bg-[var(--surface,#ffffff)] px-3 py-2 text-sm text-[var(--text,#0f172a)] outline-none transition focus:border-[var(--accent,#6366f1)] focus:ring-2 focus:ring-[var(--accent,#6366f1)]/20 disabled:cursor-not-allowed disabled:opacity-60"
               />
             </div>
@@ -530,6 +531,7 @@ export function OutreachModal({
                 onChange={(event) => setBody(event.target.value)}
                 disabled={stage === "sending"}
                 rows={10}
+                data-allow-copy
                 className="mt-1 block w-full rounded-xl border border-[var(--border,rgba(30,64,175,0.1))] bg-[var(--surface,#ffffff)] px-3 py-2 text-sm leading-6 text-[var(--text,#0f172a)] outline-none transition focus:border-[var(--accent,#6366f1)] focus:ring-2 focus:ring-[var(--accent,#6366f1)]/20 disabled:cursor-not-allowed disabled:opacity-60"
               />
             </div>
