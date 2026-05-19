@@ -58,7 +58,7 @@ export function WatermarkOverlay({ email, userId, name }: WatermarkOverlayProps)
           gap: "120px 80px",
           padding: "80px",
           opacity: 0.16,
-          color: "#0f172a",
+          color: "var(--text, #0f172a)",
           fontFamily: "var(--font-mono, ui-monospace, SFMono-Regular, monospace)",
           fontSize: "13px",
           fontWeight: 600,
