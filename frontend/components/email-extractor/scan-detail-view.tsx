@@ -347,9 +347,6 @@ function ResultsTable({
               Email
             </th>
             <th className="px-4 py-2.5 text-[11px] font-semibold uppercase tracking-[0.08em] text-[var(--text-muted,#94a3b8)]">
-              Source
-            </th>
-            <th className="px-4 py-2.5 text-[11px] font-semibold uppercase tracking-[0.08em] text-[var(--text-muted,#94a3b8)]">
               Confidence
             </th>
             <th className="px-4 py-2.5 text-[11px] font-semibold uppercase tracking-[0.08em] text-[var(--text-muted,#94a3b8)]">
@@ -365,9 +362,6 @@ function ResultsTable({
             <tr key={row.id} className="align-top">
               <td className="px-4 py-3 font-mono text-[12px] text-[var(--text,#0f172a)]">
                 {row.email}
-              </td>
-              <td className="px-4 py-3 text-[12px] text-[var(--text-muted,#94a3b8)]">
-                {row.source}
               </td>
               <td className="px-4 py-3 text-[12px] tabular-nums text-[var(--text-dim,#475569)]">
                 {formatConfidence(row.confidence)}
@@ -582,7 +576,6 @@ export function ScanDetailView({
     return scan.discovered_emails.filter(
       (row) =>
         row.email.toLowerCase().includes(q) ||
-        row.source.toLowerCase().includes(q) ||
         (row.enriched_name?.toLowerCase().includes(q) ?? false) ||
         (row.enriched_title?.toLowerCase().includes(q) ?? false) ||
         (row.enriched_company?.toLowerCase().includes(q) ?? false) ||
@@ -869,7 +862,7 @@ export function ScanDetailView({
                   type="search"
                   value={searchQuery}
                   onChange={(e) => setSearchQuery(e.target.value)}
-                  placeholder="Search email, source, name, title, company, or phone"
+                  placeholder="Search email, name, title, company, or phone"
                   aria-label="Search discovered emails"
                   className="w-full rounded-md border border-[var(--border,rgba(30,64,175,0.1))] bg-[var(--surface,#ffffff)] py-1.5 pl-8 pr-3 text-[13px] text-[var(--text,#0f172a)] placeholder:text-[var(--text-muted,#94a3b8)] focus:border-[var(--blue,#3b82f6)] focus:outline-none focus:ring-2 focus:ring-[rgba(59,130,246,0.2)]"
                 />
