@@ -1,0 +1,90 @@
+/* Content-protection styles — loaded on gated routes only via security-shield.tsx.
+   See plans/image-1-image-2-immutable-sphinx.md for the threat model. */
+
+/* Block text selection everywhere by default. Form controls and any
+   explicitly-tagged element stay selectable so search, filters, and the
+   outreach modal subject/body textareas keep working. */
+body {
+  user-select: none;
+  -webkit-user-select: none;
+  -moz-user-select: none;
+  -ms-user-select: none;
+}
+
+input,
+textarea,
+[contenteditable="true"],
+[data-allow-select],
+[data-allow-copy] {
+  user-select: text;
+  -webkit-user-select: text;
+  -moz-user-select: text;
+  -ms-user-select: text;
+}
+
+/* Block drag-to-save on images. */
+img,
+[data-no-drag] {
+  -webkit-user-drag: none;
+  user-drag: none;
+}
+
+/* Hide everything when the print dialog opens. Two layers — beforeprint
+   sets the data attribute (blurs the live page), and @media print blanks
+   the actual print canvas so even a "Save as PDF" returns the notice only. */
+html[data-print-locked="true"] body > *:not([data-security-overlay]) {
+  filter: blur(24px) !important;
+  pointer-events: none !important;
+}
+
+@media print {
+  html,
+  body {
+    background: #ffffff !important;
+  }
+  body * {
+    visibility: hidden !important;
+  }
+  body::before {
+    content: "Printing is disabled for security. This action has been logged.";
+    visibility: visible;
+    display: block;
+    position: fixed;
+    inset: 0;
+    padding: 2rem;
+    font-size: 14pt;
+    color: #0f172a;
+  }
+}
+
+/* Blur content while the tab/window is not focused. Stops the obvious
+   "screen-record while alt-tabbed" capture. */
+html[data-app-blurred="true"] body > *:not([data-security-overlay]) {
+  filter: blur(20px) !important;
+}
+
+/* Devtools-open lockdown. Heuristic only — we never block, just blur and
+   show an overlay. False positives (responsive mode, narrow windows) are
+   accepted intentionally. */
+html[data-devtools-open="true"] body > *:not([data-security-overlay]) {
+  filter: blur(28px) saturate(0) !important;
+  pointer-events: none !important;
+  user-select: none !important;
+}
+
+html[data-devtools-open="true"] body::after {
+  content: "Developer tools detected — content hidden for security. This event has been logged.";
+  position: fixed;
+  inset: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 2rem;
+  text-align: center;
+  background: rgba(8, 12, 24, 0.92);
+  color: #ffffff;
+  z-index: 2147483647;
+  font-size: 16px;
+  font-weight: 500;
+  letter-spacing: 0.01em;
+}
