@@ -39,7 +39,6 @@ import {
 import { SectionPanel } from "@/components/ui/section-panel";
 import { ListPicker } from "@/components/list-picker/list-picker";
 import { Pill } from "@/components/ui/pill";
-import { SourceBadge } from "@/components/master-list/source-badge";
 import { UnknownCell } from "@/components/master-list/unknown-cell";
 import { apiRequest, buildApiPath } from "@/lib/api";
 import { parseArrangementBlob } from "@/lib/arrangements";
@@ -974,7 +973,6 @@ export function BrokerDealerDetailClient({ brokerDealerId }: { brokerDealerId: s
                   name={contact.name}
                   title={contact.title}
                   contact={contact}
-                  source={`${contact.source} · ${formatDate(contact.enriched_at)}`}
                   brokerDealerId={bd.id}
                   brokerDealerName={bd.name}
                   onContactUpdated={handleContactUpdated}
@@ -1345,14 +1343,7 @@ function PersonCard({
 }) {
   return (
     <div className="rounded-2xl bg-[var(--surface-2,#f1f6fd)] px-4 py-3 text-sm text-[var(--text-dim,#475569)]">
-      <p className="flex flex-wrap items-center gap-2 font-semibold text-[var(--text,#0f172a)]">
-        <span>{name}</span>
-        {contact ? (
-          <span className="ml-auto">
-            <SourceBadge source={contact.source} />
-          </span>
-        ) : null}
-      </p>
+      <p className="font-semibold text-[var(--text,#0f172a)]">{name}</p>
       {title ? <p className="mt-1">{title}</p> : null}
       {extra ? <p className="mt-1 text-xs text-[var(--text-muted,#94a3b8)]">{extra}</p> : null}
       {contact ? (
