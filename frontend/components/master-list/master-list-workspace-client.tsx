@@ -506,9 +506,9 @@ export function MasterListWorkspaceClient() {
     if (stateFilter !== "") count += 1;
     if (healthFilter !== "All") count += 1;
     if (prospectPriorityFilter !== "All") count += 1;
-    if (clearingPartnerFilter.length > 0) count += 1;
+    count += clearingPartnerFilter.length;
     if (clearingTypeFilter !== "All") count += 1;
-    if (typesOfBusinessFilter.length > 0) count += 1;
+    count += typesOfBusinessFilter.length;
     if (minNetCapitalFilter !== null) count += 1;
     if (maxNetCapitalFilter !== null) count += 1;
     if (registeredAfterFilter !== null) count += 1;
@@ -812,7 +812,12 @@ export function MasterListWorkspaceClient() {
             max={maxNetCapitalFilter}
             onChange={(patch) => {
               const next: Partial<MasterListQueryState> = { page: 1 };
-              if (patch.min !== undefined) next.minNetCapital = patch.min;
+              // ≥ $0 is a no-op for non-negative net capital, so collapse
+              // min=0 to null. Max stays as-is — max=0 is a meaningful
+              // "show non-positive net capital" filter.
+              if (patch.min !== undefined) {
+                next.minNetCapital = patch.min === 0 ? null : patch.min;
+              }
               if (patch.max !== undefined) next.maxNetCapital = patch.max;
               updateState(next);
             }}
@@ -846,6 +851,7 @@ export function MasterListWorkspaceClient() {
             {clearingPartnerFilter.map((partner) => (
               <Tag
                 key={`partner-${partner}`}
+                title={`Partner: ${partner}`}
                 onDismiss={() =>
                   updateState({
                     clearingPartner: clearingPartnerFilter.filter(
@@ -884,6 +890,7 @@ export function MasterListWorkspaceClient() {
             {typesOfBusinessFilter.map((type) => (
               <Tag
                 key={`tob-${type}`}
+                title={`Business: ${type}`}
                 onDismiss={() =>
                   updateState({
                     typesOfBusiness: typesOfBusinessFilter.filter(
