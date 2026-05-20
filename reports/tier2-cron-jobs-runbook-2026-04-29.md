@@ -15,7 +15,7 @@
 - **2026-04-30T00:14:55Z – 00:15:23Z**: Created three scheduler jobs in `us-central1`:
   - `filing-monitor-hourly` — `0 * * * *` UTC
   - `populate-all-weekly` — `0 2 * * 0` UTC
-  - `initial-load-weekly` — `0 6 * * 0` UTC
+  - `initial-load-weekly` — `0 6 * * 0` UTC *(superseded by `initial-load-daily` on 2026-05-21 — see Change log)*
 - **First smoke (00:18:34Z) failed `403 PERMISSION_DENIED`.** Backend log: `Rejected OIDC token on pipeline endpoint: Token has wrong audience https://fis-backend-saxzdkn5nq-uc.a.run.app, expected one of ['https://fis-backend-136029935063.us-central1.run.app']`. Root cause: `gcloud run services describe fis-backend --format='value(status.url)'` returns the hash-form URL (`fis-backend-saxzdkn5nq-uc.a.run.app`), but the backend's `settings.backend_audience` allowlist is hardcoded to the project-number-form URL (`fis-backend-136029935063.us-central1.run.app`). The two URLs route to the same Cloud Run service, but only the latter passes the audience check in `_ensure_admin_or_scheduler_sa`.
 - **2026-04-30T00:20:13Z – 00:20:33Z**: Updated all three jobs' `--uri` and `--oidc-token-audience` to the project-number-form URL.
 - **Second smoke (00:21:22Z) failed `URL_REJECTED-REJECTED_DEADLINE_EXCEEDED` after 180s.** Root cause: `filing-monitor` is **synchronous** (per `reports/be-pipeline-endpoints-tier2-2026-04-29.md`, ~5–15 min wall time), but Cloud Scheduler's default attempt-deadline is 180s.
@@ -34,7 +34,7 @@ Pre-2026-04-29, the data pipeline only ran when someone manually triggered `pyth
 |---|---|---|---|---|---|
 | `filing-monitor-hourly` | `0 * * * *` | Catch new SEC filings the same business day they post → drives `/alerts` freshness | `POST /api/v1/pipeline/run/filing-monitor` | sync (~5–15 min wall) | **1800s** |
 | `populate-all-weekly` | `0 2 * * 0` | Weekly full enrichment refresh — Sunday 02:00 UTC (lowest-traffic window for Neon) | `POST /api/v1/pipeline/run/populate-all` | async (FastAPI `BackgroundTasks`, returns 202 immediately) | 180s default |
-| `initial-load-weekly` | `0 6 * * 0` | Weekly catch-up of newly-registered broker-dealers from FINRA — runs after `populate-all` so new BDs land before the next weekday | `POST /api/v1/pipeline/run/initial-load` | async (FastAPI `BackgroundTasks`, returns 202 immediately) | 180s default |
+| `initial-load-daily` | `0 6 * * *` | Daily catch-up of newly-registered broker-dealers from FINRA so the master list reflects new firms within ~24h | `POST /api/v1/pipeline/run/initial-load` | async (FastAPI `BackgroundTasks`, returns 202 immediately) | 180s default |
 
 ## Blocker A — Cloud Scheduler API not enabled — RESOLVED 2026-04-30
 
@@ -149,11 +149,11 @@ gcloud scheduler jobs create http populate-all-weekly \
     --description="Weekly full enrichment refresh — Sunday 02:00 UTC"
 ```
 
-### Job 3 — initial-load-weekly (async, 180s default)
+### Job 3 — initial-load-daily (async, 180s default)
 
 ```bash
-gcloud scheduler jobs create http initial-load-weekly \
-    --schedule="0 6 * * 0" \
+gcloud scheduler jobs create http initial-load-daily \
+    --schedule="0 6 * * *" \
     --time-zone="UTC" \
     --uri="$BACKEND_URL/api/v1/pipeline/run/initial-load" \
     --http-method=POST \
@@ -163,14 +163,14 @@ gcloud scheduler jobs create http initial-load-weekly \
     --oidc-token-audience="$BACKEND_URL" \
     --location=us-central1 \
     --project=fis-lead-gen \
-    --description="Weekly catch-up of newly-registered broker-dealers from FINRA"
+    --description="Daily catch-up of newly-registered broker-dealers from FINRA"
 ```
 
 ### Verify all 3 jobs exist + are enabled
 
 ```bash
 gcloud scheduler jobs list --location=us-central1 --project=fis-lead-gen \
-    --filter="name~filing-monitor-hourly OR name~populate-all-weekly OR name~initial-load-weekly" \
+    --filter="name~filing-monitor-hourly OR name~populate-all-weekly OR name~initial-load-daily" \
     --format="table(name.basename(),schedule,state,httpTarget.uri)"
 ```
 
@@ -220,7 +220,7 @@ gcloud scheduler jobs update http <name> \
 # Tear down
 gcloud scheduler jobs delete filing-monitor-hourly --location=us-central1 --project=fis-lead-gen
 gcloud scheduler jobs delete populate-all-weekly   --location=us-central1 --project=fis-lead-gen
-gcloud scheduler jobs delete initial-load-weekly   --location=us-central1 --project=fis-lead-gen
+gcloud scheduler jobs delete initial-load-daily    --location=us-central1 --project=fis-lead-gen
 ```
 
 ## Architectural follow-up — when does Tier 2 become belt-and-suspenders?
@@ -228,7 +228,7 @@ gcloud scheduler jobs delete initial-load-weekly   --location=us-central1 --proj
 After the streaming Files API path (#23 phase 2) ships and the prod flag is flipped, the weekly `populate-all` job will run against fresh-from-SEC data with no on-disk PDF cache to go stale. At that point the architectural cause of the staleness is fully resolved (no cache → no cache rot), and the cron jobs become belt-and-suspenders rather than the primary defense. Tier 2 is still worth shipping for two reasons:
 
 1. **`filing-monitor-hourly`** — `/alerts` freshness is independent of the PDF cache; new SEC filings still need to be detected on a cadence regardless of the Files API path.
-2. **`initial-load-weekly`** — newly-registered broker-dealers only enter the system through `initial_load`, which queries FINRA's roster. Without scheduling, new BDs would silently never appear.
+2. **`initial-load-daily`** — newly-registered broker-dealers only enter the system through `initial_load`, which queries FINRA's roster. Without scheduling, new BDs would silently never appear.
 
 `populate-all-weekly` is the one that becomes redundant once Files API streaming is the default. Keep it as a safety net for now; consider dropping cadence to monthly or removing entirely once the Files API path has 60+ days of clean prod telemetry.
 
@@ -247,3 +247,7 @@ The Tier 1 manual recovery path remains documented elsewhere and is unchanged. I
 - A pipeline upstream (FINRA, SEC EDGAR, Gemini) had a transient outage and the next scheduled retry would be too late.
 
 Tier 1 is *not* the right tool for routine staleness recurrence — that's what Tier 2 fixes.
+
+## Change log
+
+- **2026-05-21** — bumped `initial-load` cadence from weekly (`0 6 * * 0`) to daily (`0 6 * * *`) per client (Deshorn) request via Slack thread the same day. Job renamed `initial-load-weekly` → `initial-load-daily`; live transition via `gcloud scheduler jobs delete initial-load-weekly` + `gcloud scheduler jobs create http initial-load-daily ...`. `populate-all-weekly` deliberately left at weekly because `ClearingPipelineService.run` is not idempotent (re-extracts ~3,000 X-17A-5 PDFs through Gemini on every run) — daily populate-all would ~7× LLM spend with little marginal value. Newly-discovered firms' full enrichment still rides on weekly `populate-all`; per-firm Refresh button (`refresh_all_orchestrator.run_refresh_all`) clears any sub-7-day staleness on demand. Follow-up: track per-firm last-processed X-17A-5 accession number in clearing pipeline to unlock daily `populate-all` cheaply.
