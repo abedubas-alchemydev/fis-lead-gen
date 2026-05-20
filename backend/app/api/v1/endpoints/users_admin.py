@@ -46,6 +46,7 @@ from app.models.favorite_list import FavoriteList, FavoriteListItem
 from app.models.institutional_investor import InstitutionalInvestor
 from app.models.investment_advisor import InvestmentAdvisor
 from app.models.outreach_send import OutreachSend
+from app.models.user_activity import UserActivity
 from app.models.user_visit import UserVisit
 from app.schemas.auth import AuthenticatedUser
 from app.schemas.users_admin import (
@@ -209,7 +210,16 @@ async def list_user_saved_firms(
     )
 
 
-ActivityType = Literal["login", "view", "save", "outreach"]
+ActivityType = Literal["login", "view", "save", "outreach", "nav", "search", "input"]
+
+
+# Collapse the granular ``user_activity.action`` enum into the FE filter
+# chip identifiers. The row keeps its granular action (so the glyph +
+# tooltip can differ), but the URL ``?type=`` filter groups them.
+_NAV_ACTIONS = ("nav_view", "nav_click", "link_open")
+_SEARCH_ACTIONS = ("search_query",)
+_INPUT_ACTIONS = ("input_used",)
+_ALL_ACTIVITY_ACTIONS = _NAV_ACTIONS + _SEARCH_ACTIONS + _INPUT_ACTIONS
 
 
 def _row_details(
@@ -250,6 +260,17 @@ def _row_details(
         if send_subject:
             out["subject"] = send_subject
         return out or None
+    if event_type in _ALL_ACTIVITY_ACTIONS:
+        # The user_activity branch projects JSONB->Text into
+        # ``audit_details`` so this parses the FE-supplied scrubbed
+        # meta back into a dict for the row tooltip.
+        if not audit_details:
+            return None
+        try:
+            parsed = json.loads(audit_details)
+            return parsed if isinstance(parsed, dict) else None
+        except (TypeError, ValueError):
+            return None
     return None
 
 
@@ -479,6 +500,40 @@ async def list_user_activities(
             .where(OutreachSend.user_id == user_id)
         )
 
+    if type in (None, "nav", "search", "input"):
+        # The user_activity branch projects ``path`` into ``target_name``
+        # so the row tooltip can show the route the event fired on.
+        # No firm binding — ``target_type`` / ``target_id`` stay NULL.
+        # ``details`` (JSONB) is cast to Text so the UNION stays type-
+        # consistent with the audit_log branch, and _row_details parses
+        # it back into a dict for the FE.
+        if type == "nav":
+            action_filter = list(_NAV_ACTIONS)
+        elif type == "search":
+            action_filter = list(_SEARCH_ACTIONS)
+        elif type == "input":
+            action_filter = list(_INPUT_ACTIONS)
+        else:
+            action_filter = list(_ALL_ACTIVITY_ACTIONS)
+        branches.append(
+            select(
+                UserActivity.action.label("event_type"),
+                UserActivity.created_at.label("ts"),
+                null_target_type,
+                null_target_id,
+                UserActivity.path.label("target_name"),
+                null_list_name,
+                null_visit_count,
+                null_send_status,
+                null_send_error,
+                null_send_subject,
+                cast(UserActivity.details, Text).label("audit_details"),
+            ).where(
+                UserActivity.user_id == user_id,
+                UserActivity.action.in_(action_filter),
+            )
+        )
+
     if not branches:
         # ``type`` was set but matched no branch — shouldn't be reachable
         # given the Literal validation, but keep the safety net.
@@ -508,18 +563,39 @@ async def list_user_activities(
     items: list[AdminUserActivityRow] = []
     for row in rows:
         action = row.event_type
-        # Collapse "logout" rows into the same FE filter chip as "login"
-        # but preserve the discriminator on the row itself so the glyph
-        # + tooltip can differ.
-        event_type: Literal["login", "logout", "view", "save", "outreach"]
-        if action in ("login", "logout"):
+        # Preserve the granular discriminator on the row (so glyph +
+        # tooltip can differ) while letting the FE filter chip collapse
+        # families: login+logout → "login", nav_* → "nav", etc.
+        event_type: Literal[
+            "login",
+            "logout",
+            "view",
+            "save",
+            "outreach",
+            "nav_view",
+            "nav_click",
+            "link_open",
+            "search_query",
+            "input_used",
+        ]
+        if action in (
+            "login",
+            "logout",
+            "view",
+            "save",
+            "outreach",
+            "nav_view",
+            "nav_click",
+            "link_open",
+            "search_query",
+            "input_used",
+        ):
             event_type = action  # type: ignore[assignment]
-        elif action == "view":
-            event_type = "view"
-        elif action == "save":
-            event_type = "save"
         else:
-            event_type = "outreach"
+            # Unknown discriminator — skip the row rather than crash on
+            # schema validation. Possible if a new action lands in
+            # user_activity without the corresponding FE/schema bump.
+            continue
 
         target_type = row.target_type
         # The Literal in the schema is narrower than the SQL String. Pass

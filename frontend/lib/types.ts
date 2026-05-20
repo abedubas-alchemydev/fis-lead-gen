@@ -702,7 +702,26 @@ export type AdminUserActivityEventType =
   | "logout"
   | "view"
   | "save"
-  | "outreach";
+  | "outreach"
+  | "nav_view"
+  | "nav_click"
+  | "link_open"
+  | "search_query"
+  | "input_used";
+
+// Query-string ``?type=`` value when calling
+// /api/v1/users/{id}/activities. Granular event_type rows are
+// collapsed into family chips on the FE — login+logout → "login",
+// nav_*+link_open → "nav", search_query → "search", input_used →
+// "input".
+export type AdminUserActivityFilter =
+  | "login"
+  | "view"
+  | "save"
+  | "outreach"
+  | "nav"
+  | "search"
+  | "input";
 
 export type AdminUserActivityTargetType =
   | "broker_dealer"
