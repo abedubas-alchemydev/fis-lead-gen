@@ -57,7 +57,7 @@ export function WatermarkOverlay({ email, userId, name }: WatermarkOverlayProps)
           gridTemplateColumns: "repeat(auto-fill, minmax(360px, 1fr))",
           gap: "120px 80px",
           padding: "80px",
-          opacity: 0.08,
+          opacity: 0.06,
           color: "var(--text, #0f172a)",
           fontFamily: "var(--font-mono, ui-monospace, SFMono-Regular, monospace)",
           fontSize: "13px",
