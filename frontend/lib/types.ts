@@ -308,6 +308,20 @@ export type FilingHistoryPageResponse = {
 //   - "finra"  — name fell back to the FINRA executive-officers list
 export type ExecutiveSource = "sec" | "apollo" | "finra";
 
+export type EmailHit = {
+  value: string;
+  type: "work" | "personal";
+  confidence: number | null;
+  source: string;
+};
+
+export type PhoneHit = {
+  value: string;
+  type: "mobile" | "work" | "hq";
+  confidence: number | null;
+  source: string;
+};
+
 export type ExecutiveContactItem = {
   id: number;
   bd_id: number;
@@ -318,6 +332,8 @@ export type ExecutiveContactItem = {
   linkedin_url: string | null;
   source: ExecutiveSource;
   enriched_at: string;
+  emails: EmailHit[];
+  phones: PhoneHit[];
 };
 
 export type RegistrationComplianceSummary = {
@@ -826,6 +842,8 @@ export type AdvisorContactItem = {
   discovery_source: string | null;
   discovery_confidence: number | null;
   enriched_at: string;
+  emails: EmailHit[];
+  phones: PhoneHit[];
 };
 
 export type AdvisorFilingItem = {
@@ -911,6 +929,8 @@ export type InvestorContactItem = {
   discovery_source: string | null;
   discovery_confidence: number | null;
   enriched_at: string;
+  emails: EmailHit[];
+  phones: PhoneHit[];
 };
 
 export type InvestorFilingItem = {

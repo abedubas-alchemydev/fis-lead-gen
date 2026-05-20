@@ -1,8 +1,11 @@
 from __future__ import annotations
 
 from datetime import date, datetime
+from typing import Self
 
-from pydantic import BaseModel, ConfigDict
+from pydantic import BaseModel, ConfigDict, field_validator, model_validator
+
+from app.schemas.contact_hits import EmailHit, PhoneHit, synthesize_contact_arrays
 
 
 class InstitutionalInvestorListItem(BaseModel):
@@ -75,6 +78,18 @@ class InvestorContactItem(BaseModel):
     discovery_source: str | None = None
     discovery_confidence: float | None = None
     enriched_at: datetime
+    emails: list[EmailHit] = []
+    phones: list[PhoneHit] = []
+
+    @field_validator("emails", "phones", mode="before")
+    @classmethod
+    def _coerce_null_to_empty(cls, v: object) -> object:
+        return v if v is not None else []
+
+    @model_validator(mode="after")
+    def _synthesize_arrays(self) -> Self:
+        self.emails, self.phones = synthesize_contact_arrays(self)
+        return self
 
 
 class InvestorFilingItem(BaseModel):
