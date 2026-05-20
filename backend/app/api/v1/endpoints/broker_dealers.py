@@ -40,7 +40,7 @@ from app.schemas.broker_dealer import (
 from app.schemas.favorite_list import FavoriteListWithMembership
 from app.schemas.favorites import FavoriteResponse
 from app.services.contacts import ExecutiveContactService
-from app.services.edgar import EdgarService
+from app.services.edgar import EdgarService, build_edgar_filing_url
 from app.schemas.pipeline import ClearingArrangementItem, ClearingArrangementsResponse
 from app.services.alerts import AlertRepository
 from app.core.feature_permissions import MASTER_LIST
@@ -192,21 +192,6 @@ def _extract_accession_from_url(url: str | None) -> str | None:
         raw = no_dash.group(1)
         return f"{raw[:10]}-{raw[10:12]}-{raw[12:]}"
     return None
-
-
-def _edgar_filing_url(cik: str | None, accession: str | None, primary_document: str | None) -> str | None:
-    """Build a deep link to an EDGAR filing's primary document. Falls back
-    to the accession folder index when ``primary_document`` is missing.
-    Returns ``None`` if we don't have enough to construct any URL.
-    """
-    if not cik or not accession:
-        return None
-    cik_no_pad = cik.lstrip("0") or "0"
-    accession_no_dash = accession.replace("-", "")
-    base = f"https://www.sec.gov/Archives/edgar/data/{cik_no_pad}/{accession_no_dash}"
-    if primary_document:
-        return f"{base}/{primary_document}"
-    return f"{base}/"
 
 
 @router.get("", response_model=BrokerDealerListResponse)
@@ -985,8 +970,8 @@ async def get_filing_history(
             primary_doc = filing.get("primary_document")
             primary_desc = filing.get("primary_doc_description")
             url = (
-                _edgar_filing_url(broker_dealer.cik, str(accession) if accession else None,
-                                  str(primary_doc) if primary_doc else None)
+                build_edgar_filing_url(broker_dealer.cik, str(accession) if accession else None,
+                                       str(primary_doc) if primary_doc else None)
                 or broker_dealer.filings_index_url
             )
             item = FilingHistoryItem(
