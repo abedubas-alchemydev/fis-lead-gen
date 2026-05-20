@@ -144,7 +144,13 @@ export function fromSearchParams(sp: SearchParamsLike): MasterListQueryState {
     clearingType:
       sp.get("clearing_type") ?? MASTER_LIST_STATE_DEFAULTS.clearingType,
     typesOfBusiness: parseMultiParam(sp, "types_of_business"),
-    minNetCapital: parseNonNegativeFloat(sp.get("min_net_capital")),
+    // `min_net_capital=0` is a no-op for non-negative net-capital values, so
+    // collapse it to null at parse time. Keeps legacy share-links from
+    // surfacing a "Net capital ≥ $0" chip after we normalize on commit.
+    minNetCapital: (() => {
+      const raw = parseNonNegativeFloat(sp.get("min_net_capital"));
+      return raw === 0 ? null : raw;
+    })(),
     maxNetCapital: parseNonNegativeFloat(sp.get("max_net_capital")),
     registeredAfter: sp.get("registered_after") || null,
     registeredBefore: sp.get("registered_before") || null,
