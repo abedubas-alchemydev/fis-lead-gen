@@ -52,6 +52,21 @@ def _require_investors(
     return user
 
 
+def _parse_csv_list(values: list[str] | None) -> list[str]:
+    """Split repeated query params with embedded CSVs into a flat list.
+
+    Mirrors ``investment_advisors._parse_csv_list`` so the FE can use either
+    ``?state=NY&state=CA`` or ``?state=NY,CA`` interchangeably.
+    """
+
+    if not values:
+        return []
+    parsed: list[str] = []
+    for value in values:
+        parsed.extend(part.strip() for part in value.split(",") if part.strip())
+    return parsed
+
+
 def _item_from_consolidated(row: ConsolidatedPersonRow) -> InvestorItem:
     return InvestorItem(
         id=row.id,
@@ -90,6 +105,8 @@ def _item_from_consolidated(row: ConsolidatedPersonRow) -> InvestorItem:
 @router.get("", response_model=InvestorListResponse)
 async def list_investors(
     tab: Literal["buyers", "sellers", "all"] = Query(default="all"),
+    search: str | None = Query(default=None, alias="q"),
+    state: list[str] | None = Query(default=None),
     ticker: str | None = Query(default=None),
     days: int = Query(
         default=None,  # type: ignore[assignment]
@@ -102,6 +119,13 @@ async def list_investors(
         ge=0,
         description="Minimum transaction value. Defaults to settings.form4_min_transaction_value (50000).",
     ),
+    max_value: int | None = Query(
+        default=None,
+        ge=0,
+        description="Maximum transaction value. Omit for no ceiling.",
+    ),
+    sort_by: str = Query(default="transaction_date"),
+    sort_dir: str = Query(default="desc", pattern="^(asc|desc)$"),
     page: int = Query(default=1, ge=1),
     limit: int = Query(default=20, ge=1, le=100),
     _: AuthenticatedUser = Depends(_require_investors),
@@ -121,6 +145,14 @@ async def list_investors(
         if min_value is not None
         else Decimal(str(settings.form4_min_transaction_value))
     )
+    effective_max_value = (
+        Decimal(str(max_value)) if max_value is not None else None
+    )
+    if effective_max_value is not None and effective_min_value > effective_max_value:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail="min_value must be less than or equal to max_value.",
+        )
 
     rows, total = await repository.list_consolidated_persons(
         db,
@@ -128,6 +160,11 @@ async def list_investors(
         ticker=ticker,
         days=effective_days,
         min_value=effective_min_value,
+        max_value=effective_max_value,
+        search=search,
+        states=_parse_csv_list(state),
+        sort_by=sort_by,
+        sort_dir=sort_dir,
         page=page,
         limit=limit,
     )
@@ -140,6 +177,15 @@ async def list_investors(
             total_pages=max(1, ceil(total / limit)) if limit else 1,
         ),
     )
+
+
+@router.get("/states", response_model=list[str])
+async def list_investor_states(
+    _: AuthenticatedUser = Depends(_require_investors),
+    db: AsyncSession = Depends(get_db_session),
+) -> list[str]:
+    """Distinct insider-state codes — fuels the State Combo on /investors."""
+    return await repository.list_states(db)
 
 
 @router.post("/{txn_id}/enrich", response_model=InvestorEnrichResponse)
