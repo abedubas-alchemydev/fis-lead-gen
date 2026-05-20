@@ -101,7 +101,7 @@ import type {
 import type {
   AdjacentResponse,
   AdminUserActivitiesResponse,
-  AdminUserActivityEventType,
+  AdminUserActivityFilter,
   AdminUserSavedFirmsResponse,
   LinkedProvidersResponse,
   ContactSearchResponse,
@@ -851,7 +851,7 @@ export async function getUserActivities(
   opts?: {
     limit?: number;
     offset?: number;
-    type?: Exclude<AdminUserActivityEventType, "logout"> | undefined;
+    type?: AdminUserActivityFilter | undefined;
   }
 ): Promise<AdminUserActivitiesResponse> {
   return apiRequest<AdminUserActivitiesResponse>(

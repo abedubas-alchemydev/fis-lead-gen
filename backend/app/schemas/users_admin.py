@@ -72,13 +72,26 @@ class AdminUserActivityRow(BaseModel):
     ``event_type`` discriminates the source and shapes the FE row glyph +
     tooltip. ``target_type`` / ``target_id`` / ``target_name`` are set
     when the activity is bound to a firm (view, save, outreach) and are
-    ``None`` for login / logout. ``details`` carries event-specific
-    extras (login → IP + user_agent; save → list name; view → visit
-    count; outreach → send status + error code) — the FE renders a
-    tooltip from it.
+    ``None`` for login / logout. For broad-surface instrumentation rows
+    (nav/search/input) ``target_name`` carries the normalized route
+    path. ``details`` carries event-specific extras (login → IP +
+    user_agent; save → list name; view → visit count; outreach → send
+    status + error code; nav/search/input → FE-scrubbed metadata) — the
+    FE renders a tooltip from it.
     """
 
-    event_type: Literal["login", "logout", "view", "save", "outreach"]
+    event_type: Literal[
+        "login",
+        "logout",
+        "view",
+        "save",
+        "outreach",
+        "nav_view",
+        "nav_click",
+        "link_open",
+        "search_query",
+        "input_used",
+    ]
     timestamp: datetime
     target_type: Literal["broker_dealer", "advisor", "institutional_investor"] | None = None
     target_id: int | None = None

@@ -8,16 +8,22 @@ import {
   ArrowLeft,
   Bookmark,
   Clock,
+  Compass,
+  Edit3,
   Eye,
+  Link2,
   Loader2,
   LogIn,
   LogOut,
+  MousePointerClick,
+  Search,
   Send,
 } from "lucide-react";
 
 import { ApiError, getUserActivities } from "@/lib/api";
 import type {
   AdminUserActivityEventType,
+  AdminUserActivityFilter,
   AdminUserActivityRow,
   AdminUserActivitiesResponse,
 } from "@/lib/types";
@@ -33,9 +39,11 @@ const CARD_TITLE =
 
 const PAGE_SIZE = 50;
 
-// BE collapses login + logout under one filter chip but each row keeps
-// its own discriminator so the glyph differs in the table.
-type Filter = "all" | "login" | "view" | "save" | "outreach";
+// BE collapses event families under one filter chip but each row keeps
+// its own granular discriminator so the glyph differs in the table.
+// login+logout → "login"; nav_view+nav_click+link_open → "nav";
+// search_query → "search"; input_used → "input".
+type Filter = "all" | AdminUserActivityFilter;
 
 const FILTERS: ReadonlyArray<{ value: Filter; label: string }> = [
   { value: "all", label: "All" },
@@ -43,6 +51,9 @@ const FILTERS: ReadonlyArray<{ value: Filter; label: string }> = [
   { value: "view", label: "Viewed" },
   { value: "save", label: "Saved" },
   { value: "outreach", label: "Outreach" },
+  { value: "nav", label: "Navigation" },
+  { value: "search", label: "Search" },
+  { value: "input", label: "Input" },
 ];
 
 function targetHref(row: AdminUserActivityRow): Route | null {
@@ -84,6 +95,16 @@ function eventGlyph(eventType: AdminUserActivityEventType): JSX.Element {
       return <Bookmark className="h-4 w-4" aria-hidden />;
     case "outreach":
       return <Send className="h-4 w-4" aria-hidden />;
+    case "nav_view":
+      return <Compass className="h-4 w-4" aria-hidden />;
+    case "nav_click":
+      return <MousePointerClick className="h-4 w-4" aria-hidden />;
+    case "link_open":
+      return <Link2 className="h-4 w-4" aria-hidden />;
+    case "search_query":
+      return <Search className="h-4 w-4" aria-hidden />;
+    case "input_used":
+      return <Edit3 className="h-4 w-4" aria-hidden />;
   }
 }
 
@@ -99,6 +120,16 @@ function eventLabel(eventType: AdminUserActivityEventType): string {
       return "Saved";
     case "outreach":
       return "Sent outreach";
+    case "nav_view":
+      return "Opened page";
+    case "nav_click":
+      return "Clicked link";
+    case "link_open":
+      return "Opened external link";
+    case "search_query":
+      return "Searched";
+    case "input_used":
+      return "Filled field";
   }
 }
 
@@ -132,6 +163,39 @@ function summarizeDetails(row: AdminUserActivityRow): string {
     if (status) return status;
     return "";
   }
+  if (row.event_type === "nav_view") {
+    const filterKeys = Array.isArray(d.filter_keys)
+      ? (d.filter_keys.filter((v) => typeof v === "string") as string[])
+      : [];
+    return filterKeys.length > 0 ? `filters: ${filterKeys.join(", ")}` : "";
+  }
+  if (row.event_type === "nav_click") {
+    const label = typeof d.nav_label === "string" ? d.nav_label : null;
+    const to = typeof d.to_path === "string" ? d.to_path : null;
+    if (label && to) return `${label} → ${to}`;
+    if (label) return label;
+    if (to) return `→ ${to}`;
+    return "";
+  }
+  if (row.event_type === "link_open") {
+    const host = typeof d.host === "string" ? d.host : null;
+    const label = typeof d.nav_label === "string" ? d.nav_label : null;
+    if (host && label) return `${label} · ${host}`;
+    if (host) return host;
+    if (label) return label;
+    return "";
+  }
+  if (row.event_type === "search_query") {
+    const len = typeof d.query_length === "number" ? d.query_length : null;
+    return len !== null ? `query · ${len} chars` : "query";
+  }
+  if (row.event_type === "input_used") {
+    const name = typeof d.field_name === "string" ? d.field_name : null;
+    const len = typeof d.field_length === "number" ? d.field_length : null;
+    const populated = d.field_populated === true;
+    const sizePart = len !== null ? `${len} chars` : populated ? "filled" : "empty";
+    return name ? `${name} (${sizePart})` : sizePart;
+  }
   return "";
 }
 
@@ -153,10 +217,7 @@ export function UserActivitiesClient({
       const result = await getUserActivities(user.id, {
         limit: PAGE_SIZE,
         offset,
-        type:
-          filter === "all"
-            ? undefined
-            : (filter as Exclude<AdminUserActivityEventType, "logout">),
+        type: filter === "all" ? undefined : filter,
       });
       setData(result);
     } catch (err) {
@@ -208,7 +269,7 @@ export function UserActivitiesClient({
             Activity for {displayName}
           </h1>
           <p className="mt-2 max-w-3xl text-[13px] leading-5 text-[var(--text-dim,#475569)]">
-            Login history, firm views, saves, and outreach sends — one timestamp-ordered stream.
+            Login history, navigation, searches, form input, firm views, saves, and outreach — one timestamp-ordered stream.
           </p>
         </div>
         <Link

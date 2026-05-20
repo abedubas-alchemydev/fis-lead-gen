@@ -23,6 +23,7 @@ from app.models.investor_filing import InvestorFiling
 from app.models.outreach_send import OutreachSend
 from app.models.pipeline_run import PipelineRun
 from app.models.scoring_setting import ScoringSetting
+from app.models.user_activity import UserActivity
 from app.models.user_visit import UserVisit
 from app.models.vault_folder import VaultFolder
 from app.models.vault_folder_chunk import VaultFolderChunk
@@ -58,6 +59,7 @@ __all__ = [
     "OutreachSend",
     "PipelineRun",
     "ScoringSetting",
+    "UserActivity",
     "UserVisit",
     "VaultFolder",
     "VaultFolderChunk",

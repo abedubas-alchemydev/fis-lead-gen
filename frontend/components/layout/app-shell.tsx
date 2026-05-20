@@ -578,6 +578,7 @@ function SidebarNavLink({
       href={entry.href}
       aria-current={active ? "page" : undefined}
       title={collapsed ? entry.label : undefined}
+      data-nav-label={entry.label}
       style={active ? { background: "var(--nav-active-bg, rgba(37,99,235,0.12))" } : undefined}
       className={`relative flex items-center rounded-[10px] py-2.5 text-[13.5px] font-medium transition ${
         collapsed ? "justify-center px-0" : "gap-3 px-3"
