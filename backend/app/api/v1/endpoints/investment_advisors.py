@@ -3,6 +3,7 @@ from __future__ import annotations
 from datetime import date
 
 from fastapi import APIRouter, Depends, HTTPException, Query, status
+from fastapi.responses import RedirectResponse
 from sqlalchemy import exists, func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -20,6 +21,7 @@ from app.schemas.investment_advisor import (
 )
 from app.core.feature_permissions import INVESTMENT_ADVISORS
 from app.services.auth import ensure_feature, get_current_user
+from app.services.edgar import EdgarService, build_edgar_filing_url
 from app.services.investment_advisors import InvestmentAdvisorRepository
 
 
@@ -205,6 +207,54 @@ async def get_advisor_favorite_lists(
         )
         for fl, count, is_member in rows
     ]
+
+
+@router.get("/{advisor_id}/13f/latest")
+async def redirect_to_latest_13f(
+    advisor_id: int,
+    _: AuthenticatedUser = Depends(_require_investment_advisors),
+    db: AsyncSession = Depends(get_db_session),
+) -> RedirectResponse:
+    """302 to the most recent 13F-HR primary document on SEC EDGAR.
+
+    Resolves the latest 13F-HR at request time via ``EdgarService``
+    (1-hour in-process cache) so we don't have to persist accession
+    numbers. Mirrors the vault download pattern in ``vault_files.py``:
+    redirect to the upstream URL and let the browser handle the bytes.
+    """
+
+    advisor = await db.get(InvestmentAdvisor, advisor_id)
+    if advisor is None:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND, detail="Advisor not found."
+        )
+    if not advisor.files_13f or not advisor.cik:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="No 13F filings on record for this advisor.",
+        )
+
+    filings = await EdgarService().list_all_filings_for_cik(advisor.cik)
+    latest = next((f for f in filings if f.get("form") == "13F-HR"), None)
+    if latest is None:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="No 13F-HR filing found on EDGAR for this advisor.",
+        )
+
+    accession = latest.get("accession_number")
+    primary_document = latest.get("primary_document")
+    url = build_edgar_filing_url(
+        advisor.cik,
+        str(accession) if accession else None,
+        str(primary_document) if primary_document else None,
+    )
+    if not url:
+        raise HTTPException(
+            status_code=status.HTTP_502_BAD_GATEWAY,
+            detail="Could not build EDGAR filing URL.",
+        )
+    return RedirectResponse(url, status_code=302)
 
 
 @router.get("/{advisor_id}/adjacent")

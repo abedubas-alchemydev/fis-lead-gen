@@ -7,7 +7,7 @@ import { useRouter, useSearchParams } from "next/navigation";
 
 import { ArrowDown, ArrowUp, ChevronDown, Heart, Search, X } from "lucide-react";
 
-import { apiRequest, buildApiPath } from "@/lib/api";
+import { apiRequest, buildApiPath, getInvestmentAdvisorLatest13fPath } from "@/lib/api";
 import { formatCurrency, formatDate, formatRelativeTime } from "@/lib/format";
 import {
   ADVISOR_LIST_STATE_DEFAULTS,
@@ -998,7 +998,21 @@ function AdvisorRow({
         {row.total_clients?.toLocaleString() ?? "—"}
       </td>
       <td className="px-5 py-3.5">
-        {row.files_13f ? (
+        {row.files_13f && row.latest_13f_filing_date ? (
+          <a
+            href={getInvestmentAdvisorLatest13fPath(row.id)}
+            target="_blank"
+            rel="noopener noreferrer"
+            title={`Open latest 13F-HR (filed ${formatDate(row.latest_13f_filing_date)}) on SEC EDGAR`}
+            onClick={(e) => e.stopPropagation()}
+            className="inline-flex flex-col items-start gap-0.5 transition hover:opacity-80"
+          >
+            <Pill variant="healthy">13F</Pill>
+            <span className="text-[11px] text-[var(--text-muted,#94a3b8)]">
+              {formatDate(row.latest_13f_filing_date)}
+            </span>
+          </a>
+        ) : row.files_13f ? (
           <Pill variant="healthy">13F</Pill>
         ) : (
           <span className="text-[12px] text-[var(--text-muted,#94a3b8)]">—</span>

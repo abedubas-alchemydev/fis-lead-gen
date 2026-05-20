@@ -307,6 +307,12 @@ export async function addAdvisorsToListBatch(
   );
 }
 
+// Same-origin proxy GET; BE 302s to the latest 13F-HR primary document
+// on SEC EDGAR. Use as an <a href> so right-click "Open in new tab" works.
+export function getInvestmentAdvisorLatest13fPath(advisorId: number): string {
+  return `/api/backend/api/v1/investment-advisors/${advisorId}/13f/latest`;
+}
+
 // ── Institutional Investor variants (favorites for /investors firm list) ──
 // Parallel to BD + advisor helpers; the BE has /investor-items endpoints
 // that satisfy the 3-way XOR on favorite_list_item by writing
