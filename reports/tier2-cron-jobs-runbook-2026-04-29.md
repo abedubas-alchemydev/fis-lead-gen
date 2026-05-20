@@ -30,11 +30,20 @@ Pre-2026-04-29, the data pipeline only ran when someone manually triggered `pyth
 
 ## Provisioned jobs
 
+Prod jobs (target `fis-backend`, audience uses project-number-form URL):
+
 | Name | Schedule (UTC) | Cadence rationale | Target endpoint | Mode | Attempt deadline |
 |---|---|---|---|---|---|
 | `filing-monitor-hourly` | `0 * * * *` | Catch new SEC filings the same business day they post → drives `/alerts` freshness | `POST /api/v1/pipeline/run/filing-monitor` | sync (~5–15 min wall) | **1800s** |
 | `populate-all-weekly` | `0 2 * * 0` | Weekly full enrichment refresh — Sunday 02:00 UTC (lowest-traffic window for Neon) | `POST /api/v1/pipeline/run/populate-all` | async (FastAPI `BackgroundTasks`, returns 202 immediately) | 180s default |
 | `initial-load-daily` | `0 6 * * *` | Daily catch-up of newly-registered broker-dealers from FINRA so the master list reflects new firms within ~24h | `POST /api/v1/pipeline/run/initial-load` | async (FastAPI `BackgroundTasks`, returns 202 immediately) | 180s default |
+
+Staging jobs (target `fis-backend-staging`, audience uses hash-form URL — staging's `settings.backend_audience` default matches the hash-form):
+
+| Name | Schedule (UTC) | Cadence rationale | Target endpoint | Mode | Attempt deadline |
+|---|---|---|---|---|---|
+| `filing-monitor-hourly-staging` | `0 * * * *` | Mirrors prod `filing-monitor-hourly` so staging `/alerts` stays fresh and the endpoint stays smoke-tested every hour | `POST /api/v1/pipeline/run/filing-monitor` on staging | sync (~5–15 min wall) | **900s** |
+| `initial-load-daily-staging` | `0 6 * * *` | Mirrors prod `initial-load-daily` so the staging master list keeps parity and the endpoint stays smoke-tested daily | `POST /api/v1/pipeline/run/initial-load` on staging | async (FastAPI `BackgroundTasks`, returns 202 immediately) | 180s default |
 
 ## Blocker A — Cloud Scheduler API not enabled — RESOLVED 2026-04-30
 
@@ -166,7 +175,28 @@ gcloud scheduler jobs create http initial-load-daily \
     --description="Daily catch-up of newly-registered broker-dealers from FINRA"
 ```
 
-### Verify all 3 jobs exist + are enabled
+### Staging mirror — initial-load-daily-staging (async, 180s default)
+
+Staging uses the hash-form URL for both `--uri` and `--oidc-token-audience` because the staging deployment's `settings.backend_audience` default matches the hash-form (unlike prod, which is hardcoded to project-number-form). Re-uses the same `SCHEDULER_SA` — both prod and staging Cloud Run services grant `roles/run.invoker` to it.
+
+```bash
+STAGING_BACKEND_URL="https://fis-backend-staging-saxzdkn5nq-uc.a.run.app"
+
+gcloud scheduler jobs create http initial-load-daily-staging \
+    --schedule="0 6 * * *" \
+    --time-zone="UTC" \
+    --uri="$STAGING_BACKEND_URL/api/v1/pipeline/run/initial-load" \
+    --http-method=POST \
+    --headers="Content-Type=application/json" \
+    --message-body='{}' \
+    --oidc-service-account-email="$SCHEDULER_SA" \
+    --oidc-token-audience="$STAGING_BACKEND_URL" \
+    --location=us-central1 \
+    --project=fis-lead-gen \
+    --description="Daily catch-up of newly-registered broker-dealers from FINRA (staging mirror of initial-load-daily). Audience matches staging backend URL."
+```
+
+### Verify all prod + staging jobs exist + are enabled
 
 ```bash
 gcloud scheduler jobs list --location=us-central1 --project=fis-lead-gen \
@@ -251,3 +281,4 @@ Tier 1 is *not* the right tool for routine staleness recurrence — that's what 
 ## Change log
 
 - **2026-05-21** — bumped `initial-load` cadence from weekly (`0 6 * * 0`) to daily (`0 6 * * *`) per client (Deshorn) request via Slack thread the same day. Job renamed `initial-load-weekly` → `initial-load-daily`; live transition via `gcloud scheduler jobs delete initial-load-weekly` + `gcloud scheduler jobs create http initial-load-daily ...`. `populate-all-weekly` deliberately left at weekly because `ClearingPipelineService.run` is not idempotent (re-extracts ~3,000 X-17A-5 PDFs through Gemini on every run) — daily populate-all would ~7× LLM spend with little marginal value. Newly-discovered firms' full enrichment still rides on weekly `populate-all`; per-firm Refresh button (`refresh_all_orchestrator.run_refresh_all`) clears any sub-7-day staleness on demand. Follow-up: track per-firm last-processed X-17A-5 accession number in clearing pipeline to unlock daily `populate-all` cheaply.
+- **2026-05-21** — added `initial-load-daily-staging` mirroring the new prod job against `fis-backend-staging`. End-to-end smoke succeeded: scheduler attempt finished with `URL_CRAWLED, HTTP 200`; backend log confirmed `POST /api/v1/pipeline/run/initial-load 200 OK`. Also retroactively documented the previously-undocumented `filing-monitor-hourly-staging` (already live and ENABLED before this commit). No `populate-all-*-staging` exists — staging traffic is too low to justify the weekly clearing-pipeline run.
