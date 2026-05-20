@@ -15,7 +15,7 @@ from decimal import Decimal
 from math import ceil
 from typing import Literal
 
-from sqlalchemy import func, select, update
+from sqlalchemy import func, or_, select, update
 from sqlalchemy.dialects.postgresql import insert
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -31,6 +31,20 @@ _FORM4_COLUMN_COUNT = 27
 # per row, the hard ceiling is 65535 / 27 ≈ 2427. We chunk at 1500 to keep
 # headroom for future column additions without revisiting the math.
 _UPSERT_CHUNK_SIZE = 1500
+
+
+# Whitelist of FE-supplied sort keys → ranked-CTE column names. Anything
+# outside this map falls back to ``transaction_date`` so an invalid
+# ``?sort_by=`` value never raises — the FE may emit stale keys after a
+# rename, and 500-ing on a list query would be unkind.
+ALLOWED_SORT_FIELDS: dict[str, str] = {
+    "transaction_date": "max_txn_date",
+    "transaction_value": "sum_value",
+    "shares": "sum_shares",
+    "issuer_ticker": "issuer_ticker",
+    "reporting_owner_name": "reporting_owner_name",
+}
+DEFAULT_SORT_FIELD = "transaction_date"
 
 
 class Form4TransactionRepository:
@@ -107,6 +121,11 @@ class Form4TransactionRepository:
         ticker: str | None,
         days: int,
         min_value: Decimal | None,
+        max_value: Decimal | None = None,
+        search: str | None = None,
+        states: list[str] | None = None,
+        sort_by: str = DEFAULT_SORT_FIELD,
+        sort_dir: str = "desc",
         page: int,
         limit: int,
     ) -> tuple[list[ConsolidatedPersonRow], int]:
@@ -121,6 +140,12 @@ class Form4TransactionRepository:
 
         Pagination is over groups, so ``total`` is the number of distinct
         persons in the filter window — not the raw transaction count.
+
+        ``search``, ``states``, and ``max_value`` filter the per-row pool
+        BEFORE aggregation (same shape as ``min_value``): only matching
+        underlying transactions roll into the leader row + sums.
+        ``sort_by`` accepts any key in ``ALLOWED_SORT_FIELDS``; unknown
+        keys fall back to ``transaction_date`` silently.
         """
         filters = []
         if ad_code is not None:
@@ -134,6 +159,19 @@ class Form4TransactionRepository:
             filters.append(Form4Transaction.transaction_date >= cutoff)
         if min_value is not None:
             filters.append(Form4Transaction.transaction_value >= min_value)
+        if max_value is not None:
+            filters.append(Form4Transaction.transaction_value <= max_value)
+        if search:
+            needle = f"%{search}%"
+            filters.append(
+                or_(
+                    Form4Transaction.reporting_owner_name.ilike(needle),
+                    Form4Transaction.issuer_name.ilike(needle),
+                    Form4Transaction.issuer_ticker.ilike(needle),
+                )
+            )
+        if states:
+            filters.append(Form4Transaction.reporting_owner_state.in_(states))
 
         partition = (
             Form4Transaction.issuer_cik,
@@ -191,20 +229,55 @@ class Form4TransactionRepository:
         count_stmt = select(func.count()).select_from(group_subq_stmt.subquery())
         total = int((await db.execute(count_stmt)).scalar_one())
 
+        sort_col_name = ALLOWED_SORT_FIELDS.get(
+            sort_by, ALLOWED_SORT_FIELDS[DEFAULT_SORT_FIELD]
+        )
+        sort_col = ranked.c[sort_col_name]
+        # Descending is the natural default for date/value/share sorts;
+        # ascending is the natural default for ticker/name sorts. The FE
+        # always sends an explicit direction so this just disambiguates
+        # bad input.
+        primary_order = (
+            sort_col.asc().nullslast()
+            if sort_dir == "asc"
+            else sort_col.desc().nullslast()
+        )
+        # Preserve a deterministic tiebreak chain (txn date desc, sum
+        # value desc, id desc) so pagination stays stable across pages
+        # even when many rows share the primary sort key.
+        order_by_clauses: list = [primary_order]
+        if sort_col_name != "max_txn_date":
+            order_by_clauses.append(ranked.c.max_txn_date.desc().nullslast())
+        if sort_col_name != "sum_value":
+            order_by_clauses.append(ranked.c.sum_value.desc().nullslast())
+        order_by_clauses.append(ranked.c.id.desc())
+
         page_stmt = (
             select(ranked)
             .where(ranked.c.rn == 1)
-            .order_by(
-                ranked.c.issuer_ticker.asc().nullslast(),
-                ranked.c.max_txn_date.desc(),
-                ranked.c.sum_value.desc().nullslast(),
-            )
+            .order_by(*order_by_clauses)
             .offset((page - 1) * limit)
             .limit(limit)
         )
         result = await db.execute(page_stmt)
         rows = [_row_to_consolidated(mapping) for mapping in result.mappings().all()]
         return rows, total
+
+    async def list_states(self, db: AsyncSession) -> list[str]:
+        """Distinct ``reporting_owner_state`` values present in the table.
+
+        Fuels the State Combo on the Investors workspace. Form 4 XML
+        stores 2-letter state codes; any null / blank entries are dropped
+        so the FE doesn't render a phantom "—" option.
+        """
+        stmt = (
+            select(Form4Transaction.reporting_owner_state)
+            .where(Form4Transaction.reporting_owner_state.is_not(None))
+            .distinct()
+            .order_by(Form4Transaction.reporting_owner_state.asc())
+        )
+        rows = (await db.execute(stmt)).scalars().all()
+        return [r for r in rows if r]
 
     async def get(self, db: AsyncSession, txn_id: int) -> Form4Transaction | None:
         return await db.get(Form4Transaction, txn_id)

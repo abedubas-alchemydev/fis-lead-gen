@@ -12,6 +12,8 @@ import { formatCurrency, formatDate, formatRelativeTime } from "@/lib/format";
 import {
   ADVISOR_LIST_STATE_DEFAULTS,
   type AdvisorListQueryState,
+  type AdvisorScopeFilter,
+  type AdvisorStatusFilter,
   buildAdvisorListUrl,
   clearAllFilters,
   encodeReturnParam,
@@ -30,6 +32,7 @@ import { BulkListPicker } from "@/components/list-picker/bulk-list-picker";
 import { ListPicker } from "@/components/list-picker/list-picker";
 import { Combo } from "@/components/ui/combo";
 import { Pill } from "@/components/ui/pill";
+import { Segmented, type SegmentedItem } from "@/components/ui/segmented";
 import { Tag } from "@/components/ui/tag";
 import { ThemeToggle } from "@/components/ui/theme-toggle";
 import type {
@@ -47,6 +50,20 @@ const COLUMNS = [
   { key: "files_13f", label: "13F" },
   { key: "last_filing_date", label: "Last Filing" },
 ] as const;
+
+// Status + 13F-scope segmented catalogs — module-level so the arrays
+// stay referentially stable across renders. Mirror the master-list
+// HEALTH_ITEMS / PRIORITY_ITEMS row.
+const STATUS_ITEMS: ReadonlyArray<SegmentedItem> = [
+  { value: "All", label: "All" },
+  { value: "active", label: "Active", dot: "healthy" },
+  { value: "withdrawn", label: "Withdrawn", dot: "risk" },
+];
+
+const THIRTEEN_F_ITEMS: ReadonlyArray<SegmentedItem> = [
+  { value: "13F", label: "13F filers only" },
+  { value: "all", label: "All advisors" },
+];
 
 // Sort options shown in the toolbar Combo. Backed by the BE-recognized
 // sort_by keys in /api/v1/investment-advisors. Drops "state" (low signal)
@@ -92,6 +109,8 @@ function countActiveFilters(state: AdvisorListQueryState): number {
   let n = 0;
   if (state.search !== ADVISOR_LIST_STATE_DEFAULTS.search) n += 1;
   if (state.state !== ADVISOR_LIST_STATE_DEFAULTS.state) n += 1;
+  if (state.status !== ADVISOR_LIST_STATE_DEFAULTS.status) n += 1;
+  if (state.filesThirteenF !== ADVISOR_LIST_STATE_DEFAULTS.filesThirteenF) n += 1;
   if (state.advisoryActivities.length > 0) n += 1;
   if (state.clientTypes.length > 0) n += 1;
   if (state.minRegulatoryAum !== null || state.maxRegulatoryAum !== null) n += 1;
@@ -175,6 +194,10 @@ export function AdvisorListWorkspaceClient() {
     };
     if (state.search) params.q = state.search;
     if (state.state) params.state = [state.state];
+    if (state.status !== "All") params.status = [state.status];
+    // BE defaults files_13f=true, so we omit the param when scope is "13F"
+    // and only send the explicit "false" override when broadening to all.
+    if (state.filesThirteenF === "all") params.files_13f = "false";
     if (state.advisoryActivities.length > 0) {
       params.advisory_activities = state.advisoryActivities;
     }
@@ -212,6 +235,8 @@ export function AdvisorListWorkspaceClient() {
   }, [
     state.search,
     state.state,
+    state.status,
+    state.filesThirteenF,
     state.advisoryActivities,
     state.clientTypes,
     state.minRegulatoryAum,
@@ -416,7 +441,48 @@ export function AdvisorListWorkspaceClient() {
             value={state.clientTypes}
             onChange={(next) => updateState({ clientTypes: next, page: 1 })}
           />
+        </div>
 
+        {/* Segmented row — mirrors the master-list Health / Priority pair.
+            Status uses the BE's `status` filter; 13F Scope flips the
+            hard-coded files_13f=true scope. Both default to "no filter
+            applied" so the page lands identically to today's behavior. */}
+        <div className="mt-4 grid gap-4 lg:grid-cols-2">
+          <div>
+            <p className="mb-1.5 text-[11px] font-semibold uppercase tracking-[0.08em] text-[var(--text-muted,#94a3b8)]">
+              Status
+            </p>
+            <Segmented
+              value={state.status}
+              onChange={(next) =>
+                updateState({
+                  status: next as AdvisorStatusFilter,
+                  page: 1,
+                })
+              }
+              items={STATUS_ITEMS}
+              ariaLabel="Advisor status"
+            />
+          </div>
+          <div>
+            <p className="mb-1.5 text-[11px] font-semibold uppercase tracking-[0.08em] text-[var(--text-muted,#94a3b8)]">
+              Scope
+            </p>
+            <Segmented
+              value={state.filesThirteenF}
+              onChange={(next) =>
+                updateState({
+                  filesThirteenF: next as AdvisorScopeFilter,
+                  page: 1,
+                })
+              }
+              items={THIRTEEN_F_ITEMS}
+              ariaLabel="Advisor scope"
+            />
+          </div>
+        </div>
+
+        <div className="mt-4 grid gap-4 lg:grid-cols-2">
           <RegulatoryAumRangeFilter
             min={state.minRegulatoryAum}
             max={state.maxRegulatoryAum}
@@ -471,6 +537,20 @@ export function AdvisorListWorkspaceClient() {
             {state.state !== "" ? (
               <Tag onDismiss={() => updateState({ state: "", page: 1 })}>
                 State: {state.state}
+              </Tag>
+            ) : null}
+            {state.status !== "All" ? (
+              <Tag onDismiss={() => updateState({ status: "All", page: 1 })}>
+                Status: {state.status === "active" ? "Active" : "Withdrawn"}
+              </Tag>
+            ) : null}
+            {state.filesThirteenF !== "13F" ? (
+              <Tag
+                onDismiss={() =>
+                  updateState({ filesThirteenF: "13F", page: 1 })
+                }
+              >
+                Scope: All advisors
               </Tag>
             ) : null}
             {state.advisoryActivities.map((activity) => (
