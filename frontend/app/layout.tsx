@@ -20,8 +20,11 @@ export const metadata: Metadata = {
 const themeInitScript = `try{var t=localStorage.getItem('prospectEngineTheme');if(t==='dark')document.documentElement.setAttribute('data-theme','dark');}catch(e){}`;
 
 export default function RootLayout({ children }: { children: ReactNode }) {
+  // suppressHydrationWarning: the inline <script> below mutates <html>
+  // before hydration; without it React strips the data-theme attribute
+  // during reconciliation, causing a dark→light flash on refresh.
   return (
-    <html lang="en">
+    <html lang="en" suppressHydrationWarning>
       <head>
         <script dangerouslySetInnerHTML={{ __html: themeInitScript }} />
       </head>
