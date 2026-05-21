@@ -449,14 +449,17 @@ async def get_pipeline_run_status(
 
 @scheduled_router.post("/initial-load", response_model=PipelineTriggerResponse)
 async def run_initial_load(
-    background_tasks: BackgroundTasks,
     caller: str = Depends(_ensure_admin_or_scheduler_sa),
     db: AsyncSession = Depends(get_db_session),
 ) -> PipelineTriggerResponse:
     """Trigger the FINRA + SEC EDGAR re-bootstrap.
 
-    Asynchronous: harvest-and-merge runs 15–30 minutes. Same queued-run
-    pattern as ``/populate-all`` so Cloud Scheduler gets a fast 200.
+    Synchronous: the handler awaits the harvest in-process (15–30 min)
+    before returning, mirroring ``filing-monitor``. Cloud Scheduler must
+    use ``--attempt-deadline=1800s``. The earlier ``BackgroundTasks``
+    pattern silently dropped the work on Cloud Run because the request
+    lifecycle ended before the coroutine could run — every prior staging
+    ``initial_load`` run sat ``status='running'`` indefinitely.
     """
     run = await _create_queued_run(
         db,
@@ -464,8 +467,11 @@ async def run_initial_load(
         trigger_source=f"scheduled:{caller}",
         notes="Queued from /pipeline/run/initial-load.",
     )
-    background_tasks.add_task(_run_initial_load_background, run.id, caller)
-    return _trigger_response(run)
+    run_id = run.id
+    await _run_initial_load_background(run_id, caller)
+    async with SessionLocal() as refresh_db:
+        refreshed = await refresh_db.get(PipelineRun, run_id)
+        return _trigger_response(refreshed if refreshed is not None else run)
 
 
 async def _run_initial_load_advisors_background(
