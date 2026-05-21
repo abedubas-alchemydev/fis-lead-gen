@@ -47,6 +47,11 @@ def _base_mapping(**overrides) -> dict:
         "enriched_at": None,
         "source_filing_url": "https://www.sec.gov/Archives/edgar/data/123/0001234567-26-000001-index.htm",
         "filed_at": datetime(2026, 5, 13, 14, 30, tzinfo=timezone.utc),
+        # Added in PR #463: reporting_owner_id is None until the insider is
+        # first favorited (lazy-creates the reporting_owners row); is_favorited
+        # is False when the caller passes no default_list_id.
+        "reporting_owner_id": None,
+        "is_favorited": False,
     }
     mapping.update(overrides)
     return mapping
