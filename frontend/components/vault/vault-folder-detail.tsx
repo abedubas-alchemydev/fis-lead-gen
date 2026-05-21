@@ -13,6 +13,7 @@ import {
 } from "@/lib/api";
 import type { VaultFolder, VaultFolderFile } from "@/lib/types";
 
+import { ExpandableTextarea } from "./expandable-textarea";
 import { VaultFileRow } from "./vault-file-row";
 import { VaultFileUploader } from "./vault-file-uploader";
 import { VaultInstructionsEditor } from "./vault-instructions-editor";
@@ -283,21 +284,13 @@ function FolderEditor({
             className="mt-2 block w-full rounded-xl border border-[var(--border,rgba(30,64,175,0.1))] bg-[var(--surface,#ffffff)] px-3 py-2 text-sm text-[var(--text,#0f172a)] outline-none transition focus:border-[var(--accent,#6366f1)] focus:ring-2 focus:ring-[var(--accent,#6366f1)]/20"
           />
         </label>
-        <label className="block text-xs font-medium uppercase tracking-[0.18em] text-[var(--text-muted,#94a3b8)]">
-          Description
-          <textarea
-            value={description}
-            onChange={(event) => setDescription(event.target.value)}
-            maxLength={DESCRIPTION_MAX}
-            rows={5}
-            placeholder="What you offer, your differentiators, typical client profile..."
-            className="mt-2 block w-full rounded-xl border border-[var(--border,rgba(30,64,175,0.1))] bg-[var(--surface,#ffffff)] px-3 py-2 text-sm leading-6 text-[var(--text,#0f172a)] outline-none transition focus:border-[var(--accent,#6366f1)] focus:ring-2 focus:ring-[var(--accent,#6366f1)]/20"
-          />
-          <span className="mt-1 block text-[11px] text-[var(--text-muted,#94a3b8)]">
-            {description.length.toLocaleString()} / {DESCRIPTION_MAX.toLocaleString()}{" "}
-            characters
-          </span>
-        </label>
+        <ExpandableTextarea
+          label="Description"
+          value={description}
+          onChange={setDescription}
+          maxLength={DESCRIPTION_MAX}
+          placeholder="What you offer, your differentiators, typical client profile..."
+        />
         <VaultInstructionsEditor
           value={instructions}
           onChange={setInstructions}
