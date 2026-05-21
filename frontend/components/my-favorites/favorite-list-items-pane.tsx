@@ -137,19 +137,15 @@ export function FavoriteListItemsPane({
                 : isAdvisor
                   ? item.advisor_name
                   : item.broker_dealer_name;
-            // Insiders have no id-keyed detail page, so link into the Form 4
-            // feed pre-filtered by name (a live link).
-            // TODO: institutional_investor rows dead-link — /investors is now
-            // the Form 4 feed (no id-keyed detail). Cleanup once any stale
-            // favorites from PR #432 are pruned or repointed.
+            // /investors is the Form 4 feed (no id-keyed detail), so both
+            // insider and institutional-investor rows deep-link via the ``q``
+            // name filter — same pattern, just with the investor's name.
             const detailHref = (
-              isReportingOwner
+              isReportingOwner || isInvestor
                 ? `/investors?q=${encodeURIComponent(targetName ?? "")}`
-                : isInvestor
-                  ? `/investors/${targetId}`
-                  : isAdvisor
-                    ? `/advisor-list/${targetId}${advisorDetailHrefSuffix}`
-                    : `/master-list/${targetId}${bdDetailHrefSuffix}`
+                : isAdvisor
+                  ? `/advisor-list/${targetId}${advisorDetailHrefSuffix}`
+                  : `/master-list/${targetId}${bdDetailHrefSuffix}`
             ) as Route;
             const pillLabel = isReportingOwner
               ? "INSIDER"
