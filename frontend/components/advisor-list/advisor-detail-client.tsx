@@ -1,32 +1,99 @@
 "use client";
 
-import { useEffect, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import Link from "next/link";
 import type { Route } from "next";
-import { useSearchParams } from "next/navigation";
+import { useRouter, useSearchParams } from "next/navigation";
 
-import { ArrowLeft, ExternalLink } from "lucide-react";
+import { ArrowLeft, ArrowRight, ExternalLink, Globe, Search } from "lucide-react";
 
-import { apiRequest } from "@/lib/api";
+import { apiRequest, buildApiPath } from "@/lib/api";
 import {
   buildAdvisorListUrl,
+  encodeReturnParam,
   parseReturnParam,
   ADVISOR_LIST_STATE_DEFAULTS,
+  type AdvisorListQueryState,
 } from "@/lib/advisor-list-state";
 import { formatCurrency, formatDate } from "@/lib/format";
+import { ListPicker } from "@/components/list-picker/list-picker";
 import { Pill } from "@/components/ui/pill";
 import { SectionPanel } from "@/components/ui/section-panel";
-import type { InvestmentAdvisorProfileResponse } from "@/lib/types";
+import type {
+  InvestmentAdvisorListResponse,
+  InvestmentAdvisorProfileResponse,
+} from "@/lib/types";
+
+// Secondary button preset — copied from broker-dealer-detail-client.tsx so the
+// Previous/Next nav buttons match the master-list detail page exactly.
+const SECONDARY_BTN =
+  "inline-flex items-center justify-center gap-2 rounded-[10px] border border-[var(--border-2,rgba(30,64,175,0.16))] bg-[var(--surface,#ffffff)] px-4 py-2 text-[13px] font-medium text-[var(--text-dim,#475569)] transition hover:bg-[var(--surface-2,#f1f6fd)] hover:text-[var(--text,#0f172a)] disabled:cursor-not-allowed disabled:opacity-45";
+
+// Compact website display: strip protocol/www/trailing slash and take the
+// first path segment. Mirrors ResolvedLink in firm-website-link.tsx.
+function cleanWebsiteDisplay(website: string): string {
+  return (
+    website
+      .replace(/^https?:\/\//i, "")
+      .replace(/^www\./i, "")
+      .replace(/\/+$/, "")
+      .split("/")[0]
+      ?.toLowerCase() ?? website
+  );
+}
+
+// Builds the same /api/v1/investment-advisors query the advisor workspace
+// emits, from a recovered AdvisorListQueryState, so Next/Previous walk the
+// *exact* same result set the user was looking at when they clicked in. Keep
+// in lock step with the params object in advisor-list-workspace-client.tsx.
+function listApiPathFromState(
+  state: AdvisorListQueryState,
+  pageOverride?: number,
+): string {
+  const params: Record<string, string | number | string[]> = {
+    sort_by: state.sortBy,
+    sort_dir: state.sortDir,
+    page: pageOverride ?? state.page,
+    limit: state.limit,
+  };
+  if (state.search) params.q = state.search;
+  if (state.state) params.state = [state.state];
+  if (state.status !== "All") params.status = [state.status];
+  // BE defaults files_13f=true, so only send the explicit "false" override.
+  if (state.filesThirteenF === "all") params.files_13f = "false";
+  if (state.advisoryActivities.length > 0) {
+    params.advisory_activities = state.advisoryActivities;
+  }
+  if (state.clientTypes.length > 0) {
+    params.client_types = state.clientTypes;
+  }
+  if (state.minRegulatoryAum !== null) {
+    params.min_regulatory_aum = state.minRegulatoryAum;
+  }
+  if (state.maxRegulatoryAum !== null) {
+    params.max_regulatory_aum = state.maxRegulatoryAum;
+  }
+  if (state.registeredAfter !== null) {
+    params.registered_after = state.registeredAfter;
+  }
+  if (state.registeredBefore !== null) {
+    params.registered_before = state.registeredBefore;
+  }
+  return buildApiPath("/api/v1/investment-advisors", params);
+}
 
 // Detail view for /advisor-list/{id}. Mirrors the design system used on
 // /master-list/{id}: page topbar with breadcrumbs + h1 + meta line, KPI
 // strip of MiniStat tiles, and SectionPanel cards on a 2-column grid.
 export function AdvisorDetailClient({ advisorId }: { advisorId: string }) {
+  const router = useRouter();
   const searchParams = useSearchParams();
   const [data, setData] = useState<InvestmentAdvisorProfileResponse | null>(
     null,
   );
   const [error, setError] = useState<string | null>(null);
+  const [prevId, setPrevId] = useState<number | null>(null);
+  const [nextId, setNextId] = useState<number | null>(null);
 
   useEffect(() => {
     apiRequest<InvestmentAdvisorProfileResponse>(
@@ -40,12 +107,109 @@ export function AdvisorDetailClient({ advisorId }: { advisorId: string }) {
 
   // Restore the user's filter/sort state on back-nav, falling back to
   // the bare list URL if no return envelope was passed.
-  const returnState = parseReturnParam(searchParams.get("return"));
+  const returnState = useMemo(
+    () => parseReturnParam(searchParams.get("return")),
+    [searchParams],
+  );
+  const returnEnvelope = useMemo(
+    () => (returnState ? encodeReturnParam(returnState) : ""),
+    [returnState],
+  );
   const backHref = (
     returnState
       ? buildAdvisorListUrl(returnState)
       : buildAdvisorListUrl(ADVISOR_LIST_STATE_DEFAULTS)
   ) as Route;
+
+  // Resolve adjacent advisor IDs for Previous/Next. With a return envelope,
+  // walk the same filtered/sorted page the user came from and step ±1 (fetching
+  // the neighbouring page at a boundary); without one (deep link), fall back to
+  // the global /adjacent order. Mirrors broker-dealer-detail-client.tsx.
+  useEffect(() => {
+    let active = true;
+    const numericId = Number(advisorId);
+
+    async function resolveFromAdjacent() {
+      try {
+        const adj = await apiRequest<{
+          prev_id: number | null;
+          next_id: number | null;
+        }>(`/api/v1/investment-advisors/${advisorId}/adjacent`);
+        if (!active) return;
+        setPrevId(adj.prev_id);
+        setNextId(adj.next_id);
+      } catch {
+        if (active) {
+          setPrevId(null);
+          setNextId(null);
+        }
+      }
+    }
+
+    async function resolveFromReturnState(state: AdvisorListQueryState) {
+      const response = await apiRequest<InvestmentAdvisorListResponse>(
+        listApiPathFromState(state),
+      );
+      if (!active) return;
+
+      const idx = response.items.findIndex((item) => item.id === numericId);
+      if (idx === -1) {
+        // The advisor dropped out of the user's view (data refresh / filter
+        // change). Fall back to the global walker so the buttons still work.
+        await resolveFromAdjacent();
+        return;
+      }
+
+      let prev: number | null = null;
+      let next: number | null = null;
+
+      if (idx > 0) {
+        prev = response.items[idx - 1].id;
+      } else if (response.meta.page > 1) {
+        const prevPage = await apiRequest<InvestmentAdvisorListResponse>(
+          listApiPathFromState(state, response.meta.page - 1),
+        );
+        if (!active) return;
+        if (prevPage.items.length > 0) {
+          prev = prevPage.items[prevPage.items.length - 1].id;
+        }
+      }
+
+      if (idx < response.items.length - 1) {
+        next = response.items[idx + 1].id;
+      } else if (response.meta.page < response.meta.total_pages) {
+        const nextPage = await apiRequest<InvestmentAdvisorListResponse>(
+          listApiPathFromState(state, response.meta.page + 1),
+        );
+        if (!active) return;
+        if (nextPage.items.length > 0) {
+          next = nextPage.items[0].id;
+        }
+      }
+
+      setPrevId(prev);
+      setNextId(next);
+    }
+
+    if (returnState && Number.isFinite(numericId)) {
+      void resolveFromReturnState(returnState).catch(() => {
+        if (active) void resolveFromAdjacent();
+      });
+    } else {
+      void resolveFromAdjacent();
+    }
+
+    return () => {
+      active = false;
+    };
+  }, [advisorId, returnState]);
+
+  // Same-shape /advisor-list/{id} link that preserves the return envelope so
+  // chaining Next/Previous keeps the user's filtered context.
+  const buildAdjacentHref = (id: number): Route => {
+    const base = `/advisor-list/${id}`;
+    return (returnEnvelope ? `${base}?return=${returnEnvelope}` : base) as Route;
+  };
 
   if (error) {
     return (
@@ -108,9 +272,17 @@ export function AdvisorDetailClient({ advisorId }: { advisorId: string }) {
             <span className="text-[var(--text-dim,#475569)]">/</span> Firm
             Detail
           </p>
-          <h1 className="mt-1 text-[24px] font-bold tracking-[-0.02em] text-[var(--text,#0f172a)]">
-            {advisor.name}
-          </h1>
+          <div className="mt-1 flex flex-wrap items-center gap-3">
+            <h1 className="text-[24px] font-bold tracking-[-0.02em] text-[var(--text,#0f172a)]">
+              {advisor.name}
+            </h1>
+            <ListPicker
+              firmId={advisor.id}
+              variant="detail"
+              entityType="advisor"
+              initialDefaultMember={data.is_favorited}
+            />
+          </div>
           {advisor.legal_name && advisor.legal_name !== advisor.name ? (
             <p className="mt-1 text-[13px] text-[var(--text-dim,#475569)]">
               Legal name:{" "}
@@ -119,6 +291,33 @@ export function AdvisorDetailClient({ advisorId }: { advisorId: string }) {
               </span>
             </p>
           ) : null}
+          {/* Website + Google fallback — header-level, mirrors master-list. */}
+          <div className="mt-1.5 flex flex-wrap items-center gap-x-4 gap-y-1.5">
+            {advisor.website ? (
+              <a
+                href={
+                  advisor.website.startsWith("http")
+                    ? advisor.website
+                    : `https://${advisor.website}`
+                }
+                target="_blank"
+                rel="noopener noreferrer"
+                className="inline-flex items-center gap-1.5 text-[13px] text-[var(--accent,#6366f1)] transition hover:underline"
+              >
+                <Globe className="h-3.5 w-3.5" strokeWidth={2} />
+                {cleanWebsiteDisplay(advisor.website)}
+              </a>
+            ) : null}
+            <a
+              href={`https://www.google.com/search?q=${encodeURIComponent(`${advisor.name} investment advisor`)}`}
+              target="_blank"
+              rel="noopener noreferrer"
+              className="inline-flex items-center gap-1.5 text-[13px] text-[var(--text-dim,#475569)] transition hover:text-[var(--text,#0f172a)] hover:underline"
+            >
+              <Search className="h-3.5 w-3.5" strokeWidth={2} />
+              Search Google for this firm
+            </a>
+          </div>
           <div className="mt-2 flex flex-wrap items-center gap-x-3 gap-y-1 text-[12px] text-[var(--text-muted,#94a3b8)]">
             {advisor.crd_number ? (
               <span>
@@ -167,15 +366,32 @@ export function AdvisorDetailClient({ advisorId }: { advisorId: string }) {
         </div>
       ) : null}
 
-      {/* ── Back-nav row ────────────────────────────────────────────────── */}
-      <div className="mb-5">
+      {/* ── Prev / Back / Next nav row ──────────────────────────────────── */}
+      <div className="mb-5 flex items-center justify-between gap-3">
+        <button
+          type="button"
+          disabled={!prevId}
+          onClick={() => prevId && router.push(buildAdjacentHref(prevId))}
+          className={SECONDARY_BTN}
+        >
+          <ArrowLeft className="h-4 w-4" strokeWidth={2} aria-hidden />
+          Previous
+        </button>
         <Link
           href={backHref}
-          className="inline-flex items-center gap-1.5 text-[12px] uppercase tracking-[0.08em] text-[var(--text-muted,#94a3b8)] transition hover:text-[var(--text,#0f172a)]"
+          className="text-[12px] uppercase tracking-[0.08em] text-[var(--text-muted,#94a3b8)] transition hover:text-[var(--text,#0f172a)]"
         >
-          <ArrowLeft className="h-3.5 w-3.5" strokeWidth={2} aria-hidden />
           Back to advisors
         </Link>
+        <button
+          type="button"
+          disabled={!nextId}
+          onClick={() => nextId && router.push(buildAdjacentHref(nextId))}
+          className={SECONDARY_BTN}
+        >
+          Next
+          <ArrowRight className="h-4 w-4" strokeWidth={2} aria-hidden />
+        </button>
       </div>
 
       {/* ── KPI strip ───────────────────────────────────────────────────── */}
@@ -288,7 +504,7 @@ export function AdvisorDetailClient({ advisorId }: { advisorId: string }) {
         </SectionPanel>
 
         {/* Firm overview */}
-        <SectionPanel eyebrow="Overview" title="Registration & web presence">
+        <SectionPanel eyebrow="Overview" title="Registration & filings">
           <div className="grid gap-3 md:grid-cols-2">
             <MiniStat
               label="Status"
@@ -311,32 +527,6 @@ export function AdvisorDetailClient({ advisorId }: { advisorId: string }) {
               compact
             />
           </div>
-
-          {advisor.website ? (
-            <div className="mt-4 rounded-2xl bg-[var(--surface-2,#f1f6fd)] px-4 py-3">
-              <p className="text-[11px] font-semibold uppercase tracking-[0.08em] text-[var(--text-muted,#94a3b8)]">
-                Website
-              </p>
-              <a
-                href={advisor.website}
-                target="_blank"
-                rel="noopener noreferrer"
-                className="mt-1 inline-flex items-center gap-1 text-[13px] font-medium text-[var(--accent,#6366f1)] hover:underline"
-              >
-                {advisor.website}
-                <ExternalLink className="h-3 w-3" strokeWidth={2} />
-              </a>
-              {advisor.website_source ? (
-                <p className="mt-1 text-[11px] uppercase tracking-[0.08em] text-[var(--text-muted,#94a3b8)]">
-                  Source: {advisor.website_source}
-                </p>
-              ) : null}
-            </div>
-          ) : (
-            <p className="mt-4 text-sm text-[var(--text-muted,#94a3b8)]">
-              No website on file.
-            </p>
-          )}
 
           {advisor.filings_index_url ? (
             <a
