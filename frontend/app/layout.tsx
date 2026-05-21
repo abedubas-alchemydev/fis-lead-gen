@@ -12,9 +12,19 @@ export const metadata: Metadata = {
   description: "Broker-dealer intelligence platform for clearing-services workflows."
 };
 
+// Inline, blocking script that runs before paint so the saved theme is
+// applied on first render of every route — without it, `<ThemeToggle>`'s
+// post-hydration effect was the only thing setting `data-theme`, which
+// caused a light-mode flash on refresh and left dark mode broken on any
+// route that didn't render the topbar (e.g. /auth/*).
+const themeInitScript = `try{var t=localStorage.getItem('prospectEngineTheme');if(t==='dark')document.documentElement.setAttribute('data-theme','dark');}catch(e){}`;
+
 export default function RootLayout({ children }: { children: ReactNode }) {
   return (
     <html lang="en">
+      <head>
+        <script dangerouslySetInnerHTML={{ __html: themeInitScript }} />
+      </head>
       <body className={`${inter.variable} ${mono.variable} font-sans text-ink antialiased`}>{children}</body>
     </html>
   );
