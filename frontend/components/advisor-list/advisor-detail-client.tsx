@@ -280,7 +280,7 @@ export function AdvisorDetailClient({ advisorId }: { advisorId: string }) {
               firmId={advisor.id}
               variant="detail"
               entityType="advisor"
-              initialDefaultMember={data.is_favorited}
+              initialFavorited={data.is_favorited}
             />
           </div>
           {advisor.legal_name && advisor.legal_name !== advisor.name ? (

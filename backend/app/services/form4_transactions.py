@@ -19,7 +19,7 @@ from sqlalchemy import false, func, or_, select, update
 from sqlalchemy.dialects.postgresql import insert
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.models.favorite_list import FavoriteListItem
+from app.models.favorite_list import FavoriteList, FavoriteListItem
 from app.models.form4_transaction import Form4Transaction
 from app.models.reporting_owner import ReportingOwner
 from app.services.service_models import (
@@ -130,7 +130,7 @@ class Form4TransactionRepository:
         sort_dir: str = "desc",
         page: int,
         limit: int,
-        default_list_id: int | None = None,
+        user_id: str | None = None,
     ) -> tuple[list[ConsolidatedPersonRow], int]:
         """Paginated list of consolidated person rows.
 
@@ -150,11 +150,12 @@ class Form4TransactionRepository:
         ``sort_by`` accepts any key in ``ALLOWED_SORT_FIELDS``; unknown
         keys fall back to ``transaction_date`` silently.
 
-        ``default_list_id`` is the caller's default favorite list; when
-        provided, each row gets an ``is_favorited`` flag for whether the
-        insider (by CIK) is pinned to that list. ``reporting_owner_id`` is
-        the surrogate id of the insider's ``reporting_owners`` row (None
-        until first favorited — the row is lazy-created at that point).
+        ``user_id`` is the caller's BetterAuth id; when provided, each row
+        gets an ``is_favorited`` flag for whether the insider (by CIK) is on
+        any of the caller's favorite lists (default OR custom).
+        ``reporting_owner_id`` is the surrogate id of the insider's
+        ``reporting_owners`` row (None until first favorited — the row is
+        lazy-created at that point).
         """
         filters = []
         if ad_code is not None:
@@ -264,23 +265,24 @@ class Form4TransactionRepository:
         # Insider favorites overlay. ``reporting_owner_id`` is a correlated
         # scalar lookup by CIK (None until the insider is first favorited
         # and its ``reporting_owners`` row is lazy-created). ``is_favorited``
-        # is an EXISTS against the caller's default list, also keyed by CIK
-        # so it works regardless of whether the surrogate id exists yet.
+        # is an EXISTS against any list owned by the caller, also keyed by
+        # CIK so it works regardless of whether the surrogate id exists yet.
         reporting_owner_id_col = (
             select(ReportingOwner.id)
             .where(ReportingOwner.cik == ranked.c.reporting_owner_cik)
             .scalar_subquery()
             .label("reporting_owner_id")
         )
-        if default_list_id is not None:
+        if user_id is not None:
             is_favorited_col = (
                 select(FavoriteListItem.id)
                 .join(
                     ReportingOwner,
                     ReportingOwner.id == FavoriteListItem.reporting_owner_id,
                 )
+                .join(FavoriteList, FavoriteList.id == FavoriteListItem.list_id)
                 .where(
-                    FavoriteListItem.list_id == default_list_id,
+                    FavoriteList.user_id == user_id,
                     ReportingOwner.cik == ranked.c.reporting_owner_cik,
                 )
                 .exists()

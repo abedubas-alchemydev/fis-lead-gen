@@ -921,7 +921,7 @@ function InvestorRow({
           entityType="reporting_owner"
           firmId={row.reporting_owner_id ?? 0}
           reportingOwnerCik={row.reporting_owner_cik}
-          initialDefaultMember={row.is_favorited}
+          initialFavorited={row.is_favorited}
         />
         <button
           type="button"

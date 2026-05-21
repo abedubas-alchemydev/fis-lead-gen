@@ -47,9 +47,9 @@ const MAX_NEW_LIST_NAME_LENGTH = 80;
 //     to open + one click to toggle the default checkbox.
 //   - Outside-click closes (mousedown handler — same pattern as
 //     multi-select-filter.tsx)
-//   - For variant="detail", the trigger heart fills based on the
-//     default list's `is_member` once the picker has fetched, with
-//     `initialDefaultMember` as a pre-fetch seed so the heart isn't
+//   - For variant="detail"/"row-heart", the trigger heart fills when
+//     the firm appears on ANY of the user's lists (default OR custom),
+//     with `initialFavorited` as a pre-fetch seed so the heart isn't
 //     misleading on first paint.
 //
 // IDs are integers (FavoriteList.id: number) — see the comment in
@@ -74,9 +74,9 @@ export interface ListPickerProps {
   // key on CIK because the surrogate id is lazy-created on first favorite.
   reportingOwnerCik?: string;
   // Seeds the heart fill on variant="detail"/"row-heart" before the
-  // picker has fetched, mirroring default-list membership. Ignored on
+  // picker has fetched, mirroring any-list membership. Ignored on
   // variant="row" (the Save pill has no filled state).
-  initialDefaultMember?: boolean;
+  initialFavorited?: boolean;
 }
 
 export function ListPicker({
@@ -84,7 +84,7 @@ export function ListPicker({
   variant,
   entityType = "broker_dealer",
   reportingOwnerCik,
-  initialDefaultMember = false,
+  initialFavorited = false,
 }: ListPickerProps) {
   // Reporting owners are lazy-created, so a row may not have a surrogate
   // id until its first favorite. Seed from ``firmId`` and capture the id
@@ -246,13 +246,14 @@ export function ListPicker({
     };
   }, [open, lists, fetchLists]);
 
-  // Default-list membership drives the trigger's filled-heart state on
-  // variant="detail". Falls back to the seed before the first fetch.
-  const defaultIsMember = useMemo(() => {
-    if (lists === null) return initialDefaultMember;
-    const def = lists.find((l) => l.is_default);
-    return def ? def.is_member : initialDefaultMember;
-  }, [lists, initialDefaultMember]);
+  // Any-list membership drives the trigger's filled-heart state on
+  // variant="detail" / "row-heart" — a firm pinned to any of the user's
+  // lists (default OR custom) reads as "favorited" overall. Falls back
+  // to the seed before the first fetch.
+  const isFavorited = useMemo(() => {
+    if (lists === null) return initialFavorited;
+    return lists.some((l) => l.is_member);
+  }, [lists, initialFavorited]);
 
   const handleToggle = useCallback(
     async (list: FavoriteListWithMembership) => {
@@ -405,12 +406,12 @@ export function ListPicker({
 
   const triggerLabel = useMemo(() => {
     if (variant === "detail" || variant === "row-heart") {
-      return defaultIsMember
+      return isFavorited
         ? "Open favorite-list picker (favorited)"
         : "Open favorite-list picker";
     }
     return "Save to a list";
-  }, [variant, defaultIsMember]);
+  }, [variant, isFavorited]);
 
   const popoverPanel =
     open && position ? (
@@ -581,7 +582,7 @@ export function ListPicker({
         <DetailTrigger
           open={open}
           onClick={togglePicker}
-          favorited={defaultIsMember}
+          favorited={isFavorited}
           ariaLabel={triggerLabel}
         />
       ) : variant === "row-heart" ? (
@@ -592,7 +593,7 @@ export function ListPicker({
             e.stopPropagation();
             togglePicker();
           }}
-          favorited={defaultIsMember}
+          favorited={isFavorited}
           ariaLabel={triggerLabel}
         />
       ) : (
