@@ -107,19 +107,26 @@ _TYPES_TERMINATORS = {
     "Disclosure Events",
 }
 
-# All Form BD fields we read live in the first ~15 pages of any report.
-# Big firms balloon their reports to 1000+ pages with Disclosure Events /
-# Organization Affiliates content we don't read; pdfplumber's per-document
-# metadata pass over those pages is a 15-30 second penalty per firm. The
-# fix is two-stage: pypdf slices the PDF down to the first ``_PAGE_HARD_CAP``
-# pages (cheap — copies references not bytes), then pdfplumber does its
-# full layout-aware text extraction on the small slice. Layout-aware
-# extraction is required for the "Direct Owners and Executive Officers"
-# section, which uses a two-column layout that pypdf / pypdfium2 flatten
-# in a way that breaks our regex. Verified against the fixture set + a
-# live probe of CRDs 7560 (Pershing, 264p), 7691 (BAC NA, 1995p), and
-# 13071 (Apex, 64p).
-_PAGE_HARD_CAP = 30
+# Most Form BD fields (Types of Business, Direct Owners, Firm Operations)
+# live in the first ~15 pages of any report. ``registration_date`` and
+# ``formation_date``, however, are parsed from the "Registrations" section
+# (the "SEC Approved/Active/Registered/Effective <date>" line), which for
+# large firms with long Direct Owners / Firm History blocks gets pushed
+# well past page 30. Davenport (CRD 1588, 77-page report) is the worst case
+# observed — its SEC Approved line sits on page 36. Big firms balloon
+# their reports to 1000+ pages with Disclosure Events / Organization
+# Affiliates content we never read, so we still cap the slice to keep
+# pdfplumber's per-document metadata pass bounded; 80 is the empirical
+# ceiling for the Registrations section across the 27-firm backfill
+# (PR #471). Two-stage: pypdf slices the PDF down to the first
+# ``_PAGE_HARD_CAP`` pages (cheap — copies references not bytes), then
+# pdfplumber does its full layout-aware text extraction on the small
+# slice. Layout-aware extraction is required for the "Direct Owners and
+# Executive Officers" section, which uses a two-column layout that pypdf /
+# pypdfium2 flatten in a way that breaks our regex. Verified against the
+# fixture set + a live probe of CRDs 7560 (Pershing, 264p), 7691 (BAC NA,
+# 1995p), 13071 (Apex, 64p), and 1588 (Davenport, 77p, SEC line p36).
+_PAGE_HARD_CAP = 80
 
 
 @dataclass(frozen=True)
