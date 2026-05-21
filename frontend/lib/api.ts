@@ -96,7 +96,8 @@ export async function apiRequest<T>(path: string, init?: RequestInit): Promise<T
 import type {
   FavoriteList,
   FavoriteListWithMembership,
-  PaginatedFavoriteListItems
+  PaginatedFavoriteListItems,
+  ReportingOwnerItemAddResponse
 } from "@/types/favorite-list";
 import type {
   AdjacentResponse,
@@ -359,6 +360,46 @@ export async function addInstitutionalInvestorsToListBatch(
       method: "POST",
       body: JSON.stringify({ institutional_investor_ids: investorIds }),
     }
+  );
+}
+
+// ── Reporting-owner (Form 4 insider) variants ─────────────────────────────
+// Insiders are addressed by CIK (string), not a surrogate id: the
+// /investors feed only carries the CIK and the ``reporting_owners`` row
+// is lazy-created on first favorite. The membership lookup lives under
+// the /investors router (the owner isn't a firm), while add/remove sit on
+// /favorite-lists like the other types. ``addReportingOwnerToList``
+// returns the resolved ``reporting_owner_id`` so a row that had none can
+// be un-favorited (DELETE by id) without re-resolving the CIK.
+
+export async function getListsForReportingOwner(
+  cik: string
+): Promise<FavoriteListWithMembership[]> {
+  return apiRequest<FavoriteListWithMembership[]>(
+    `/api/v1/investors/reporting-owners/${encodeURIComponent(cik)}/favorite-lists`
+  );
+}
+
+export async function addReportingOwnerToList(
+  listId: number,
+  cik: string
+): Promise<ReportingOwnerItemAddResponse> {
+  return apiRequest<ReportingOwnerItemAddResponse>(
+    `/api/v1/favorite-lists/${listId}/reporting-owner-items`,
+    {
+      method: "POST",
+      body: JSON.stringify({ cik }),
+    }
+  );
+}
+
+export async function removeReportingOwnerFromList(
+  listId: number,
+  reportingOwnerId: number
+): Promise<void> {
+  await apiRequest<void>(
+    `/api/v1/favorite-lists/${listId}/reporting-owner-items/${reportingOwnerId}`,
+    { method: "DELETE" }
   );
 }
 

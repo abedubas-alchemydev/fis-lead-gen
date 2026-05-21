@@ -28,6 +28,7 @@ import {
 } from "@/lib/investors-state";
 import { STATE_NAMES, stateCodeFromName } from "@/lib/states";
 import { Combo } from "@/components/ui/combo";
+import { ListPicker } from "@/components/list-picker/list-picker";
 import { Tag } from "@/components/ui/tag";
 import { ThemeToggle } from "@/components/ui/theme-toggle";
 import { TransactionValueRangeFilter } from "@/components/investors/filters/transaction-value-range-filter";
@@ -914,7 +915,14 @@ function InvestorRow({
           </a>
         ) : null}
       </div>
-      <div className="flex items-start justify-end">
+      <div className="flex items-start justify-end gap-2">
+        <ListPicker
+          variant="row-heart"
+          entityType="reporting_owner"
+          firmId={row.reporting_owner_id ?? 0}
+          reportingOwnerCik={row.reporting_owner_cik}
+          initialDefaultMember={row.is_favorited}
+        />
         <button
           type="button"
           onClick={onEnrich}

@@ -27,23 +27,27 @@ class FavoriteListResponse(BaseModel):
 class FavoriteListItemResponse(BaseModel):
     """One row in ``GET /api/v1/favorite-lists/{list_id}/items``.
 
-    Polymorphic shape across three firm types: broker_dealer, advisor,
-    institutional_investor. Each row sets exactly one id/name pair
-    matching its ``entity_type`` discriminator; the other two pairs are
-    ``None``. Keeping legacy BD + advisor field names populated preserves
-    backwards compatibility with the FE contracts shipped before
-    institutional investors landed.
+    Polymorphic shape across four entity types: broker_dealer, advisor,
+    institutional_investor, reporting_owner (Form 4 insider). Each row
+    sets exactly one id/name pair matching its ``entity_type``
+    discriminator; the other pairs are ``None``. Keeping legacy field
+    names populated preserves backwards compatibility with the FE
+    contracts shipped before each entity type landed.
     """
 
     model_config = ConfigDict(from_attributes=True)
 
-    entity_type: Literal["broker_dealer", "advisor", "institutional_investor"]
+    entity_type: Literal[
+        "broker_dealer", "advisor", "institutional_investor", "reporting_owner"
+    ]
     broker_dealer_id: int | None = None
     broker_dealer_name: str | None = None
     advisor_id: int | None = None
     advisor_name: str | None = None
     institutional_investor_id: int | None = None
     institutional_investor_name: str | None = None
+    reporting_owner_id: int | None = None
+    reporting_owner_name: str | None = None
     added_at: datetime
 
 
@@ -181,6 +185,42 @@ class FavoriteListInvestorItemResponse(BaseModel):
 
     institutional_investor_id: int
     institutional_investor_name: str
+    added_at: datetime
+
+
+class FavoriteListReportingOwnerItemCreate(BaseModel):
+    """Body for ``POST /api/v1/favorite-lists/{list_id}/reporting-owner-items``.
+
+    Identified by CIK (string) rather than a surrogate id: the /investors
+    feed only carries the reporting owner's CIK, and the
+    ``reporting_owners`` row is lazy-created on first favorite. The server
+    resolves the canonical (most-recent) name from Form 4 history, so no
+    client-supplied name is trusted.
+    """
+
+    cik: str = Field(min_length=1, max_length=16)
+
+    @field_validator("cik")
+    @classmethod
+    def _strip(cls, v: str) -> str:
+        stripped = v.strip()
+        if not stripped:
+            raise ValueError("cik must not be blank")
+        return stripped
+
+
+class FavoriteListReportingOwnerItemResponse(BaseModel):
+    """Response shape for single reporting-owner add to a favorite list.
+
+    ``reporting_owner_id`` is the surrogate id resolved (or freshly
+    created) for the posted CIK; the FE keeps it so subsequent toggles can
+    DELETE by id without another CIK round-trip.
+    """
+
+    model_config = ConfigDict(from_attributes=True)
+
+    reporting_owner_id: int
+    reporting_owner_name: str
     added_at: datetime
 
 

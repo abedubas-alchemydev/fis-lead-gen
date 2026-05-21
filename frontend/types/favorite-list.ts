@@ -25,14 +25,16 @@ export interface FavoriteListWithMembership extends FavoriteList {
   is_member: boolean;
 }
 
-// Polymorphic item across three firm types: broker_dealer, advisor,
-// institutional_investor. ``entity_type`` discriminates; the unused
-// id/name pairs are null. Pre-existing BD/advisor callers can still
-// read the typed fields directly but should gate on ``entity_type``.
+// Polymorphic item across four entity types: broker_dealer, advisor,
+// institutional_investor, reporting_owner (Form 4 insider).
+// ``entity_type`` discriminates; the unused id/name pairs are null.
+// Pre-existing callers can still read the typed fields directly but
+// should gate on ``entity_type``.
 export type FavoriteListEntityType =
   | "broker_dealer"
   | "advisor"
-  | "institutional_investor";
+  | "institutional_investor"
+  | "reporting_owner";
 
 export interface FavoriteListItem {
   entity_type: FavoriteListEntityType;
@@ -42,6 +44,8 @@ export interface FavoriteListItem {
   advisor_name: string | null;
   institutional_investor_id: number | null;
   institutional_investor_name: string | null;
+  reporting_owner_id: number | null;
+  reporting_owner_name: string | null;
   added_at: string;
 }
 
@@ -50,4 +54,15 @@ export interface PaginatedFavoriteListItems {
   total: number;
   page: number;
   page_size: number;
+}
+
+// Returned by POST /favorite-lists/{id}/reporting-owner-items. The
+// insider is posted by CIK and the ``reporting_owners`` row is
+// lazy-created; the response hands back the resolved surrogate id so the
+// caller can DELETE by id on a subsequent un-favorite without another
+// CIK round-trip.
+export interface ReportingOwnerItemAddResponse {
+  reporting_owner_id: number;
+  reporting_owner_name: string;
+  added_at: string;
 }

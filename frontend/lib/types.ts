@@ -202,6 +202,13 @@ export type InvestorItem = {
 
   source_filing_url: string | null;
   filed_at: string;
+
+  // Favorites (insider). ``reporting_owner_id`` is the surrogate id of the
+  // insider's reporting_owners row, or null until first favorited (the
+  // heart then adds by ``reporting_owner_cik``). ``is_favorited`` reflects
+  // membership in the caller's default list.
+  reporting_owner_id: number | null;
+  is_favorited: boolean;
 };
 
 export type InvestorListResponse = {

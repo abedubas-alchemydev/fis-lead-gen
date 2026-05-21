@@ -16,11 +16,14 @@ import {
   ApiError,
   addAdvisorToList,
   addFirmToList,
+  addReportingOwnerToList,
   createFavoriteList,
   getListsForAdvisor,
   getListsForFirm,
+  getListsForReportingOwner,
   removeAdvisorFromList,
   removeFirmFromList,
+  removeReportingOwnerFromList,
 } from "@/lib/api";
 import type {
   FavoriteListEntityType,
@@ -52,22 +55,27 @@ const MAX_NEW_LIST_NAME_LENGTH = 80;
 // IDs are integers (FavoriteList.id: number) — see the comment in
 // frontend/types/favorite-list.ts.
 
-export type ListPickerVariant = "row" | "detail";
+export type ListPickerVariant = "row" | "detail" | "row-heart";
 
 export interface ListPickerProps {
-  // The id of the broker-dealer or investment advisor the picker is
-  // saving. Combined with ``entityType`` it routes to the right BE
-  // endpoint. Pre-existing call sites that pass only ``firmId`` keep
-  // working — entityType defaults to "broker_dealer".
+  // The id of the entity the picker is saving. Combined with
+  // ``entityType`` it routes to the right BE endpoint. Pre-existing call
+  // sites that pass only ``firmId`` keep working — entityType defaults to
+  // "broker_dealer". For entityType="reporting_owner" this is the
+  // reporting_owners surrogate id, which may be 0 until the insider is
+  // first favorited — use ``reportingOwnerCik`` for the add path.
   firmId: number;
   variant: ListPickerVariant;
-  // Discriminates broker-dealer vs advisor. Defaults to "broker_dealer"
-  // so master-list / firm-detail callers don't have to change.
+  // Discriminates the four favoritable entity types. Defaults to
+  // "broker_dealer" so master-list / firm-detail callers don't change.
   entityType?: FavoriteListEntityType;
-  // Seeds the heart fill on variant="detail" before the picker has
-  // fetched. Read from BrokerDealerProfileResponse.is_favorited which
-  // mirrors default-list membership for the legacy single-favorite
-  // surface. Ignored on variant="row".
+  // Reporting-owner (insider) CIK. Required when
+  // entityType="reporting_owner": the membership lookup and the add path
+  // key on CIK because the surrogate id is lazy-created on first favorite.
+  reportingOwnerCik?: string;
+  // Seeds the heart fill on variant="detail"/"row-heart" before the
+  // picker has fetched, mirroring default-list membership. Ignored on
+  // variant="row" (the Save pill has no filled state).
   initialDefaultMember?: boolean;
 }
 
@@ -75,27 +83,49 @@ export function ListPicker({
   firmId,
   variant,
   entityType = "broker_dealer",
+  reportingOwnerCik,
   initialDefaultMember = false,
 }: ListPickerProps) {
+  // Reporting owners are lazy-created, so a row may not have a surrogate
+  // id until its first favorite. Seed from ``firmId`` and capture the id
+  // the add endpoint resolves so a later un-favorite can DELETE by id. A
+  // ref (not state) keeps the toggle callbacks free of stale closures.
+  const reportingOwnerIdRef = useRef(firmId);
+  useEffect(() => {
+    if (firmId) reportingOwnerIdRef.current = firmId;
+  }, [firmId]);
+
   const fetchLists = useCallback(
     () =>
-      entityType === "advisor"
-        ? getListsForAdvisor(firmId)
-        : getListsForFirm(firmId),
-    [entityType, firmId],
+      entityType === "reporting_owner"
+        ? getListsForReportingOwner(reportingOwnerCik ?? "")
+        : entityType === "advisor"
+          ? getListsForAdvisor(firmId)
+          : getListsForFirm(firmId),
+    [entityType, firmId, reportingOwnerCik],
   );
   const addToList = useCallback(
-    (listId: number) =>
-      entityType === "advisor"
-        ? addAdvisorToList(listId, firmId)
-        : addFirmToList(listId, firmId),
-    [entityType, firmId],
+    async (listId: number) => {
+      if (entityType === "reporting_owner") {
+        const res = await addReportingOwnerToList(listId, reportingOwnerCik ?? "");
+        reportingOwnerIdRef.current = res.reporting_owner_id;
+        return;
+      }
+      if (entityType === "advisor") {
+        await addAdvisorToList(listId, firmId);
+        return;
+      }
+      await addFirmToList(listId, firmId);
+    },
+    [entityType, firmId, reportingOwnerCik],
   );
   const removeFromList = useCallback(
     (listId: number) =>
-      entityType === "advisor"
-        ? removeAdvisorFromList(listId, firmId)
-        : removeFirmFromList(listId, firmId),
+      entityType === "reporting_owner"
+        ? removeReportingOwnerFromList(listId, reportingOwnerIdRef.current)
+        : entityType === "advisor"
+          ? removeAdvisorFromList(listId, firmId)
+          : removeFirmFromList(listId, firmId),
     [entityType, firmId],
   );
   const [open, setOpen] = useState(false);
@@ -140,7 +170,7 @@ export function ListPicker({
     if (!trigger) return;
     const rect = trigger.getBoundingClientRect();
     const top = rect.bottom + 8; // matches the prior `mt-2` spacing
-    if (variant === "row") {
+    if (variant === "row" || variant === "row-heart") {
       // Anchor popover's right edge to trigger's right edge — keeps the
       // 18rem-wide panel from drifting off the viewport's right side.
       setPosition({ top, right: window.innerWidth - rect.right });
@@ -374,7 +404,7 @@ export function ListPicker({
   );
 
   const triggerLabel = useMemo(() => {
-    if (variant === "detail") {
+    if (variant === "detail" || variant === "row-heart") {
       return defaultIsMember
         ? "Open favorite-list picker (favorited)"
         : "Open favorite-list picker";
@@ -554,6 +584,17 @@ export function ListPicker({
           favorited={defaultIsMember}
           ariaLabel={triggerLabel}
         />
+      ) : variant === "row-heart" ? (
+        <RowHeartTrigger
+          open={open}
+          onClick={(e) => {
+            e.preventDefault();
+            e.stopPropagation();
+            togglePicker();
+          }}
+          favorited={defaultIsMember}
+          ariaLabel={triggerLabel}
+        />
       ) : (
         <RowTrigger
           open={open}
@@ -639,6 +680,46 @@ function RowTrigger({
       <Heart className="h-3 w-3" strokeWidth={2.5} aria-hidden />
       Save
       <ChevronDown className="h-3 w-3" strokeWidth={2.5} aria-hidden />
+    </button>
+  );
+}
+
+// Compact heart trigger for feed-style rows (e.g. /investors, which has
+// no row checkboxes). Like DetailTrigger but sized to sit inline next to
+// a row's action buttons; the fill follows ``favorited`` so an insider's
+// saved state reads at a glance. stopPropagation guards against any
+// row-level click handler swallowing the toggle.
+function RowHeartTrigger({
+  open,
+  onClick,
+  favorited,
+  ariaLabel,
+}: {
+  open: boolean;
+  onClick: (event: React.MouseEvent<HTMLButtonElement>) => void;
+  favorited: boolean;
+  ariaLabel: string;
+}) {
+  return (
+    <button
+      type="button"
+      onClick={onClick}
+      aria-haspopup="dialog"
+      aria-expanded={open}
+      aria-label={ariaLabel}
+      title={ariaLabel}
+      className={`inline-flex h-7 w-7 items-center justify-center rounded-full border transition ${
+        favorited
+          ? "border-red-200 bg-red-500/15 text-red-500 hover:bg-red-500/20"
+          : "border-[var(--border-2,rgba(30,64,175,0.16))] bg-[var(--surface,#ffffff)] text-[var(--text-dim,#475569)] hover:bg-[var(--surface-2,#f1f6fd)] hover:text-[var(--text,#0f172a)]"
+      }`}
+    >
+      <Heart
+        className="h-4 w-4"
+        strokeWidth={2}
+        fill={favorited ? "currentColor" : "none"}
+        aria-hidden
+      />
     </button>
   );
 }
