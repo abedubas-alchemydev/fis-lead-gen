@@ -616,7 +616,7 @@ export function BrokerDealerDetailClient({ brokerDealerId }: { brokerDealerId: s
             <ListPicker
               firmId={bd.id}
               variant="detail"
-              initialDefaultMember={profile.is_favorited}
+              initialFavorited={profile.is_favorited}
             />
           </div>
           <FirmWebsiteLink firmId={bd.id} firmName={bd.name} website={bd.website} />

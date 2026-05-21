@@ -160,17 +160,6 @@ async def list_investors(
             detail="min_value must be less than or equal to max_value.",
         )
 
-    # Resolve the caller's default list once so the repository can flag
-    # which insiders are already favorited without an N+1 per row.
-    default_list_id = (
-        await db.execute(
-            select(FavoriteList.id).where(
-                FavoriteList.user_id == current_user.id,
-                FavoriteList.is_default.is_(True),
-            )
-        )
-    ).scalar_one_or_none()
-
     rows, total = await repository.list_consolidated_persons(
         db,
         ad_code=ad_code,
@@ -184,7 +173,7 @@ async def list_investors(
         sort_dir=sort_dir,
         page=page,
         limit=limit,
-        default_list_id=default_list_id,
+        user_id=current_user.id,
     )
     return InvestorListResponse(
         items=[_item_from_consolidated(row) for row in rows],
