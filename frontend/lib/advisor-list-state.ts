@@ -84,12 +84,15 @@ type SearchParamsLike = {
   getAll(name: string): string[];
 };
 
+// Repeat-key multi param (`?k=a&k=b`). Deliberately NOT comma-split: Form ADV
+// advisory-activity / client-type labels can contain commas, and splitting
+// would shatter a value so its chip/checkbox and the BE filter stop matching.
+// `toSearchParams` only ever writes one entry per value.
 function parseMultiParam(sp: SearchParamsLike, key: string): string[] {
   return sp
     .getAll(key)
-    .flatMap((entry) => entry.split(","))
-    .map((part) => part.trim())
-    .filter((part) => part.length > 0);
+    .map((entry) => entry.trim())
+    .filter((entry) => entry.length > 0);
 }
 
 function parseIntInRange(

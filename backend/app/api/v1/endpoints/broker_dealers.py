@@ -244,7 +244,12 @@ async def list_broker_dealers(
         lead_priorities=_parse_states(lead_priority_filter),
         clearing_partners=_parse_states(clearing_partner_filter),
         clearing_types=_parse_states(clearing_type_filter),
-        types_of_business=_parse_states(types_of_business_filter),
+        # NOT _parse_states: it comma-splits each value, but type-of-business
+        # labels legitimately contain commas (e.g. "...networking, kiosk or
+        # similar arrangment with a: bank, savings bank or association, or...").
+        # The FE sends each selection as its own repeated query param, so the
+        # list already arrives intact — just drop blanks, never split.
+        types_of_business=[t for t in (types_of_business_filter or []) if t.strip()],
         min_net_capital=min_net_capital,
         max_net_capital=max_net_capital,
         registered_after=registered_after,

@@ -3,7 +3,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import Link from "next/link";
 import type { Route } from "next";
-import { useRouter, useSearchParams } from "next/navigation";
+import { useUrlSyncedState } from "@/lib/use-url-synced-state";
 
 import {
   ArrowDown,
@@ -170,35 +170,16 @@ export function MasterListWorkspaceClient() {
   // instance with default state and threw away every filter, the
   // current page, and the sort. Lifting it into URL search params makes
   // back-nav, share-links, and full reloads all restore the same view.
-  const router = useRouter();
-  const searchParams = useSearchParams();
-  const queryState = useMemo<MasterListQueryState>(
-    () => fromSearchParams(searchParams),
-    [searchParams],
-  );
-
-  // Commit a state change to the URL. router.replace (not push) so the
-  // back button still goes to the previous *route*, not the previous
-  // *filter combo* — Deshorn doesn't want to mash Back five times to
-  // get past his last filter mutation.
-  const commit = useCallback(
-    (next: MasterListQueryState) => {
-      router.replace(buildMasterListUrl(next) as Route, { scroll: false });
-    },
-    [router],
-  );
-
-  const updateState = useCallback(
-    (patch: Partial<MasterListQueryState>) => {
-      // Re-parse the URL at call time instead of closing over queryState.
-      // Belt-and-suspenders against any stale-closure regression where a
-      // pagination/sort/filter handler captured an older queryState ref —
-      // every patch is now applied on top of the live URL.
-      const current = fromSearchParams(searchParams);
-      commit({ ...current, ...patch });
-    },
-    [commit, searchParams],
-  );
+  // The URL is the canonical store (back-nav + share-links round-trip), but a
+  // synchronous local mirror is the source of truth for rendering + merging
+  // edits. router.replace is async, so reading filter state straight off the
+  // URL drops rapid successive edits — ticking several multi-select
+  // checkboxes would keep only the last one. See useUrlSyncedState.
+  const {
+    state: queryState,
+    updateState,
+    replaceState,
+  } = useUrlSyncedState(fromSearchParams, buildMasterListUrl);
 
   const stateFilter = queryState.state;
   const search = queryState.search;
@@ -495,7 +476,7 @@ export function MasterListWorkspaceClient() {
 
   function clearFilters() {
     setSearchInput("");
-    commit(clearAllFilters(queryState));
+    replaceState(clearAllFilters(queryState));
   }
 
   const filtersActive = hasActiveFilters(queryState);

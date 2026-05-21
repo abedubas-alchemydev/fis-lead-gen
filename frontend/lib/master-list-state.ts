@@ -91,16 +91,17 @@ type SearchParamsLike = {
   getAll(name: string): string[];
 };
 
-// Splits CSV values inside a single param entry too (`?k=a,b`) so a
-// link copy-pasted from a hand-edited URL behaves the same as the
-// repeat-key form (`?k=a&k=b`). Mirrors the existing helper in
-// app/(app)/master-list/page.tsx so the two parsers don't diverge.
+// Reads a repeat-key multi param (`?k=a&k=b`). We deliberately do NOT split
+// entries on commas: real filter values contain commas — FINRA "types of
+// business" especially (e.g. "...networking, kiosk...with a: bank, savings
+// bank...") — and splitting shatters the value so its chip/checkbox and the
+// BE filter no longer match. `toSearchParams` always writes one entry per
+// value, so the repeat-key form is the only shape we emit.
 function parseMultiParam(sp: SearchParamsLike, key: string): string[] {
   return sp
     .getAll(key)
-    .flatMap((entry) => entry.split(","))
-    .map((part) => part.trim())
-    .filter((part) => part.length > 0);
+    .map((entry) => entry.trim())
+    .filter((entry) => entry.length > 0);
 }
 
 function parseIntInRange(
