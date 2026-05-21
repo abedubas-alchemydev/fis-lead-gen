@@ -23,6 +23,7 @@ from app.core.feature_permissions import INVESTMENT_ADVISORS
 from app.services.auth import ensure_feature, get_current_user
 from app.services.edgar import EdgarService, build_edgar_filing_url
 from app.services.investment_advisors import InvestmentAdvisorRepository
+from app.services.user_lists import is_advisor_favorited
 
 
 router = APIRouter(prefix="/investment-advisors")
@@ -313,7 +314,7 @@ async def get_investment_advisor(
 @router.get("/{advisor_id}/profile", response_model=InvestmentAdvisorProfileResponse)
 async def get_investment_advisor_profile(
     advisor_id: int,
-    _: AuthenticatedUser = Depends(_require_investment_advisors),
+    current_user: AuthenticatedUser = Depends(_require_investment_advisors),
     db: AsyncSession = Depends(get_db_session),
 ) -> InvestmentAdvisorProfileResponse:
     """Aggregate detail-page response.
@@ -337,5 +338,5 @@ async def get_investment_advisor_profile(
         advisor=InvestmentAdvisorDetail.model_validate(advisor),
         contacts=contacts,
         filings=filings,
-        is_favorited=False,
+        is_favorited=await is_advisor_favorited(db, current_user.id, advisor_id),
     )

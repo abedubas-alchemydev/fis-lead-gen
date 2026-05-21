@@ -327,6 +327,37 @@ async def is_favorited(
     return True, created_at
 
 
+async def is_advisor_favorited(
+    db: AsyncSession,
+    user_id: str,
+    advisor_id: int,
+) -> bool:
+    """Check whether the user has favorited this investment advisor.
+
+    Advisor analogue of ``is_favorited`` -- same default-list lookup, keyed on
+    ``FavoriteListItem.advisor_id``. The advisor profile response carries only a
+    boolean (no ``favorited_at``), so this returns ``bool`` rather than the
+    ``(bool, datetime)`` tuple.
+
+    Args:
+        db: Async DB session.
+        user_id: BetterAuth user id.
+        advisor_id: Investment-advisor primary key.
+
+    Returns:
+        ``True`` when the advisor is on the user's default list; ``False`` when
+        the user has no default list yet or the advisor isn't pinned to it.
+    """
+    list_id = await _get_default_list_id(db, user_id)
+    if list_id is None:
+        return False
+    stmt = select(FavoriteListItem.id).where(
+        FavoriteListItem.list_id == list_id,
+        FavoriteListItem.advisor_id == advisor_id,
+    )
+    return (await db.execute(stmt)).scalar_one_or_none() is not None
+
+
 def _bd_to_summary(broker_dealer: BrokerDealer) -> dict[str, object]:
     """Project a ``BrokerDealer`` row onto the 12-field summary shape.
 
