@@ -2,58 +2,86 @@
 
 import { FindPhoneButton } from "@/components/master-list/detail/find-phone-button";
 import { OutreachButton } from "@/components/master-list/outreach-button";
-import type { ExecutiveContactItem } from "@/lib/types";
+import type {
+  ExecutiveContactItem,
+  InvestorContactItem,
+} from "@/lib/types";
 
-// Inline contact summary rendered under each owner/officer card on the
-// firm-detail panel. Email/phone open via mailto: / tel:; LinkedIn opens in
-// a new tab. The Outreach button opens the cold-email draft modal (Gemini
-// Flash) when the contact has an email — without one there's nothing to
-// address, so we hide the button. The Find-phone button is shown when the
-// contact has an email but no phone (the common case post-Apollo enrichment
-// on our current plan) — clicking it costs one Apollo credit. Returns null
-// only when the contact has nothing renderable: no email, no phone, no
-// LinkedIn (rare; mostly FINRA-only officers with no provider match).
-export function ContactRow({
-  brokerDealerId,
-  brokerDealerName,
+// Generic contact row used on both /master-list/{id} (broker-dealer) and
+// /institutional-investors/{id} (institutional investor) detail pages.
+// Renders the new multi-value emails[] / phones[] arrays with type chips
+// (personal / mobile) when PDL returned multiples; falls back to a 1-
+// element synthesized list for single-value sources (Apollo, FOCUS PDF,
+// Hunter, Snov) via the schema's read-time validator. The Find-phone
+// button shows when there's an email but no phones; POSTs to the right
+// endpoint via entityKind. Outreach (cold-email modal) stays BD-only --
+// there's no outreach flow for institutional investors yet.
+export function ContactRow<
+  T extends ExecutiveContactItem | InvestorContactItem,
+>({
+  entityKind = "broker-dealer",
+  entityId,
+  entityName,
   contact,
   onContactUpdated,
 }: {
-  brokerDealerId: number;
-  brokerDealerName: string;
-  contact: ExecutiveContactItem;
-  onContactUpdated?: (updated: ExecutiveContactItem) => void;
+  entityKind?: "broker-dealer" | "investor";
+  entityId: number;
+  entityName: string;
+  contact: T;
+  onContactUpdated?: (updated: T) => void;
 }) {
-  if (!contact.email && !contact.phone && !contact.linkedin_url) return null;
+  const emails = contact.emails ?? [];
+  const phones = contact.phones ?? [];
+  if (emails.length === 0 && phones.length === 0 && !contact.linkedin_url) {
+    return null;
+  }
+  const showFindPhone =
+    phones.length === 0 && !!contact.email && !!onContactUpdated;
+
   return (
     <div className="mt-2 flex flex-wrap items-center gap-2 text-xs">
-      {contact.email ? (
-        <a
-          href={`mailto:${contact.email}`}
-          className="text-[var(--accent,#6366f1)] transition hover:underline"
-        >
-          {contact.email}
-        </a>
-      ) : null}
-      {contact.phone ? (
-        <a
-          href={`tel:${contact.phone}`}
-          className="text-[var(--text-dim,#475569)] transition hover:underline"
-        >
-          {contact.phone}
-        </a>
-      ) : contact.email ? (
+      {emails.map((email, i) => (
+        <span key={`email-${i}`} className="inline-flex items-center gap-1">
+          <a
+            href={`mailto:${email.value}`}
+            className="text-[var(--accent,#6366f1)] transition hover:underline"
+          >
+            {email.value}
+          </a>
+          {email.type === "personal" ? (
+            <span className="rounded-full bg-[var(--surface-2,#f1f6fd)] px-1.5 py-0.5 text-[10px] uppercase tracking-[0.08em] text-[var(--text-muted,#94a3b8)]">
+              personal
+            </span>
+          ) : null}
+        </span>
+      ))}
+      {phones.map((phone, i) => (
+        <span key={`phone-${i}`} className="inline-flex items-center gap-1">
+          <a
+            href={`tel:${phone.value}`}
+            className="text-[var(--text-dim,#475569)] transition hover:underline"
+          >
+            {phone.value}
+          </a>
+          {phone.type !== "work" ? (
+            <span className="rounded-full bg-[var(--surface-2,#f1f6fd)] px-1.5 py-0.5 text-[10px] uppercase tracking-[0.08em] text-[var(--text-muted,#94a3b8)]">
+              {phone.type}
+            </span>
+          ) : null}
+        </span>
+      ))}
+      {showFindPhone ? (
         <>
           <span className="text-[var(--text-muted,#94a3b8)] italic">
             Phone unavailable
           </span>
-          {onContactUpdated ? (
-            <FindPhoneButton
-              brokerDealerId={brokerDealerId}
-              contactId={contact.id}
-              onSuccess={onContactUpdated}
-            />
-          ) : null}
+          <FindPhoneButton
+            entityKind={entityKind}
+            entityId={entityId}
+            contactId={contact.id}
+            onSuccess={onContactUpdated!}
+          />
         </>
       ) : null}
       {contact.linkedin_url ? (
@@ -66,12 +94,12 @@ export function ContactRow({
           LinkedIn
         </a>
       ) : null}
-      {contact.email ? (
+      {entityKind === "broker-dealer" && contact.email ? (
         <span className="ml-auto">
           <OutreachButton
-            brokerDealerId={brokerDealerId}
-            brokerDealerName={brokerDealerName}
-            contact={contact}
+            brokerDealerId={entityId}
+            brokerDealerName={entityName}
+            contact={contact as unknown as ExecutiveContactItem}
           />
         </span>
       ) : null}

@@ -4,34 +4,45 @@ import { Loader2, Phone, Sparkles } from "lucide-react";
 import { useState } from "react";
 
 import { apiRequest, ApiError } from "@/lib/api";
-import type { ExecutiveContactItem } from "@/lib/types";
+import type {
+  ExecutiveContactItem,
+  InvestorContactItem,
+} from "@/lib/types";
 
 // Per-row "Find phone" button rendered under a ContactRow when the contact
-// has an email but no phone. POSTs to the per-contact Apollo /people/match
-// endpoint; one Apollo credit per click. The bd-level Generate-More-Details
-// button enriches everyone in one shot, but it can return without a phone
-// (Apollo's plan tier doesn't always surface phone). This per-row action is
-// the manual retry users reach for when they want phone specifically.
-export function FindPhoneButton({
-  brokerDealerId,
+// has an email but no phone. POSTs to the per-contact PDL+Apollo
+// /find-phone endpoint; PDL is tried first now (PR 2) with Apollo as a
+// fallback. Generic over the contact item type so the same button works
+// on both the broker-dealer detail page (/master-list/{id}) and the
+// institutional-investor detail page (/institutional-investors/{id}) --
+// entityKind picks the URL base.
+export function FindPhoneButton<
+  T extends ExecutiveContactItem | InvestorContactItem,
+>({
+  entityKind = "broker-dealer",
+  entityId,
   contactId,
   onSuccess,
 }: {
-  brokerDealerId: number;
+  entityKind?: "broker-dealer" | "investor";
+  entityId: number;
   contactId: number;
-  onSuccess: (updated: ExecutiveContactItem) => void;
+  onSuccess: (updated: T) => void;
 }) {
   const [inFlight, setInFlight] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [triedEmpty, setTriedEmpty] = useState(false);
+
+  const basePath =
+    entityKind === "investor" ? "institutional-investors" : "broker-dealers";
 
   async function handleClick() {
     setInFlight(true);
     setError(null);
     setTriedEmpty(false);
     try {
-      const updated = await apiRequest<ExecutiveContactItem>(
-        `/api/v1/broker-dealers/${brokerDealerId}/contacts/${contactId}/find-phone`,
+      const updated = await apiRequest<T>(
+        `/api/v1/${basePath}/${entityId}/contacts/${contactId}/find-phone`,
         { method: "POST" },
       );
       onSuccess(updated);

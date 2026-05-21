@@ -2,7 +2,8 @@ from __future__ import annotations
 
 from datetime import date
 
-from fastapi import APIRouter, Depends, HTTPException, Query, status
+from fastapi import APIRouter, Body, Depends, HTTPException, Query, status
+from pydantic import BaseModel, Field
 from sqlalchemy import exists, func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -10,6 +11,7 @@ from app.core.feature_permissions import INSTITUTIONAL_INVESTORS
 from app.db.session import get_db_session
 from app.models.favorite_list import FavoriteList, FavoriteListItem
 from app.models.institutional_investor import InstitutionalInvestor
+from app.models.investor_contact import InvestorContact
 from app.schemas.auth import AuthenticatedUser
 from app.schemas.favorite_list import FavoriteListWithMembership
 from app.schemas.institutional_investor import (
@@ -17,13 +19,23 @@ from app.schemas.institutional_investor import (
     InstitutionalInvestorDetail,
     InstitutionalInvestorListResponse,
     InstitutionalInvestorProfileResponse,
+    InvestorContactItem,
 )
 from app.services.auth import ensure_feature, get_current_user
+from app.services.contact_discovery.orchestrator import discover_investor_contact
+from app.services.contacts import (
+    ApolloLookupError,
+    ContactEnrichmentUnavailableError,
+    ContactNotFoundError,
+    NoEmailForLookupError,
+)
 from app.services.institutional_investors import InstitutionalInvestorRepository
+from app.services.investor_contacts import InvestorContactService
 
 
 router = APIRouter(prefix="/institutional-investors")
 repository = InstitutionalInvestorRepository()
+investor_contact_service = InvestorContactService()
 
 
 def _require_institutional_investors(
@@ -241,3 +253,175 @@ async def get_institutional_investor_profile(
         filings=filings,
         is_favorited=False,
     )
+
+
+# ── Enrichment (PDL-driven, mirrors the BD endpoint) ──────────────────
+
+
+class InvestorEnrichOfficerRequest(BaseModel):
+    """One officer the FE wants discovered via the multi-provider chain.
+
+    ``type="person"`` requires ``first_name`` + ``last_name``; ``title``
+    is optional but preserved on the resulting row so the UI can render
+    the source role alongside the provider-found email / phone.
+
+    ``type="organization"`` requires ``org_name`` (defaults to the
+    investor's own name when omitted).
+    """
+
+    type: str = Field(pattern="^(person|organization)$")
+    first_name: str | None = None
+    last_name: str | None = None
+    org_name: str | None = None
+    title: str | None = None
+
+
+class InvestorEnrichRequestBody(BaseModel):
+    officers: list[InvestorEnrichOfficerRequest] = Field(default_factory=list)
+
+
+@router.post("/{investor_id}/enrich", response_model=list[InvestorContactItem])
+async def enrich_institutional_investor_contacts(
+    investor_id: int,
+    body: InvestorEnrichRequestBody | None = Body(default=None),
+    _: AuthenticatedUser = Depends(_require_institutional_investors),
+    db: AsyncSession = Depends(get_db_session),
+) -> list[InvestorContactItem]:
+    """Enrich investor contacts via the multi-provider discovery chain.
+
+    Unlike the BD endpoint there's no Phase-1 Apollo company search for
+    investors -- Apollo coverage for pure-13F filers is weak and we don't
+    have a precedent company-search service. Phase 2 runs each requested
+    officer through ``pdl -> apollo_match -> hunter -> snov`` in order
+    via ``discover_investor_contact``. An empty officers list returns the
+    existing contacts unchanged (no enrich attempted).
+    """
+    investor = await repository.get_institutional_investor(db, investor_id)
+    if investor is None:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Institutional investor not found.",
+        )
+
+    existing = await repository.list_investor_contacts(db, investor_id)
+    officers = list(body.officers) if body else []
+    if not officers:
+        return [InvestorContactItem.model_validate(c) for c in existing]
+
+    domain = _resolve_investor_domain(investor)
+    existing_names = {_normalise_name(c.name) for c in existing}
+    discovered = 0
+    for officer in officers:
+        entity = _officer_to_investor_entity(officer, investor, domain)
+        if entity is None:
+            continue
+        if _normalise_name(entity["cache_name"]) in existing_names:
+            continue
+        row = await discover_investor_contact(
+            entity, investor_id=investor.id, session=db
+        )
+        if row is not None:
+            discovered += 1
+            existing_names.add(_normalise_name(row.name))
+
+    if discovered:
+        await db.commit()
+        existing = await repository.list_investor_contacts(db, investor_id)
+    return [InvestorContactItem.model_validate(c) for c in existing]
+
+
+@router.post(
+    "/{investor_id}/contacts/{contact_id}/find-phone",
+    response_model=InvestorContactItem,
+)
+async def find_phone_for_investor_contact(
+    investor_id: int,
+    contact_id: int,
+    _: AuthenticatedUser = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db_session),
+) -> InvestorContactItem:
+    """Per-row PDL (Apollo fallback) phone lookup for an InvestorContact.
+
+    Mirrors ``POST /api/v1/broker-dealers/{id}/contacts/{contact_id}/find-phone``:
+    PDL is tried first; on miss / hard error / no key the Apollo path
+    runs as a fallback. PDL errors are silenced (graceful degradation);
+    Apollo's transient errors surface as 502.
+    """
+    contact = await db.get(InvestorContact, contact_id)
+    if contact is None or contact.investor_id != investor_id:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND, detail="Contact not found."
+        )
+
+    try:
+        updated = await investor_contact_service.find_phone_for_contact(db, contact_id)
+    except ContactNotFoundError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND, detail=str(exc)
+        ) from exc
+    except NoEmailForLookupError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail=str(exc)
+        ) from exc
+    except ContactEnrichmentUnavailableError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE, detail=str(exc)
+        ) from exc
+    except ApolloLookupError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_502_BAD_GATEWAY, detail=f"apollo: {exc}"
+        ) from exc
+
+    return InvestorContactItem.model_validate(updated)
+
+
+def _normalise_name(name: str | None) -> str:
+    return (name or "").strip().lower()
+
+
+def _resolve_investor_domain(investor: InstitutionalInvestor) -> str | None:
+    """Extract a bare ``example.com`` domain from the firm's website."""
+    website = (investor.website or "").strip()
+    if not website:
+        return None
+    candidate = website
+    if "://" in candidate:
+        candidate = candidate.split("://", 1)[1]
+    candidate = candidate.split("/", 1)[0].strip().lower()
+    if candidate.startswith("www."):
+        candidate = candidate[4:]
+    return candidate or None
+
+
+def _officer_to_investor_entity(
+    officer: InvestorEnrichOfficerRequest,
+    investor: InstitutionalInvestor,
+    domain: str | None,
+) -> dict[str, object] | None:
+    """Translate the FE officer payload into the orchestrator's entity shape."""
+    if officer.type == "person":
+        first = (officer.first_name or "").strip()
+        last = (officer.last_name or "").strip()
+        if not first or not last:
+            return None
+        return {
+            "type": "person",
+            "first_name": first,
+            "last_name": last,
+            "org_name": investor.name,
+            "title": officer.title,
+            "domain": domain,
+            "cache_name": f"{first} {last}",
+        }
+    org_name = (officer.org_name or investor.name or "").strip()
+    if not org_name:
+        return None
+    return {
+        "type": "organization",
+        "first_name": None,
+        "last_name": None,
+        "org_name": org_name,
+        "title": officer.title,
+        "domain": domain,
+        "cache_name": org_name,
+    }

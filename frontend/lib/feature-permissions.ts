@@ -4,6 +4,13 @@
 export const MASTER_LIST = "master_list" as const;
 export const INVESTMENT_ADVISORS = "investment_advisors" as const;
 export const INVESTORS = "investors" as const;
+// Mirrors backend ``INSTITUTIONAL_INVESTORS`` -- gates
+// ``/institutional-investors/{id}`` detail page (PR 3) and the existing
+// list / favorite-lists endpoints on the BE. Deliberately not in
+// ``ENABLED_FEATURE_KEYS`` since the sidebar tab was dropped in #438; the
+// constant exists so the page can still gate via ``hasFeature``
+// (admins always pass; viewers need explicit grant).
+export const INSTITUTIONAL_INVESTORS = "institutional_investors" as const;
 export const ALERTS = "alerts" as const;
 export const EMAIL_EXTRACTOR = "email_extractor" as const;
 export const SENT_OUTREACH = "sent_outreach" as const;
@@ -18,6 +25,7 @@ export const ALL_FEATURE_KEYS = [
   MASTER_LIST,
   INVESTMENT_ADVISORS,
   INVESTORS,
+  INSTITUTIONAL_INVESTORS,
   ALERTS,
   EMAIL_EXTRACTOR,
   SENT_OUTREACH,
@@ -35,6 +43,7 @@ export const FEATURE_LABELS: Record<FeatureKey, string> = {
   master_list: "Master List",
   investment_advisors: "Investment Advisors",
   investors: "Investors",
+  institutional_investors: "Institutional Investors",
   alerts: "Alerts",
   email_extractor: "Email Extractor",
   sent_outreach: "Sent Outreach",
