@@ -24,11 +24,15 @@ from math import ceil
 from typing import Literal
 
 from fastapi import APIRouter, Depends, HTTPException, Query, status
+from sqlalchemy import exists, false, func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.config import settings
 from app.db.session import get_db_session
+from app.models.favorite_list import FavoriteList, FavoriteListItem
+from app.models.reporting_owner import ReportingOwner
 from app.schemas.auth import AuthenticatedUser
+from app.schemas.favorite_list import FavoriteListWithMembership
 from app.schemas.investors import (
     InvestorEnrichResponse,
     InvestorItem,
@@ -99,6 +103,8 @@ def _item_from_consolidated(row: ConsolidatedPersonRow) -> InvestorItem:
         enriched_at=row.enriched_at,
         source_filing_url=row.source_filing_url,
         filed_at=row.filed_at,
+        reporting_owner_id=row.reporting_owner_id,
+        is_favorited=row.is_favorited,
     )
 
 
@@ -128,7 +134,7 @@ async def list_investors(
     sort_dir: str = Query(default="desc", pattern="^(asc|desc)$"),
     page: int = Query(default=1, ge=1),
     limit: int = Query(default=20, ge=1, le=100),
-    _: AuthenticatedUser = Depends(_require_investors),
+    current_user: AuthenticatedUser = Depends(_require_investors),
     db: AsyncSession = Depends(get_db_session),
 ) -> InvestorListResponse:
     ad_code: Literal["A", "D"] | None
@@ -154,6 +160,17 @@ async def list_investors(
             detail="min_value must be less than or equal to max_value.",
         )
 
+    # Resolve the caller's default list once so the repository can flag
+    # which insiders are already favorited without an N+1 per row.
+    default_list_id = (
+        await db.execute(
+            select(FavoriteList.id).where(
+                FavoriteList.user_id == current_user.id,
+                FavoriteList.is_default.is_(True),
+            )
+        )
+    ).scalar_one_or_none()
+
     rows, total = await repository.list_consolidated_persons(
         db,
         ad_code=ad_code,
@@ -167,6 +184,7 @@ async def list_investors(
         sort_dir=sort_dir,
         page=page,
         limit=limit,
+        default_list_id=default_list_id,
     )
     return InvestorListResponse(
         items=[_item_from_consolidated(row) for row in rows],
@@ -186,6 +204,72 @@ async def list_investor_states(
 ) -> list[str]:
     """Distinct insider-state codes — fuels the State Combo on /investors."""
     return await repository.list_states(db)
+
+
+@router.get(
+    "/reporting-owners/{cik}/favorite-lists",
+    response_model=list[FavoriteListWithMembership],
+)
+async def get_reporting_owner_favorite_lists(
+    cik: str,
+    current_user: AuthenticatedUser = Depends(_require_investors),
+    db: AsyncSession = Depends(get_db_session),
+) -> list[FavoriteListWithMembership]:
+    """Return the caller's lists with an ``is_member`` flag for the insider.
+
+    Insiders are addressed by CIK; the ``reporting_owners`` row is
+    lazy-created on first favorite, so a CIK with no row yet simply
+    reports ``is_member=False`` on every list (it can't be pinned until it
+    exists). Lists are still returned so the FE list-picker renders.
+    Mirror of ``GET /institutional-investors/{id}/favorite-lists``.
+    """
+    reporting_owner_id = (
+        await db.execute(
+            select(ReportingOwner.id).where(ReportingOwner.cik == cik)
+        )
+    ).scalar_one_or_none()
+
+    item_count_sq = (
+        select(
+            FavoriteListItem.list_id.label("list_id"),
+            func.count(FavoriteListItem.id).label("count"),
+        )
+        .group_by(FavoriteListItem.list_id)
+        .subquery()
+    )
+    if reporting_owner_id is not None:
+        is_member_expr = (
+            exists()
+            .where(
+                FavoriteListItem.list_id == FavoriteList.id,
+                FavoriteListItem.reporting_owner_id == reporting_owner_id,
+            )
+            .label("is_member")
+        )
+    else:
+        is_member_expr = false().label("is_member")
+    stmt = (
+        select(
+            FavoriteList,
+            func.coalesce(item_count_sq.c.count, 0).label("item_count"),
+            is_member_expr,
+        )
+        .outerjoin(item_count_sq, FavoriteList.id == item_count_sq.c.list_id)
+        .where(FavoriteList.user_id == current_user.id)
+        .order_by(FavoriteList.is_default.desc(), FavoriteList.created_at.asc())
+    )
+    rows = (await db.execute(stmt)).all()
+    return [
+        FavoriteListWithMembership(
+            id=fl.id,
+            name=fl.name,
+            is_default=fl.is_default,
+            item_count=int(count),
+            created_at=fl.created_at,
+            is_member=bool(is_member),
+        )
+        for fl, count, is_member in rows
+    ]
 
 
 @router.post("/{txn_id}/enrich", response_model=InvestorEnrichResponse)

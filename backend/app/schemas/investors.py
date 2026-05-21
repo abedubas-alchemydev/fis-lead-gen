@@ -50,6 +50,13 @@ class InvestorItem(BaseModel):
     source_filing_url: str | None
     filed_at: datetime
 
+    # Favorites (insider). ``reporting_owner_id`` is the surrogate id of
+    # the insider's ``reporting_owners`` row, or None until first
+    # favorited (the FE then adds by ``reporting_owner_cik``).
+    # ``is_favorited`` reflects membership in the caller's default list.
+    reporting_owner_id: int | None = None
+    is_favorited: bool = False
+
 
 class InvestorListMeta(BaseModel):
     page: int

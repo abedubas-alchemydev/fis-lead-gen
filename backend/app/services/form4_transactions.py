@@ -15,11 +15,13 @@ from decimal import Decimal
 from math import ceil
 from typing import Literal
 
-from sqlalchemy import func, or_, select, update
+from sqlalchemy import false, func, or_, select, update
 from sqlalchemy.dialects.postgresql import insert
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.models.favorite_list import FavoriteListItem
 from app.models.form4_transaction import Form4Transaction
+from app.models.reporting_owner import ReportingOwner
 from app.services.service_models import (
     ConsolidatedPersonRow,
     Form4TransactionRecord,
@@ -128,6 +130,7 @@ class Form4TransactionRepository:
         sort_dir: str = "desc",
         page: int,
         limit: int,
+        default_list_id: int | None = None,
     ) -> tuple[list[ConsolidatedPersonRow], int]:
         """Paginated list of consolidated person rows.
 
@@ -146,6 +149,12 @@ class Form4TransactionRepository:
         underlying transactions roll into the leader row + sums.
         ``sort_by`` accepts any key in ``ALLOWED_SORT_FIELDS``; unknown
         keys fall back to ``transaction_date`` silently.
+
+        ``default_list_id`` is the caller's default favorite list; when
+        provided, each row gets an ``is_favorited`` flag for whether the
+        insider (by CIK) is pinned to that list. ``reporting_owner_id`` is
+        the surrogate id of the insider's ``reporting_owners`` row (None
+        until first favorited — the row is lazy-created at that point).
         """
         filters = []
         if ad_code is not None:
@@ -252,8 +261,36 @@ class Form4TransactionRepository:
             order_by_clauses.append(ranked.c.sum_value.desc().nullslast())
         order_by_clauses.append(ranked.c.id.desc())
 
+        # Insider favorites overlay. ``reporting_owner_id`` is a correlated
+        # scalar lookup by CIK (None until the insider is first favorited
+        # and its ``reporting_owners`` row is lazy-created). ``is_favorited``
+        # is an EXISTS against the caller's default list, also keyed by CIK
+        # so it works regardless of whether the surrogate id exists yet.
+        reporting_owner_id_col = (
+            select(ReportingOwner.id)
+            .where(ReportingOwner.cik == ranked.c.reporting_owner_cik)
+            .scalar_subquery()
+            .label("reporting_owner_id")
+        )
+        if default_list_id is not None:
+            is_favorited_col = (
+                select(FavoriteListItem.id)
+                .join(
+                    ReportingOwner,
+                    ReportingOwner.id == FavoriteListItem.reporting_owner_id,
+                )
+                .where(
+                    FavoriteListItem.list_id == default_list_id,
+                    ReportingOwner.cik == ranked.c.reporting_owner_cik,
+                )
+                .exists()
+                .label("is_favorited")
+            )
+        else:
+            is_favorited_col = false().label("is_favorited")
+
         page_stmt = (
-            select(ranked)
+            select(ranked, reporting_owner_id_col, is_favorited_col)
             .where(ranked.c.rn == 1)
             .order_by(*order_by_clauses)
             .offset((page - 1) * limit)
@@ -365,4 +402,6 @@ def _row_to_consolidated(mapping) -> ConsolidatedPersonRow:
         enriched_at=mapping["enriched_at"],
         source_filing_url=mapping["source_filing_url"],
         filed_at=mapping["filed_at"],
+        reporting_owner_id=mapping["reporting_owner_id"],
+        is_favorited=bool(mapping["is_favorited"]),
     )

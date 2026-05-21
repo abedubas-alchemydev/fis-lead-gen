@@ -22,6 +22,7 @@ from app.models.investor_contact import InvestorContact
 from app.models.investor_filing import InvestorFiling
 from app.models.outreach_send import OutreachSend
 from app.models.pipeline_run import PipelineRun
+from app.models.reporting_owner import ReportingOwner
 from app.models.scoring_setting import ScoringSetting
 from app.models.user_activity import UserActivity
 from app.models.user_visit import UserVisit
@@ -58,6 +59,7 @@ __all__ = [
     "InvestorFiling",
     "OutreachSend",
     "PipelineRun",
+    "ReportingOwner",
     "ScoringSetting",
     "UserActivity",
     "UserVisit",

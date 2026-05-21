@@ -118,36 +118,53 @@ export function FavoriteListItemsPane({
         <ul role="list" className="divide-y divide-[var(--border,rgba(30,64,175,0.1))]">
           {items.map((item) => {
             // Resolve target (id, name, route prefix, pill label) based on
-            // entity_type. The three pills (BD/RIA/INV) use the same
+            // entity_type. The four pills (BD/RIA/INV/INSIDER) use the same
             // styling family with different accent colors.
+            const isReportingOwner = item.entity_type === "reporting_owner";
             const isAdvisor = item.entity_type === "advisor";
             const isInvestor = item.entity_type === "institutional_investor";
-            const targetId = isInvestor
-              ? item.institutional_investor_id
-              : isAdvisor
-                ? item.advisor_id
-                : item.broker_dealer_id;
-            const targetName = isInvestor
-              ? item.institutional_investor_name
-              : isAdvisor
-                ? item.advisor_name
-                : item.broker_dealer_name;
+            const targetId = isReportingOwner
+              ? item.reporting_owner_id
+              : isInvestor
+                ? item.institutional_investor_id
+                : isAdvisor
+                  ? item.advisor_id
+                  : item.broker_dealer_id;
+            const targetName = isReportingOwner
+              ? item.reporting_owner_name
+              : isInvestor
+                ? item.institutional_investor_name
+                : isAdvisor
+                  ? item.advisor_name
+                  : item.broker_dealer_name;
+            // Insiders have no id-keyed detail page, so link into the Form 4
+            // feed pre-filtered by name (a live link).
             // TODO: institutional_investor rows dead-link — /investors is now
             // the Form 4 feed (no id-keyed detail). Cleanup once any stale
             // favorites from PR #432 are pruned or repointed.
             const detailHref = (
-              isInvestor
-                ? `/investors/${targetId}`
-                : isAdvisor
-                  ? `/advisor-list/${targetId}${advisorDetailHrefSuffix}`
-                  : `/master-list/${targetId}${bdDetailHrefSuffix}`
+              isReportingOwner
+                ? `/investors?q=${encodeURIComponent(targetName ?? "")}`
+                : isInvestor
+                  ? `/investors/${targetId}`
+                  : isAdvisor
+                    ? `/advisor-list/${targetId}${advisorDetailHrefSuffix}`
+                    : `/master-list/${targetId}${bdDetailHrefSuffix}`
             ) as Route;
-            const pillLabel = isInvestor ? "INV" : isAdvisor ? "RIA" : "BD";
-            const pillClass = isInvestor
-              ? "bg-[rgba(245,158,11,0.12)] text-[#b45309]"
-              : isAdvisor
-                ? "bg-[rgba(16,185,129,0.12)] text-[#047857]"
-                : "bg-[rgba(99,102,241,0.12)] text-[#4338ca]";
+            const pillLabel = isReportingOwner
+              ? "INSIDER"
+              : isInvestor
+                ? "INV"
+                : isAdvisor
+                  ? "RIA"
+                  : "BD";
+            const pillClass = isReportingOwner
+              ? "bg-[rgba(139,92,246,0.12)] text-[#6d28d9]"
+              : isInvestor
+                ? "bg-[rgba(245,158,11,0.12)] text-[#b45309]"
+                : isAdvisor
+                  ? "bg-[rgba(16,185,129,0.12)] text-[#047857]"
+                  : "bg-[rgba(99,102,241,0.12)] text-[#4338ca]";
             return (
               <li
                 key={`${item.entity_type}-${targetId}`}

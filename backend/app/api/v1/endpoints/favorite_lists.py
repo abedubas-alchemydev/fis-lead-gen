@@ -20,8 +20,10 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.db.session import get_db_session
 from app.models.broker_dealer import BrokerDealer
 from app.models.favorite_list import FavoriteList, FavoriteListItem
+from app.models.form4_transaction import Form4Transaction
 from app.models.institutional_investor import InstitutionalInvestor
 from app.models.investment_advisor import InvestmentAdvisor
+from app.models.reporting_owner import ReportingOwner
 from app.schemas.auth import AuthenticatedUser
 from app.schemas.favorite_list import (
     FavoriteListAdvisorItemBatchCreate,
@@ -35,6 +37,8 @@ from app.schemas.favorite_list import (
     FavoriteListItemBatchResponse,
     FavoriteListItemCreate,
     FavoriteListItemResponse,
+    FavoriteListReportingOwnerItemCreate,
+    FavoriteListReportingOwnerItemResponse,
     FavoriteListResponse,
     FavoriteListUpdate,
     PaginatedFavoriteListItems,
@@ -93,10 +97,11 @@ async def list_favorite_list_items(
 ) -> PaginatedFavoriteListItems:
     """Return a page of items in a list owned by the calling user.
 
-    Returns broker-dealer and investment-advisor items in one stream, ordered
-    by ``created_at desc`` then ``id desc``. Each row carries an
-    ``entity_type`` discriminator plus the populated id/name pair for its
-    kind (the other kind's columns are ``None``).
+    Returns broker-dealer, advisor, institutional-investor, and Form 4
+    reporting-owner items in one stream, ordered by ``created_at desc``
+    then ``id desc``. Each row carries an ``entity_type`` discriminator
+    plus the populated id/name pair for its kind (the other kinds'
+    columns are ``None``).
 
     404 if the list doesn't exist or belongs to another user — same shape so
     a leaked list_id doesn't reveal whether it's "missing" vs. "yours".
@@ -125,6 +130,8 @@ async def list_favorite_list_items(
             InvestmentAdvisor.name.label("advisor_name"),
             FavoriteListItem.institutional_investor_id,
             InstitutionalInvestor.name.label("institutional_investor_name"),
+            FavoriteListItem.reporting_owner_id,
+            ReportingOwner.name.label("reporting_owner_name"),
             FavoriteListItem.created_at,
         )
         .outerjoin(
@@ -137,6 +144,10 @@ async def list_favorite_list_items(
         .outerjoin(
             InstitutionalInvestor,
             InstitutionalInvestor.id == FavoriteListItem.institutional_investor_id,
+        )
+        .outerjoin(
+            ReportingOwner,
+            ReportingOwner.id == FavoriteListItem.reporting_owner_id,
         )
         .where(FavoriteListItem.list_id == list_id)
         .order_by(FavoriteListItem.created_at.desc(), FavoriteListItem.id.desc())
@@ -154,6 +165,8 @@ async def list_favorite_list_items(
         advisor_name,
         investor_id,
         investor_name,
+        reporting_owner_id,
+        reporting_owner_name,
         added_at,
     ) in rows:
         if bd_id is not None:
@@ -174,12 +187,21 @@ async def list_favorite_list_items(
                     added_at=added_at,
                 )
             )
-        else:
+        elif investor_id is not None:
             items.append(
                 FavoriteListItemResponse(
                     entity_type="institutional_investor",
                     institutional_investor_id=investor_id,
                     institutional_investor_name=investor_name,
+                    added_at=added_at,
+                )
+            )
+        else:
+            items.append(
+                FavoriteListItemResponse(
+                    entity_type="reporting_owner",
+                    reporting_owner_id=reporting_owner_id,
+                    reporting_owner_name=reporting_owner_name,
                     added_at=added_at,
                 )
             )
@@ -717,6 +739,131 @@ async def remove_investor_from_favorite_list(
         delete(FavoriteListItem).where(
             FavoriteListItem.list_id == list_id,
             FavoriteListItem.institutional_investor_id == investor_id,
+        )
+    )
+    if result.rowcount == 0:
+        raise HTTPException(status_code=404, detail="favorite_list_item_not_found")
+    await db.commit()
+    return Response(status_code=status.HTTP_204_NO_CONTENT)
+
+
+# ── Form 4 reporting-owner (insider) parallels ────────────────────────────
+# Unlike the other three types, reporting owners are addressed by CIK
+# (string) rather than a surrogate id: the /investors feed only carries
+# the owner's CIK, and the ``reporting_owners`` row is lazy-created on
+# first favorite (new Form 4 filers appear continuously, so a CIK may not
+# yet have a row even though the migration backfilled history). The add
+# path resolves the canonical name from Form 4 history, upserts the owner,
+# then pins it -- with ``broker_dealer_id``/``advisor_id``/
+# ``institutional_investor_id`` left NULL to satisfy the 4-way XOR check
+# (``ck_favorite_list_item_exactly_one_target``, migration 0055).
+
+
+@router.post(
+    "/{list_id}/reporting-owner-items",
+    response_model=FavoriteListReportingOwnerItemResponse,
+)
+async def add_reporting_owner_to_favorite_list(
+    payload: FavoriteListReportingOwnerItemCreate,
+    list_id: int = Path(..., ge=1),
+    current_user: AuthenticatedUser = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db_session),
+) -> FavoriteListReportingOwnerItemResponse:
+    """Add a Form 4 reporting owner (insider) to a list, by CIK.
+
+    Lazy-creates the ``reporting_owners`` row when the CIK is seen for the
+    first time, resolving its canonical name from the most-recent Form 4
+    filing. Idempotent -- re-POSTing the same CIK returns the existing
+    pinned row's ``added_at`` instead of raising on the partial unique
+    index. 404 if the CIK has no Form 4 history (so it isn't a real
+    insider the FE could be showing).
+    """
+    await _get_owned_list(db, list_id, current_user.id)
+
+    cik = payload.cik
+    # Canonical name = most-recent Form 4 name for this CIK. The FE only
+    # ever sends a CIK it's currently displaying, so a missing row means
+    # the CIK isn't a real Form 4 filer.
+    name = (
+        await db.execute(
+            select(Form4Transaction.reporting_owner_name)
+            .where(Form4Transaction.reporting_owner_cik == cik)
+            .order_by(Form4Transaction.filed_at.desc())
+            .limit(1)
+        )
+    ).scalar_one_or_none()
+    if name is None:
+        raise HTTPException(status_code=404, detail="Reporting owner not found")
+
+    # Upsert the owner by CIK. DO UPDATE SET cik = excluded.cik is a no-op
+    # that lets RETURNING hand back the id whether the row was just
+    # inserted or already existed (and keeps two concurrent first-favorites
+    # of the same new CIK from racing). The existing name is preserved --
+    # we don't clobber it with each favorite.
+    owner_insert = pg_insert(ReportingOwner).values(cik=cik, name=name)
+    owner_insert = owner_insert.on_conflict_do_update(
+        index_elements=["cik"],
+        set_={"cik": owner_insert.excluded.cik},
+    ).returning(ReportingOwner.id, ReportingOwner.name)
+    reporting_owner_id, reporting_owner_name = (
+        await db.execute(owner_insert)
+    ).one()
+
+    # uq_favorite_list_item_list_reporting_owner is a PARTIAL unique index
+    # (WHERE reporting_owner_id IS NOT NULL) from migration 0055. ON
+    # CONFLICT needs the matching index_where predicate to bind to it.
+    upsert = (
+        pg_insert(FavoriteListItem)
+        .values(
+            list_id=list_id,
+            reporting_owner_id=reporting_owner_id,
+            broker_dealer_id=None,
+            advisor_id=None,
+            institutional_investor_id=None,
+        )
+        .on_conflict_do_nothing(
+            index_elements=["list_id", "reporting_owner_id"],
+            index_where=text("reporting_owner_id IS NOT NULL"),
+        )
+        .returning(FavoriteListItem.id, FavoriteListItem.created_at)
+    )
+    inserted = (await db.execute(upsert)).first()
+    if inserted is None:
+        existing = await db.execute(
+            select(FavoriteListItem.created_at).where(
+                FavoriteListItem.list_id == list_id,
+                FavoriteListItem.reporting_owner_id == reporting_owner_id,
+            )
+        )
+        added_at = existing.scalar_one()
+    else:
+        added_at = inserted[1]
+    await db.commit()
+
+    return FavoriteListReportingOwnerItemResponse(
+        reporting_owner_id=reporting_owner_id,
+        reporting_owner_name=reporting_owner_name,
+        added_at=added_at,
+    )
+
+
+@router.delete(
+    "/{list_id}/reporting-owner-items/{reporting_owner_id}",
+    status_code=204,
+)
+async def remove_reporting_owner_from_favorite_list(
+    list_id: int = Path(..., ge=1),
+    reporting_owner_id: int = Path(..., ge=1),
+    current_user: AuthenticatedUser = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db_session),
+) -> Response:
+    """Remove a reporting owner from the list. 404 if it wasn't in the list."""
+    await _get_owned_list(db, list_id, current_user.id)
+
+    result = await db.execute(
+        delete(FavoriteListItem).where(
+            FavoriteListItem.list_id == list_id,
+            FavoriteListItem.reporting_owner_id == reporting_owner_id,
         )
     )
     if result.rowcount == 0:

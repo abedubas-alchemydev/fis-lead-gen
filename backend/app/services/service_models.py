@@ -304,6 +304,13 @@ class ConsolidatedPersonRow:
     source_filing_url: str | None
     filed_at: datetime
 
+    # Favorites (insider). ``reporting_owner_id`` is the surrogate id of
+    # the ``reporting_owners`` row for this CIK, or None if the insider
+    # has never been favorited (the row is lazy-created on first favorite).
+    # ``is_favorited`` reflects membership in the caller's default list.
+    reporting_owner_id: int | None
+    is_favorited: bool
+
 
 @dataclass(slots=True)
 class DownloadedPdfRecord:
