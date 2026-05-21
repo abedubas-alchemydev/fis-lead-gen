@@ -467,11 +467,9 @@ async def run_initial_load(
         trigger_source=f"scheduled:{caller}",
         notes="Queued from /pipeline/run/initial-load.",
     )
-    run_id = run.id
-    await _run_initial_load_background(run_id, caller)
-    async with SessionLocal() as refresh_db:
-        refreshed = await refresh_db.get(PipelineRun, run_id)
-        return _trigger_response(refreshed if refreshed is not None else run)
+    await _run_initial_load_background(run.id, caller)
+    await db.refresh(run)
+    return _trigger_response(run)
 
 
 async def _run_initial_load_advisors_background(
