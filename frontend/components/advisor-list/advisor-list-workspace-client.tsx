@@ -3,7 +3,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import Link from "next/link";
 import type { Route } from "next";
-import { useRouter, useSearchParams } from "next/navigation";
+import { useUrlSyncedState } from "@/lib/use-url-synced-state";
 
 import { ArrowDown, ArrowUp, ChevronDown, Heart, Search, X } from "lucide-react";
 
@@ -119,14 +119,14 @@ function countActiveFilters(state: AdvisorListQueryState): number {
 }
 
 export function AdvisorListWorkspaceClient() {
-  const router = useRouter();
-  const searchParams = useSearchParams();
-
-  // URL is the source of truth — every render derives state from search
-  // params so back/forward buttons and share-links round-trip cleanly.
-  const state = useMemo(
-    () => fromSearchParams(searchParams),
-    [searchParams],
+  // URL is the canonical store, but a synchronous local mirror is the source
+  // of truth for rendering + merging edits — router.replace is async, so
+  // reading filter state straight off the URL drops rapid successive edits
+  // (ticking several multi-select checkboxes would keep only the last). See
+  // useUrlSyncedState.
+  const { state, updateState, replaceState } = useUrlSyncedState(
+    fromSearchParams,
+    buildAdvisorListUrl,
   );
   const [searchInput, setSearchInput] = useState(state.search);
 
@@ -151,17 +151,6 @@ export function AdvisorListWorkspaceClient() {
   const [bulkPickerOpen, setBulkPickerOpen] = useState(false);
   const headerCheckboxRef = useRef<HTMLInputElement | null>(null);
   const bulkActionTriggerRef = useRef<HTMLButtonElement | null>(null);
-
-  const updateState = useCallback(
-    (next: Partial<AdvisorListQueryState>) => {
-      const merged = { ...state, ...next };
-      // router.replace (vs push) — prevents the back button from
-      // replaying every filter toggle. Detail-page back-nav still
-      // restores filter state because it lives in the URL.
-      router.replace(buildAdvisorListUrl(merged) as Route);
-    },
-    [router, state],
-  );
 
   const toggleSort = useCallback(
     (key: string) => {
@@ -301,9 +290,8 @@ export function AdvisorListWorkspaceClient() {
   }, [items]);
 
   function handleClearFilters() {
-    const cleared = clearAllFilters(state);
     setSearchInput("");
-    router.replace(buildAdvisorListUrl(cleared) as Route);
+    replaceState(clearAllFilters(state));
   }
 
   // Encoded return-URL appended to every detail link so the detail page
