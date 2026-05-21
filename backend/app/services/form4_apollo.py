@@ -1,18 +1,26 @@
-"""Apollo people-match helper for Form 4 reporting persons.
+"""PDL + Apollo people-match helper for Form 4 reporting persons.
+
+Two-stage match: PDL's ``/v5/person/enrich`` runs first (the only paid
+API in this chain that actually returns person phones on the current
+plan, per PR #419's audit), Apollo ``/people/match`` as the fallback.
+PDL errors silently fall through to Apollo (graceful degradation -- a
+flaky upstream shouldn't break the per-row enrich button). Returns
+``matched=False`` only when neither provider had anything (or when
+neither key is configured).
 
 Lightweight, single-purpose wrapper. The existing
-``ExecutiveContactService`` is tied to ``broker_dealer`` + persists
-to ``executive_contacts`` rows; Form 4 reporting persons are not
-broker-dealer employees and don't fit that shape, so the Investors
-tab gets its own helper that returns ``(phone, email, matched)``
-and lets the caller persist to ``form4_transactions`` directly.
+``ExecutiveContactService`` is tied to ``broker_dealer`` + persists to
+``executive_contacts`` rows; Form 4 reporting persons are not
+broker-dealer employees and don't fit that shape, so the Investors tab
+gets its own helper that returns ``(phone, email, matched)`` and lets
+the caller persist to ``form4_transactions`` directly.
 
-Match strategy: a single Apollo ``/people/match`` POST with the
-insider's name plus the issuer's company name. Reporting persons are
-named with the company they file under, so the company name acts as
-a disambiguator for common first/last name pairs. Apollo's free
-``/people/match`` tier is plan-dependent; missing key or 403 returns
-``matched=False`` without raising.
+Match anchor for both providers: insider name + issuer's company name.
+For outside 10%-holder filings (e.g. Bill Gates filing under Republic
+Services) the issuer isn't the insider's employer, so both providers
+miss more often than executive-officer filings (where the issuer IS
+the employer). The PDL/Apollo fallback maximizes the combined hit rate
+across both shapes.
 """
 
 from __future__ import annotations
@@ -23,6 +31,7 @@ from dataclasses import dataclass
 import httpx
 
 from app.core.config import settings
+from app.services.contact_discovery.pdl import PdlProvider
 
 logger = logging.getLogger(__name__)
 
@@ -41,10 +50,10 @@ def _split_name(full_name: str) -> tuple[str | None, str | None]:
     """Split ``"COOK TIMOTHY D"`` style names into (first, last).
 
     Form 4 names are uppercase ``LASTNAME FIRSTNAME [MIDDLE]`` by SEC
-    convention. We swap the order to first-last for Apollo and drop
-    trailing single-letter middle initials. Best-effort — Apollo's
-    match endpoint also accepts the full name, so a degraded split
-    still returns useful results.
+    convention. We swap the order to first-last for the providers and
+    drop trailing single-letter middle initials. Best-effort -- both
+    Apollo's and PDL's match endpoints also accept the full name as a
+    fallback anchor.
     """
     cleaned = (full_name or "").strip()
     if not cleaned:
@@ -53,7 +62,8 @@ def _split_name(full_name: str) -> tuple[str | None, str | None]:
     if len(tokens) == 1:
         return tokens[0].title(), None
     # SEC convention is ``LAST FIRST [MIDDLE]``; surface that order
-    # to Apollo as ``First Last`` so it matches LinkedIn-style records.
+    # to the providers as ``First Last`` so it matches LinkedIn-style
+    # records.
     last = tokens[0].title()
     first = tokens[1].title()
     return first, last
@@ -64,19 +74,44 @@ async def match_form4_person(
     full_name: str,
     issuer_name: str,
 ) -> Form4ApolloMatch:
-    """Resolve an insider's contact details via Apollo ``/people/match``.
+    """Resolve a Form 4 reporting person's contact details.
 
-    Returns ``Form4ApolloMatch(matched=False, phone=None, email=None)``
-    on missing key, transport failure, or no-match. The caller is
-    expected to persist ``enriched_at`` regardless so the FE doesn't
-    re-trigger on every render.
+    PDL primary, Apollo fallback. Returns
+    ``Form4ApolloMatch(matched=False, phone=None, email=None)`` on
+    missing keys, transport failure, or no-match across both providers.
+    The caller is expected to persist ``enriched_at`` regardless so the
+    FE doesn't re-trigger on every render.
     """
-    if not settings.apollo_api_key:
-        logger.info("Form4 enrichment skipped: APOLLO_API_KEY not set.")
-        return Form4ApolloMatch(phone=None, email=None, matched=False)
-
     first_name, last_name = _split_name(full_name)
     if first_name is None and last_name is None:
+        return Form4ApolloMatch(phone=None, email=None, matched=False)
+
+    # ── PDL primary ──────────────────────────────────────────────
+    # PDL's find_person requires both first + last (the org anchor
+    # alone isn't enough to disambiguate); single-word names skip to
+    # Apollo, which accepts a `name=` fallback.
+    if settings.pdl_api_key and first_name and last_name:
+        try:
+            pdl_hit = await PdlProvider().find_person(
+                first_name=first_name,
+                last_name=last_name,
+                org_name=issuer_name,
+                domain=None,
+            )
+        except Exception as exc:  # noqa: BLE001 -- treat any PDL error as miss
+            logger.warning("PDL form4 match failed for %r: %s", full_name, exc)
+            pdl_hit = None
+
+        if pdl_hit is not None:
+            return Form4ApolloMatch(
+                phone=pdl_hit.phone,
+                email=pdl_hit.email,
+                matched=bool(pdl_hit.email) or bool(pdl_hit.phone),
+            )
+
+    # ── Apollo fallback ──────────────────────────────────────────
+    if not settings.apollo_api_key:
+        logger.info("Form4 enrichment skipped: APOLLO_API_KEY not set.")
         return Form4ApolloMatch(phone=None, email=None, matched=False)
 
     payload: dict[str, str] = {"organization_name": issuer_name}
@@ -84,7 +119,7 @@ async def match_form4_person(
         payload["first_name"] = first_name
     if last_name:
         payload["last_name"] = last_name
-    # Also send the raw concatenated name — Apollo accepts ``name`` and
+    # Also send the raw concatenated name -- Apollo accepts ``name`` and
     # falls back to it if first/last didn't match a record.
     payload["name"] = full_name
 
