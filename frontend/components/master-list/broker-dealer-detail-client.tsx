@@ -1348,8 +1348,9 @@ function PersonCard({
       {extra ? <p className="mt-1 text-xs text-[var(--text-muted,#94a3b8)]">{extra}</p> : null}
       {contact ? (
         <ContactRow
-          brokerDealerId={brokerDealerId}
-          brokerDealerName={brokerDealerName}
+          entityKind="broker-dealer"
+          entityId={brokerDealerId}
+          entityName={brokerDealerName}
           contact={contact}
           onContactUpdated={onContactUpdated}
         />
