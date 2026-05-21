@@ -135,13 +135,29 @@ class Settings(BaseSettings):
     # 5xx / network errors do not engage the cooldown. Set to 0 to disable.
     apollo_enrich_cooldown_hours: int = 24
     zoominfo_api_key: str | None = None
+    # People Data Labs — the first provider in the discovery chain that
+    # actually returns person phones via API (PR #419's audit showed Apollo
+    # /people/match returns phone_numbers=[] for 0/105 historical rows on
+    # the current plan). PDL also returns multiple emails (work + personal)
+    # and multiple phones (mobile + work) per match, which the ``emails`` /
+    # ``phones`` JSONB columns added in migration 20260521_0054 persist.
+    pdl_api_key: str | None = None
+    # PDL's match likelihood is 1..10; values >=6 map to >=60.0 confidence
+    # which clears the default ``contact_discovery_min_confidence`` floor.
+    # Setting this as a server-side filter means PDL only bills for matches
+    # that already clear our threshold — a too-low value would return
+    # billed-but-useless matches.
+    pdl_min_likelihood: int = 6
     # Multi-provider contact discovery chain used by the "Generate More Details"
     # button on the firm detail page. The orchestrator walks providers in the
     # comma-separated order below; the first result with ``confidence >=
-    # contact_discovery_min_confidence`` wins. Keys (``hunter_api_key``,
-    # ``snov_client_id``, ``snov_client_secret``) are declared further down
-    # because the existing email-extractor module already depends on them.
-    contact_discovery_chain: str = "apollo_match,hunter,snov"
+    # contact_discovery_min_confidence`` wins. PDL leads because it's the
+    # only provider that returns multi-value emails + phones; Apollo / Hunter
+    # / Snov stay as fallbacks (cheap, pay-as-you-go) when PDL misses or has
+    # no key. Keys (``hunter_api_key``, ``snov_client_id``,
+    # ``snov_client_secret``) are declared further down because the existing
+    # email-extractor module already depends on them.
+    contact_discovery_chain: str = "pdl,apollo_match,hunter,snov"
     contact_discovery_min_confidence: float = 60.0
     contact_discovery_timeout: float = 10.0
     gemini_api_key: str | None = None

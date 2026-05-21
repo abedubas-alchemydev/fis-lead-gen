@@ -22,7 +22,7 @@ provider can't block the rest of the fan-out.
 from __future__ import annotations
 
 from abc import ABC, abstractmethod
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Any, Literal
 
 
@@ -41,9 +41,38 @@ class DiscoveryEntity:
     title: str | None = None
 
 
+@dataclass(frozen=True)
+class EmailHit:
+    """One email address with provenance tags, persisted as a JSON object
+    inside the ``emails`` JSONB column on the contact tables."""
+
+    value: str
+    type: Literal["work", "personal"]
+    confidence: float | None
+    source: str
+
+
+@dataclass(frozen=True)
+class PhoneHit:
+    """One phone number with provenance tags, persisted as a JSON object
+    inside the ``phones`` JSONB column on the contact tables."""
+
+    value: str
+    type: Literal["mobile", "work", "hq"]
+    confidence: float | None
+    source: str
+
+
 @dataclass
 class DiscoveryResult:
-    """One provider's successful hit, normalised for the orchestrator."""
+    """One provider's successful hit, normalised for the orchestrator.
+
+    ``emails`` and ``phones`` are multi-value lists that multi-value
+    providers (PDL) populate directly. Single-value providers
+    (Apollo, Hunter, Snov) leave them as the empty default and rely on
+    the schema's read-time synthesis to project the scalar ``email`` /
+    ``phone`` into a 1-element list on the wire.
+    """
 
     email: str | None
     phone: str | None
@@ -51,6 +80,8 @@ class DiscoveryResult:
     confidence: float
     provider: str
     raw: dict[str, Any]
+    emails: list[EmailHit] = field(default_factory=list)
+    phones: list[PhoneHit] = field(default_factory=list)
 
 
 class ContactDiscoveryProvider(ABC):

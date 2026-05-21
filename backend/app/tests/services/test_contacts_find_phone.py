@@ -23,8 +23,10 @@ import respx
 
 from app.core.config import settings
 from app.models.executive_contact import ExecutiveContact
+from app.services.contact_discovery import pdl
 from app.services.contacts import (
     ApolloLookupError,
+    ContactEnrichmentUnavailableError,
     ContactNotFoundError,
     ExecutiveContactService,
     NoEmailForLookupError,
@@ -208,3 +210,155 @@ async def test_find_phone_falls_back_to_raw_number(patch_settings: None) -> None
     result = await service.find_phone_for_contact(session, 42)
 
     assert result.phone == "(555) 123-4567"
+
+
+# ── PDL-primary path (PR 2 — find-phone PDL switch) ──────────────────
+
+
+@pytest.fixture
+def patch_settings_with_pdl(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Both PDL and Apollo configured so the new chain (PDL primary,
+    Apollo fallback) runs end-to-end."""
+    monkeypatch.setattr(settings, "apollo_api_key", "test-apollo-key")
+    monkeypatch.setattr(settings, "pdl_api_key", "test-pdl-key")
+    monkeypatch.setattr(settings, "pdl_min_likelihood", 6)
+    monkeypatch.setattr(settings, "contact_discovery_timeout", 2.0)
+
+
+@pytest.mark.asyncio
+@respx.mock
+async def test_find_phone_pdl_primary_writes_phones_jsonb(
+    patch_settings_with_pdl: None,
+) -> None:
+    """PDL returns multi-value phones -> phones JSONB array + scalar phone
+    are both written; Apollo is never called."""
+    pdl_route = respx.post(pdl.PERSON_ENRICH_URL).mock(
+        return_value=httpx.Response(
+            200,
+            json={
+                "likelihood": 8,
+                "data": {
+                    "emails": [{"address": "jane@example.com", "type": "professional"}],
+                    "mobile_phone": "+15551112222",
+                    "phone_numbers": ["+15551112222", "+15553334444"],
+                },
+            },
+        )
+    )
+    apollo_route = respx.post(_APOLLO_MATCH_URL).mock(return_value=httpx.Response(200))
+
+    contact = _seed_contact()
+    session = _FakeSession(contact)
+    service = ExecutiveContactService()
+
+    result = await service.find_phone_for_contact(session, 42)
+
+    assert result.phone == "+15551112222"  # mobile leads the scalar
+    assert result.phones is not None
+    assert [p["type"] for p in result.phones] == ["mobile", "work"]
+    assert [p["value"] for p in result.phones] == ["+15551112222", "+15553334444"]
+    assert pdl_route.called
+    assert not apollo_route.called
+
+
+@pytest.mark.asyncio
+@respx.mock
+async def test_find_phone_falls_back_to_apollo_on_pdl_miss(
+    patch_settings_with_pdl: None,
+) -> None:
+    """PDL 404 (no match) -> Apollo runs; scalar phone updated from Apollo."""
+    respx.post(pdl.PERSON_ENRICH_URL).mock(return_value=httpx.Response(404))
+    apollo_route = respx.post(_APOLLO_MATCH_URL).mock(
+        return_value=httpx.Response(
+            200,
+            json={"person": {"phone_numbers": [{"sanitized_number": "+15559998888"}]}},
+        )
+    )
+
+    contact = _seed_contact()
+    session = _FakeSession(contact)
+    service = ExecutiveContactService()
+
+    result = await service.find_phone_for_contact(session, 42)
+
+    assert result.phone == "+15559998888"
+    # Apollo doesn't populate the JSONB array (single-value provider);
+    # read-time synthesis will project the scalar into a 1-element list.
+    assert result.phones is None
+    assert apollo_route.called
+
+
+@pytest.mark.asyncio
+@respx.mock
+async def test_find_phone_falls_back_to_apollo_on_pdl_5xx(
+    patch_settings_with_pdl: None,
+) -> None:
+    """PDL hard error -> chain continues to Apollo silently (graceful degradation)."""
+    respx.post(pdl.PERSON_ENRICH_URL).mock(return_value=httpx.Response(503))
+    apollo_route = respx.post(_APOLLO_MATCH_URL).mock(
+        return_value=httpx.Response(
+            200,
+            json={"person": {"phone_numbers": [{"sanitized_number": "+15557776666"}]}},
+        )
+    )
+
+    contact = _seed_contact()
+    session = _FakeSession(contact)
+    service = ExecutiveContactService()
+
+    result = await service.find_phone_for_contact(session, 42)
+
+    assert result.phone == "+15557776666"
+    assert apollo_route.called
+
+
+@pytest.mark.asyncio
+@respx.mock
+async def test_find_phone_pdl_match_without_phones_falls_back_to_apollo(
+    patch_settings_with_pdl: None,
+) -> None:
+    """PDL returns a hit but with no phone data -> chain falls to Apollo."""
+    respx.post(pdl.PERSON_ENRICH_URL).mock(
+        return_value=httpx.Response(
+            200,
+            json={
+                "likelihood": 8,
+                "data": {
+                    "emails": [{"address": "jane@example.com", "type": "professional"}],
+                    # no mobile_phone, no phone_numbers
+                },
+            },
+        )
+    )
+    apollo_route = respx.post(_APOLLO_MATCH_URL).mock(
+        return_value=httpx.Response(
+            200,
+            json={"person": {"phone_numbers": [{"sanitized_number": "+15556665555"}]}},
+        )
+    )
+
+    contact = _seed_contact()
+    session = _FakeSession(contact)
+    service = ExecutiveContactService()
+
+    result = await service.find_phone_for_contact(session, 42)
+
+    assert result.phone == "+15556665555"
+    assert apollo_route.called
+
+
+@pytest.mark.asyncio
+async def test_find_phone_raises_unavailable_when_neither_configured(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Neither PDL nor Apollo configured -> ContactEnrichmentUnavailableError."""
+    monkeypatch.setattr(settings, "pdl_api_key", None)
+    monkeypatch.setattr(settings, "apollo_api_key", None)
+
+    contact = _seed_contact()
+    session = _FakeSession(contact)
+    service = ExecutiveContactService()
+
+    with pytest.raises(ContactEnrichmentUnavailableError):
+        await service.find_phone_for_contact(session, 42)
+    assert session.commits == 0
