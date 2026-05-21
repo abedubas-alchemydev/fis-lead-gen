@@ -36,14 +36,14 @@ Prod jobs (target `fis-backend`, audience uses project-number-form URL):
 |---|---|---|---|---|---|
 | `filing-monitor-hourly` | `0 * * * *` | Catch new SEC filings the same business day they post → drives `/alerts` freshness | `POST /api/v1/pipeline/run/filing-monitor` | sync (~5–15 min wall) | **1800s** |
 | `populate-all-weekly` | `0 2 * * 0` | Weekly full enrichment refresh — Sunday 02:00 UTC (lowest-traffic window for Neon) | `POST /api/v1/pipeline/run/populate-all` | async (FastAPI `BackgroundTasks`, returns 202 immediately) | 180s default |
-| `initial-load-daily` | `0 6 * * *` | Daily catch-up of newly-registered broker-dealers from FINRA so the master list reflects new firms within ~24h | `POST /api/v1/pipeline/run/initial-load` | async (FastAPI `BackgroundTasks`, returns 202 immediately) | 180s default |
+| `initial-load-daily` | `0 6 * * *` | Daily catch-up of newly-registered broker-dealers from FINRA so the master list reflects new firms within ~24h | `POST /api/v1/pipeline/run/initial-load` | sync (~15–30 min wall) | **1800s** |
 
 Staging jobs (target `fis-backend-staging`, audience uses hash-form URL — staging's `settings.backend_audience` default matches the hash-form):
 
 | Name | Schedule (UTC) | Cadence rationale | Target endpoint | Mode | Attempt deadline |
 |---|---|---|---|---|---|
 | `filing-monitor-hourly-staging` | `0 * * * *` | Mirrors prod `filing-monitor-hourly` so staging `/alerts` stays fresh and the endpoint stays smoke-tested every hour | `POST /api/v1/pipeline/run/filing-monitor` on staging | sync (~5–15 min wall) | **900s** |
-| `initial-load-daily-staging` | `0 6 * * *` | Mirrors prod `initial-load-daily` so the staging master list keeps parity and the endpoint stays smoke-tested daily | `POST /api/v1/pipeline/run/initial-load` on staging | async (FastAPI `BackgroundTasks`, returns 202 immediately) | 180s default |
+| `initial-load-daily-staging` | `0 6 * * *` | Mirrors prod `initial-load-daily` so the staging master list keeps parity and the endpoint stays smoke-tested daily | `POST /api/v1/pipeline/run/initial-load` on staging | sync (~15–30 min wall) | **1800s** |
 
 ## Blocker A — Cloud Scheduler API not enabled — RESOLVED 2026-04-30
 
@@ -158,7 +158,7 @@ gcloud scheduler jobs create http populate-all-weekly \
     --description="Weekly full enrichment refresh — Sunday 02:00 UTC"
 ```
 
-### Job 3 — initial-load-daily (async, 180s default)
+### Job 3 — initial-load-daily (sync, 1800s deadline)
 
 ```bash
 gcloud scheduler jobs create http initial-load-daily \
@@ -170,12 +170,13 @@ gcloud scheduler jobs create http initial-load-daily \
     --message-body='{}' \
     --oidc-service-account-email="$SCHEDULER_SA" \
     --oidc-token-audience="$BACKEND_URL" \
+    --attempt-deadline=1800s \
     --location=us-central1 \
     --project=fis-lead-gen \
     --description="Daily catch-up of newly-registered broker-dealers from FINRA"
 ```
 
-### Staging mirror — initial-load-daily-staging (async, 180s default)
+### Staging mirror — initial-load-daily-staging (sync, 1800s deadline)
 
 Staging uses the hash-form URL for both `--uri` and `--oidc-token-audience` because the staging deployment's `settings.backend_audience` default matches the hash-form (unlike prod, which is hardcoded to project-number-form). Re-uses the same `SCHEDULER_SA` — both prod and staging Cloud Run services grant `roles/run.invoker` to it.
 
@@ -191,6 +192,7 @@ gcloud scheduler jobs create http initial-load-daily-staging \
     --message-body='{}' \
     --oidc-service-account-email="$SCHEDULER_SA" \
     --oidc-token-audience="$STAGING_BACKEND_URL" \
+    --attempt-deadline=1800s \
     --location=us-central1 \
     --project=fis-lead-gen \
     --description="Daily catch-up of newly-registered broker-dealers from FINRA (staging mirror of initial-load-daily). Audience matches staging backend URL."
@@ -282,4 +284,5 @@ Tier 1 is *not* the right tool for routine staleness recurrence — that's what 
 
 - **2026-05-21** — bumped `initial-load` cadence from weekly (`0 6 * * 0`) to daily (`0 6 * * *`) per client (Deshorn) request via Slack thread the same day. Job renamed `initial-load-weekly` → `initial-load-daily`; live transition via `gcloud scheduler jobs delete initial-load-weekly` + `gcloud scheduler jobs create http initial-load-daily ...`. `populate-all-weekly` deliberately left at weekly because `ClearingPipelineService.run` is not idempotent (re-extracts ~3,000 X-17A-5 PDFs through Gemini on every run) — daily populate-all would ~7× LLM spend with little marginal value. Newly-discovered firms' full enrichment still rides on weekly `populate-all`; per-firm Refresh button (`refresh_all_orchestrator.run_refresh_all`) clears any sub-7-day staleness on demand. Follow-up: track per-firm last-processed X-17A-5 accession number in clearing pipeline to unlock daily `populate-all` cheaply.
 - **2026-05-21** — added `initial-load-daily-staging` mirroring the new prod job against `fis-backend-staging`. End-to-end smoke succeeded: scheduler attempt finished with `URL_CRAWLED, HTTP 200`; backend log confirmed `POST /api/v1/pipeline/run/initial-load 200 OK`. Also retroactively documented the previously-undocumented `filing-monitor-hourly-staging` (already live and ENABLED before this commit). No `populate-all-*-staging` exists — staging traffic is too low to justify the weekly clearing-pipeline run.
-- **2026-05-21** — disabled CPU throttling on `fis-backend-staging` (`gcloud run services update fis-backend-staging --no-cpu-throttling`, new revision `00277-6pk`). Root-cause finding: the async pipeline endpoints (`/pipeline/run/initial-load` and presumably `/pipeline/run/populate-all`) use FastAPI `BackgroundTasks` to run their long pipelines after returning 202. With Cloud Run's default CPU throttling, the warm instance loses CPU between requests and the background coroutine never makes progress — `pipeline_runs` rows sit `status='running'` indefinitely. Aggregate staging history confirmed: zero `initial_load` runs ever reached `completed`, all prior rows were `failed` or `cancelled`. Disabling throttling on the minScale=1 warm instance keeps CPU available 24/7 so background tasks actually run. Cost impact ≈ $46/mo/env (1 vCPU × 24/7 × $0.000018/vCPU-s). **Same change must be applied to `fis-backend` (prod) once the current prod-revision-startup outage is resolved**, or `initial-load-daily` will keep silently failing on prod. Long-term: factor `_run_initial_load_background` into a Cloud Run Job so request lifecycle stops mattering (recommendation from the original 2026-04-29 runbook, deferred). Stuck `pipeline_runs` row 17752 manually marked `failed` to clear the UI.
+- **2026-05-21** — disabled CPU throttling on `fis-backend-staging` (`gcloud run services update fis-backend-staging --no-cpu-throttling`, new revision `00277-6pk`) hoping FastAPI `BackgroundTasks` would start completing. **It did not** — re-smoked, row 17753 sat at `status='running'` for 24+ min with zero progress markers and no log lines, same shape as the earlier stuck row 17752. Diagnosis: the async `BackgroundTasks` pattern is fundamentally broken on Cloud Run for long pipelines, regardless of CPU throttling. The request lifecycle ends when the response is sent and the coroutine gets dropped. Filing monitor's 295 successful staging runs since 2026-05-01 confirm Cloud Run itself is healthy — only the async pattern is broken. Cpu-throttling=false change kept (no harm, ~$46/mo for the warm instance), but is not the actual fix.
+- **2026-05-21** — converted `/api/v1/pipeline/run/initial-load` to **synchronous** (mirrors `filing-monitor`). The endpoint now awaits `_run_initial_load_background` in-process before returning. Cloud Scheduler `--attempt-deadline` bumped to **1800s** on both `initial-load-daily` (prod) and `initial-load-daily-staging`. Trade-off: the admin UI's "Run now" button on `/settings/pipelines` will sit in a loading state for 15–30 min during a manual trigger; acceptable since the button is operator-only. The earlier `cpu-throttling=false` change on staging is retained but no longer load-bearing. **Long-term: factor `_run_initial_load_background` into a Cloud Run Job** so the synchronous endpoint contract decouples from the long pipeline (the original 2026-04-29 runbook author already recommended this). Stuck `pipeline_runs` rows 17752 and 17753 manually marked `failed` for UI cleanliness.
