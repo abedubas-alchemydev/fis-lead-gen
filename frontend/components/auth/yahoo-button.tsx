@@ -33,7 +33,7 @@ export function YahooButton({
       await authClient.signIn.oauth2({
         providerId: "yahoo",
         callbackURL: "/dashboard",
-        errorCallbackURL: "/pending-approval"
+        errorCallbackURL: "/pending-approval?via=oauth"
       });
     } catch {
       setIsPending(false);

@@ -31,7 +31,7 @@ export function GoogleButton({ mode }: { mode: "login" | "signup" }) {
       await authClient.signIn.social({
         provider: "google",
         callbackURL: "/dashboard",
-        errorCallbackURL: "/pending-approval"
+        errorCallbackURL: "/pending-approval?via=oauth"
       });
     } catch {
       // signIn.social does a full-page navigation, so reaching this

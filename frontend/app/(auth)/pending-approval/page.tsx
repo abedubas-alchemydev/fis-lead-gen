@@ -1,7 +1,17 @@
 import Link from "next/link";
 import { Clock, Mail } from "lucide-react";
 
-export default function PendingApprovalPage() {
+// OAuth buttons append ?via=oauth so we can hide the "verify your email" card —
+// Google/Microsoft/Yahoo have already verified the email at the IdP, so only
+// admin approval is pending. Email/password signups land here without the
+// query param and still see both cards.
+export default function PendingApprovalPage({
+  searchParams
+}: {
+  searchParams: { via?: string };
+}) {
+  const viaOAuth = searchParams.via === "oauth";
+
   return (
     <div className="animate-fade-in">
       <div className="mb-8">
@@ -22,14 +32,16 @@ export default function PendingApprovalPage() {
           </p>
         </div>
 
-        <div className="flex items-start gap-3 rounded-2xl border border-amber-500/25 bg-amber-500/12 px-4 py-3 text-sm leading-6 text-amber-700">
-          <Mail className="mt-0.5 h-4 w-4 flex-none text-warning" />
-          <p>
-            <span className="font-semibold">Verify your email too.</span> Click the
-            verification link we sent to your inbox. Both email verification and admin
-            approval are required to sign in.
-          </p>
-        </div>
+        {viaOAuth ? null : (
+          <div className="flex items-start gap-3 rounded-2xl border border-amber-500/25 bg-amber-500/12 px-4 py-3 text-sm leading-6 text-amber-700">
+            <Mail className="mt-0.5 h-4 w-4 flex-none text-warning" />
+            <p>
+              <span className="font-semibold">Verify your email too.</span> Click the
+              verification link we sent to your inbox. Both email verification and admin
+              approval are required to sign in.
+            </p>
+          </div>
+        )}
       </div>
 
       <p className="mt-8 text-center text-sm text-[var(--text-muted,#94a3b8)]">
