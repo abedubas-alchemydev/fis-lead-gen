@@ -300,9 +300,12 @@ export function DashboardHomeClient() {
         </div>
       </div>
 
-      {/* Provider distribution (LEFT, wider) + activity feed (RIGHT, narrower) — 1.4fr 1fr */}
+      {/* Provider distribution (LEFT, wider) + activity feed (RIGHT, narrower) — 1.4fr 1fr.
+          `h-full` on both wrappers forwards the grid row's stretched height to
+          the cards inside, so the two tiles' bottom edges align even when one
+          card has more natural content than the other. */}
       <div className="grid grid-cols-1 gap-4 xl:grid-cols-[1.4fr_1fr]">
-        <div className="animate-fade-in-left delay-[400ms]">
+        <div className="h-full animate-fade-in-left delay-[400ms]">
           <ClearingDistributionChart
             items={distribution}
             loading={distributionLoading}
@@ -310,7 +313,7 @@ export function DashboardHomeClient() {
             onRetry={handleDistributionRetry}
           />
         </div>
-        <div className="animate-fade-in-right delay-[400ms]">
+        <div className="h-full animate-fade-in-right delay-[400ms]">
           {alertsLoadError ? (
             // External retry block when the initial /api/v1/alerts fetch
             // fails. AlertFeedCard lives under frontend/components/alerts/**
@@ -318,7 +321,7 @@ export function DashboardHomeClient() {
             // alongside it instead of modifying the AlertFeedCard signature.
             // Wrap in the same surface chrome AlertFeedCard uses so the
             // tile slot keeps a stable visual footprint.
-            <article className="rounded-2xl border border-[var(--border,rgba(30,64,175,0.1))] bg-[var(--surface,#ffffff)] p-5 shadow-[var(--shadow-card,0_1px_2px_rgba(15,23,42,0.04),0_4px_14px_rgba(15,23,42,0.05))]">
+            <article className="flex h-full flex-col rounded-2xl border border-[var(--border,rgba(30,64,175,0.1))] bg-[var(--surface,#ffffff)] p-5 shadow-[var(--shadow-card,0_1px_2px_rgba(15,23,42,0.04),0_4px_14px_rgba(15,23,42,0.05))]">
               <div className="mb-4 flex items-start justify-between gap-4">
                 <div>
                   <h2 className="text-[15px] font-semibold tracking-[-0.01em] text-[var(--text,#0f172a)]">Activity feed</h2>

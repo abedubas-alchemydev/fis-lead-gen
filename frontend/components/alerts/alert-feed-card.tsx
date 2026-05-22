@@ -46,7 +46,7 @@ export function AlertFeedCard({
   onMarkRead?: (alertId: number) => void;
 }) {
   return (
-    <article className="rounded-2xl border border-[var(--border,rgba(30,64,175,0.1))] bg-[var(--surface,#ffffff)] p-5 shadow-[var(--shadow-card,0_1px_2px_rgba(15,23,42,0.04),0_4px_14px_rgba(15,23,42,0.05))]">
+    <article className="flex h-full flex-col rounded-2xl border border-[var(--border,rgba(30,64,175,0.1))] bg-[var(--surface,#ffffff)] p-5 shadow-[var(--shadow-card,0_1px_2px_rgba(15,23,42,0.04),0_4px_14px_rgba(15,23,42,0.05))]">
       <div className="mb-4 flex items-start justify-between gap-4">
         <div>
           <h2 className="text-[15px] font-semibold tracking-[-0.01em] text-[var(--text,#0f172a)]">Activity feed</h2>
