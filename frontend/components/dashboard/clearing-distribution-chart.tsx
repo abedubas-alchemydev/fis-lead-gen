@@ -1,9 +1,28 @@
 "use client";
 
+import { useState } from "react";
 import { useRouter } from "next/navigation";
 
 import { DashboardErrorCard } from "@/components/dashboard/dashboard-error-card";
 import type { ClearingProviderShare } from "@/lib/types";
+
+const PAGE_SIZE = 10;
+
+// Pagination helper — same shape as the one in master-list-workspace-client.
+type PageToken = number | "…";
+function paginationPages(current: number, total: number): PageToken[] {
+  if (total <= 7) {
+    return Array.from({ length: total }, (_, i) => i + 1);
+  }
+  const pages: PageToken[] = [1];
+  const start = Math.max(2, current - 1);
+  const end = Math.min(total - 1, current + 1);
+  if (start > 2) pages.push("…");
+  for (let i = start; i <= end; i++) pages.push(i);
+  if (end < total - 1) pages.push("…");
+  pages.push(total);
+  return pages;
+}
 
 // Mockup palette — each row gets a stable color pair by position.
 const ROW_PALETTES = [
@@ -45,6 +64,7 @@ export function ClearingDistributionChart({
   onRetry?: () => void;
 }) {
   const router = useRouter();
+  const [page, setPage] = useState(1);
 
   // Header shared across loading/error/empty/data branches so the card
   // chrome (border, shadow, padding, title) stays stable while the
@@ -127,8 +147,17 @@ export function ClearingDistributionChart({
   // Normalize bar widths so the top bar reads at ~92% and everything else
   // scales against the leader — matches the mockup's visual rhythm and
   // keeps the track visible when percentages are near-zero in aggregate.
+  // Derived from the full items list (not the current page) so a small
+  // 0.3% bar on page 2 doesn't get rescaled into looking like the leader.
   const maxPercent = Math.max(...items.map((i) => i.percentage));
   const scale = (p: number) => (maxPercent > 0 ? (p / maxPercent) * 92 : 0);
+
+  const totalPages = Math.max(1, Math.ceil(items.length / PAGE_SIZE));
+  // Clamp on render so a shrinking items list (e.g., new fetch returns
+  // fewer providers) never strands us on an empty page.
+  const safePage = Math.min(Math.max(1, page), totalPages);
+  const pageItems = items.slice((safePage - 1) * PAGE_SIZE, safePage * PAGE_SIZE);
+  const pages = paginationPages(safePage, totalPages);
 
   return (
     <div
@@ -146,9 +175,12 @@ export function ClearingDistributionChart({
         </div>
       </div>
 
-      <div>
-        {items.map((item, index) => {
-          const palette = ROW_PALETTES[index % ROW_PALETTES.length];
+      <div className="flex-1">
+        {pageItems.map((item, index) => {
+          // Use the global index for color so each provider keeps its swatch
+          // across pages (Pershing LLC stays blue whether it's row 1 or row 11).
+          const globalIndex = (safePage - 1) * PAGE_SIZE + index;
+          const palette = ROW_PALETTES[globalIndex % ROW_PALETTES.length];
           const firmsLabel = formatFirmsLabel(item.count);
           const percentLabel = formatPercentLabel(item.percentage);
           return (
@@ -198,6 +230,57 @@ export function ClearingDistributionChart({
           );
         })}
       </div>
+
+      {totalPages > 1 ? (
+        <div className="mt-4 flex flex-wrap items-center justify-between gap-3 border-t border-[var(--border,rgba(30,64,175,0.1))] pt-3">
+          <p className="text-[12px] text-[var(--text-muted,#94a3b8)]">
+            Showing {(safePage - 1) * PAGE_SIZE + 1}–
+            {Math.min(safePage * PAGE_SIZE, items.length)} of {items.length}
+          </p>
+          <div className="flex flex-wrap gap-1">
+            <button
+              type="button"
+              disabled={safePage <= 1}
+              onClick={() => setPage(Math.max(1, safePage - 1))}
+              className="rounded-[8px] border border-[var(--border-2,rgba(30,64,175,0.16))] bg-[var(--surface,#ffffff)] px-3 py-1.5 text-[12px] font-medium text-[var(--text-dim,#475569)] transition hover:bg-[var(--surface-2,#f1f6fd)] disabled:cursor-not-allowed disabled:opacity-45"
+            >
+              Previous
+            </button>
+            {pages.map((token, idx) =>
+              token === "…" ? (
+                <span
+                  key={`ellipsis-${idx}`}
+                  className="px-2 py-1.5 text-[12px] text-[var(--text-muted,#94a3b8)]"
+                >
+                  …
+                </span>
+              ) : (
+                <button
+                  key={token}
+                  type="button"
+                  onClick={() => setPage(token)}
+                  aria-current={safePage === token ? "page" : undefined}
+                  className={`min-w-[36px] rounded-[8px] border px-3 py-1.5 text-[12px] font-medium transition ${
+                    safePage === token
+                      ? "border-transparent bg-gradient-to-br from-[#6366f1] to-[#8b5cf6] text-white shadow-[0_6px_16px_rgba(99,102,241,0.35)]"
+                      : "border-[var(--border-2,rgba(30,64,175,0.16))] bg-[var(--surface,#ffffff)] text-[var(--text-dim,#475569)] hover:bg-[var(--surface-2,#f1f6fd)]"
+                  }`}
+                >
+                  {token}
+                </button>
+              ),
+            )}
+            <button
+              type="button"
+              disabled={safePage >= totalPages}
+              onClick={() => setPage(Math.min(totalPages, safePage + 1))}
+              className="rounded-[8px] border border-[var(--border-2,rgba(30,64,175,0.16))] bg-[var(--surface,#ffffff)] px-3 py-1.5 text-[12px] font-medium text-[var(--text-dim,#475569)] transition hover:bg-[var(--surface-2,#f1f6fd)] disabled:cursor-not-allowed disabled:opacity-45"
+            >
+              Next
+            </button>
+          </div>
+        </div>
+      ) : null}
     </div>
   );
 }
