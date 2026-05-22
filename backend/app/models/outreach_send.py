@@ -93,6 +93,16 @@ class OutreachSend(Base):
     # via aiosmtplib). Backfilled to "google" on the migration 0049
     # upgrade. New rows MUST set this explicitly.
     provider: Mapped[str] = mapped_column(String(16), nullable=False)
+    # Soft reference to ``account.id`` (no FK; see migration 0057).
+    # NULL on legacy pre-multi-sender rows; new rows always populate.
+    sender_account_id: Mapped[str | None] = mapped_column(
+        String(255), nullable=True, index=True
+    )
+    # Point-in-time sender address. For legacy rows this was backfilled
+    # from ``user.email`` so admin sort/filter on sender still works.
+    sender_email: Mapped[str | None] = mapped_column(
+        String(320), nullable=True
+    )
     # Provider-side message id. For Gmail this is the real
     # users.messages.send response id; for Microsoft/Yahoo it's a
     # synthetic "{provider}-{iso8601}" placeholder (those transports

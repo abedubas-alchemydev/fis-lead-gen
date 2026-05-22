@@ -37,22 +37,23 @@ _REFRESH_TIMEOUT = 15.0
 
 
 async def get_fresh_yahoo_access_token(
-    db: AsyncSession, user_id: str
+    db: AsyncSession, account_id: str
 ) -> tuple[str, list[str]]:
-    """Return ``(access_token, scopes)`` for the user's Yahoo account.
+    """Return ``(access_token, scopes)`` for the given Yahoo account row.
 
-    Same contract as the Google + Microsoft helpers. Raises
+    Keyed by ``account.id`` (Better Auth's PK). Same refresh + persistence
+    semantics as the Google + Microsoft helpers. Raises
     :class:`EmailAccountNotLinked` on missing row or revoked refresh
     token; :class:`EmailProviderConfigurationError` on missing env.
     """
 
     stmt = select(Account).where(
-        Account.user_id == user_id, Account.provider_id == "yahoo"
+        Account.id == account_id, Account.provider_id == "yahoo"
     )
     account = (await db.execute(stmt)).scalar_one_or_none()
     if account is None:
         raise EmailAccountNotLinked(
-            f"No Yahoo account linked for user {user_id}."
+            f"No Yahoo account row found for id {account_id}."
         )
 
     scopes = _parse_scopes(account.scope)
@@ -68,7 +69,7 @@ async def get_fresh_yahoo_access_token(
 
     if not account.refresh_token:
         raise EmailAccountNotLinked(
-            f"User {user_id} has a Yahoo account but no refresh token."
+            f"Yahoo account {account_id} has no refresh token."
         )
 
     new_access_token, new_expires_at = await _refresh_access_token(

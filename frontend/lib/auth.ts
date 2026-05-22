@@ -27,6 +27,76 @@ export const db = database;
 
 const appUrl = process.env.BETTER_AUTH_URL ?? process.env.NEXT_PUBLIC_APP_URL ?? "http://localhost:3000";
 
+// Decodes a JWT payload without verifying the signature. Safe to use
+// here because Better Auth has already verified the id_token against
+// the provider's JWKS before storing it on the account row -- we just
+// need to read the email claim out of the payload.
+function decodeJwtPayload(token: string): Record<string, unknown> | null {
+  try {
+    const parts = token.split(".");
+    if (parts.length < 2) return null;
+    const b64 = parts[1].replace(/-/g, "+").replace(/_/g, "/");
+    const padded = b64 + "=".repeat((4 - (b64.length % 4)) % 4);
+    const json = Buffer.from(padded, "base64").toString("utf-8");
+    return JSON.parse(json) as Record<string, unknown>;
+  } catch {
+    return null;
+  }
+}
+
+// Provider-specific email extraction. Google + Yahoo expose ``email``
+// directly. Microsoft prefers ``preferred_username`` (it's the email
+// on AAD work/school + outlook.com consumer); ``upn`` and ``email``
+// are documented fallbacks for older tenants. Returns null if no
+// known claim is present -- the lazy-backfill path in the FastAPI
+// OAuth helper covers that case on first send.
+function extractEmailFromIdToken(
+  providerId: string,
+  idToken: string | null | undefined
+): string | null {
+  if (!idToken) return null;
+  const payload = decodeJwtPayload(idToken);
+  if (!payload) return null;
+  if (providerId === "google" || providerId === "yahoo") {
+    return typeof payload.email === "string" ? payload.email : null;
+  }
+  if (providerId === "microsoft") {
+    if (typeof payload.preferred_username === "string") return payload.preferred_username;
+    if (typeof payload.upn === "string") return payload.upn;
+    if (typeof payload.email === "string") return payload.email;
+    return null;
+  }
+  return null;
+}
+
+type AccountHookRow = {
+  id: string;
+  providerId?: string;
+  provider_id?: string;
+  idToken?: string | null;
+  id_token?: string | null;
+  emailAddress?: string | null;
+  email_address?: string | null;
+};
+
+async function captureAccountEmail(account: AccountHookRow): Promise<void> {
+  try {
+    if (account.emailAddress || account.email_address) return;
+    const providerId = account.providerId ?? account.provider_id ?? "";
+    const idToken = account.idToken ?? account.id_token ?? null;
+    const email = extractEmailFromIdToken(providerId, idToken);
+    if (!email) return;
+    await database.query(
+      'UPDATE "account" SET email_address = $1 WHERE id = $2 AND email_address IS NULL',
+      [email, account.id]
+    );
+  } catch (err) {
+    // Never block link/refresh on email capture -- the FastAPI side
+    // has a lazy backfill on first send that covers misses here.
+    console.error("[ACCOUNT-EMAIL] Failed to capture email_address:", err);
+  }
+}
+
 const extraTrustedOrigins = (process.env.BETTER_AUTH_TRUSTED_ORIGINS ?? "")
   .split(",")
   .map((o) => o.trim())
@@ -170,6 +240,18 @@ export const auth = betterAuth({
     }
   },
   account: {
+    // Multi-sender outreach: a user can link a SECOND Google account
+    // (or any provider combo). ``allowDifferentEmails`` is required —
+    // without it, Better Auth aborts the link with ``email_doesn't_match``
+    // when the new OAuth identity's email differs from the session
+    // user's email (callback.mjs:106). ``trustedProviders`` lists the
+    // providers that are allowed to auto-link to an existing account
+    // without an extra confirmation step.
+    accountLinking: {
+      enabled: true,
+      allowDifferentEmails: true,
+      trustedProviders: ["google", "microsoft", "yahoo"]
+    },
     fields: {
       userId: "user_id",
       accountId: "account_id",
@@ -191,6 +273,28 @@ export const auth = betterAuth({
     }
   },
   databaseHooks: {
+    account: {
+      // Fires after a fresh OAuth link (Better Auth's
+      // ``createAccount`` path in callback.mjs). Decodes the stored
+      // id_token and writes ``email_address`` so the multi-sender
+      // picker in the outreach modal can show "alice@personal.com"
+      // / "alice@firm.com" instead of just "Google" / "Google".
+      create: {
+        after: async (account) => {
+          await captureAccountEmail(account as AccountHookRow);
+        }
+      },
+      // Fires after a token refresh or scope re-grant (Better Auth's
+      // ``updateAccount``). Useful when the original create.after
+      // missed (e.g. legacy rows linked before this hook existed)
+      // and the user later re-granted send scope -- the id_token
+      // gets refreshed, and we backfill the address opportunistically.
+      update: {
+        after: async (account) => {
+          await captureAccountEmail(account as AccountHookRow);
+        }
+      }
+    },
     user: {
       create: {
         after: async (user) => {

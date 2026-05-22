@@ -28,6 +28,10 @@ class VaultFolderResponse(BaseModel):
     # every Outreach draft for this folder. Default '' means "no extra
     # guidance, prompt the AI with description + retrieved files only".
     outreach_instructions: str = ""
+    # Optional per-folder default sender. When set, the Outreach modal
+    # preselects this account when this folder is chosen. Soft reference
+    # to ``account.id`` — modal falls back if the account is unlinked.
+    default_sender_account_id: str | None = None
     created_at: datetime
     updated_at: datetime
 
@@ -36,12 +40,17 @@ class VaultFolderCreate(BaseModel):
     name: str = Field(..., min_length=1, max_length=255)
     description: str = Field(default="", max_length=20_000)
     outreach_instructions: str = Field(default="", max_length=10_000)
+    default_sender_account_id: str | None = Field(default=None, max_length=255)
 
 
 class VaultFolderUpdate(BaseModel):
     name: str | None = Field(default=None, min_length=1, max_length=255)
     description: str | None = Field(default=None, max_length=20_000)
     outreach_instructions: str | None = Field(default=None, max_length=10_000)
+    # Send ``null`` to clear, a value to set, omit the key entirely to
+    # leave alone (handled by ``model_dump(exclude_unset=True)`` in the
+    # endpoint -- explicit ``None`` writes through, missing key skips).
+    default_sender_account_id: str | None = Field(default=None, max_length=255)
 
 
 class OutreachDraftRequest(BaseModel):
@@ -65,7 +74,14 @@ class OutreachSendRequest(BaseModel):
     # ceiling — no realistic draft is anywhere near it.
     subject: str = Field(..., min_length=1, max_length=998)
     body: str = Field(..., min_length=1, max_length=100_000)
+    # Legacy field kept on the wire for back-compat. Once
+    # ``sender_account_id`` is set the server derives the provider from
+    # the account row and this is ignored.
     provider: EmailProviderId = "google"
+    # PK of the ``account`` row to send from. Optional so legacy callers
+    # work: the server applies the 3-tier fallback (folder default →
+    # first send-scoped account → first linked account) when omitted.
+    sender_account_id: str | None = Field(default=None, max_length=255)
 
 
 # ── Advisor + Investor parallels ──────────────────────────────────────
@@ -88,6 +104,7 @@ class OutreachAdvisorSendRequest(BaseModel):
     subject: str = Field(..., min_length=1, max_length=998)
     body: str = Field(..., min_length=1, max_length=100_000)
     provider: EmailProviderId = "google"
+    sender_account_id: str | None = Field(default=None, max_length=255)
 
 
 class OutreachInvestorDraftRequest(BaseModel):
@@ -103,6 +120,7 @@ class OutreachInvestorSendRequest(BaseModel):
     subject: str = Field(..., min_length=1, max_length=998)
     body: str = Field(..., min_length=1, max_length=100_000)
     provider: EmailProviderId = "google"
+    sender_account_id: str | None = Field(default=None, max_length=255)
 
 
 class OutreachSendResponse(BaseModel):
@@ -177,12 +195,26 @@ class OutreachSendDetailResponse(OutreachSendItem):
 class LinkedProviderItem(BaseModel):
     """One linked OAuth account for the calling user.
 
-    Returned by ``GET /api/v1/auth/me/linked-providers`` so the
-    Outreach modal can decide whether to render a provider picker
-    (2+ linked) or a "Connect <provider>" CTA (0 linked).
+    Returned by ``GET /api/v1/outreach/linked-providers`` so the
+    Outreach modal can render an email-address dropdown — one entry
+    per account, not per provider type, since a user can link
+    multiple Google accounts (or any provider combo).
     """
 
+    # PK of the ``account`` row. The FE passes this back as
+    # ``sender_account_id`` on the send call.
+    account_id: str
+    # OAuth provider's external user id (Google's ``sub``, MS Graph's
+    # object id, Yahoo's user GUID). Required by Better Auth's
+    # ``/unlink-account`` to disambiguate which Google account to
+    # unlink when the user has multiple.
+    provider_account_id: str
     provider: EmailProviderId
+    # The actual mailbox the OAuth token is bound to. Captured on link
+    # via the databaseHooks in ``frontend/lib/auth.ts``; may be None
+    # for legacy accounts linked before the hook existed (lazy backfill
+    # on first send covers that case).
+    email_address: str | None
     scope: str | None
     # True iff the linked account has the send scope already granted
     # (``gmail.send`` / ``Mail.Send`` / ``mail-w`` per provider). FE

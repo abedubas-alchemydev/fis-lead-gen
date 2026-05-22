@@ -64,12 +64,18 @@ class EmailProvider(Protocol):
     is returned."""
 
     async def get_fresh_token(
-        self, db: AsyncSession, user_id: str
+        self, db: AsyncSession, account_id: str
     ) -> tuple[str, list[str]]:
-        """Refresh and return ``(access_token, scopes)`` for this user.
+        """Refresh and return ``(access_token, scopes)`` for the given account row.
 
-        Raises :class:`EmailAccountNotLinked` when there is no account
-        row or the refresh token is revoked;
+        ``account_id`` is ``account.id`` (Better Auth's PK), NOT the
+        provider's external user id (``account.account_id``). This lets
+        a single user dispatch sends to a specific linked account when
+        they have multiple of the same provider. The caller must verify
+        row ownership before passing the id.
+
+        Raises :class:`EmailAccountNotLinked` when the row is gone or
+        the refresh token is revoked;
         :class:`EmailProviderConfigurationError` when the env config is
         missing. Concrete implementations may also raise the bare
         ``httpx`` errors for transient network failures, which the
