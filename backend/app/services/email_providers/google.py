@@ -36,10 +36,12 @@ class GoogleEmailProvider:
     send_scope: str = GMAIL_SEND_SCOPE
 
     async def get_fresh_token(
-        self, db: AsyncSession, user_id: str
+        self, db: AsyncSession, account_id: str
     ) -> tuple[str, list[str]]:
         try:
-            return await get_fresh_google_access_token(db=db, user_id=user_id)
+            return await get_fresh_google_access_token(
+                db=db, account_id=account_id
+            )
         except GoogleAccountNotLinked as exc:
             raise EmailAccountNotLinked(str(exc)) from exc
         except GoogleOAuthConfigurationError as exc:

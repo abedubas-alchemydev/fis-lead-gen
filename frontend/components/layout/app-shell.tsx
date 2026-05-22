@@ -155,6 +155,17 @@ function SentOutreachIcon(props: IconProps) {
   );
 }
 
+// Envelope @-sign glyph for the multi-sender settings page.
+function MailAtIcon(props: IconProps) {
+  return (
+    <IconBase {...props}>
+      <rect x="3" y="5" width="18" height="14" rx="2" />
+      <path d="M3 7l9 6 9-6" />
+      <circle cx="12" cy="13" r="2" />
+    </IconBase>
+  );
+}
+
 // Double-chevron used by the sidebar collapse toggle. Rotated 180° when
 // the sidebar is collapsed so a single icon serves both states.
 function ChevronsLeftIcon(props: IconProps) {
@@ -237,6 +248,7 @@ const navSections: ReadonlyArray<NavSection> = [
     label: "Account",
     items: [
       { href: "/settings", label: "Settings", icon: SettingsIcon, badgeKey: null, permissionKey: "settings" },
+      { href: "/settings/email-accounts" as Route, label: "Email Accounts", icon: MailAtIcon, badgeKey: null },
       { href: "/settings/users" as Route, label: "Users", icon: UsersIcon, badgeKey: null, adminOnly: true, permissionKey: "users" },
       { href: "/vault", label: "Vault", icon: VaultIcon, badgeKey: null, permissionKey: "vault" }
     ]

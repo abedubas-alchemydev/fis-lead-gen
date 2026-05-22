@@ -75,6 +75,9 @@ class Account(Base):
     scope: Mapped[str | None] = mapped_column(Text, nullable=True)
     id_token: Mapped[str | None] = mapped_column(Text, nullable=True)
     password: Mapped[str | None] = mapped_column(Text, nullable=True)
+    email_address: Mapped[str | None] = mapped_column(
+        String(320), nullable=True, index=True
+    )
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now(), nullable=False)
     updated_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True),

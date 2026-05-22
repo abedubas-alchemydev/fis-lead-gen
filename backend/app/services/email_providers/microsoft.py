@@ -44,9 +44,11 @@ class MicrosoftEmailProvider:
     send_scope: str = SEND_SCOPE
 
     async def get_fresh_token(
-        self, db: AsyncSession, user_id: str
+        self, db: AsyncSession, account_id: str
     ) -> tuple[str, list[str]]:
-        return await get_fresh_microsoft_access_token(db=db, user_id=user_id)
+        return await get_fresh_microsoft_access_token(
+            db=db, account_id=account_id
+        )
 
     async def send(
         self,

@@ -61,6 +61,35 @@ const PROVIDER_LABEL: Record<EmailProviderId, string> = {
   yahoo: "Yahoo Mail"
 };
 
+// "Open Sent folder" URLs per provider. Best-effort -- Yahoo's deep
+// link is brittle so we just point at the inbox root; users can find
+// Sent from there.
+const SENT_FOLDER_URL: Record<EmailProviderId, string> = {
+  google: "https://mail.google.com/mail/u/0/#sent",
+  microsoft: "https://outlook.office.com/mail/sentitems",
+  yahoo: "https://mail.yahoo.com/d/folders/2"
+};
+
+// Three-tier fallback so the picker has a predictable default for any
+// (folder, linkedProviders) combination. Mirrors the BE resolver in
+// outreach.py (``_resolve_sender_account``): folder default first,
+// then the first send-scoped account, then the first linked account,
+// then null when nothing is linked.
+function resolveDefaultSenderAccountId(
+  folder: VaultFolder | null,
+  linkedProviders: LinkedProviderItem[]
+): string | null {
+  if (linkedProviders.length === 0) return null;
+  if (folder?.default_sender_account_id) {
+    const folderDefault = linkedProviders.find(
+      (p) => p.account_id === folder.default_sender_account_id
+    );
+    if (folderDefault) return folderDefault.account_id;
+  }
+  const withScope = linkedProviders.find((p) => p.has_send_scope);
+  return (withScope ?? linkedProviders[0]).account_id;
+}
+
 // Backend 412 detail codes per provider. The Gmail path keeps its
 // legacy codes ("google_account_not_linked" / "gmail_scope_required")
 // for back-compat; Microsoft + Yahoo use the provider-prefixed
@@ -126,14 +155,22 @@ export function OutreachModal({
   const [linkActionNeeded, setLinkActionNeeded] = useState(false);
   const [linkActionProvider, setLinkActionProvider] =
     useState<EmailProviderId | null>(null);
-  // Linked-provider state — drives the "Send from:" dropdown when 2+
-  // providers are linked, and the "Connect <provider>" CTAs when 0.
+  // Linked-account state — drives the "Send from:" email-address
+  // dropdown and the "Connect <provider>" empty state. Multi-sender
+  // outreach (see plans/multi-sender-outreach): one entry per linked
+  // OAuth account, not per provider type.
   const [linkedProviders, setLinkedProviders] = useState<LinkedProviderItem[]>(
     []
   );
-  const [providerId, setProviderId] = useState<EmailProviderId>("google");
+  // PK of the currently selected ``account`` row. Resolved via the
+  // three-tier fallback in resolveDefaultSenderAccountId. Null only
+  // before linked-providers has loaded or when zero accounts are
+  // linked (empty state).
+  const [senderAccountId, setSenderAccountId] = useState<string | null>(null);
+  // True when the user has explicitly picked a sender in this modal
+  // session -- prevents folder changes from clobbering their choice.
+  const userOverrodeSenderRef = useRef(false);
   const session = authClient.useSession();
-  const senderEmail = session.data?.user?.email ?? null;
 
   const isMountedRef = useRef(true);
   useEffect(() => {
@@ -179,9 +216,8 @@ export function OutreachModal({
 
   // Linked-providers fetch — runs in parallel with the folders fetch so
   // the dropdown is ready by the time the user clicks Generate.
-  // Failures here are non-fatal: if the call 500s we keep ``providerId``
-  // at its "google" default and the user can still send (assuming Gmail
-  // is linked); the BE's 412 path catches the not-linked case.
+  // Failures here are non-fatal: if the call 500s we leave the picker
+  // empty and the BE's 412 path catches the no-account case.
   useEffect(() => {
     let cancelled = false;
     (async () => {
@@ -189,15 +225,8 @@ export function OutreachModal({
         const result = await getLinkedProviders();
         if (cancelled || !isMountedRef.current) return;
         setLinkedProviders(result.items);
-        // Default to the first linked provider that has the send scope
-        // already granted (so the user's Send click doesn't need a
-        // round-trip through linkSocial). Falls back to the first
-        // linked provider, then "google" if nothing is linked.
-        const withScope = result.items.find((p) => p.has_send_scope);
-        const fallback = result.items[0]?.provider ?? "google";
-        setProviderId(withScope?.provider ?? fallback);
       } catch {
-        // Swallow — keep "google" default, BE's 412 will guide the user.
+        // Swallow — empty picker, BE's 412 will guide the user.
       }
     })();
     return () => {
@@ -209,6 +238,29 @@ export function OutreachModal({
     () => folders.find((f) => f.id === folderId) ?? null,
     [folders, folderId]
   );
+
+  // Apply the three-tier default any time the folder or linkedProviders
+  // change -- unless the user has already overridden the picker in
+  // this session. Clears ``senderAccountId`` cleanly when zero accounts
+  // are linked (empty state). The ref-guard means folder switches DO
+  // bring the folder's default back if the user hasn't picked yet, but
+  // folder switches AFTER a manual pick are honoured (the user's pick
+  // sticks even if they navigate folders).
+  useEffect(() => {
+    if (userOverrodeSenderRef.current) return;
+    const next = resolveDefaultSenderAccountId(selectedFolder, linkedProviders);
+    setSenderAccountId(next);
+  }, [selectedFolder, linkedProviders]);
+
+  const selectedAccount = useMemo<LinkedProviderItem | null>(
+    () =>
+      linkedProviders.find((p) => p.account_id === senderAccountId) ?? null,
+    [linkedProviders, senderAccountId]
+  );
+  const providerId: EmailProviderId = selectedAccount?.provider ?? "google";
+  const senderEmail =
+    selectedAccount?.email_address ??
+    (session.data?.user?.email ?? null);
 
   async function handleGenerate() {
     if (folderId === null) return;
@@ -244,7 +296,10 @@ export function OutreachModal({
         folder_id: folderId ?? 0,
         subject,
         body,
-        provider: providerId
+        // Server derives provider from the resolved account; we still
+        // pass ``provider`` for back-compat with older deploys.
+        provider: providerId,
+        sender_account_id: senderAccountId
       });
       if (!isMountedRef.current) return;
       setStage("sent");
@@ -420,7 +475,13 @@ export function OutreachModal({
               Service to pitch
               <select
                 value={folderId ?? ""}
-                onChange={(event) => setFolderId(Number(event.target.value))}
+                onChange={(event) => {
+                  // Folder switch implies new service -> re-apply the
+                  // new folder's default sender. The override flag is
+                  // session-scoped per-folder, not global to the modal.
+                  userOverrodeSenderRef.current = false;
+                  setFolderId(Number(event.target.value));
+                }}
                 disabled={stage === "generating"}
                 className="mt-2 block w-full rounded-xl border border-[var(--border,rgba(30,64,175,0.1))] bg-[var(--surface,#ffffff)] px-3 py-2 text-sm text-[var(--text,#0f172a)] outline-none transition focus:border-[var(--accent,#6366f1)] focus:ring-2 focus:ring-[var(--accent,#6366f1)]/20 disabled:cursor-not-allowed disabled:opacity-60"
               >
@@ -444,19 +505,27 @@ export function OutreachModal({
               <label className="block text-xs font-medium uppercase tracking-[0.18em] text-[var(--text-muted,#94a3b8)]">
                 Send from
                 <select
-                  value={providerId}
-                  onChange={(event) =>
-                    setProviderId(event.target.value as EmailProviderId)
-                  }
+                  value={senderAccountId ?? ""}
+                  onChange={(event) => {
+                    userOverrodeSenderRef.current = true;
+                    setSenderAccountId(event.target.value || null);
+                  }}
                   disabled={stage === "generating"}
                   className="mt-2 block w-full rounded-xl border border-[var(--border,rgba(30,64,175,0.1))] bg-[var(--surface,#ffffff)] px-3 py-2 text-sm text-[var(--text,#0f172a)] outline-none transition focus:border-[var(--accent,#6366f1)] focus:ring-2 focus:ring-[var(--accent,#6366f1)]/20 disabled:cursor-not-allowed disabled:opacity-60"
                 >
-                  {linkedProviders.map((p) => (
-                    <option key={p.provider} value={p.provider}>
-                      {PROVIDER_LABEL[p.provider]}
-                      {p.has_send_scope ? "" : " (will request send access)"}
-                    </option>
-                  ))}
+                  {linkedProviders.map((p) => {
+                    const label =
+                      p.email_address ?? `${PROVIDER_LABEL[p.provider]} account`;
+                    const suffix = p.has_send_scope
+                      ? ` (${PROVIDER_LABEL[p.provider]})`
+                      : ` (${PROVIDER_LABEL[p.provider]} — will request send access)`;
+                    return (
+                      <option key={p.account_id} value={p.account_id}>
+                        {label}
+                        {suffix}
+                      </option>
+                    );
+                  })}
                 </select>
               </label>
             ) : null}
@@ -552,16 +621,16 @@ export function OutreachModal({
                   </span>
                 </>
               ) : null}
-              . A copy is in your Gmail Sent folder.
+              . A copy is in your {PROVIDER_LABEL[providerId]} Sent folder.
             </p>
             <div className="mt-3 flex flex-wrap items-center gap-2">
               <a
-                href="https://mail.google.com/mail/u/0/#sent"
+                href={SENT_FOLDER_URL[providerId]}
                 target="_blank"
                 rel="noopener noreferrer"
                 className="inline-flex h-9 items-center rounded-xl border border-emerald-300 bg-white px-3 text-xs font-semibold text-emerald-700 transition hover:bg-emerald-50"
               >
-                Open Gmail Sent folder
+                Open {PROVIDER_LABEL[providerId]} Sent folder
               </a>
               <Link
                 href={"/outreach/sent" as Route}

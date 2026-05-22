@@ -42,30 +42,28 @@ _REFRESH_TIMEOUT = 15.0
 
 
 async def get_fresh_microsoft_access_token(
-    db: AsyncSession, user_id: str
+    db: AsyncSession, account_id: str
 ) -> tuple[str, list[str]]:
-    """Return ``(access_token, scopes)`` for the user's Microsoft account.
+    """Return ``(access_token, scopes)`` for the given Microsoft account row.
 
-    Identical contract to :func:`get_fresh_google_access_token`. Refreshes
-    via Microsoft's token endpoint when ``access_token_expires_at`` is
-    null, in the past, or within ``_EXPIRY_SKEW`` of now. Persists the
-    refreshed token + expiry back to the row (no commit — caller owns
-    the transaction).
+    Keyed by ``account.id`` (Better Auth's PK). The caller verifies row
+    ownership before passing the id in. Same refresh + persistence
+    semantics as :func:`get_fresh_google_access_token`.
 
-    Raises :class:`EmailAccountNotLinked` when the user has no Microsoft
-    account on file, the refresh token is missing, or Microsoft returns
+    Raises :class:`EmailAccountNotLinked` when the account row is gone,
+    not a Microsoft row, has no refresh token, or Microsoft returns
     ``invalid_grant`` (revoked / expired). Raises
     :class:`EmailProviderConfigurationError` when the env config is
     missing.
     """
 
     stmt = select(Account).where(
-        Account.user_id == user_id, Account.provider_id == "microsoft"
+        Account.id == account_id, Account.provider_id == "microsoft"
     )
     account = (await db.execute(stmt)).scalar_one_or_none()
     if account is None:
         raise EmailAccountNotLinked(
-            f"No Microsoft account linked for user {user_id}."
+            f"No Microsoft account row found for id {account_id}."
         )
 
     scopes = _parse_scopes(account.scope)
@@ -81,7 +79,7 @@ async def get_fresh_microsoft_access_token(
 
     if not account.refresh_token:
         raise EmailAccountNotLinked(
-            f"User {user_id} has a Microsoft account but no refresh token."
+            f"Microsoft account {account_id} has no refresh token."
         )
 
     new_access_token, new_expires_at = await _refresh_access_token(

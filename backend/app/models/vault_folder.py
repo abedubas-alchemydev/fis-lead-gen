@@ -57,6 +57,13 @@ class VaultFolder(Base):
     outreach_instructions: Mapped[str] = mapped_column(
         Text, nullable=False, server_default=""
     )
+    # Soft reference to ``account.id`` (no FK; see migration 0058).
+    # When set, the Outreach modal preselects this account when the
+    # folder is chosen. Modal falls back to the first linked account
+    # with send-scope if the referenced account is gone.
+    default_sender_account_id: Mapped[str | None] = mapped_column(
+        String(255), nullable=True
+    )
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True),
         nullable=False,

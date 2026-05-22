@@ -56,6 +56,9 @@ from app.services.email_providers import (
     EmailScopeRequired,
     EmailSendError,
 )
+from app.services.email_providers.email_address import (
+    extract_email_from_id_token,
+)
 from app.services.outreach import (
     ContactContext,
     FirmContext,
@@ -255,6 +258,12 @@ async def send_outreach(
         # so this only fires if the API is called directly.
         raise HTTPException(status_code=400, detail="recipient_no_email")
 
+    sender_account = await _resolve_sender_account(
+        db=db,
+        current_user=current_user,
+        folder=folder,
+        explicit_account_id=payload.sender_account_id,
+    )
     audit = OutreachSend(
         user_id=current_user.id,
         broker_dealer_id=payload.broker_dealer_id,
@@ -263,16 +272,16 @@ async def send_outreach(
         subject=payload.subject,
         body=payload.body,
         status="failed",
-        provider=payload.provider,
+        provider=sender_account.provider_id,
     )
     return await _provider_send_and_record(
         db=db,
         current_user=current_user,
         audit=audit,
+        sender_account=sender_account,
         recipient_email=contact.email,
         subject=payload.subject,
         body=payload.body,
-        provider_id=payload.provider,
     )
 
 
@@ -535,7 +544,13 @@ def _row_to_item(row: tuple, *, include_sender: bool) -> dict:
     if include_sender:
         payload["user_id"] = send.user_id
         payload["sender_name"] = row[11]
-        payload["sender_email"] = row[12]
+        # Prefer the point-in-time ``outreach_sends.sender_email``
+        # column so admin sorting reflects the mailbox that actually
+        # transmitted (not the login email, which can differ once a
+        # user routes through a non-login linked account). Falls
+        # back to the joined AuthUser.email for legacy rows where the
+        # 0057 backfill is the only data we have.
+        payload["sender_email"] = send.sender_email or row[12]
     return payload
 
 
@@ -648,6 +663,12 @@ async def send_advisor_outreach(
     if not contact.email:
         raise HTTPException(status_code=400, detail="recipient_no_email")
 
+    sender_account = await _resolve_sender_account(
+        db=db,
+        current_user=current_user,
+        folder=folder,
+        explicit_account_id=payload.sender_account_id,
+    )
     audit = OutreachSend(
         user_id=current_user.id,
         advisor_id=payload.advisor_id,
@@ -656,16 +677,16 @@ async def send_advisor_outreach(
         subject=payload.subject,
         body=payload.body,
         status="failed",
-        provider=payload.provider,
+        provider=sender_account.provider_id,
     )
     return await _provider_send_and_record(
         db=db,
         current_user=current_user,
         audit=audit,
+        sender_account=sender_account,
         recipient_email=contact.email,
         subject=payload.subject,
         body=payload.body,
-        provider_id=payload.provider,
     )
 
 
@@ -717,6 +738,12 @@ async def send_investor_outreach(
     if not contact.email:
         raise HTTPException(status_code=400, detail="recipient_no_email")
 
+    sender_account = await _resolve_sender_account(
+        db=db,
+        current_user=current_user,
+        folder=folder,
+        explicit_account_id=payload.sender_account_id,
+    )
     audit = OutreachSend(
         user_id=current_user.id,
         institutional_investor_id=payload.institutional_investor_id,
@@ -725,17 +752,113 @@ async def send_investor_outreach(
         subject=payload.subject,
         body=payload.body,
         status="failed",
-        provider=payload.provider,
+        provider=sender_account.provider_id,
     )
     return await _provider_send_and_record(
         db=db,
         current_user=current_user,
         audit=audit,
+        sender_account=sender_account,
         recipient_email=contact.email,
         subject=payload.subject,
         body=payload.body,
-        provider_id=payload.provider,
     )
+
+
+async def _resolve_sender_account(
+    *,
+    db: AsyncSession,
+    current_user: AuthenticatedUser,
+    folder: VaultFolder,
+    explicit_account_id: str | None,
+) -> Account:
+    """Pick which linked OAuth account should send for this request.
+
+    Three-tier fallback (deterministic — no session-state surprises):
+      1. Explicit ``sender_account_id`` from the request body (the
+         picker in the outreach modal).
+      2. The folder's ``default_sender_account_id`` (set on the vault
+         folder detail page).
+      3. The first linked account with the send scope already granted
+         (oldest first; lets onboarding "just work" with one account).
+      4. The first linked account at all (will surface a 412
+         ``*_scope_required`` downstream and the FE will re-prompt
+         consent).
+
+    Raises ``HTTPException`` with a 412 + provider-prefixed
+    ``*_account_not_linked`` code when the user has no linked
+    accounts. Defaults to ``google_account_not_linked`` for the
+    zero-accounts case so the FE shows "Connect Gmail" -- the most
+    common onboarding path.
+    """
+
+    if explicit_account_id:
+        stmt = select(Account).where(
+            Account.id == explicit_account_id,
+            Account.user_id == current_user.id,
+            Account.provider_id.in_(("google", "microsoft", "yahoo")),
+        )
+        account = (await db.execute(stmt)).scalar_one_or_none()
+        if account is None:
+            # Don't leak whether the id exists for another user — 404
+            # mirrors the rest of the outreach endpoint family.
+            raise HTTPException(
+                status_code=404, detail="sender_account_not_found"
+            )
+        return account
+
+    if folder.default_sender_account_id:
+        stmt = select(Account).where(
+            Account.id == folder.default_sender_account_id,
+            Account.user_id == current_user.id,
+            Account.provider_id.in_(("google", "microsoft", "yahoo")),
+        )
+        account = (await db.execute(stmt)).scalar_one_or_none()
+        if account is not None:
+            return account
+        # Fall through silently when the folder default is gone — modal
+        # surfaces the orphan separately on the picker side.
+
+    linked_stmt = (
+        select(Account)
+        .where(Account.user_id == current_user.id)
+        .where(Account.provider_id.in_(("google", "microsoft", "yahoo")))
+        .order_by(Account.created_at.asc())
+    )
+    linked = (await db.execute(linked_stmt)).scalars().all()
+    if not linked:
+        raise HTTPException(
+            status_code=412, detail="google_account_not_linked"
+        )
+
+    for account in linked:
+        provider = PROVIDERS.get(account.provider_id)
+        if provider is None:
+            continue
+        scopes = (account.scope or "").replace(",", " ").split()
+        if provider.send_scope in scopes:
+            return account
+    return linked[0]
+
+
+async def _backfill_account_email(
+    db: AsyncSession, account: Account
+) -> None:
+    """Populate ``account.email_address`` from the stored id_token.
+
+    Idempotent — no-op if already set. Used by the send path so legacy
+    rows (linked before the FE's post-link hook existed) get their
+    email captured on first send instead of staying blank forever.
+    """
+
+    if account.email_address:
+        return
+    email = extract_email_from_id_token(account.provider_id, account.id_token)
+    if not email:
+        return
+    account.email_address = email
+    # No commit here — the caller's transaction (which writes the
+    # outreach_sends audit row) carries it.
 
 
 async def _provider_send_and_record(
@@ -743,24 +866,24 @@ async def _provider_send_and_record(
     db: AsyncSession,
     current_user: AuthenticatedUser,
     audit: OutreachSend,
+    sender_account: Account,
     recipient_email: str,
     subject: str,
     body: str,
-    provider_id: str,
 ) -> OutreachSendResponse:
-    """Dispatch the send to the right provider + commit the audit row.
+    """Dispatch the send via the resolved sender account + commit the audit.
 
-    Replaces the Gmail-only ``_gmail_send_and_record`` helper from the
-    pre-multi-provider era. Looks up the provider implementation in
-    :data:`PROVIDERS`, runs the token refresh + scope check + send,
-    and surfaces typed errors as HTTPExceptions with provider-prefixed
-    detail codes so the FE knows which "Connect X" CTA to render.
+    The caller resolves the sender account via :func:`_resolve_sender_account`
+    so this helper stays focused on the provider plumbing. Provider is
+    derived from ``sender_account.provider_id`` (the client-passed
+    ``provider`` field is now legacy and overridden).
 
-    Error-code shape: the Gmail path keeps its legacy ``gmail_*`` codes
-    for FE back-compat; Microsoft + Yahoo emit ``<provider>_*`` codes
-    (see :data:`_SCOPE_ERROR_CODE` / :data:`_API_ERROR_CODE`).
+    Sets ``audit.sender_account_id``, ``audit.sender_email``, and
+    ``audit.provider`` from the resolved account before committing,
+    so the audit row always reflects which mailbox actually transmitted.
     """
 
+    provider_id = sender_account.provider_id
     provider = PROVIDERS.get(provider_id)
     if provider is None:
         await _record_failure(db, audit, "unknown_provider")
@@ -771,9 +894,18 @@ async def _provider_send_and_record(
     scope_required_code = _SCOPE_ERROR_CODE[provider_id]
     api_error_code = _API_ERROR_CODE[provider_id]
 
+    # Lazy-backfill email_address from id_token before we use it as the
+    # send-time From address. Sits before get_fresh_token so a refresh
+    # that mutates the account row commits the backfill in one shot.
+    await _backfill_account_email(db, sender_account)
+
+    audit.provider = provider_id
+    audit.sender_account_id = sender_account.id
+    audit.sender_email = sender_account.email_address or current_user.email
+
     try:
         access_token, scopes = await provider.get_fresh_token(
-            db=db, user_id=current_user.id
+            db=db, account_id=sender_account.id
         )
     except EmailAccountNotLinked as exc:
         await _record_failure(db, audit, not_linked_code)
@@ -796,7 +928,7 @@ async def _provider_send_and_record(
     try:
         message_id = await provider.send(
             access_token=access_token,
-            sender_email=current_user.email,
+            sender_email=audit.sender_email,
             to_email=recipient_email,
             subject=subject,
             body=body,
@@ -918,19 +1050,18 @@ async def list_linked_providers(
     current_user: AuthenticatedUser = Depends(get_current_user),
     db: AsyncSession = Depends(get_db_session),
 ) -> LinkedProvidersResponse:
-    """Which email providers the calling user has linked + whether each
-    one already has the send scope granted.
+    """Linked OAuth accounts for the calling user, one entry per account.
 
-    Used by the Outreach modal to drive the provider picker:
-      - 0 linked: render "Connect Gmail / Outlook / Yahoo" buttons.
-      - 1 linked: hide picker, use it implicitly.
-      - 2+ linked: render a small "Send from:" dropdown.
+    Used by the Outreach modal's "Send from" dropdown — a user with
+    two Google accounts plus an Outlook account gets three entries,
+    not three provider types. Each entry includes the bound mailbox
+    (``email_address``, captured on link via the FE post-link hook)
+    so the picker can label rows by address instead of provider name.
 
-    Returns rows ordered by ``linked_at`` ascending (oldest first) so
-    the modal can pick a deterministic default when more than one is
-    linked. Only the three supported providers are surfaced; any other
-    ``account.provider_id`` rows (e.g. legacy migrations) are filtered
-    out.
+    Lazy-backfills ``email_address`` from the stored ``id_token`` for
+    rows linked before the post-link hook existed -- the modal needs
+    a label even for legacy accounts. Rows ordered by ``linked_at``
+    ascending so the modal can pick a deterministic default.
     """
 
     stmt = (
@@ -941,23 +1072,32 @@ async def list_linked_providers(
     )
     accounts = (await db.execute(stmt)).scalars().all()
 
+    dirty = False
     items: list[LinkedProviderItem] = []
     for account in accounts:
-        # provider_id is already validated by the WHERE clause above, but
-        # cast through dict lookup so a future provider_id added at the
-        # DB level can't sneak past the Literal type. Note: PROVIDERS
-        # may be subset-mocked in tests.
         provider = PROVIDERS.get(account.provider_id)
         if provider is None:
             continue
         scopes = (account.scope or "").replace(",", " ").split()
         has_send_scope = provider.send_scope in scopes
+        if account.email_address is None:
+            email = extract_email_from_id_token(
+                account.provider_id, account.id_token
+            )
+            if email:
+                account.email_address = email
+                dirty = True
         items.append(
             LinkedProviderItem(
+                account_id=account.id,
+                provider_account_id=account.account_id,
                 provider=account.provider_id,  # type: ignore[arg-type]
+                email_address=account.email_address,
                 scope=account.scope,
                 has_send_scope=has_send_scope,
                 linked_at=account.created_at,
             )
         )
+    if dirty:
+        await db.commit()
     return LinkedProvidersResponse(items=items)

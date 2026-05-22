@@ -544,6 +544,10 @@ export type VaultFolder = {
   name: string;
   description: string;
   outreach_instructions: string;
+  // PK of the ``account`` row this folder defaults to when the user
+  // opens the Outreach modal for any of this folder's contacts. Null
+  // means "no default — apply the user-level fallback chain instead."
+  default_sender_account_id: string | null;
   created_at: string;
   updated_at: string;
 };
@@ -552,12 +556,16 @@ export type VaultFolderCreate = {
   name: string;
   description: string;
   outreach_instructions?: string;
+  default_sender_account_id?: string | null;
 };
 
 export type VaultFolderUpdate = {
   name?: string;
   description?: string;
   outreach_instructions?: string;
+  // ``null`` clears the default, a string sets it. Omit to leave alone
+  // (the FE forms use react-state -> explicit-null to clear).
+  default_sender_account_id?: string | null;
 };
 
 // File rows attached to a folder. The status walks
@@ -600,7 +608,13 @@ export type OutreachSendRequest = {
   folder_id: number;
   subject: string;
   body: string;
+  // Legacy field kept for back-compat. Once ``sender_account_id`` is
+  // set the server derives the provider from the account row.
   provider?: EmailProviderId;
+  // PK of the ``account`` row to send from. Optional; server applies
+  // the 3-tier fallback (folder default -> first send-scoped -> first
+  // linked) when omitted.
+  sender_account_id?: string | null;
 };
 
 export type OutreachSendResponse = {
@@ -651,7 +665,19 @@ export type OutreachSendItem = {
 // CTA (0 linked), or just use the only linked provider implicitly
 // (1 linked).
 export type LinkedProviderItem = {
+  // PK of the ``account`` row -- one entry per linked account, not
+  // per provider type (a user can link multiple Google accounts).
+  // FE passes this back as ``sender_account_id`` on the send call.
+  account_id: string;
+  // OAuth provider's external user id. Used by Better Auth's
+  // /unlink-account endpoint to disambiguate which account to drop
+  // when the user has multiple of the same provider linked.
+  provider_account_id: string;
   provider: EmailProviderId;
+  // The mailbox the OAuth token is bound to (e.g. "alice@firm.com").
+  // Null for legacy accounts linked before the post-link hook --
+  // the picker labels those by provider name in that case.
+  email_address: string | null;
   scope: string | null;
   has_send_scope: boolean;
   linked_at: string;
@@ -1015,6 +1041,7 @@ export type OutreachAdvisorSendRequest = OutreachAdvisorDraftRequest & {
   subject: string;
   body: string;
   provider?: EmailProviderId;
+  sender_account_id?: string | null;
 };
 
 export type OutreachInvestorDraftRequest = {
@@ -1027,4 +1054,5 @@ export type OutreachInvestorSendRequest = OutreachInvestorDraftRequest & {
   subject: string;
   body: string;
   provider?: EmailProviderId;
+  sender_account_id?: string | null;
 };

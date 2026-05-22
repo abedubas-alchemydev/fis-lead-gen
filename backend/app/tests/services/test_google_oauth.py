@@ -36,8 +36,11 @@ class _FakeAccount:
 
     We only need the fields ``get_fresh_google_access_token`` touches
     (the rest of the column set is irrelevant to the refresh logic).
+    Keyed by ``id`` (Better Auth's PK) now that the helper accepts
+    ``account_id`` instead of ``user_id``.
     """
 
+    id: str = "acc-1"
     user_id: str = "user-1"
     provider_id: str = "google"
     access_token: str | None = None
@@ -123,7 +126,7 @@ async def test_get_fresh_token_raises_not_linked_when_no_google_account(
     session = _FakeSession(account=None)
     with pytest.raises(GoogleAccountNotLinked):
         await google_oauth.get_fresh_google_access_token(
-            db=session, user_id="user-1"  # type: ignore[arg-type]
+            db=session, account_id="acc-1"  # type: ignore[arg-type]
         )
 
 
@@ -140,7 +143,7 @@ async def test_get_fresh_token_returns_existing_when_not_near_expiry() -> None:
     session = _FakeSession(account=account)
 
     token, scopes = await google_oauth.get_fresh_google_access_token(
-        db=session, user_id="user-1"  # type: ignore[arg-type]
+        db=session, account_id="acc-1"  # type: ignore[arg-type]
     )
 
     assert token == "existing-token"
@@ -177,7 +180,7 @@ async def test_get_fresh_token_refreshes_when_expired(
     session = _FakeSession(account=account)
 
     token, scopes = await google_oauth.get_fresh_google_access_token(
-        db=session, user_id="user-1"  # type: ignore[arg-type]
+        db=session, account_id="acc-1"  # type: ignore[arg-type]
     )
 
     assert token == "new-token"
@@ -205,7 +208,7 @@ async def test_get_fresh_token_raises_not_linked_when_refresh_token_missing() ->
 
     with pytest.raises(GoogleAccountNotLinked):
         await google_oauth.get_fresh_google_access_token(
-            db=session, user_id="user-1"  # type: ignore[arg-type]
+            db=session, account_id="acc-1"  # type: ignore[arg-type]
         )
 
 
