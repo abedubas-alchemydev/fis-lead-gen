@@ -35,7 +35,7 @@ export function MicrosoftButton({
       await authClient.signIn.social({
         provider: "microsoft",
         callbackURL: "/dashboard",
-        errorCallbackURL: "/pending-approval"
+        errorCallbackURL: "/pending-approval?via=oauth"
       });
     } catch {
       setIsPending(false);
