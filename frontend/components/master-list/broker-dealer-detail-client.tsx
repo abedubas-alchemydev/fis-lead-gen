@@ -40,7 +40,13 @@ import { SectionPanel } from "@/components/ui/section-panel";
 import { ListPicker } from "@/components/list-picker/list-picker";
 import { Pill } from "@/components/ui/pill";
 import { UnknownCell } from "@/components/master-list/unknown-cell";
-import { apiRequest, buildApiPath } from "@/lib/api";
+import {
+  apiRequest,
+  buildApiPath,
+  getPipelineRunStatus,
+  refreshFirm,
+} from "@/lib/api";
+import { PageSpinner } from "@/components/ui/spinner";
 import { parseArrangementBlob } from "@/lib/arrangements";
 import { listScansForBrokerDealer } from "@/lib/email-extractor";
 import {
@@ -178,6 +184,18 @@ export function BrokerDealerDetailClient({ brokerDealerId }: { brokerDealerId: s
   const [filingTotal, setFilingTotal] = useState(0);
   const [filingTotalPages, setFilingTotalPages] = useState(0);
   const [filingLoading, setFilingLoading] = useState(false);
+
+  // Refresh-on-visit gating. We POST /refresh-all on mount so the BE's
+  // per-pipeline gates can fill any missing column before we render.
+  // The /profile fetch below is gated on `refreshState.phase === "ready"`
+  // so the user sees the loading screen until the orchestrator's child
+  // pipelines finish (or short-circuit). Errors fall through to "ready"
+  // — refresh is best-effort, never blocks the page indefinitely.
+  type RefreshPhase =
+    | { phase: "queuing" }
+    | { phase: "polling"; runId: number; pipelinesRunning: string[] }
+    | { phase: "ready" };
+  const [refreshState, setRefreshState] = useState<RefreshPhase>({ phase: "queuing" });
 
   // Resolve adjacent firm IDs.
   //
@@ -324,6 +342,98 @@ export function BrokerDealerDetailClient({ brokerDealerId }: { brokerDealerId: s
     });
   }, [brokerDealerId]);
 
+  // Refresh-on-visit: POST /refresh-all and poll the parent PipelineRun
+  // until terminal. Three short-circuit paths short of "ready":
+  //   - 200 status="skipped" -> no work needed, flip to ready immediately
+  //   - 202 status="queued" -> poll the new run_id
+  //   - 409 (normalized in lib/api refreshFirm) -> attach to in-flight run
+  // 429 cooldown and any unexpected ApiError fall through to ready so
+  // the user still sees the page with whatever data the DB has. The
+  // 180-second polling deadline is the same as
+  // scripts/standalone_refresh_all_loop.py used in PR #477.
+  useEffect(() => {
+    const numericId = Number(brokerDealerId);
+    if (!Number.isFinite(numericId)) {
+      setRefreshState({ phase: "ready" });
+      return;
+    }
+    let active = true;
+    let pollTimer: ReturnType<typeof setTimeout> | null = null;
+
+    function parsePipelinesRunning(notes: string | null): string[] {
+      if (!notes) return [];
+      try {
+        const parsed = JSON.parse(notes) as { ran?: unknown };
+        if (Array.isArray(parsed.ran)) {
+          return parsed.ran.filter((x): x is string => typeof x === "string");
+        }
+      } catch {
+        /* notes isn't structured JSON yet (early in lifecycle) */
+      }
+      return [];
+    }
+
+    async function pollUntilTerminal(runId: number) {
+      const deadline = Date.now() + 180_000;
+      const TERMINAL = new Set(["completed", "completed_with_errors", "failed"]);
+      while (active && Date.now() < deadline) {
+        try {
+          const detail = await getPipelineRunStatus(runId);
+          if (!active) return;
+          if (TERMINAL.has(detail.status)) {
+            setRefreshState({ phase: "ready" });
+            return;
+          }
+          // Still queued / running — update visible progress and wait.
+          setRefreshState({
+            phase: "polling",
+            runId,
+            pipelinesRunning: parsePipelinesRunning(detail.notes),
+          });
+        } catch {
+          // Transient poll error — wait and try again. If it persists,
+          // the deadline below catches us out.
+        }
+        await new Promise<void>((resolve) => {
+          pollTimer = setTimeout(resolve, 2000);
+        });
+      }
+      // Deadline elapsed — fall through and render with whatever the DB
+      // has now. The orchestrator may still be running server-side; a
+      // future visit will pick up the fresh data.
+      if (active) setRefreshState({ phase: "ready" });
+    }
+
+    async function run() {
+      try {
+        const result = await refreshFirm(numericId, "all");
+        if (!active) return;
+        if (result.status === "skipped" || result.run_id === null) {
+          // Backend short-circuited — every per-pipeline gate was closed.
+          // No PipelineRun row created, nothing to poll.
+          setRefreshState({ phase: "ready" });
+          return;
+        }
+        setRefreshState({
+          phase: "polling",
+          runId: result.run_id,
+          pipelinesRunning: [],
+        });
+        await pollUntilTerminal(result.run_id);
+      } catch {
+        // 429 cooldown, 503 missing provider, network blip, etc. — fall
+        // through so the page renders with the existing data.
+        if (active) setRefreshState({ phase: "ready" });
+      }
+    }
+    void run();
+
+    return () => {
+      active = false;
+      if (pollTimer !== null) clearTimeout(pollTimer);
+    };
+  }, [brokerDealerId]);
+
   const reloadProfile = useCallback(async () => {
     const response = await apiRequest<BrokerDealerProfileResponse>(
       `/api/v1/broker-dealers/${brokerDealerId}/profile`,
@@ -332,6 +442,11 @@ export function BrokerDealerDetailClient({ brokerDealerId }: { brokerDealerId: s
   }, [brokerDealerId]);
 
   useEffect(() => {
+    // Wait for refresh-on-visit to finish before fetching /profile so
+    // the page renders with the freshest data the orchestrator can
+    // produce. While refreshState.phase is "queuing" or "polling" the
+    // loading-screen branches below intercept the render anyway.
+    if (refreshState.phase !== "ready") return;
     let active = true;
     async function loadProfile() {
       try {
@@ -351,7 +466,7 @@ export function BrokerDealerDetailClient({ brokerDealerId }: { brokerDealerId: s
     return () => {
       active = false;
     };
-  }, [brokerDealerId]);
+  }, [brokerDealerId, refreshState.phase]);
 
   // Hydrate the inline "Discovered Emails" section. Two sources, in
   // precedence order:
@@ -537,6 +652,28 @@ export function BrokerDealerDetailClient({ brokerDealerId }: { brokerDealerId: s
         value: item.net_capital,
       }));
   }, [profile]);
+
+  // Refresh-on-visit gate. Show the loading screen while the BE
+  // orchestrator is queuing or running. Once it goes "ready" the
+  // /profile fetch below populates and the existing render path runs.
+  if (refreshState.phase === "queuing") {
+    return (
+      <div className="px-7 pb-12 pt-7 lg:px-9">
+        <PageSpinner label="Preparing fresh data for this firm…" />
+      </div>
+    );
+  }
+  if (refreshState.phase === "polling") {
+    const label =
+      refreshState.pipelinesRunning.length > 0
+        ? `Refreshing ${refreshState.pipelinesRunning.join(", ")}…`
+        : "Refreshing firm data…";
+    return (
+      <div className="px-7 pb-12 pt-7 lg:px-9">
+        <PageSpinner label={label} />
+      </div>
+    );
+  }
 
   if (error) {
     return (
