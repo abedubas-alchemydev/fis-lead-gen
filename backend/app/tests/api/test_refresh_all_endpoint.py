@@ -17,7 +17,8 @@ Coverage:
   - 401 unauthenticated.
   - 404 firm not found.
   - 503 when a required provider key is missing.
-  - 409 when an in-flight refresh-all already exists for this firm.
+  - 202 attach-to-existing when an in-flight refresh-all already exists
+    for this firm (status="in_flight"; no new row, no background work).
   - 429 when the per-(user, BD) cooldown is hit.
   - Background-task wrapper delegates to the orchestrator and swallows
     exceptions.
@@ -407,11 +408,15 @@ async def test_provider_key_missing_returns_503(
     assert stub_background == []
 
 
-async def test_in_flight_run_returns_409_with_existing_run_id(
+async def test_in_flight_run_returns_202_with_existing_run_id(
     monkeypatch: pytest.MonkeyPatch,
     override_db: _FakeAsyncSession,
     stub_background: list[dict[str, Any]],
 ) -> None:
+    # An in-flight run attaches the caller to that run via 202 +
+    # status="in_flight" instead of 409. The FE polls run_id identically
+    # in the queued and in-flight cases, and the browser no longer logs a
+    # cosmetic console error for the refresh-on-visit POST.
     bd = _bd()
     in_flight = PipelineRun(
         id=8888,
@@ -442,11 +447,13 @@ async def test_in_flight_run_returns_409_with_existing_run_id(
     finally:
         app.dependency_overrides.pop(get_current_user, None)
 
-    assert response.status_code == 409
-    detail = response.json()["detail"]
-    assert detail["run_id"] == 8888
-    assert detail["status"] == "running"
-    assert detail["broker_dealer_id"] == bd.id
+    assert response.status_code == 202
+    body = response.json()
+    assert body["run_id"] == 8888
+    assert body["status"] == "in_flight"
+    assert body["broker_dealer_id"] == bd.id
+    # No new run is created and no background work is scheduled — we just
+    # attach to the existing in-flight run.
     assert override_db.added == []
     assert stub_background == []
 
