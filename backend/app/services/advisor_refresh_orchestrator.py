@@ -43,6 +43,7 @@ from dataclasses import dataclass
 from datetime import datetime, timezone
 from typing import Iterable, Literal
 
+import httpx
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -54,11 +55,53 @@ from app.services.apollo import ApolloClient
 from app.services.brokercheck_pdf import (
     FinraPdfFetchError,
     FinraPdfNotFound,
+    _parse_form_bd_pdf,
     fetch_form_bd_detail,
 )
+from app.services.finra_pdf_service import fetch_brokercheck_pdf
 from app.services.serpapi import SerpAPIClient
 from app.services.serper import SerperClient
 from app.services.website_resolver import resolve_website
+
+
+# IA-only firms (Vanguard, BlackRock IA arms, etc.) have no BrokerCheck
+# firm-PDF -- the FINRA endpoint returns 403/404 for them. SEC's IAPD
+# system serves their Form ADV PDF instead. URL pattern verified
+# against CRD 105958 (Vanguard) -- returns a 7.9 MB PDF with the same
+# "Direct Owners and Executive Officers" section header the existing
+# parser anchors on. Sections like "Firm Operations" / "Clearing
+# Arrangements" don't exist in Form ADV; the parser falls through to
+# None for those, which is fine because we only consume
+# ``executive_officers`` from the result.
+IAPD_PDF_URL_TEMPLATE = "https://reports.adviserinfo.sec.gov/reports/ADV/{crd}/PDF/{crd}.pdf"
+IAPD_REQUEST_TIMEOUT_SECONDS = 30.0
+
+
+async def _fetch_iapd_form_adv_pdf(crd: str) -> bytes:
+    """Download the IAPD Form ADV PDF for ``crd``. Raises
+    :class:`FinraPdfFetchError` on any non-2xx or transport error, and
+    :class:`FinraPdfNotFound` when SEC returns 404 (no ADV on file).
+    """
+    url = IAPD_PDF_URL_TEMPLATE.format(crd=crd)
+    headers = {
+        "User-Agent": settings.sec_user_agent,
+        "Accept": "application/pdf",
+    }
+    try:
+        async with httpx.AsyncClient(
+            timeout=IAPD_REQUEST_TIMEOUT_SECONDS, follow_redirects=True
+        ) as client:
+            response = await client.get(url, headers=headers)
+    except httpx.HTTPError as exc:
+        raise FinraPdfFetchError(f"iapd network: {exc.__class__.__name__}: {exc}") from exc
+    if response.status_code == 404:
+        raise FinraPdfNotFound(f"no IAPD PDF for CRD {crd}")
+    if response.status_code != 200:
+        raise FinraPdfFetchError(f"iapd http {response.status_code}")
+    pdf_bytes = response.content
+    if not pdf_bytes.startswith(b"%PDF"):
+        raise FinraPdfFetchError("iapd response body is not a PDF")
+    return pdf_bytes
 
 
 RefreshScope = Literal["all"]
@@ -212,25 +255,48 @@ async def _run_refresh_owners_officers(
             crd = advisor.crd_number
 
         if not crd:
-            summary = "No CRD on record; cannot fetch BrokerCheck PDF."
+            summary = "No CRD on record; cannot fetch BrokerCheck or IAPD PDF."
             await _finalize_child(child_id, status="completed_with_errors", success=0, failure=1, summary=summary)
             return "completed_with_errors", summary
 
+        # Two-tier fetch: BrokerCheck firm PDF (works for BDs + dual-
+        # registered firms), then IAPD Form ADV PDF (works for IA-only
+        # firms like Vanguard / BlackRock advisor arms). Both PDFs use
+        # the same "Direct Owners and Executive Officers" section header
+        # so the existing parser handles either.
+        source = "brokercheck"
+        pdf_bytes: bytes | None = None
+        last_error: str | None = None
         try:
-            detail = await fetch_form_bd_detail(crd)
+            pdf_bytes = await fetch_brokercheck_pdf(crd)
         except FinraPdfNotFound:
-            # IA-only firms whose data lives at IAPD (not BrokerCheck) hit
-            # this path. Documented as a follow-up in the plan.
-            summary = "No BrokerCheck PDF on file for this CRD."
-            await _finalize_child(child_id, status="completed_with_errors", success=0, failure=1, summary=summary)
-            return "completed_with_errors", summary
+            last_error = "BrokerCheck 404"
         except FinraPdfFetchError as exc:
-            summary = f"FINRA fetch failed: {str(exc)[:160]}"
-            await _finalize_child(child_id, status="failed", success=0, failure=1, summary=summary)
-            return "failed", summary
+            # 403 from BrokerCheck for IA-only firms — fall through to IAPD.
+            last_error = f"BrokerCheck: {str(exc)[:120]}"
+
+        if pdf_bytes is None:
+            source = "iapd"
+            try:
+                pdf_bytes = await _fetch_iapd_form_adv_pdf(crd)
+            except FinraPdfNotFound:
+                summary = f"No PDF on file (BrokerCheck 404, IAPD 404)."
+                await _finalize_child(child_id, status="completed_with_errors", success=0, failure=1, summary=summary)
+                return "completed_with_errors", summary
+            except FinraPdfFetchError as exc:
+                summary = f"PDF fetch failed (BrokerCheck: {last_error}; IAPD: {str(exc)[:120]})"
+                await _finalize_child(child_id, status="failed", success=0, failure=1, summary=summary)
+                return "failed", summary
+
+        # Parse with the existing Form BD parser. For Form ADV PDFs from
+        # IAPD, only the "Direct Owners and Executive Officers" section is
+        # populated -- BD-specific fields (types_of_business, clearing
+        # arrangements) come back empty/None, which is the intended
+        # parser fallthrough.
+        detail = await asyncio.to_thread(_parse_form_bd_pdf, crd, pdf_bytes)
 
         if detail is None or not detail.executive_officers:
-            summary = "BrokerCheck PDF parsed but contained no Officers/Owners section."
+            summary = f"PDF ({source}) parsed but contained no Officers/Owners section."
             await _finalize_child(child_id, status="completed_with_errors", success=0, failure=1, summary=summary)
             return "completed_with_errors", summary
 
@@ -248,7 +314,7 @@ async def _run_refresh_owners_officers(
             # detail page's Executive Officers panel.
             await db.commit()
 
-        summary = f"Wrote {len(detail.executive_officers)} officer/owner record(s)."
+        summary = f"Wrote {len(detail.executive_officers)} officer/owner record(s) from {source}."
         await _finalize_child(child_id, status="completed", success=1, failure=0, summary=summary)
         return "completed", summary
     except Exception as exc:
