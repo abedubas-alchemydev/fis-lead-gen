@@ -7,7 +7,13 @@ import { useRouter, useSearchParams } from "next/navigation";
 
 import { ArrowLeft, ArrowRight, ExternalLink, Globe, Search } from "lucide-react";
 
-import { apiRequest, buildApiPath } from "@/lib/api";
+import {
+  apiRequest,
+  buildApiPath,
+  getPipelineRunStatus,
+  refreshAdvisor,
+} from "@/lib/api";
+import { PageSpinner } from "@/components/ui/spinner";
 import {
   buildAdvisorListUrl,
   encodeReturnParam,
@@ -95,7 +101,100 @@ export function AdvisorDetailClient({ advisorId }: { advisorId: string }) {
   const [prevId, setPrevId] = useState<number | null>(null);
   const [nextId, setNextId] = useState<number | null>(null);
 
+  // Refresh-on-visit gating. Mirrors broker-dealer-detail-client.tsx — we
+  // POST /refresh-all on mount so the BE's per-pipeline gates can fill any
+  // missing column (executive_officers, website) before we render. The
+  // /profile fetch below is gated on `refreshState.phase === "ready"` so
+  // the user sees the loading screen until the orchestrator's child
+  // pipelines finish (or short-circuit). Errors fall through to "ready" —
+  // refresh is best-effort, never blocks the page indefinitely.
+  type RefreshPhase =
+    | { phase: "queuing" }
+    | { phase: "polling"; runId: number; pipelinesRunning: string[] }
+    | { phase: "ready" };
+  const [refreshState, setRefreshState] = useState<RefreshPhase>({ phase: "queuing" });
+
+  // Refresh-on-visit: POST /refresh-all and poll the parent PipelineRun
+  // until terminal. Same handler shape + 180s poll deadline as the BD
+  // detail page (see broker-dealer-detail-client.tsx, PR #482).
   useEffect(() => {
+    const numericId = Number(advisorId);
+    if (!Number.isFinite(numericId)) {
+      setRefreshState({ phase: "ready" });
+      return;
+    }
+    let active = true;
+    let pollTimer: ReturnType<typeof setTimeout> | null = null;
+
+    function parsePipelinesRunning(notes: string | null): string[] {
+      if (!notes) return [];
+      try {
+        const parsed = JSON.parse(notes) as { ran?: unknown };
+        if (Array.isArray(parsed.ran)) {
+          return parsed.ran.filter((x): x is string => typeof x === "string");
+        }
+      } catch {
+        /* notes isn't structured JSON yet (early in lifecycle) */
+      }
+      return [];
+    }
+
+    async function pollUntilTerminal(runId: number) {
+      const deadline = Date.now() + 180_000;
+      const TERMINAL = new Set(["completed", "completed_with_errors", "failed"]);
+      while (active && Date.now() < deadline) {
+        try {
+          const detail = await getPipelineRunStatus(runId);
+          if (!active) return;
+          if (TERMINAL.has(detail.status)) {
+            setRefreshState({ phase: "ready" });
+            return;
+          }
+          setRefreshState({
+            phase: "polling",
+            runId,
+            pipelinesRunning: parsePipelinesRunning(detail.notes),
+          });
+        } catch {
+          // Transient poll error — wait and try again.
+        }
+        await new Promise<void>((resolve) => {
+          pollTimer = setTimeout(resolve, 2000);
+        });
+      }
+      if (active) setRefreshState({ phase: "ready" });
+    }
+
+    async function run() {
+      try {
+        const result = await refreshAdvisor(numericId, "all");
+        if (!active) return;
+        if (result.status === "skipped" || result.run_id === null) {
+          setRefreshState({ phase: "ready" });
+          return;
+        }
+        setRefreshState({
+          phase: "polling",
+          runId: result.run_id,
+          pipelinesRunning: [],
+        });
+        await pollUntilTerminal(result.run_id);
+      } catch {
+        // 429 / 503 / network — fall through so the page renders.
+        if (active) setRefreshState({ phase: "ready" });
+      }
+    }
+    void run();
+
+    return () => {
+      active = false;
+      if (pollTimer !== null) clearTimeout(pollTimer);
+    };
+  }, [advisorId]);
+
+  useEffect(() => {
+    // Wait for refresh-on-visit to finish before fetching /profile.
+    if (refreshState.phase !== "ready") return;
     apiRequest<InvestmentAdvisorProfileResponse>(
       `/api/v1/investment-advisors/${advisorId}/profile`,
     )
@@ -103,7 +202,7 @@ export function AdvisorDetailClient({ advisorId }: { advisorId: string }) {
       .catch((err) => {
         setError(err instanceof Error ? err.message : "Failed to load advisor");
       });
-  }, [advisorId]);
+  }, [advisorId, refreshState.phase]);
 
   // Restore the user's filter/sort state on back-nav, falling back to
   // the bare list URL if no return envelope was passed.
@@ -210,6 +309,28 @@ export function AdvisorDetailClient({ advisorId }: { advisorId: string }) {
     const base = `/advisor-list/${id}`;
     return (returnEnvelope ? `${base}?return=${returnEnvelope}` : base) as Route;
   };
+
+  // Refresh-on-visit gate. Show loading screen while the BE orchestrator
+  // is queuing or running. Once ready, the /profile fetch above populates
+  // and the existing render path runs.
+  if (refreshState.phase === "queuing") {
+    return (
+      <div className="px-7 pb-12 pt-7 lg:px-9">
+        <PageSpinner label="Preparing fresh data for this advisor…" />
+      </div>
+    );
+  }
+  if (refreshState.phase === "polling") {
+    const label =
+      refreshState.pipelinesRunning.length > 0
+        ? `Refreshing ${refreshState.pipelinesRunning.join(", ")}…`
+        : "Refreshing advisor data…";
+    return (
+      <div className="px-7 pb-12 pt-7 lg:px-9">
+        <PageSpinner label={label} />
+      </div>
+    );
+  }
 
   if (error) {
     return (

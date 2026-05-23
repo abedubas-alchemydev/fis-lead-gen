@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from datetime import date, datetime
-from typing import Self
+from typing import Literal, Self
 
 from pydantic import BaseModel, ConfigDict, field_validator, model_validator
 
@@ -163,3 +163,42 @@ class InvestmentAdvisorProfileResponse(BaseModel):
     contacts: list[AdvisorContactItem] = []
     filings: list[AdvisorFilingItem] = []
     is_favorited: bool = False
+
+
+# ─── Per-advisor refresh-all (IA analog of RefreshAllRequest/Response) ───────
+# Mirrors backend/app/schemas/broker_dealer.py:346-379 so the FE can reuse the
+# same polling + 409-conflict + 429-cooldown handling pattern. See plan in
+# C:/Users/DSWDSRV-CARAGA/.claude/plans/hos-is-the-new-gleaming-toast.md.
+
+class RefreshAdvisorRequest(BaseModel):
+    """Request body for ``POST /investment-advisors/{id}/refresh-all``.
+
+    ``scope="all"`` is the only initial scope. List-only scope can be added
+    later if the IA grid grows refresh-relevant columns; today the grid
+    surfaces only the always-populated AUM/filing fields, so list_only
+    would have nothing to skip.
+    """
+
+    scope: Literal["all"] = "all"
+
+
+class RefreshAdvisorResponse(BaseModel):
+    """Response shape for ``POST /investment-advisors/{id}/refresh-all``.
+
+    Two terminal shapes mirroring the BD endpoint:
+
+    - ``run_id=int, status="queued"`` — at least one sub-pipeline's gate
+      passed; FE polls ``GET /pipeline/run/{run_id}`` for the parent run's
+      terminal state and ``notes.summary`` toast string.
+    - ``run_id=None, status="skipped", reason="Already complete."`` — every
+      gate failed. No PipelineRun row, no provider calls, no cost.
+
+    On 409 conflict (a parent run is already in flight for this advisor),
+    the FE will read ``detail.run_id`` from the error envelope and start
+    polling that run instead.
+    """
+
+    run_id: int | None = None
+    status: str
+    advisor_id: int
+    reason: str | None = None
