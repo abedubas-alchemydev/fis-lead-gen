@@ -6,6 +6,7 @@ from typing import Literal, Self
 from pydantic import BaseModel, ConfigDict, field_validator, model_validator
 
 from app.schemas.alerts import AlertListItem
+from app.schemas.clearing_membership import ClearingMembershipItem
 from app.schemas.contact_hits import EmailHit, PhoneHit, synthesize_contact_arrays
 from app.schemas.pipeline import ClearingArrangementItem
 from app.schemas.unknown_reason import UnknownReason
@@ -75,6 +76,15 @@ class BrokerDealerListItem(BaseModel):
     # follow-up FE PR can use it to gate the detail-page enrich call.
     last_enrich_attempt_at: datetime | None = None
     created_at: datetime
+    # Clearing-agency / SRO membership labels. ``member_agencies`` is the
+    # sorted set of agency codes (OCC/DTC/NSCC/FICC-GOV/FICC-MBS) the firm is
+    # an active member of — attached per page by the list service with one
+    # batched query (no N+1), so it defaults to [] when not populated.
+    # ``clearing_membership_checked_at`` is the sentinel: NULL ⇒ never
+    # evaluated by the directory importer (FE renders nothing); non-NULL with
+    # empty ``member_agencies`` ⇒ "not a member".
+    member_agencies: list[str] = []
+    clearing_membership_checked_at: datetime | None = None
     # Populated when any field in the clearing cluster
     # (``current_clearing_partner``, ``current_clearing_type``) is None —
     # derived from the latest ``ClearingArrangement`` row's extraction_status
@@ -287,6 +297,9 @@ class BrokerDealerProfileResponse(BaseModel):
     broker_dealer: BrokerDealerDetail
     financials: list[FinancialMetricItem]
     clearing_arrangements: list[ClearingArrangementItem]
+    # Full clearing-agency / SRO membership rows with provenance (member
+    # number, source directory, match method). Active + needs_review only.
+    clearing_memberships: list[ClearingMembershipItem] = []
     introducing_arrangements: list[IntroducingArrangementItem]
     industry_arrangements: list[IndustryArrangementItem] = []
     recent_alerts: list[AlertListItem]

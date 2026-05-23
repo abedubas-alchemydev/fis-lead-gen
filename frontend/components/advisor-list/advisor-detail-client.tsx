@@ -25,6 +25,7 @@ import {
 import { formatCurrency, formatDate } from "@/lib/format";
 import { ListPicker } from "@/components/list-picker/list-picker";
 import { Pill } from "@/components/ui/pill";
+import { agencyLabel } from "@/components/master-list/detail/clearing-membership-helpers";
 import { SectionPanel } from "@/components/ui/section-panel";
 import type {
   InvestmentAdvisorListResponse,
@@ -482,9 +483,14 @@ export function AdvisorDetailClient({ advisorId }: { advisorId: string }) {
       </div>
 
       {/* ── Status pills row ────────────────────────────────────────────── */}
-      {advisor.files_13f ? (
+      {advisor.files_13f || advisor.member_agencies.length > 0 ? (
         <div className="mb-5 flex flex-wrap items-center gap-2">
-          <Pill variant="healthy">13F filer</Pill>
+          {advisor.files_13f ? <Pill variant="healthy">13F filer</Pill> : null}
+          {advisor.member_agencies.map((code) => (
+            <Pill key={code} variant="member">
+              {agencyLabel(code)} member
+            </Pill>
+          ))}
         </div>
       ) : null}
 

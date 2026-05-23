@@ -98,4 +98,12 @@ class BrokerDealer(Base):
     last_gap_fill_attempt_at: Mapped[datetime | None] = mapped_column(
         DateTime(timezone=True), nullable=True, index=True
     )
+    # Stamped by the clearing-agency-membership importer for every firm it
+    # evaluates against the OCC/DTCC directories. NULL means "never checked"
+    # (FE renders nothing); non-NULL with no active membership row means
+    # "evaluated, not a member" (FE renders "Not a member"). This sentinel is
+    # what distinguishes a confirmed non-member from an unprocessed firm.
+    clearing_membership_checked_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True, index=True
+    )
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now(), nullable=False)

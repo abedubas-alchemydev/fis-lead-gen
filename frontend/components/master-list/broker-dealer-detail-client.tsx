@@ -39,6 +39,7 @@ import {
 import { SectionPanel } from "@/components/ui/section-panel";
 import { ListPicker } from "@/components/list-picker/list-picker";
 import { Pill } from "@/components/ui/pill";
+import { agencyLabel } from "@/components/master-list/detail/clearing-membership-helpers";
 import { UnknownCell } from "@/components/master-list/unknown-cell";
 import {
   apiRequest,
@@ -817,6 +818,11 @@ export function BrokerDealerDetailClient({ brokerDealerId }: { brokerDealerId: s
             {bd.lead_score !== null ? ` · ${bd.lead_score.toFixed(0)}` : ""}
           </Pill>
         ) : null}
+        {bd.member_agencies.map((code) => (
+          <Pill key={code} variant="member">
+            {agencyLabel(code)} member
+          </Pill>
+        ))}
         {healthCheckResult ? (
           <span className="text-[12px] text-[var(--text-muted,#94a3b8)]">{healthCheckResult}</span>
         ) : null}

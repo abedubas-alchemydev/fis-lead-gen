@@ -9,6 +9,7 @@ from sqlalchemy.dialects.postgresql import insert
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.models.broker_dealer import BrokerDealer
+from app.models.clearing_agency_membership import ClearingAgencyMembership
 from app.models.clearing_arrangement import ClearingArrangement
 from app.models.industry_arrangement import IndustryArrangement
 from app.models.introducing_arrangement import IntroducingArrangement
@@ -375,7 +376,9 @@ class BrokerDealerRepository:
         unknown_reasons = await self._build_list_unknown_reasons(
             db, list(items)
         )
+        memberships = await self._build_list_memberships(db, list(items))
         for item in items:
+            item.member_agencies = memberships.get(item.id, [])
             clearing_reason, financial_reason = unknown_reasons.get(
                 item.id, (None, None)
             )
@@ -464,6 +467,53 @@ class BrokerDealerRepository:
             )
             out[bd_id] = (clearing_reason, financial_reason)
         return out
+
+    async def _build_list_memberships(
+        self,
+        db: AsyncSession,
+        broker_dealers: list[BrokerDealer],
+    ) -> dict[int, list[str]]:
+        """Map each BD id -> sorted active clearing-agency codes.
+
+        One batched ``WHERE broker_dealer_id IN :ids AND status='active'``
+        query per list response, mirroring ``_build_list_unknown_reasons``
+        so the master list never N+1s against the memberships table.
+        """
+        if not broker_dealers:
+            return {}
+        ids = [bd.id for bd in broker_dealers]
+        stmt = (
+            select(
+                ClearingAgencyMembership.broker_dealer_id,
+                ClearingAgencyMembership.agency,
+            )
+            .where(
+                ClearingAgencyMembership.broker_dealer_id.in_(ids),
+                ClearingAgencyMembership.status == "active",
+            )
+            .order_by(
+                ClearingAgencyMembership.broker_dealer_id.asc(),
+                ClearingAgencyMembership.agency.asc(),
+            )
+        )
+        out: dict[int, list[str]] = {}
+        for bd_id, agency in (await db.execute(stmt)).all():
+            out.setdefault(bd_id, []).append(agency)
+        return out
+
+    async def list_clearing_memberships(
+        self, db: AsyncSession, broker_dealer_id: int
+    ) -> list[ClearingAgencyMembership]:
+        """Full membership rows (active + needs_review) for the detail page."""
+        stmt = (
+            select(ClearingAgencyMembership)
+            .where(
+                ClearingAgencyMembership.broker_dealer_id == broker_dealer_id,
+                ClearingAgencyMembership.status.in_(("active", "needs_review")),
+            )
+            .order_by(ClearingAgencyMembership.agency.asc())
+        )
+        return list((await db.execute(stmt)).scalars().all())
 
     async def get_broker_dealer(self, db: AsyncSession, broker_dealer_id: int) -> BrokerDealer | None:
         return await db.get(BrokerDealer, broker_dealer_id)

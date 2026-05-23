@@ -73,6 +73,13 @@ class InvestmentAdvisor(Base):
     last_enrich_attempt_at: Mapped[datetime | None] = mapped_column(
         DateTime(timezone=True), nullable=True
     )
+    # Stamped by the clearing-agency-membership importer for every advisor it
+    # evaluates. NULL = never checked (FE renders nothing); non-NULL with no
+    # active membership row = "evaluated, not a member". Most IAs are
+    # correctly non-members; only dually-registered BD/IA firms match.
+    clearing_membership_checked_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True, index=True
+    )
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=func.now(), nullable=False
     )

@@ -87,6 +87,25 @@ export type BrokerDealerListItem = {
   types_of_business_other: string | null;
   dba_names: string[] | null;
   created_at: string;
+  // Clearing-agency / SRO membership labels. `member_agencies` is the set of
+  // agency codes (OCC/DTC/NSCC/FICC-GOV/FICC-MBS) the firm actively belongs
+  // to. `clearing_membership_checked_at` is the sentinel: null ⇒ never
+  // evaluated (render nothing); non-null + empty `member_agencies` ⇒ "Not a
+  // member".
+  member_agencies: string[];
+  clearing_membership_checked_at: string | null;
+};
+
+// One clearing-agency / SRO membership with provenance (firm detail page).
+export type ClearingMembershipItem = {
+  agency: string;
+  member_number: string | null;
+  member_name_raw: string;
+  source_file: string;
+  source_version: string | null;
+  match_method: string;
+  match_confidence: number | null;
+  status: string;
 };
 
 export type BrokerDealerListResponse = {
@@ -386,6 +405,9 @@ export type BrokerDealerProfileResponse = {
   broker_dealer: BrokerDealerListItem;
   financials: FinancialMetricItem[];
   clearing_arrangements: ClearingArrangementItem[];
+  // Full clearing-agency / SRO membership rows with provenance (active +
+  // needs_review).
+  clearing_memberships: ClearingMembershipItem[];
   introducing_arrangements: IntroducingArrangementItem[];
   industry_arrangements: IndustryArrangementItem[];
   recent_alerts: AlertListItem[];
@@ -846,6 +868,10 @@ export type InvestmentAdvisorListItem = {
   last_enrich_attempt_at: string | null;
   created_at: string;
   updated_at: string;
+  // Clearing-agency / SRO membership labels (same shape as BD). Mostly empty
+  // for IAs — only dually-registered BD/IA firms match.
+  member_agencies: string[];
+  clearing_membership_checked_at: string | null;
 };
 
 export type InvestmentAdvisorDetail = InvestmentAdvisorListItem;
@@ -894,6 +920,9 @@ export type InvestmentAdvisorProfileResponse = {
   advisor: InvestmentAdvisorDetail;
   contacts: AdvisorContactItem[];
   filings: AdvisorFilingItem[];
+  // Full clearing-agency / SRO membership rows with provenance (active +
+  // needs_review). Mostly empty for IAs.
+  clearing_memberships: ClearingMembershipItem[];
   is_favorited: boolean;
 };
 
