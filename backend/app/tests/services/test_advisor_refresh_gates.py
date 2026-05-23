@@ -14,17 +14,20 @@ from app.services.advisor_refresh_orchestrator import (
     ADV_REEXTRACT_COOLDOWN,
     SUB_ENRICH_CONTACTS,
     SUB_REFRESH_FILINGS,
+    SUB_REFRESH_IAPD_SUMMARY,
     SUB_REFRESH_OWNERS_OFFICERS,
     SUB_RESOLVE_ADVISOR_WEBSITE,
     _canonicalize_domain,
     _domain_from_website,
     _filing_priority,
     _normalize_org_name,
+    _parse_iapd_us_date,
     _parse_iso_date,
     _people_to_json,
     _split_officer_name,
     decide_pipelines,
 )
+from datetime import date as _date
 from app.services.gemini_responses import (
     GeminiAdvisorPerson,
     GeminiAdvisorProfileExtraction,
@@ -35,19 +38,23 @@ def _advisor(
     *,
     website: str | None = None,
     cik: str | None = None,
+    crd_number: str | None = None,
     executive_officers: object | None = None,
     direct_owners: object | None = None,
     client_types: object | None = None,
     firm_operations_text: str | None = None,
+    registration_date: _date | None = None,
     last_enrich_attempt_at: datetime | None = None,
 ) -> InvestmentAdvisor:
     advisor = InvestmentAdvisor()
     advisor.website = website
     advisor.cik = cik
+    advisor.crd_number = crd_number
     advisor.executive_officers = executive_officers
     advisor.direct_owners = direct_owners
     advisor.client_types = client_types
     advisor.firm_operations_text = firm_operations_text
+    advisor.registration_date = registration_date
     advisor.last_enrich_attempt_at = last_enrich_attempt_at
     return advisor
 
@@ -345,3 +352,51 @@ def test_advisor_profile_model_parses_full_payload() -> None:
     assert parsed.client_types == ["Investment companies", "Pooled investment vehicles"]
     assert parsed.indirect_owners == []
     assert parsed.confidence_score == 0.92
+
+
+# ── IAPD summary gate: needs CRD + registration_date empty + cooldown ──────
+
+
+def test_iapd_gate_open_when_crd_present_and_registration_date_missing() -> None:
+    decision = decide_pipelines(_advisor(crd_number="105958", registration_date=None))
+    assert SUB_REFRESH_IAPD_SUMMARY in decision.to_run
+
+
+def test_iapd_gate_closed_without_crd() -> None:
+    decision = decide_pipelines(_advisor(crd_number=None, registration_date=None))
+    assert SUB_REFRESH_IAPD_SUMMARY in decision.to_skip
+    assert SUB_REFRESH_IAPD_SUMMARY not in decision.to_run
+
+
+def test_iapd_gate_closed_when_registration_date_already_set() -> None:
+    decision = decide_pipelines(
+        _advisor(crd_number="105958", registration_date=_date(1976, 8, 23))
+    )
+    assert SUB_REFRESH_IAPD_SUMMARY in decision.to_skip
+
+
+def test_iapd_gate_suppressed_by_recent_attempt() -> None:
+    recent = datetime.now(timezone.utc) - (ADV_REEXTRACT_COOLDOWN / 2)
+    decision = decide_pipelines(
+        _advisor(crd_number="105958", registration_date=None, last_enrich_attempt_at=recent)
+    )
+    assert SUB_REFRESH_IAPD_SUMMARY in decision.to_skip
+
+
+# ── IAPD date parser (M/D/YYYY) ────────────────────────────────────────────
+
+
+def test_parse_iapd_us_date_standard() -> None:
+    assert _parse_iapd_us_date("8/23/1976") == _date(1976, 8, 23)
+
+
+def test_parse_iapd_us_date_zero_padded() -> None:
+    assert _parse_iapd_us_date("08/23/1976") == _date(1976, 8, 23)
+
+
+def test_parse_iapd_us_date_invalid() -> None:
+    assert _parse_iapd_us_date(None) is None
+    assert _parse_iapd_us_date("") is None
+    assert _parse_iapd_us_date("not a date") is None
+    assert _parse_iapd_us_date("1976-08-23") is None  # ISO format, not M/D/Y
+    assert _parse_iapd_us_date("13/45/1976") is None  # invalid month/day
