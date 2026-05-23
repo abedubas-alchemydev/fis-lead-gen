@@ -68,7 +68,7 @@ async def list_alerts(
     priority: list[str] | None = Query(default=None),
     read: bool | None = Query(default=None),
     broker_dealer_id: int | None = Query(default=None),
-    category: Literal["form_bd", "deficiency", "all"] | None = Query(default=None),
+    category: Literal["form_bd", "deficiency", "audited_financials", "all"] | None = Query(default=None),
     page: int = Query(default=1, ge=1),
     limit: int = Query(default=20, ge=1, le=100),
     _: AuthenticatedUser = Depends(_require_alerts),

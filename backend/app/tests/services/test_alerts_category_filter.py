@@ -18,10 +18,11 @@ Two layers of coverage:
      b) Each accepted value forwards verbatim to the repository.
      c) Omitted ``category`` forwards as ``None`` (default = no filter).
 
-The discriminator column is ``filing_alerts.form_type``, populated only by
-``services/filing_monitor.py`` with values ``"Form BD"`` (canonical Form BD
-filing) or ``"Form 17a-11"`` (deficiency notice). The category mapping is
-therefore a clean two-way split — no third bucket.
+The discriminator column is ``filing_alerts.form_type``, populated by the
+three live watcher services with values ``"Form BD"`` (registration filing),
+``"Form 17a-11"`` (deficiency notice), and ``"Form X-17A-5"`` (annual audited
+financials). The category mapping is a three-way split with ``all`` as the
+explicit no-filter sentinel.
 """
 
 from __future__ import annotations
@@ -129,6 +130,22 @@ async def test_category_deficiency_emits_form_17a11_predicate(
     where = _captured_where_sql(session)
     assert "filing_alerts.form_type = 'form 17a-11'" in where
     assert "form bd" not in where
+
+
+@pytest.mark.asyncio
+async def test_category_audited_financials_emits_form_x17a5_predicate(
+    repository: AlertRepository,
+) -> None:
+    session = _StagedSession()
+
+    await repository.list_alerts(
+        session, **_default_kwargs(), category="audited_financials"
+    )
+
+    where = _captured_where_sql(session)
+    assert "filing_alerts.form_type = 'form x-17a-5'" in where
+    assert "form bd" not in where
+    assert "form 17a-11" not in where
 
 
 @pytest.mark.asyncio
@@ -249,6 +266,16 @@ async def test_endpoint_forwards_deficiency_category(stubbed_endpoint) -> None:
         )
     assert response.status_code == 200, response.text
     assert stubbed_endpoint.await_args.kwargs["category"] == "deficiency"
+
+
+@pytest.mark.asyncio
+async def test_endpoint_forwards_audited_financials_category(stubbed_endpoint) -> None:
+    async with _client() as client:
+        response = await client.get(
+            "/api/v1/alerts", params={"category": "audited_financials"}
+        )
+    assert response.status_code == 200, response.text
+    assert stubbed_endpoint.await_args.kwargs["category"] == "audited_financials"
 
 
 @pytest.mark.asyncio
