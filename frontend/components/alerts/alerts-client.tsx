@@ -29,17 +29,19 @@ import { EmptyAlertsState } from "./empty-alerts-state";
 // secondary. Three-tab UI on top of the existing filters card mirrors
 // the master-list Primary / Alternative / All Firms pattern, wired to
 // the BE `category` query param shipped in PR #122/#124.
-type AlertCategory = "form_bd" | "deficiency" | "all";
+type AlertCategory = "form_bd" | "deficiency" | "audited_financials" | "all";
 
 const ALERT_CATEGORIES: ReadonlyArray<{ value: AlertCategory; label: string }> = [
   { value: "form_bd", label: "Form BD" },
   { value: "deficiency", label: "Deficiency Notices" },
+  { value: "audited_financials", label: "Audited Financials" },
   { value: "all", label: "All Alerts" },
 ];
 
 const ALERT_CATEGORY_VALUES: ReadonlyArray<AlertCategory> = [
   "form_bd",
   "deficiency",
+  "audited_financials",
   "all",
 ];
 
@@ -60,6 +62,7 @@ const FORM_TYPE_OPTIONS = [
   { value: "All", label: "All form types" },
   { value: "Form BD", label: "Form BD" },
   { value: "Form 17a-11", label: "Form 17a-11" },
+  { value: "Form X-17A-5", label: "Form X-17A-5" },
 ] as const;
 
 const PRIORITY_ITEMS: ReadonlyArray<SegmentedItem> = [
@@ -169,6 +172,7 @@ export function AlertsClient({
   >({
     form_bd: null,
     deficiency: null,
+    audited_financials: null,
     all: null,
   });
 
@@ -247,12 +251,15 @@ export function AlertsClient({
     let active = true;
 
     async function loadCategoryCounts() {
-      const [formBdResult, deficiencyResult, allResult] = await Promise.allSettled([
+      const [formBdResult, deficiencyResult, auditedResult, allResult] = await Promise.allSettled([
         apiRequest<AlertListResponse>(
           buildApiPath("/api/v1/alerts", { category: "form_bd", limit: 1 }),
         ),
         apiRequest<AlertListResponse>(
           buildApiPath("/api/v1/alerts", { category: "deficiency", limit: 1 }),
+        ),
+        apiRequest<AlertListResponse>(
+          buildApiPath("/api/v1/alerts", { category: "audited_financials", limit: 1 }),
         ),
         apiRequest<AlertListResponse>(
           buildApiPath("/api/v1/alerts", { category: "all", limit: 1 }),
@@ -268,6 +275,10 @@ export function AlertsClient({
         deficiency:
           deficiencyResult.status === "fulfilled"
             ? deficiencyResult.value.meta.total
+            : null,
+        audited_financials:
+          auditedResult.status === "fulfilled"
+            ? auditedResult.value.meta.total
             : null,
         all:
           allResult.status === "fulfilled" ? allResult.value.meta.total : null,
