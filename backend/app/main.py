@@ -12,8 +12,9 @@ from fastapi.middleware.cors import CORSMiddleware
 
 from app.api.router import api_router
 from app.core.config import settings
-from app.db.session import engine
+from app.db.session import SessionLocal, engine
 from app.services.alert_events import alert_event_bus
+from app.services.pipeline_reaper import reap_stale_refresh_runs
 
 if sys.platform == "win32":
     asyncio.set_event_loop_policy(asyncio.WindowsSelectorEventLoopPolicy())
@@ -33,6 +34,20 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     # LISTEN filing_alerts_new so SSE subscribers on any instance see new
     # filing alerts regardless of which instance ran the upsert.
     listener_task = asyncio.create_task(alert_event_bus.run_listener())
+
+    # Recover refresh-on-visit runs orphaned by a previous instance's
+    # shutdown/replacement. Their in-process BackgroundTask died without
+    # finalizing the PipelineRun row, leaving it stuck "running" — which the
+    # detail page's in-flight guard would otherwise re-attach to forever.
+    # Best-effort: a failure here must never block the app from serving.
+    try:
+        async with SessionLocal() as db:
+            reaped = await reap_stale_refresh_runs(db)
+        if reaped:
+            logger.info("Startup reaper marked %d stale refresh run(s) as failed", reaped)
+    except Exception:  # noqa: BLE001
+        logger.warning("Startup reaper failed", exc_info=True)
+
     try:
         yield
     finally:

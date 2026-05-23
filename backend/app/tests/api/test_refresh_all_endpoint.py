@@ -413,7 +413,7 @@ async def test_in_flight_run_returns_202_with_existing_run_id(
     override_db: _FakeAsyncSession,
     stub_background: list[dict[str, Any]],
 ) -> None:
-    # An in-flight run attaches the caller to that run via 202 +
+    # A RECENT in-flight run attaches the caller to that run via 202 +
     # status="in_flight" instead of 409. The FE polls run_id identically
     # in the queued and in-flight cases, and the browser no longer logs a
     # cosmetic console error for the refresh-on-visit POST.
@@ -428,6 +428,8 @@ async def test_in_flight_run_returns_202_with_existing_run_id(
         success_count=1,
         failure_count=0,
         notes='{"bd_id": 11, "stage": "running"}',
+        # Started just now → within STALE_REFRESH_RUN_AGE → counts as alive.
+        started_at=datetime.now(timezone.utc),
     )
 
     async def _fake_get(_db: Any, _firm_id: int) -> BrokerDealer | None:
@@ -456,6 +458,60 @@ async def test_in_flight_run_returns_202_with_existing_run_id(
     # attach to the existing in-flight run.
     assert override_db.added == []
     assert stub_background == []
+
+
+async def test_stale_running_run_is_not_in_flight_starts_fresh_run(
+    monkeypatch: pytest.MonkeyPatch,
+    override_db: _FakeAsyncSession,
+    stub_background: list[dict[str, Any]],
+) -> None:
+    # A running/queued row older than STALE_REFRESH_RUN_AGE is an orphan: its
+    # in-process BackgroundTask was killed by a Cloud Run instance swap and it
+    # will never finalize. The endpoint must NOT attach to it (which would
+    # trap the page polling a dead run forever) — it starts a fresh run.
+    bd = _bd()
+    stale = PipelineRun(
+        id=7777,
+        pipeline_name="broker_dealer_refresh_all",
+        trigger_source="manual_single:viewer@example.com",
+        status="running",
+        total_items=2,
+        processed_items=0,
+        success_count=0,
+        failure_count=0,
+        notes='{"bd_id": 11, "stage": "running"}',
+        # Started well past the staleness threshold → presumed dead.
+        started_at=datetime.now(timezone.utc) - timedelta(minutes=45),
+    )
+
+    async def _fake_get(_db: Any, _firm_id: int) -> BrokerDealer | None:
+        return bd
+
+    # has_executive_contacts → None, in-flight → the stale (ignored) run,
+    # cooldown → None. The endpoint should fall through and queue a new run.
+    override_db.queue_scalar(None)
+    override_db.queue_scalar(stale)
+    override_db.queue_scalar(None)
+
+    monkeypatch.setattr(bd_endpoint.repository, "get_broker_dealer", _fake_get)
+    _enable_all_provider_keys(monkeypatch)
+
+    app.dependency_overrides[get_current_user] = _viewer_user
+    try:
+        async with _client() as client:
+            response = await client.post(f"/api/v1/broker-dealers/{bd.id}/refresh-all")
+    finally:
+        app.dependency_overrides.pop(get_current_user, None)
+
+    assert response.status_code == 202
+    body = response.json()
+    # A brand-new run, NOT the stale 7777.
+    assert body["status"] == "queued"
+    assert body["run_id"] >= 9500
+    assert body["run_id"] != 7777
+    # A fresh PipelineRun was created and a background task scheduled.
+    assert len(override_db.added) == 1
+    assert len(stub_background) == 1
 
 
 async def test_cooldown_active_returns_429_with_retry_after(

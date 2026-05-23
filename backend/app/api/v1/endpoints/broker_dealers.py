@@ -9,11 +9,11 @@ from datetime import date, datetime, time, timedelta, timezone
 from fastapi import APIRouter, BackgroundTasks, Body, Depends, HTTPException, Query, status
 from fastapi.responses import Response
 from pydantic import BaseModel, Field
-from sqlalchemy import exists, func, or_, select, update
+from sqlalchemy import exists, func, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.config import settings
-from app.db.session import SessionLocal, get_db_session
+from app.db.session import get_db_session
 from app.models.broker_dealer import BrokerDealer
 from app.models.executive_contact import ExecutiveContact
 from app.models.favorite_list import FavoriteList, FavoriteListItem
@@ -26,7 +26,6 @@ from app.schemas.broker_dealer import (
     DeficiencyStatusSummary,
     ExecutiveContactItem,
     FocusCeoExtractionResponse,
-    IntroducingArrangementItem,
     FilingHistoryItem,
     FilingHistoryPage,
     FinancialMetricItem,
@@ -61,13 +60,11 @@ from app.services.user_lists import (
     record_visit,
     remove_favorite,
 )
-from app.services.classification import apply_classification_to_all
 from app.services.contact_discovery.orchestrator import discover_contact
 from app.services.contacts import (
     ApolloLookupError,
     ContactEnrichmentUnavailableError,
     ContactNotFoundError,
-    ExecutiveContactService,
     NoEmailForLookupError,
 )
 from app.services.finra import FinraService
@@ -90,6 +87,7 @@ from app.services.serpapi import SerpAPIClient
 from app.services.serper import SerperClient
 from app.services.service_models import FinraBrokerDealerRecord
 from app.services.firm_alias_enricher import ensure_resolver_aliases
+from app.services.pipeline_reaper import STALE_REFRESH_RUN_AGE
 from app.services.website_resolver import resolve_website
 
 logger = logging.getLogger(__name__)
@@ -1449,6 +1447,21 @@ async def refresh_broker_dealer_financials(
 _REFRESH_ALL_COOLDOWN_SECONDS = 30
 
 
+def _is_recent_run(started_at: datetime | None) -> bool:
+    """True if a run started recently enough to still be considered alive.
+
+    Anything older than STALE_REFRESH_RUN_AGE is presumed orphaned (its
+    in-process BackgroundTask was killed by an instance swap) and must not be
+    treated as in-flight.
+    """
+
+    if started_at is None:
+        return False
+    if started_at.tzinfo is None:
+        started_at = started_at.replace(tzinfo=timezone.utc)
+    return started_at >= datetime.now(timezone.utc) - STALE_REFRESH_RUN_AGE
+
+
 async def _run_refresh_all_background(
     parent_run_id: int,
     bd_id: int,
@@ -1544,12 +1557,18 @@ async def refresh_broker_dealer_all(
 
     bd_marker = f'"bd_id": {broker_dealer_id}'
 
-    # An in-flight refresh-all already exists for this firm. Rather than
-    # 409 (which the browser surfaces as a red console error even though the
-    # FE handles it cleanly), attach to the existing run and return 202 with
-    # that run_id. The FE polls run_id identically whether the run was just
-    # queued or already in flight, so the behavior is unchanged — only the
-    # cosmetic console error disappears.
+    # A genuinely in-flight refresh-all already exists for this firm. Rather
+    # than 409 (which the browser surfaces as a red console error even though
+    # the FE handles it cleanly), attach to the existing run and return 202
+    # with that run_id. The FE polls run_id identically whether the run was
+    # just queued or already in flight, so the behavior is unchanged.
+    #
+    # A run only counts as in-flight if it started within STALE_REFRESH_RUN_AGE.
+    # An older running/queued row is an orphan — its in-process BackgroundTask
+    # was killed by an instance swap and it will never finalize — so we ignore
+    # it and start a fresh run instead of trapping the page on a dead run. The
+    # startup reaper marks such orphans failed; this guard handles the window
+    # before the next restart.
     in_flight_stmt = (
         select(PipelineRun)
         .where(PipelineRun.pipeline_name == REFRESH_ALL_PIPELINE_NAME)
@@ -1559,7 +1578,7 @@ async def refresh_broker_dealer_all(
         .limit(1)
     )
     in_flight = (await db.execute(in_flight_stmt)).scalar_one_or_none()
-    if in_flight is not None:
+    if in_flight is not None and _is_recent_run(in_flight.started_at):
         response.status_code = status.HTTP_202_ACCEPTED
         return RefreshAllResponse(
             run_id=in_flight.id,
