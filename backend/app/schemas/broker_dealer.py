@@ -368,9 +368,11 @@ class RefreshAllResponse(BaseModel):
       every gate failed. No PipelineRun row, no provider calls, no
       cost. FE shows the success toast and refreshes the firm.
 
-    On 409 conflict (a parent run is already in flight for this firm),
-    the FE will read ``detail.run_id`` from the error envelope and
-    start polling that run instead.
+    When a parent run is already in flight for this firm, the handler
+    returns 202 + ``status="in_flight"`` carrying that run's id (rather
+    than a 409) so the FE attaches to it without the browser logging a
+    cosmetic console error. The FE polls ``run_id`` identically in the
+    queued and in-flight cases.
     """
 
     run_id: int | None = None
