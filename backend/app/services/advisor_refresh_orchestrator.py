@@ -291,10 +291,13 @@ def required_provider_keys(pipelines: Iterable[str]) -> list[str]:
     missing: list[str] = []
     pipelines = list(pipelines)
     if SUB_RESOLVE_ADVISOR_WEBSITE in pipelines:
-        if not settings.apollo_api_key:
-            missing.append("APOLLO_API_KEY")
-        # Hunter / SerpAPI keys are soft fallbacks -- the resolver degrades
-        # gracefully if they're absent, so we don't gate on them.
+        # SerpAPI is now the primary website source (Google entity resolution
+        # is far more precise than Apollo's fuzzy org-name match for
+        # common-word brands). Apollo is only a last-resort fallback, so gate
+        # on the primary key. SerpAPI absent + Apollo present still resolves
+        # via the fallback, but we surface SerpAPI as the expected dependency.
+        if not getattr(settings, "serpapi_api_key", None) and not settings.apollo_api_key:
+            missing.append("SERPAPI_API_KEY")
     if SUB_REFRESH_OWNERS_OFFICERS in pipelines:
         # The ADV profile extraction now runs through Gemini, so the key is
         # required for this sub-pipeline (the PDF fetch itself is keyless).
@@ -576,10 +579,6 @@ async def _run_resolve_advisor_website(
             await _finalize_child(child_id, status="completed_with_errors", success=0, failure=1, summary=summary)
             return "completed_with_errors", summary
 
-        # ApolloClient is required for the first tier; the SerpAPI/Serper
-        # tiers are optional fallbacks the resolver skips when their keys
-        # aren't set. ``required_provider_keys`` above already 503s when
-        # APOLLO_API_KEY is missing so we won't hit this path without it.
         apollo = ApolloClient(settings.apollo_api_key) if settings.apollo_api_key else None
         serpapi = (
             SerpAPIClient(settings.serpapi_api_key)
@@ -592,13 +591,27 @@ async def _run_resolve_advisor_website(
             else None
         )
 
+        # Resolve via search engines FIRST (SerpAPI / serper). Google's entity
+        # resolution plus the validator's high-confidence bypass picks the
+        # firm's real domain — e.g. vanguard.com for "VANGUARD GROUP INC".
+        # Apollo is demoted to a last-resort fallback here because its fuzzy
+        # org-name match returns same-named *different* companies for
+        # common-word brands (it returned vanguardstaffing.com for Vanguard).
         website, source, reason = await resolve_website(
             firm_name=firm_name,
             crd=crd,
-            apollo=apollo,
+            apollo=None,
             serpapi=serpapi,
             serper=serper,
         )
+        if not website and apollo is not None:
+            website, source, reason = await resolve_website(
+                firm_name=firm_name,
+                crd=crd,
+                apollo=apollo,
+                serpapi=None,
+                serper=None,
+            )
 
         if not website:
             # No valid candidate. If the row currently holds a blocklisted
