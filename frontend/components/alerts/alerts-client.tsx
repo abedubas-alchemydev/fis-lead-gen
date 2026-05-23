@@ -45,9 +45,11 @@ const ALERT_CATEGORY_VALUES: ReadonlyArray<AlertCategory> = [
   "all",
 ];
 
-// Default lands on Form BD per Deshorn's request. Default is omitted
-// from the URL so plain `/alerts` is the canonical share-link.
-const DEFAULT_CATEGORY: AlertCategory = "form_bd";
+// Default lands on All Alerts (reversal of the earlier Form-BD-first call
+// from 2026-04-27 — operator wants the full feed visible by default now).
+// The default value is omitted from the URL so plain `/alerts` is the
+// canonical share-link.
+const DEFAULT_CATEGORY: AlertCategory = "all";
 
 function parseCategoryParam(raw: string | null): AlertCategory {
   if (raw && (ALERT_CATEGORY_VALUES as ReadonlyArray<string>).includes(raw)) {
