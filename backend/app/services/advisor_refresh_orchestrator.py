@@ -37,10 +37,11 @@ BD detail client at
 from __future__ import annotations
 
 import asyncio
+import base64
 import json
 import logging
 from dataclasses import dataclass
-from datetime import datetime, timezone
+from datetime import date, datetime, timedelta, timezone
 from typing import Iterable, Literal
 
 import httpx
@@ -53,9 +54,14 @@ from app.services.apollo import ApolloClient
 from app.services.brokercheck_pdf import (
     FinraPdfFetchError,
     FinraPdfNotFound,
-    _parse_form_bd_pdf,
 )
 from app.services.finra_pdf_service import fetch_brokercheck_pdf
+from app.services.gemini_responses import (
+    GeminiAdvisorProfileExtraction,
+    GeminiConfigurationError,
+    GeminiExtractionError,
+    GeminiResponsesClient,
+)
 from app.services.serpapi import SerpAPIClient
 from app.services.serper import SerperClient
 from app.services.website_resolver import is_blocklisted_host, resolve_website
@@ -118,6 +124,40 @@ _SUB_LABEL: dict[str, str] = {
     SUB_RESOLVE_ADVISOR_WEBSITE: "website",
 }
 
+# Don't re-run the (paid) Gemini ADV extraction more than once per advisor in
+# this window. Some fields (registration/formation dates) may simply not be
+# present in the ADV PDF, so without a cooldown the gate would re-fire the
+# extraction on every visit forever. ``last_enrich_attempt_at`` is stamped on
+# each attempt; the gate treats a recent stamp as "already tried".
+ADV_REEXTRACT_COOLDOWN = timedelta(days=7)
+
+_ADV_PROFILE_PROMPT = """\
+You are reading an SEC investment-adviser disclosure PDF (Form ADV from IAPD, \
+or a FINRA BrokerCheck firm report). Extract the following about THIS firm:
+
+1. executive_officers — each executive officer / management person: name and \
+   title. From the "Direct Owners and Executive Officers" section / Schedule A.
+2. direct_owners — each direct owner: name, title/status, and ownership band \
+   (e.g. "25% but less than 50%") when shown. Schedule A.
+3. indirect_owners — each indirect owner with the same fields. Schedule B.
+4. client_types — the firm's client categories (Form ADV Item 5.D), e.g. \
+   "Individuals", "High net worth individuals", "Investment companies", \
+   "Pension and profit sharing plans", "Pooled investment vehicles".
+5. registration_date — the firm's SEC/IARD registration date (YYYY-MM-DD) if stated.
+6. formation_date — the date the firm was formed/organized (YYYY-MM-DD) if stated.
+7. firm_operations_text — a concise (1-3 sentence) plain-English summary of what \
+   the firm does, drawn from its described advisory business.
+
+IMPORTANT:
+- A person can be both an owner and an officer; list them under each section \
+  that applies.
+- Use null / empty list for anything not present in the document. Do NOT guess.
+- The same "Direct Owners and Executive Officers" header appears on both Form \
+  ADV and Form BD, so it is present whether this is an IA-only or dual-registered firm.
+- confidence_score reflects overall extraction certainty (0.0-1.0); rationale \
+  briefly notes where the data was found.
+"""
+
 
 @dataclass(frozen=True)
 class GateDecision:
@@ -135,7 +175,27 @@ def decide_pipelines(advisor: InvestmentAdvisor) -> GateDecision:
     to_run: list[str] = []
     to_skip: list[str] = []
 
-    needs_owners = not advisor.executive_officers
+    # The owners/officers sub-pipeline now does a full Gemini ADV extraction
+    # that fills the People panel, client types, and the firm-operations
+    # summary in one call. Open the gate when any of those content fields is
+    # empty — but suppress re-runs within ADV_REEXTRACT_COOLDOWN (tracked via
+    # last_enrich_attempt_at) so a field the ADV simply doesn't carry can't
+    # make the paid extraction fire on every single visit. Dates are NOT in
+    # the predicate for the same reason (often absent from the ADV).
+    profile_incomplete = (
+        not advisor.executive_officers
+        or not advisor.direct_owners
+        or not advisor.client_types
+        or not advisor.firm_operations_text
+    )
+    last_attempt = advisor.last_enrich_attempt_at
+    if last_attempt is not None and last_attempt.tzinfo is None:
+        last_attempt = last_attempt.replace(tzinfo=timezone.utc)
+    recently_attempted = (
+        last_attempt is not None
+        and last_attempt >= datetime.now(timezone.utc) - ADV_REEXTRACT_COOLDOWN
+    )
+    needs_owners = profile_incomplete and not recently_attempted
     if needs_owners:
         to_run.append(SUB_REFRESH_OWNERS_OFFICERS)
     else:
@@ -168,11 +228,17 @@ def required_provider_keys(pipelines: Iterable[str]) -> list[str]:
     sets via ``settings.sec_user_agent``.
     """
     missing: list[str] = []
+    pipelines = list(pipelines)
     if SUB_RESOLVE_ADVISOR_WEBSITE in pipelines:
         if not settings.apollo_api_key:
             missing.append("APOLLO_API_KEY")
         # Hunter / SerpAPI keys are soft fallbacks -- the resolver degrades
         # gracefully if they're absent, so we don't gate on them.
+    if SUB_REFRESH_OWNERS_OFFICERS in pipelines:
+        # The ADV profile extraction now runs through Gemini, so the key is
+        # required for this sub-pipeline (the PDF fetch itself is keyless).
+        if not settings.gemini_api_key:
+            missing.append("GEMINI_API_KEY")
     return missing
 
 
@@ -235,16 +301,106 @@ async def _finalize_child(
 
 
 # ---------------------------------------------------------------------------
+# ADV extraction write helpers
+# ---------------------------------------------------------------------------
+
+_ADV_MIN_CONFIDENCE = 0.4
+_FIRM_OPERATIONS_MAX_CHARS = 4000
+
+
+def _people_to_json(people: list) -> list[dict[str, str]]:
+    """Convert Gemini person objects to the JSONB shape the IA columns store."""
+    rows: list[dict[str, str]] = []
+    for person in people:
+        name = (person.name or "").strip()
+        if not name:
+            continue
+        row: dict[str, str] = {"name": name}
+        if person.title:
+            row["title"] = person.title.strip()
+        if person.ownership:
+            row["ownership"] = person.ownership.strip()
+        rows.append(row)
+    return rows
+
+
+def _parse_iso_date(value: str | None) -> date | None:
+    if not value:
+        return None
+    try:
+        return date.fromisoformat(value.strip()[:10])
+    except (ValueError, AttributeError):
+        return None
+
+
+async def _apply_adv_extraction(
+    advisor_id: int, extraction: GeminiAdvisorProfileExtraction
+) -> list[str] | None:
+    """Write the extracted profile fields onto the IA row, filling only
+    currently-empty fields (never clobbering existing good data). Always
+    stamps ``last_enrich_attempt_at`` so the gate's re-extract cooldown holds
+    even when the ADV didn't carry a given field. Returns the list of written
+    field labels, or ``None`` if the advisor row disappeared.
+    """
+    written: list[str] = []
+    async with SessionLocal() as db:
+        advisor = await db.get(InvestmentAdvisor, advisor_id)
+        if advisor is None:
+            return None
+
+        if extraction.confidence_score >= _ADV_MIN_CONFIDENCE:
+            officers = _people_to_json(extraction.executive_officers)
+            if officers and not advisor.executive_officers:
+                advisor.executive_officers = officers
+                written.append("officers")
+
+            direct = _people_to_json(extraction.direct_owners)
+            if direct and not advisor.direct_owners:
+                advisor.direct_owners = direct
+                written.append("owners")
+
+            indirect = _people_to_json(extraction.indirect_owners)
+            if indirect and not advisor.indirect_owners:
+                advisor.indirect_owners = indirect
+                written.append("indirect owners")
+
+            if extraction.client_types and not advisor.client_types:
+                advisor.client_types = [c.strip() for c in extraction.client_types if c and c.strip()]
+                if advisor.client_types:
+                    written.append("client types")
+
+            if extraction.firm_operations_text and not advisor.firm_operations_text:
+                advisor.firm_operations_text = extraction.firm_operations_text.strip()[:_FIRM_OPERATIONS_MAX_CHARS]
+                written.append("operations")
+
+            reg = _parse_iso_date(extraction.registration_date)
+            if reg is not None and advisor.registration_date is None:
+                advisor.registration_date = reg
+                written.append("registration date")
+
+            formed = _parse_iso_date(extraction.formation_date)
+            if formed is not None and advisor.formation_date is None:
+                advisor.formation_date = formed
+                written.append("formation date")
+
+        advisor.last_enrich_attempt_at = datetime.now(timezone.utc)
+        await db.commit()
+    return written
+
+
+# ---------------------------------------------------------------------------
 # Sub-pipeline runners
 # ---------------------------------------------------------------------------
 
 async def _run_refresh_owners_officers(
     parent_run_id: int, advisor_id: int, trigger_source: str
 ) -> tuple[str, str]:
-    """Fetch the BrokerCheck PDF for this advisor's CRD and write the
-    extracted executive_officers list to the IA row. The "Direct Owners
-    and Executive Officers" section header is universal between Form BD
-    and Form ADV so the existing parser handles both."""
+    """Fetch the firm PDF (BrokerCheck, then IAPD Form ADV fallback) for this
+    advisor's CRD and run a Gemini structured extraction over it, writing
+    officers, direct/indirect owners, client types, registration/formation
+    dates, and a firm-operations summary onto the IA row. Only currently-empty
+    fields are filled; ``last_enrich_attempt_at`` is stamped on every attempt
+    so the gate's re-extract cooldown holds."""
     child_id = await _create_child_run(
         parent_run_id, advisor_id, SUB_REFRESH_OWNERS_OFFICERS, trigger_source
     )
@@ -291,33 +447,40 @@ async def _run_refresh_owners_officers(
                 await _finalize_child(child_id, status="failed", success=0, failure=1, summary=summary)
                 return "failed", summary
 
-        # Parse with the existing Form BD parser. For Form ADV PDFs from
-        # IAPD, only the "Direct Owners and Executive Officers" section is
-        # populated -- BD-specific fields (types_of_business, clearing
-        # arrangements) come back empty/None, which is the intended
-        # parser fallthrough.
-        detail = await asyncio.to_thread(_parse_form_bd_pdf, crd, pdf_bytes)
+        # Gemini structured extraction over the whole PDF. ``_dispatch_pdf_extract``
+        # routes the large IAPD ADV PDFs (Vanguard's is ~8 MB) through the
+        # Files API automatically. One call fills officers, owners, client
+        # types, dates, and the firm-operations summary — far more robust than
+        # the old regex parser, which only ever recovered executive_officers.
+        pdf_b64 = base64.b64encode(pdf_bytes).decode("ascii")
+        try:
+            extraction = await GeminiResponsesClient().extract_advisor_profile(
+                pdf_bytes_base64=pdf_b64, prompt=_ADV_PROFILE_PROMPT
+            )
+        except GeminiConfigurationError as exc:
+            summary = f"Gemini not configured: {str(exc)[:160]}"
+            await _finalize_child(child_id, status="failed", success=0, failure=1, summary=summary)
+            return "failed", summary
+        except GeminiExtractionError as exc:
+            summary = f"Gemini extraction failed ({source}): {str(exc)[:160]}"
+            await _finalize_child(child_id, status="failed", success=0, failure=1, summary=summary)
+            return "failed", summary
 
-        if detail is None or not detail.executive_officers:
-            summary = f"PDF ({source}) parsed but contained no Officers/Owners section."
+        written = await _apply_adv_extraction(advisor_id, extraction)
+        if written is None:
+            summary = "Advisor row disappeared between extract and write."
+            await _finalize_child(child_id, status="failed", success=0, failure=1, summary=summary)
+            return "failed", summary
+
+        if not written:
+            summary = (
+                f"PDF ({source}) extracted but yielded no new profile fields "
+                f"(confidence {extraction.confidence_score:.2f})."
+            )
             await _finalize_child(child_id, status="completed_with_errors", success=0, failure=1, summary=summary)
             return "completed_with_errors", summary
 
-        async with SessionLocal() as db:
-            advisor = await db.get(InvestmentAdvisor, advisor_id)
-            if advisor is None:
-                summary = "Advisor row disappeared between extract and write."
-                await _finalize_child(child_id, status="failed", success=0, failure=1, summary=summary)
-                return "failed", summary
-            advisor.executive_officers = detail.executive_officers
-            # The parser returns a combined officers/owners list. For v1 we
-            # populate executive_officers only; splitting into direct_owners
-            # is tracked as a follow-up. The combined list still surfaces
-            # owners (typically those with non-zero ownership_pct) on the
-            # detail page's Executive Officers panel.
-            await db.commit()
-
-        summary = f"Wrote {len(detail.executive_officers)} officer/owner record(s) from {source}."
+        summary = f"Wrote {', '.join(written)} from {source} (confidence {extraction.confidence_score:.2f})."[:180]
         await _finalize_child(child_id, status="completed", success=1, failure=0, summary=summary)
         return "completed", summary
     except Exception as exc:
