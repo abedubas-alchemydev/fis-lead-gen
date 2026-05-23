@@ -58,30 +58,15 @@ export function useDevtoolsDetector(): void {
       setOpen(false, "clear");
     }
 
-    // Signal 3 — console getter trick. console.log evaluates the object's
-    // toString/valueOf only when devtools renders it; if our getter ever
-    // fires we know the console pane is open. Runs on each poll alongside
-    // the other detectors.
-    const probe = {
-      get id() {
-        setOpen(true, "console_getter");
-        return "";
-      },
-    };
-
-    function runConsoleProbe() {
-      // No-op when devtools closed; triggers the getter when open.
-      // eslint-disable-next-line no-console
-      console.log("%c", "", probe);
-    }
+    // NOTE: a third "console getter" signal (logging an object whose getter
+    // fires only when devtools renders it) was removed — it printed an empty
+    // ``{}`` to the console on every poll, spamming the very console an admin
+    // has open while debugging. The viewport-delta and debugger-timing
+    // signals above cover the same casual cases without the noise.
 
     detect();
-    runConsoleProbe();
 
-    const interval = window.setInterval(() => {
-      detect();
-      runConsoleProbe();
-    }, POLL_INTERVAL_MS);
+    const interval = window.setInterval(detect, POLL_INTERVAL_MS);
 
     return () => {
       window.clearInterval(interval);
