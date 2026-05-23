@@ -108,6 +108,33 @@ export type ClearingMembershipItem = {
   status: string;
 };
 
+// Admin review-queue row: one needs_review candidate joined to its firm.
+export type ClearingMembershipReviewRow = {
+  id: number;
+  agency: string;
+  member_number: string | null;
+  member_name_raw: string;
+  source_file: string;
+  source_version: string | null;
+  match_method: string;
+  match_confidence: number | null;
+  firm_side: "broker_dealer" | "investment_advisor";
+  firm_id: number;
+  firm_name: string;
+  created_at: string;
+};
+
+export type ClearingMembershipReviewListResponse = {
+  items: ClearingMembershipReviewRow[];
+  total: number;
+};
+
+export type ClearingMembershipDecisionResponse = {
+  id: number;
+  status: string;
+  match_method: string;
+};
+
 export type BrokerDealerListResponse = {
   items: BrokerDealerListItem[];
   meta: {

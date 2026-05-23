@@ -155,6 +155,16 @@ function SentOutreachIcon(props: IconProps) {
   );
 }
 
+// Shield-with-check glyph for the clearing-membership review queue.
+function ShieldCheckIcon(props: IconProps) {
+  return (
+    <IconBase {...props}>
+      <path d="M12 3l8 3v6c0 4.5-3.5 8-8 9-4.5-1-8-4.5-8-9V6l8-3z" />
+      <path d="M9 12l2 2 4-4" />
+    </IconBase>
+  );
+}
+
 // Envelope @-sign glyph for the multi-sender settings page.
 function MailAtIcon(props: IconProps) {
   return (
@@ -250,6 +260,7 @@ const navSections: ReadonlyArray<NavSection> = [
       { href: "/settings", label: "Settings", icon: SettingsIcon, badgeKey: null, permissionKey: "settings" },
       { href: "/settings/email-accounts" as Route, label: "Email Accounts", icon: MailAtIcon, badgeKey: null },
       { href: "/settings/users" as Route, label: "Users", icon: UsersIcon, badgeKey: null, adminOnly: true, permissionKey: "users" },
+      { href: "/settings/clearing-memberships" as Route, label: "Clearing Memberships", icon: ShieldCheckIcon, badgeKey: null, adminOnly: true },
       { href: "/vault", label: "Vault", icon: VaultIcon, badgeKey: null, permissionKey: "vault" }
     ]
   }
