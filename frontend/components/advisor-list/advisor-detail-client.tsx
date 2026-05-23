@@ -646,11 +646,11 @@ export function AdvisorDetailClient({ advisorId }: { advisorId: string }) {
               value={formatDate(advisor.registration_date)}
               compact
             />
-            <MiniStat
-              label="Formation date"
-              value={formatDate(advisor.formation_date)}
-              compact
-            />
+            {/* Formation date intentionally not rendered: Form ADV doesn't
+                ask for it and the IAPD per-firm payload doesn't carry one,
+                so the column would be "Not available" for nearly every IA.
+                Field remains on the schema/model — re-enable if a corporate-
+                records source (OpenCorporates / state SOS) is ever wired. */}
             <MiniStat
               label="Source"
               value={advisor.matched_source || "—"}
