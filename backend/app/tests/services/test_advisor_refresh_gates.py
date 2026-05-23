@@ -12,10 +12,14 @@ from datetime import datetime, timedelta, timezone
 from app.models.investment_advisor import InvestmentAdvisor
 from app.services.advisor_refresh_orchestrator import (
     ADV_REEXTRACT_COOLDOWN,
+    SUB_ENRICH_CONTACTS,
+    SUB_REFRESH_FILINGS,
     SUB_REFRESH_OWNERS_OFFICERS,
     SUB_RESOLVE_ADVISOR_WEBSITE,
+    _filing_priority,
     _parse_iso_date,
     _people_to_json,
+    _rank_to_display_title,
     decide_pipelines,
 )
 from app.services.gemini_responses import (
@@ -27,6 +31,7 @@ from app.services.gemini_responses import (
 def _advisor(
     *,
     website: str | None = None,
+    cik: str | None = None,
     executive_officers: object | None = None,
     direct_owners: object | None = None,
     client_types: object | None = None,
@@ -35,6 +40,7 @@ def _advisor(
 ) -> InvestmentAdvisor:
     advisor = InvestmentAdvisor()
     advisor.website = website
+    advisor.cik = cik
     advisor.executive_officers = executive_officers
     advisor.direct_owners = direct_owners
     advisor.client_types = client_types
@@ -125,7 +131,75 @@ def test_owners_gate_reopens_after_cooldown_expires() -> None:
     assert SUB_REFRESH_OWNERS_OFFICERS in decision.to_run
 
 
+# ── filings gate: needs CIK + shares the re-extract cooldown ───────────────
+
+
+def test_filings_gate_open_when_cik_present_and_not_recently_attempted() -> None:
+    decision = decide_pipelines(_advisor(cik="0001234567"))
+    assert SUB_REFRESH_FILINGS in decision.to_run
+
+
+def test_filings_gate_closed_without_cik() -> None:
+    decision = decide_pipelines(_advisor(cik=None))
+    assert SUB_REFRESH_FILINGS in decision.to_skip
+    assert SUB_REFRESH_FILINGS not in decision.to_run
+
+
+def test_filings_gate_suppressed_by_recent_attempt() -> None:
+    recent = datetime.now(timezone.utc) - (ADV_REEXTRACT_COOLDOWN / 2)
+    decision = decide_pipelines(
+        _advisor(cik="0001234567", last_enrich_attempt_at=recent)
+    )
+    assert SUB_REFRESH_FILINGS in decision.to_skip
+
+
+def test_filings_gate_reopens_after_cooldown_expires() -> None:
+    old = datetime.now(timezone.utc) - (ADV_REEXTRACT_COOLDOWN + timedelta(days=1))
+    decision = decide_pipelines(
+        _advisor(cik="0001234567", last_enrich_attempt_at=old)
+    )
+    assert SUB_REFRESH_FILINGS in decision.to_run
+
+
+# ── contacts gate: no precondition, shares the re-extract cooldown ─────────
+
+
+def test_contacts_gate_open_when_not_recently_attempted() -> None:
+    # Open even without a CIK — contacts falls back to executive_officers.
+    decision = decide_pipelines(_advisor(cik=None))
+    assert SUB_ENRICH_CONTACTS in decision.to_run
+
+
+def test_contacts_gate_suppressed_by_recent_attempt() -> None:
+    recent = datetime.now(timezone.utc) - (ADV_REEXTRACT_COOLDOWN / 2)
+    decision = decide_pipelines(_advisor(last_enrich_attempt_at=recent))
+    assert SUB_ENRICH_CONTACTS in decision.to_skip
+
+
+def test_cooldown_suppresses_filings_and_contacts_together() -> None:
+    recent = datetime.now(timezone.utc) - (ADV_REEXTRACT_COOLDOWN / 2)
+    decision = decide_pipelines(
+        _advisor(cik="0001234567", last_enrich_attempt_at=recent)
+    )
+    assert SUB_REFRESH_FILINGS in decision.to_skip
+    assert SUB_ENRICH_CONTACTS in decision.to_skip
+
+
 # ── pure write helpers ─────────────────────────────────────────────────────
+
+
+def test_filing_priority_bands() -> None:
+    assert _filing_priority("ADV") == "medium"
+    assert _filing_priority("ADV-W") == "medium"
+    assert _filing_priority("13F-HR") == "low"
+    assert _filing_priority("D") == "low"
+
+
+def test_rank_to_display_title() -> None:
+    assert _rank_to_display_title("ceo") == "Chief Executive Officer"
+    assert _rank_to_display_title("president") == "President"
+    assert _rank_to_display_title("other") == "Executive Officer"
+    assert _rank_to_display_title("unknown-slug") == "Executive Officer"
 
 
 def test_people_to_json_shapes_and_skips_blanks() -> None:

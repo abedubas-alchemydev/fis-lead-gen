@@ -46,15 +46,20 @@ from typing import Iterable, Literal
 
 import httpx
 
+from sqlalchemy import select
+
 from app.core.config import settings
 from app.db.session import SessionLocal
+from app.models.advisor_contact import AdvisorContact
+from app.models.advisor_filing import AdvisorFiling
 from app.models.investment_advisor import InvestmentAdvisor
 from app.models.pipeline_run import PipelineRun
-from app.services.apollo import ApolloClient
+from app.services.apollo import ApolloClient, ApolloError
 from app.services.brokercheck_pdf import (
     FinraPdfFetchError,
     FinraPdfNotFound,
 )
+from app.services.edgar import EdgarService, build_edgar_filing_url
 from app.services.finra_pdf_service import fetch_brokercheck_pdf
 from app.services.gemini_responses import (
     GeminiAdvisorProfileExtraction,
@@ -117,12 +122,48 @@ logger = logging.getLogger(__name__)
 REFRESH_ADVISOR_ALL_PIPELINE_NAME = "investment_advisor_refresh_all"
 SUB_REFRESH_OWNERS_OFFICERS = "investment_advisor_refresh_owners_officers"
 SUB_RESOLVE_ADVISOR_WEBSITE = "investment_advisor_resolve_website"
+SUB_REFRESH_FILINGS = "investment_advisor_refresh_filings"
+SUB_ENRICH_CONTACTS = "investment_advisor_enrich_contacts"
 
 # Short human labels used in the parent's notes.summary toast string.
 _SUB_LABEL: dict[str, str] = {
     SUB_REFRESH_OWNERS_OFFICERS: "owners",
     SUB_RESOLVE_ADVISOR_WEBSITE: "website",
+    SUB_REFRESH_FILINGS: "filings",
+    SUB_ENRICH_CONTACTS: "contacts",
 }
+
+# Display title for an Apollo-sourced contact row keyed by the officer-rank
+# slug the Apollo client emits (mirrors focus_ceo_extraction._RANK_DISPLAY_TITLES).
+# The slug is the only title information the names-only fallback persists.
+_RANK_DISPLAY_TITLES: dict[str, str] = {
+    "ceo": "Chief Executive Officer",
+    "president": "President",
+    "coo": "Chief Operating Officer",
+    "cfo": "Chief Financial Officer",
+}
+
+
+def _rank_to_display_title(officer_rank: str) -> str:
+    return _RANK_DISPLAY_TITLES.get(officer_rank, "Executive Officer")
+
+
+# The filings panel renders the 25 newest rows; cap stored history a little
+# above that so we never persist a firm's full ~1000-filing EDGAR history.
+_MAX_FILINGS_TO_STORE = 50
+
+
+# Map an EDGAR form type to a filing-alert priority band. ADV amendments are
+# the most material to an advisor's profile; 13F holdings reports are routine.
+def _filing_priority(form: str) -> str:
+    normalized = form.strip().upper()
+    if normalized.startswith("ADV-W"):
+        return "medium"
+    if normalized.startswith("ADV"):
+        return "medium"
+    if normalized.startswith("13F"):
+        return "low"
+    return "low"
 
 # Don't re-run the (paid) Gemini ADV extraction more than once per advisor in
 # this window. Some fields (registration/formation dates) may simply not be
@@ -212,6 +253,26 @@ def decide_pipelines(advisor: InvestmentAdvisor) -> GateDecision:
         to_run.append(SUB_RESOLVE_ADVISOR_WEBSITE)
     else:
         to_skip.append(SUB_RESOLVE_ADVISOR_WEBSITE)
+
+    # Filings + contacts both write to child tables (advisor_filings /
+    # advisor_contacts) that aren't visible from the advisor row, so we can't
+    # gate on "is the panel already populated". Instead we gate on the same
+    # last_enrich_attempt_at + ADV_REEXTRACT_COOLDOWN window the owners gate
+    # uses: a recent attempt means we already filled (or tried to fill) these
+    # panels, so don't re-run on every visit. Filings additionally needs a CIK
+    # (the EDGAR submissions feed is keyed on it). Contacts has no hard
+    # precondition — it falls back to executive_officers when Apollo is absent.
+    needs_filings = advisor.cik is not None and not recently_attempted
+    if needs_filings:
+        to_run.append(SUB_REFRESH_FILINGS)
+    else:
+        to_skip.append(SUB_REFRESH_FILINGS)
+
+    needs_contacts = not recently_attempted
+    if needs_contacts:
+        to_run.append(SUB_ENRICH_CONTACTS)
+    else:
+        to_skip.append(SUB_ENRICH_CONTACTS)
 
     return GateDecision(to_run=tuple(to_run), to_skip=tuple(to_skip))
 
@@ -574,9 +635,272 @@ async def _run_resolve_advisor_website(
         return "failed", summary
 
 
+async def _run_refresh_filings(
+    parent_run_id: int, advisor_id: int, trigger_source: str
+) -> tuple[str, str]:
+    """Pull this advisor's full EDGAR filing history and upsert one
+    ``AdvisorFiling`` row per filing (deduped on accession number) so the
+    detail page's "Recent regulatory filings" panel fills. Re-runs are
+    insert-or-skip on ``dedupe_key`` so we never duplicate. Needs a CIK; with
+    none, finishes ``completed_with_errors``."""
+    child_id = await _create_child_run(
+        parent_run_id, advisor_id, SUB_REFRESH_FILINGS, trigger_source
+    )
+    try:
+        async with SessionLocal() as db:
+            advisor = await db.get(InvestmentAdvisor, advisor_id)
+            if advisor is None:
+                summary = "Advisor row disappeared between queue and run."
+                await _finalize_child(child_id, status="failed", success=0, failure=1, summary=summary)
+                return "failed", summary
+            cik = advisor.cik
+
+        if not cik:
+            summary = "No CIK on record; cannot fetch EDGAR filing history."
+            await _finalize_child(child_id, status="completed_with_errors", success=0, failure=1, summary=summary)
+            return "completed_with_errors", summary
+
+        filings = await EdgarService().list_all_filings_for_cik(cik)
+        if not filings:
+            summary = "EDGAR returned no filings for this CIK."
+            await _finalize_child(child_id, status="completed_with_errors", success=0, failure=1, summary=summary)
+            return "completed_with_errors", summary
+
+        cik_padded = (cik or "").strip().lstrip("0").zfill(10)
+        inserted = 0
+        registration_candidate: date | None = None
+        async with SessionLocal() as db:
+            advisor = await db.get(InvestmentAdvisor, advisor_id)
+            if advisor is None:
+                summary = "Advisor row disappeared between fetch and write."
+                await _finalize_child(child_id, status="failed", success=0, failure=1, summary=summary)
+                return "failed", summary
+
+            existing_keys = set(
+                (
+                    await db.execute(
+                        select(AdvisorFiling.dedupe_key).where(
+                            AdvisorFiling.advisor_id == advisor_id
+                        )
+                    )
+                ).scalars()
+            )
+
+            # Earliest ADV filing date is a cheap registration_date proxy. Scan
+            # ALL filings for it (the earliest is the oldest, at the tail), but
+            # only STORE the most recent _MAX_FILINGS_TO_STORE — the panel reads
+            # 25 newest, so persisting a firm's full ~1000-filing history would
+            # just bloat the table.
+            for filing in filings:
+                form = str(filing.get("form") or "").strip()
+                filing_date = filing.get("filing_date")
+                if (
+                    form.upper().startswith("ADV")
+                    and isinstance(filing_date, date)
+                    and (registration_candidate is None or filing_date < registration_candidate)
+                ):
+                    registration_candidate = filing_date
+
+            for filing in filings[:_MAX_FILINGS_TO_STORE]:
+                form = str(filing.get("form") or "").strip()
+                if not form:
+                    continue
+                filing_date = filing.get("filing_date")
+                if not isinstance(filing_date, date):
+                    # Skip undated filings — filed_at is NOT NULL and we won't
+                    # fabricate a date.
+                    continue
+
+                accession = filing.get("accession_number")
+                accession_str = str(accession).strip() if accession else ""
+                dedupe_key = accession_str or f"{advisor_id}:{form}:{filing_date.isoformat()}"
+                if dedupe_key in existing_keys:
+                    continue
+                existing_keys.add(dedupe_key)
+
+                primary_doc = filing.get("primary_document")
+                primary_doc_str = str(primary_doc).strip() if primary_doc else None
+                source_url = build_edgar_filing_url(
+                    cik_padded, accession_str or None, primary_doc_str
+                )
+                desc = filing.get("primary_doc_description")
+                desc_str = str(desc).strip() if desc else ""
+                summary_text = f"{form} filed {filing_date.isoformat()}"
+                if desc_str:
+                    summary_text = f"{summary_text} — {desc_str}"
+
+                db.add(
+                    AdvisorFiling(
+                        advisor_id=advisor_id,
+                        dedupe_key=dedupe_key[:255],
+                        form_type=form[:64],
+                        priority=_filing_priority(form),
+                        filed_at=datetime(
+                            filing_date.year,
+                            filing_date.month,
+                            filing_date.day,
+                            tzinfo=timezone.utc,
+                        ),
+                        summary=summary_text,
+                        source_filing_url=source_url,
+                        is_read=False,
+                    )
+                )
+                inserted += 1
+
+            if registration_candidate is not None and advisor.registration_date is None:
+                advisor.registration_date = registration_candidate
+
+            await db.commit()
+
+        summary = f"Added {inserted} new filing(s) ({len(filings)} on EDGAR)."
+        await _finalize_child(child_id, status="completed", success=1, failure=0, summary=summary)
+        return "completed", summary
+    except Exception as exc:
+        logger.exception("advisor-refresh/filings failed for advisor %s", advisor_id)
+        summary = f"{type(exc).__name__}: {str(exc)[:200]}"
+        await _finalize_child(child_id, status="failed", success=0, failure=1, summary=summary)
+        return "failed", summary
+
+
+async def _run_enrich_contacts(
+    parent_run_id: int, advisor_id: int, trigger_source: str
+) -> tuple[str, str]:
+    """Fill the People panel's contact channels via an Apollo people-search
+    (names-only, per the CSV-export PRD constraint) with a fallback to seeding
+    from the already-extracted ``executive_officers`` blob. Idempotent: if any
+    ``advisor_contacts`` row already exists, finishes without touching data.
+    Apollo provider errors leave the table untouched so a retry can happen."""
+    child_id = await _create_child_run(
+        parent_run_id, advisor_id, SUB_ENRICH_CONTACTS, trigger_source
+    )
+    try:
+        async with SessionLocal() as db:
+            advisor = await db.get(InvestmentAdvisor, advisor_id)
+            if advisor is None:
+                summary = "Advisor row disappeared between queue and run."
+                await _finalize_child(child_id, status="failed", success=0, failure=1, summary=summary)
+                return "failed", summary
+            firm_name = advisor.name
+            crd = advisor.crd_number
+            executive_officers = advisor.executive_officers
+
+            existing = (
+                await db.execute(
+                    select(AdvisorContact.id)
+                    .where(AdvisorContact.advisor_id == advisor_id)
+                    .limit(1)
+                )
+            ).scalar_one_or_none()
+            if existing is not None:
+                summary = "Advisor already has contacts; nothing to enrich."
+                await _finalize_child(child_id, status="completed", success=1, failure=0, summary=summary)
+                return "completed", summary
+
+        # Tier 1: Apollo people-search (names only). A provider error must NOT
+        # persist anything so the next run can retry instead of caching an
+        # outage as "no contacts".
+        apollo_results = None
+        api_key = settings.apollo_api_key
+        if api_key and firm_name:
+            try:
+                apollo_results = await ApolloClient(api_key).search_executives(firm_name, crd)
+            except ApolloError as exc:
+                summary = f"Apollo provider_error; leaving contacts untouched for retry: {str(exc)[:120]}"
+                await _finalize_child(child_id, status="completed_with_errors", success=0, failure=1, summary=summary)
+                return "completed_with_errors", summary
+
+        now = datetime.now(timezone.utc)
+        inserted = 0
+        source = ""
+        async with SessionLocal() as db:
+            advisor = await db.get(InvestmentAdvisor, advisor_id)
+            if advisor is None:
+                summary = "Advisor row disappeared between search and write."
+                await _finalize_child(child_id, status="failed", success=0, failure=1, summary=summary)
+                return "failed", summary
+
+            # Re-check inside the write session to avoid a duplicate-insert race
+            # with a concurrent run on the same advisor.
+            existing = (
+                await db.execute(
+                    select(AdvisorContact.id)
+                    .where(AdvisorContact.advisor_id == advisor_id)
+                    .limit(1)
+                )
+            ).scalar_one_or_none()
+            if existing is not None:
+                summary = "Advisor already has contacts; nothing to enrich."
+                await _finalize_child(child_id, status="completed", success=1, failure=0, summary=summary)
+                return "completed", summary
+
+            if apollo_results:
+                source = "apollo"
+                for executive in apollo_results:
+                    name = f"{executive.first_name} {executive.last_name}".strip()
+                    if not name:
+                        continue
+                    db.add(
+                        AdvisorContact(
+                            advisor_id=advisor_id,
+                            name=name[:255],
+                            title=_rank_to_display_title(executive.officer_rank)[:255],
+                            email=None,
+                            phone=None,
+                            linkedin_url=None,
+                            source="apollo",
+                            enriched_at=now,
+                        )
+                    )
+                    inserted += 1
+            elif isinstance(executive_officers, list):
+                # Tier 2: seed from the Gemini-extracted officers blob. Names +
+                # title only; channels NULL (a richer enrichment is out of scope).
+                source = "adv"
+                for officer in executive_officers:
+                    if not isinstance(officer, dict):
+                        continue
+                    name = str(officer.get("name") or "").strip()
+                    if not name:
+                        continue
+                    title = (str(officer.get("title") or "Executive Officer").strip() or "Executive Officer")
+                    db.add(
+                        AdvisorContact(
+                            advisor_id=advisor_id,
+                            name=name[:255],
+                            title=title[:255],
+                            email=None,
+                            phone=None,
+                            linkedin_url=None,
+                            source="adv",
+                            enriched_at=now,
+                        )
+                    )
+                    inserted += 1
+
+            if inserted:
+                await db.commit()
+
+        if not inserted:
+            summary = "No contacts found (Apollo empty/absent, no executive_officers to seed from)."
+            await _finalize_child(child_id, status="completed_with_errors", success=0, failure=1, summary=summary)
+            return "completed_with_errors", summary
+
+        summary = f"Wrote {inserted} contact(s) from {source} (names only)."
+        await _finalize_child(child_id, status="completed", success=1, failure=0, summary=summary)
+        return "completed", summary
+    except Exception as exc:
+        logger.exception("advisor-refresh/contacts failed for advisor %s", advisor_id)
+        summary = f"{type(exc).__name__}: {str(exc)[:200]}"
+        await _finalize_child(child_id, status="failed", success=0, failure=1, summary=summary)
+        return "failed", summary
+
+
 _RUNNERS = {
     SUB_REFRESH_OWNERS_OFFICERS: _run_refresh_owners_officers,
     SUB_RESOLVE_ADVISOR_WEBSITE: _run_resolve_advisor_website,
+    SUB_REFRESH_FILINGS: _run_refresh_filings,
+    SUB_ENRICH_CONTACTS: _run_enrich_contacts,
 }
 
 
@@ -685,6 +1009,15 @@ async def run_advisor_refresh(
                 "children": children_summary,
             }
         )
+        # Stamp the advisor's last-attempt time so the cooldown-gated
+        # sub-pipelines (owners, filings, contacts) all settle uniformly. The
+        # owners pipeline also stamps this on its own write path, but stamping
+        # here guarantees the cooldown holds even when owners was skipped (e.g.
+        # already complete) and only filings/contacts ran — without it, those
+        # two would re-fire (and re-hit EDGAR) on every visit.
+        advisor = await db.get(InvestmentAdvisor, advisor_id)
+        if advisor is not None:
+            advisor.last_enrich_attempt_at = datetime.now(timezone.utc)
         await db.commit()
 
 
@@ -693,6 +1026,8 @@ __all__ = [
     "REFRESH_ADVISOR_ALL_PIPELINE_NAME",
     "SUB_REFRESH_OWNERS_OFFICERS",
     "SUB_RESOLVE_ADVISOR_WEBSITE",
+    "SUB_REFRESH_FILINGS",
+    "SUB_ENRICH_CONTACTS",
     "decide_pipelines",
     "required_provider_keys",
     "run_advisor_refresh",
