@@ -104,6 +104,8 @@ import type {
   AdminUserActivitiesResponse,
   AdminUserActivityFilter,
   AdminUserSavedFirmsResponse,
+  ClearingMembershipDecisionResponse,
+  ClearingMembershipReviewListResponse,
   LinkedProvidersResponse,
   ContactSearchResponse,
   InstitutionalInvestorListResponse,
@@ -1077,6 +1079,42 @@ export async function retryVaultFile(
 ): Promise<VaultFolderFile> {
   return apiRequest<VaultFolderFile>(
     `/api/v1/vault/folders/${folderId}/files/${fileId}/retry`,
+    { method: "POST" }
+  );
+}
+
+// ── Clearing-membership admin review queue ────────────────────────────
+// Surfaces `status='needs_review'` rows from the directory importer (the
+// safety path for ambiguous name matches) so an admin can approve the
+// correct candidate or reject a wrong one. Approve flips the row to
+// `match_method='manual'` server-side so re-imports preserve the decision.
+
+export async function getClearingMembershipReviewQueue(opts: {
+  limit?: number;
+  offset?: number;
+} = {}): Promise<ClearingMembershipReviewListResponse> {
+  return apiRequest<ClearingMembershipReviewListResponse>(
+    buildApiPath("/api/v1/clearing-memberships/review", {
+      limit: opts.limit,
+      offset: opts.offset,
+    })
+  );
+}
+
+export async function approveClearingMembership(
+  membershipId: number
+): Promise<ClearingMembershipDecisionResponse> {
+  return apiRequest<ClearingMembershipDecisionResponse>(
+    `/api/v1/clearing-memberships/${membershipId}/approve`,
+    { method: "POST" }
+  );
+}
+
+export async function rejectClearingMembership(
+  membershipId: number
+): Promise<ClearingMembershipDecisionResponse> {
+  return apiRequest<ClearingMembershipDecisionResponse>(
+    `/api/v1/clearing-memberships/${membershipId}/reject`,
     { method: "POST" }
   );
 }

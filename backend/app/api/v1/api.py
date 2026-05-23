@@ -4,6 +4,7 @@ from app.api.v1.endpoints import (
     alerts,
     auth,
     broker_dealers,
+    clearing_memberships_admin,
     contacts,
     email_extractor,
     favorite_lists,
@@ -46,3 +47,4 @@ api_router.include_router(vault_files.router, tags=["vault-files"])
 api_router.include_router(outreach.router, tags=["outreach"])
 api_router.include_router(contacts.router, tags=["contacts"])
 api_router.include_router(users_admin.router, tags=["users-admin"])
+api_router.include_router(clearing_memberships_admin.router)
