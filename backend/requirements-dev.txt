@@ -4,3 +4,6 @@
 pytest>=8.3.0
 pytest-asyncio>=0.24.0
 respx>=0.21.1
+# In-memory async DB driver for tests that exercise real SQL (e.g. the
+# pipeline-reaper test). Test-only — never imported by app code.
+aiosqlite>=0.21.0
