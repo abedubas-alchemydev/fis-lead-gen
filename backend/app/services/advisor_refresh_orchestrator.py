@@ -86,6 +86,20 @@ from app.services.website_resolver import is_blocklisted_host, resolve_website
 IAPD_PDF_URL_TEMPLATE = "https://reports.adviserinfo.sec.gov/reports/ADV/{crd}/PDF/{crd}.pdf"
 IAPD_REQUEST_TIMEOUT_SECONDS = 30.0
 
+# Per-firm IAPD summary JSON. The same payload the public adviserinfo.sec.gov
+# firm profile page consumes (discovered by inspecting the SPA's network
+# calls). The `iacontent` field wraps `basicInformation`, `registrationStatus`,
+# `compilationData`, and other firm-level data that Form ADV doesn't print on
+# the PDF cover page — in particular, SEC registration effective date, which
+# is otherwise not in our existing sources (PDF, EDGAR submissions for IAs,
+# IAPD bulk compilation CSV). The CRD goes in the path; the noisy query
+# string params (`hl`, `nrows`, `query=`, `r`, `sort`, `wt`) are required by
+# the endpoint even though `query` is empty when looking up a specific CRD.
+IAPD_FIRM_SUMMARY_URL_TEMPLATE = (
+    "https://api.adviserinfo.sec.gov/search/firm/{crd}"
+    "?hl=true&nrows=12&query=&r=25&sort=score+desc&wt=json"
+)
+
 
 async def _fetch_iapd_form_adv_pdf(crd: str) -> bytes:
     """Download the IAPD Form ADV PDF for ``crd``. Raises
@@ -114,6 +128,69 @@ async def _fetch_iapd_form_adv_pdf(crd: str) -> bytes:
     return pdf_bytes
 
 
+async def _fetch_iapd_firm_summary(crd: str) -> dict | None:
+    """Fetch and unwrap the IAPD per-firm summary JSON for ``crd``.
+
+    Returns the parsed ``iacontent`` dict on success, ``None`` on any
+    fetch / parse failure. ``iacontent`` is itself a JSON string inside the
+    Elasticsearch-shaped envelope (``hits.hits[0]._source.iacontent``); we
+    unwrap that string before returning. Non-2xx and network errors log and
+    return ``None`` — the caller treats absence as "no IAPD data available
+    for this firm" rather than aborting the broader refresh.
+    """
+    url = IAPD_FIRM_SUMMARY_URL_TEMPLATE.format(crd=crd)
+    headers = {
+        "User-Agent": settings.sec_user_agent,
+        "Accept": "application/json",
+        "Origin": "https://adviserinfo.sec.gov",
+        "Referer": f"https://adviserinfo.sec.gov/firm/summary/{crd}",
+    }
+    try:
+        async with httpx.AsyncClient(
+            timeout=IAPD_REQUEST_TIMEOUT_SECONDS, follow_redirects=True
+        ) as client:
+            response = await client.get(url, headers=headers)
+    except httpx.HTTPError as exc:
+        logger.warning("IAPD firm summary network error for CRD %s: %s", crd, exc)
+        return None
+    if response.status_code != 200:
+        logger.info("IAPD firm summary HTTP %s for CRD %s", response.status_code, crd)
+        return None
+    try:
+        envelope = response.json()
+    except (json.JSONDecodeError, ValueError):
+        logger.warning("IAPD firm summary returned non-JSON for CRD %s", crd)
+        return None
+    hits = (envelope.get("hits") or {}).get("hits") or []
+    if not hits:
+        return None
+    raw = (hits[0].get("_source") or {}).get("iacontent")
+    if not isinstance(raw, str):
+        return None
+    try:
+        return json.loads(raw)
+    except json.JSONDecodeError:
+        logger.warning("IAPD firm summary iacontent unparseable for CRD %s", crd)
+        return None
+
+
+def _parse_iapd_us_date(value: str | None) -> date | None:
+    """Parse the ``"M/D/YYYY"`` / ``"MM/DD/YYYY"`` date format the IAPD JSON
+    uses for ``registrationStatus[].effectiveDate``. Returns ``None`` on any
+    parse failure rather than raising — we'd rather skip a malformed date
+    than abort the whole sub-pipeline."""
+    if not value:
+        return None
+    parts = value.strip().split("/")
+    if len(parts) != 3:
+        return None
+    try:
+        month, day, year = (int(p) for p in parts)
+        return date(year, month, day)
+    except ValueError:
+        return None
+
+
 RefreshScope = Literal["all"]
 
 logger = logging.getLogger(__name__)
@@ -126,6 +203,7 @@ SUB_REFRESH_OWNERS_OFFICERS = "investment_advisor_refresh_owners_officers"
 SUB_RESOLVE_ADVISOR_WEBSITE = "investment_advisor_resolve_website"
 SUB_REFRESH_FILINGS = "investment_advisor_refresh_filings"
 SUB_ENRICH_CONTACTS = "investment_advisor_enrich_contacts"
+SUB_REFRESH_IAPD_SUMMARY = "investment_advisor_refresh_iapd_summary"
 
 # Short human labels used in the parent's notes.summary toast string.
 _SUB_LABEL: dict[str, str] = {
@@ -133,6 +211,7 @@ _SUB_LABEL: dict[str, str] = {
     SUB_RESOLVE_ADVISOR_WEBSITE: "website",
     SUB_REFRESH_FILINGS: "filings",
     SUB_ENRICH_CONTACTS: "contacts",
+    SUB_REFRESH_IAPD_SUMMARY: "iapd",
 }
 
 
@@ -392,6 +471,20 @@ def decide_pipelines(advisor: InvestmentAdvisor) -> GateDecision:
         to_run.append(SUB_ENRICH_CONTACTS)
     else:
         to_skip.append(SUB_ENRICH_CONTACTS)
+
+    # IAPD per-firm summary fills `registration_date` (and only that — Form
+    # ADV doesn't capture a formation date, so neither does this endpoint).
+    # Needs a CRD; gate closes when the date is already populated AND on the
+    # cooldown so a non-extractable date can't make the call fire every visit.
+    needs_iapd = (
+        advisor.crd_number is not None
+        and advisor.registration_date is None
+        and not recently_attempted
+    )
+    if needs_iapd:
+        to_run.append(SUB_REFRESH_IAPD_SUMMARY)
+    else:
+        to_skip.append(SUB_REFRESH_IAPD_SUMMARY)
 
     return GateDecision(to_run=tuple(to_run), to_skip=tuple(to_skip))
 
@@ -1077,11 +1170,84 @@ async def _run_enrich_contacts(
         return "failed", summary
 
 
+async def _run_refresh_iapd_summary(
+    parent_run_id: int, advisor_id: int, trigger_source: str
+) -> tuple[str, str]:
+    """Fetch the IAPD per-firm summary JSON and backfill ``registration_date``.
+
+    Form ADV doesn't print SEC registration date on the PDF cover page (the
+    Gemini ADV pass returns NULL for this field on most firms), and the IAPD
+    bulk compilation CSV doesn't have a registration-date column. The public
+    adviserinfo.sec.gov firm profile page consumes a per-firm JSON API that
+    surfaces ``registrationStatus[0].effectiveDate`` for every SEC-registered
+    advisor — that's our authoritative source for this one field.
+
+    Form ADV also doesn't ask for a formation date, so this endpoint doesn't
+    carry one either; this sub-pipeline doesn't touch ``formation_date``.
+    """
+    child_id = await _create_child_run(
+        parent_run_id, advisor_id, SUB_REFRESH_IAPD_SUMMARY, trigger_source
+    )
+    try:
+        async with SessionLocal() as db:
+            advisor = await db.get(InvestmentAdvisor, advisor_id)
+            if advisor is None:
+                summary = "Advisor row disappeared between queue and run."
+                await _finalize_child(child_id, status="failed", success=0, failure=1, summary=summary)
+                return "failed", summary
+            crd = advisor.crd_number
+
+        if not crd:
+            summary = "No CRD on record; cannot fetch IAPD summary."
+            await _finalize_child(child_id, status="completed_with_errors", success=0, failure=1, summary=summary)
+            return "completed_with_errors", summary
+
+        iacontent = await _fetch_iapd_firm_summary(crd)
+        if iacontent is None:
+            summary = "IAPD summary fetch failed or returned no data."
+            await _finalize_child(child_id, status="completed_with_errors", success=0, failure=1, summary=summary)
+            return "completed_with_errors", summary
+
+        statuses = iacontent.get("registrationStatus") or []
+        reg_dt: date | None = None
+        if statuses and isinstance(statuses[0], dict):
+            reg_dt = _parse_iapd_us_date(statuses[0].get("effectiveDate"))
+        if reg_dt is None:
+            summary = "IAPD summary parsed but had no registrationStatus effectiveDate."
+            await _finalize_child(child_id, status="completed_with_errors", success=0, failure=1, summary=summary)
+            return "completed_with_errors", summary
+
+        wrote: list[str] = []
+        async with SessionLocal() as db:
+            advisor = await db.get(InvestmentAdvisor, advisor_id)
+            if advisor is None:
+                summary = "Advisor row disappeared between fetch and write."
+                await _finalize_child(child_id, status="failed", success=0, failure=1, summary=summary)
+                return "failed", summary
+            if advisor.registration_date is None:
+                advisor.registration_date = reg_dt
+                wrote.append("registration_date")
+                await db.commit()
+
+        if wrote:
+            summary = f"Wrote {', '.join(wrote)} from IAPD ({reg_dt.isoformat()})."
+        else:
+            summary = f"registration_date already set; IAPD value {reg_dt.isoformat()} not overwritten."
+        await _finalize_child(child_id, status="completed", success=1, failure=0, summary=summary)
+        return "completed", summary
+    except Exception as exc:
+        logger.exception("advisor-refresh/iapd-summary failed for advisor %s", advisor_id)
+        summary = f"{type(exc).__name__}: {str(exc)[:200]}"
+        await _finalize_child(child_id, status="failed", success=0, failure=1, summary=summary)
+        return "failed", summary
+
+
 _RUNNERS = {
     SUB_REFRESH_OWNERS_OFFICERS: _run_refresh_owners_officers,
     SUB_RESOLVE_ADVISOR_WEBSITE: _run_resolve_advisor_website,
     SUB_REFRESH_FILINGS: _run_refresh_filings,
     SUB_ENRICH_CONTACTS: _run_enrich_contacts,
+    SUB_REFRESH_IAPD_SUMMARY: _run_refresh_iapd_summary,
 }
 
 
@@ -1209,6 +1375,7 @@ __all__ = [
     "SUB_RESOLVE_ADVISOR_WEBSITE",
     "SUB_REFRESH_FILINGS",
     "SUB_ENRICH_CONTACTS",
+    "SUB_REFRESH_IAPD_SUMMARY",
     "decide_pipelines",
     "required_provider_keys",
     "run_advisor_refresh",

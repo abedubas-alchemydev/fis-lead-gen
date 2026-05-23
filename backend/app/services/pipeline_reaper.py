@@ -62,6 +62,7 @@ REFRESH_FAMILY_PIPELINES: frozenset[str] = frozenset(
         "investment_advisor_resolve_website",
         "investment_advisor_refresh_filings",
         "investment_advisor_enrich_contacts",
+        "investment_advisor_refresh_iapd_summary",
     }
 )
 
