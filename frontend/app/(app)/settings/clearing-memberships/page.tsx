@@ -19,10 +19,10 @@ export default async function ClearingMembershipsAdminPage() {
             <div className="space-y-2">
               <p className="text-[11px] font-semibold uppercase tracking-[0.1em] text-amber-700">Admin Only</p>
               <h1 className="text-2xl font-bold tracking-[-0.02em] text-[var(--text,#0f172a)]">
-                Clearing-membership review is restricted
+                Reputable-dispute membership review is restricted
               </h1>
               <p className="max-w-2xl text-[13px] leading-5 text-[var(--text-dim,#475569)]">
-                The clearing-agency directory importer routes ambiguous name matches to a review
+                The reputable-dispute directory importer routes ambiguous name matches to a review
                 queue. Only administrators can approve or reject those candidates.
               </p>
             </div>
