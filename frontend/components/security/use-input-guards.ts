@@ -110,13 +110,15 @@ export function useInputGuards(): void {
     function onWindowFocus() {
       document.documentElement.removeAttribute("data-app-blurred");
       // Best-effort clipboard wipe on regaining focus. Clipboard write
-      // outside a user gesture is permission-gated in most browsers — wrap
-      // in try/catch and ignore failures.
-      try {
-        void navigator.clipboard?.writeText("");
-      } catch {
+      // outside a user gesture is permission-gated in most browsers; on
+      // those, navigator.clipboard.writeText() returns a Promise that
+      // rejects with NotAllowedError. A synchronous try/catch never sees
+      // the rejection — it escapes as "Uncaught (in promise)
+      // NotAllowedError" in the console on every focus/blur cycle. Attach
+      // a .catch() so the rejection is handled and silently swallowed.
+      navigator.clipboard?.writeText("").catch(() => {
         // intentionally ignored
-      }
+      });
     }
 
     function onKeyDown(e: KeyboardEvent) {
@@ -125,13 +127,17 @@ export function useInputGuards(): void {
 
       // Always block PrintScreen — and wipe the clipboard immediately, since
       // PrintScreen on Windows puts the captured bitmap into the clipboard.
+      // Same Promise-rejection trap as onWindowFocus above: navigator.
+      // clipboard.writeText() returns a Promise whose rejection escapes
+      // any surrounding synchronous try/catch. Use .catch() to swallow
+      // the NotAllowedError that fires when the page lacks a current
+      // user gesture or when the clipboard-write Permissions-Policy
+      // hasn't been granted yet.
       if (key === "PrintScreen") {
         e.preventDefault();
-        try {
-          void navigator.clipboard?.writeText("");
-        } catch {
+        navigator.clipboard?.writeText("").catch(() => {
           // intentionally ignored
-        }
+        });
         maybeToast("printscreen", "Screen capture is disabled for security.");
         logEvent("clipboard_cleared", { trigger: "printscreen" });
         return;
