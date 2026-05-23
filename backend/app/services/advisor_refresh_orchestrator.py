@@ -580,9 +580,17 @@ async def _run_resolve_advisor_website(
         # tiers are optional fallbacks the resolver skips when their keys
         # aren't set. ``required_provider_keys`` above already 503s when
         # APOLLO_API_KEY is missing so we won't hit this path without it.
-        apollo = ApolloClient() if settings.apollo_api_key else None
-        serpapi = SerpAPIClient() if getattr(settings, "serpapi_api_key", None) else None
-        serper = SerperClient() if getattr(settings, "serper_api_key", None) else None
+        apollo = ApolloClient(settings.apollo_api_key) if settings.apollo_api_key else None
+        serpapi = (
+            SerpAPIClient(settings.serpapi_api_key)
+            if getattr(settings, "serpapi_api_key", None)
+            else None
+        )
+        serper = (
+            SerperClient(settings.serper_api_key)
+            if getattr(settings, "serper_api_key", None)
+            else None
+        )
 
         website, source, reason = await resolve_website(
             firm_name=firm_name,
@@ -797,18 +805,25 @@ async def _run_enrich_contacts(
                 await _finalize_child(child_id, status="completed", success=1, failure=0, summary=summary)
                 return "completed", summary
 
-        # Tier 1: Apollo people-search (names only). A provider error must NOT
-        # persist anything so the next run can retry instead of caching an
-        # outage as "no contacts".
+        # Tier 1: Apollo people-search (names only). On a provider error we
+        # don't bail — we fall through to the executive_officers seed below so
+        # the panel still fills from the data the Gemini ADV pass already
+        # extracted. (A 422 like the one Apollo returns for some large firms
+        # is not transient, so "leave empty and retry" would just keep the
+        # panel blank forever despite officers being on file.)
         apollo_results = None
         api_key = settings.apollo_api_key
         if api_key and firm_name:
             try:
                 apollo_results = await ApolloClient(api_key).search_executives(firm_name, crd)
             except ApolloError as exc:
-                summary = f"Apollo provider_error; leaving contacts untouched for retry: {str(exc)[:120]}"
-                await _finalize_child(child_id, status="completed_with_errors", success=0, failure=1, summary=summary)
-                return "completed_with_errors", summary
+                logger.info(
+                    "Apollo people-search errored for advisor %s (%s); falling back to "
+                    "executive_officers seed: %s",
+                    advisor_id,
+                    firm_name,
+                    str(exc)[:160],
+                )
 
         now = datetime.now(timezone.utc)
         inserted = 0
