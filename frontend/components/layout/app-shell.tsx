@@ -260,7 +260,7 @@ const navSections: ReadonlyArray<NavSection> = [
       { href: "/settings", label: "Settings", icon: SettingsIcon, badgeKey: null, permissionKey: "settings" },
       { href: "/settings/email-accounts" as Route, label: "Email Accounts", icon: MailAtIcon, badgeKey: null },
       { href: "/settings/users" as Route, label: "Users", icon: UsersIcon, badgeKey: null, adminOnly: true, permissionKey: "users" },
-      { href: "/settings/clearing-memberships" as Route, label: "Reputable Dispute Memberships", icon: ShieldCheckIcon, badgeKey: null, adminOnly: true },
+      { href: "/settings/clearing-memberships" as Route, label: "Memberships", icon: ShieldCheckIcon, badgeKey: null, adminOnly: true },
       { href: "/vault", label: "Vault", icon: VaultIcon, badgeKey: null, permissionKey: "vault" }
     ]
   }

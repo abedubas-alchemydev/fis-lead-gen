@@ -59,7 +59,7 @@ const columns = [
   { key: "cik", label: "CIK" },
   { key: "current_clearing_partner", label: "Clearing Arrangement" },
   { key: "current_clearing_type", label: "Clearing Type" },
-  { key: "memberships", label: "Reputable Dispute Memberships" },
+  { key: "memberships", label: "Memberships" },
   { key: "health_status", label: "Financial Health" },
   { key: "lead_score", label: "Prospect Priority" },
   { key: "latest_net_capital", label: "Net Capital" },

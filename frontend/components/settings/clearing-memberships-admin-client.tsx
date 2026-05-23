@@ -104,7 +104,7 @@ export function ClearingMembershipsAdminClient() {
   return (
     <div className="space-y-6">
       <header className="space-y-2">
-        <p className={EYEBROW}>Reputable-Dispute Membership Review</p>
+        <p className={EYEBROW}>Membership Review</p>
         <h1 className="text-2xl font-bold tracking-[-0.02em] text-[var(--text,#0f172a)]">
           Adjudicate ambiguous directory matches
         </h1>
