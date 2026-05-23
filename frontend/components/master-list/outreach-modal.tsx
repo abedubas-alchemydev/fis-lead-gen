@@ -6,15 +6,22 @@ import { useEffect, useMemo, useRef, useState } from "react";
 
 import {
   ApiError,
+  generateAdvisorOutreachDraft,
+  generateInvestorOutreachDraft,
   generateOutreachDraft,
   getLinkedProviders,
   listVaultFolders,
+  sendAdvisorOutreach,
+  sendInvestorOutreach,
   sendOutreachEmail
 } from "@/lib/api";
 import { authClient } from "@/lib/auth-client";
 import type {
+  OutreachContact,
+  OutreachEntityKind
+} from "@/components/master-list/outreach-button";
+import type {
   EmailProviderId,
-  ExecutiveContactItem,
   LinkedProviderItem,
   VaultFolder
 } from "@/lib/types";
@@ -29,9 +36,16 @@ import type {
 // the gmail.send scope.
 
 interface OutreachModalProps {
-  brokerDealerId: number;
-  brokerDealerName: string;
-  contact: ExecutiveContactItem;
+  // Discriminator: picks the (draft, send) endpoint pair invoked when
+  // the user clicks Generate / Send. BD callers pass "broker_dealer"
+  // (legacy default for the master-list contact rows); the IA
+  // advisor-detail surface passes "advisor". Investor isn't wired into
+  // any UI surface yet but the case is handled so future callers can
+  // pass it without touching this file.
+  entityKind: OutreachEntityKind;
+  entityId: number;
+  entityName: string;
+  contact: OutreachContact;
   onClose: () => void;
 }
 
@@ -135,8 +149,9 @@ function decodeLinkAction(
 }
 
 export function OutreachModal({
-  brokerDealerId,
-  brokerDealerName,
+  entityKind,
+  entityId,
+  entityName,
   contact,
   onClose
 }: OutreachModalProps) {
@@ -267,11 +282,30 @@ export function OutreachModal({
     setStage("generating");
     setError(null);
     try {
-      const draft = await generateOutreachDraft({
-        broker_dealer_id: brokerDealerId,
-        contact_id: contact.id,
-        folder_id: folderId
-      });
+      // Branch on entityKind so the right /outreach/{kind}-draft endpoint
+      // runs. The wire payloads differ only in their id field names
+      // (broker_dealer_id vs advisor_id vs institutional_investor_id),
+      // wrapped by the per-kind helpers in api.ts.
+      let draft;
+      if (entityKind === "broker_dealer") {
+        draft = await generateOutreachDraft({
+          broker_dealer_id: entityId,
+          contact_id: contact.id,
+          folder_id: folderId
+        });
+      } else if (entityKind === "advisor") {
+        draft = await generateAdvisorOutreachDraft({
+          advisor_id: entityId,
+          advisor_contact_id: contact.id,
+          folder_id: folderId
+        });
+      } else {
+        draft = await generateInvestorOutreachDraft({
+          institutional_investor_id: entityId,
+          investor_contact_id: contact.id,
+          folder_id: folderId
+        });
+      }
       if (!isMountedRef.current) return;
       setSubject(draft.subject);
       setBody(draft.body);
@@ -290,17 +324,43 @@ export function OutreachModal({
     setLinkActionNeeded(false);
     setLinkActionProvider(null);
     try {
-      await sendOutreachEmail({
-        broker_dealer_id: brokerDealerId,
-        contact_id: contact.id,
-        folder_id: folderId ?? 0,
-        subject,
-        body,
-        // Server derives provider from the resolved account; we still
-        // pass ``provider`` for back-compat with older deploys.
-        provider: providerId,
-        sender_account_id: senderAccountId
-      });
+      // Same entityKind branch as handleGenerate -- POSTs to the
+      // matching /outreach/{kind}-send endpoint. provider +
+      // sender_account_id are entity-agnostic so the body shape only
+      // diverges on the id columns.
+      if (entityKind === "broker_dealer") {
+        await sendOutreachEmail({
+          broker_dealer_id: entityId,
+          contact_id: contact.id,
+          folder_id: folderId ?? 0,
+          subject,
+          body,
+          // Server derives provider from the resolved account; we still
+          // pass ``provider`` for back-compat with older deploys.
+          provider: providerId,
+          sender_account_id: senderAccountId
+        });
+      } else if (entityKind === "advisor") {
+        await sendAdvisorOutreach({
+          advisor_id: entityId,
+          advisor_contact_id: contact.id,
+          folder_id: folderId ?? 0,
+          subject,
+          body,
+          provider: providerId,
+          sender_account_id: senderAccountId
+        });
+      } else {
+        await sendInvestorOutreach({
+          institutional_investor_id: entityId,
+          investor_contact_id: contact.id,
+          folder_id: folderId ?? 0,
+          subject,
+          body,
+          provider: providerId,
+          sender_account_id: senderAccountId
+        });
+      }
       if (!isMountedRef.current) return;
       setStage("sent");
     } catch (err) {
@@ -413,7 +473,7 @@ export function OutreachModal({
               </span>
             </h2>
             <p className="mt-1 text-xs text-[var(--text-muted,#94a3b8)]">
-              At <span className="font-medium text-[var(--text-dim,#475569)]">{brokerDealerName}</span>
+              At <span className="font-medium text-[var(--text-dim,#475569)]">{entityName}</span>
               {contact.email ? (
                 <>
                   {" "}-{" "}

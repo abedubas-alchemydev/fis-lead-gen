@@ -16,8 +16,10 @@ from app.services.advisor_refresh_orchestrator import (
     SUB_REFRESH_FILINGS,
     SUB_REFRESH_OWNERS_OFFICERS,
     SUB_RESOLVE_ADVISOR_WEBSITE,
+    _canonicalize_domain,
     _domain_from_website,
     _filing_priority,
+    _normalize_org_name,
     _parse_iso_date,
     _people_to_json,
     _split_officer_name,
@@ -237,6 +239,69 @@ def test_domain_from_website_none_or_blank() -> None:
     assert _domain_from_website(None) is None
     assert _domain_from_website("") is None
     assert _domain_from_website("   ") is None
+
+
+# ── _canonicalize_domain: strip one portal/sub-brand prefix only ───────────
+
+
+def test_canonicalize_domain_strips_investor_portal() -> None:
+    # Vanguard's website resolver lands on the portal subdomain; Hunter/Snov/
+    # Apollo all index the apex, so the chain needs the bare brand.
+    assert _canonicalize_domain("investor.vanguard.com") == "vanguard.com"
+
+
+def test_canonicalize_domain_strips_institutional_subbrand() -> None:
+    assert _canonicalize_domain("institutional.blackrock.com") == "blackrock.com"
+
+
+def test_canonicalize_domain_strips_www() -> None:
+    # ``_domain_from_website`` already strips www, but ``_canonicalize_domain``
+    # is idempotent on a bare host that still carries one (defensive call).
+    assert _canonicalize_domain("www.foo.io") == "foo.io"
+
+
+def test_canonicalize_domain_passes_bare_host_through() -> None:
+    assert _canonicalize_domain("bare.co") == "bare.co"
+
+
+def test_canonicalize_domain_none_returns_none() -> None:
+    assert _canonicalize_domain(None) is None
+    assert _canonicalize_domain("") is None
+
+
+def test_canonicalize_domain_stops_after_single_strip() -> None:
+    # ``foo.investor.com`` is a company subdomain of ``investor.com`` — not a
+    # portal — so we must not recurse and collapse it to ``investor.com``.
+    assert _canonicalize_domain("foo.investor.com") == "foo.investor.com"
+
+
+# ── _normalize_org_name: title-case while keeping legal suffixes upper ─────
+
+
+def test_normalize_org_name_upper_with_inc_suffix() -> None:
+    # The DB stores firm names upper-cased; PDL's name-based fallback matches
+    # the canonical mixed-case form, so we title-case while pinning the
+    # corporate suffix.
+    assert _normalize_org_name("VANGUARD GROUP INC") == "Vanguard Group INC"
+
+
+def test_normalize_org_name_punctuated_suffix_kept_upper() -> None:
+    # "Co." should still title-case correctly and the LLC suffix must stay
+    # uppercase even with punctuation on the preceding token.
+    assert _normalize_org_name("GOLDMAN SACHS & CO. LLC") == "Goldman Sachs & Co. LLC"
+
+
+def test_normalize_org_name_lower_input() -> None:
+    assert _normalize_org_name("berkshire hathaway inc") == "Berkshire Hathaway INC"
+
+
+def test_normalize_org_name_collapses_whitespace() -> None:
+    assert _normalize_org_name("  spaced  out  ") == "Spaced Out"
+
+
+def test_normalize_org_name_none_or_blank() -> None:
+    assert _normalize_org_name(None) is None
+    assert _normalize_org_name("") is None
 
 
 def test_people_to_json_shapes_and_skips_blanks() -> None:

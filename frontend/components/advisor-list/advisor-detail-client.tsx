@@ -24,10 +24,12 @@ import {
 } from "@/lib/advisor-list-state";
 import { formatCurrency, formatDate } from "@/lib/format";
 import { ListPicker } from "@/components/list-picker/list-picker";
+import { OutreachButton } from "@/components/master-list/outreach-button";
 import { Pill } from "@/components/ui/pill";
 import { agencyLabel } from "@/components/master-list/detail/clearing-membership-helpers";
 import { SectionPanel } from "@/components/ui/section-panel";
 import type {
+  AdvisorContactItem,
   InvestmentAdvisorListResponse,
   InvestmentAdvisorProfileResponse,
 } from "@/lib/types";
@@ -759,19 +761,22 @@ export function AdvisorDetailClient({ advisorId }: { advisorId: string }) {
                 },
                 { header: "Title", cell: (c) => c.title ?? "—" },
                 {
-                  header: "Email",
+                  header: "Channels",
+                  cell: (c) => <ContactChannelsCell contact={c} />,
+                  className: "break-all",
+                },
+                {
+                  header: "Outreach",
                   cell: (c) =>
                     c.email ? (
-                      <a
-                        href={`mailto:${c.email}`}
-                        className="text-[var(--accent,#6366f1)] hover:underline"
-                      >
-                        {c.email}
-                      </a>
-                    ) : (
-                      "—"
-                    ),
-                  className: "break-all",
+                      <OutreachButton
+                        entityKind="advisor"
+                        entityId={Number(advisorId)}
+                        entityName={advisor.name}
+                        contact={c}
+                      />
+                    ) : null,
+                  className: "whitespace-nowrap",
                 },
               ]}
             />
@@ -970,6 +975,69 @@ function PeopleTable<T>({
           </tbody>
         </table>
       </div>
+    </div>
+  );
+}
+
+// Multi-channel cell renderer for the Enriched contacts table. Mirrors the
+// pattern from master-list/detail/contact-row.tsx so the IA surface shows
+// the same emails[] / phones[] / linkedin_url payload the BD surface does
+// — chips for personal email + non-work phone type, work phones unbadged,
+// LinkedIn as an external-link icon. Returns an em-dash when none of the
+// three are populated so empty rows still anchor the row height.
+function ContactChannelsCell({ contact }: { contact: AdvisorContactItem }) {
+  const emails = contact.emails ?? [];
+  const phones = contact.phones ?? [];
+  const linkedinUrl = contact.linkedin_url;
+
+  if (emails.length === 0 && phones.length === 0 && !linkedinUrl) {
+    return <span className="text-[var(--text-muted,#94a3b8)]">—</span>;
+  }
+
+  return (
+    <div className="flex flex-col gap-1 text-xs">
+      {emails.map((email, i) => (
+        <span key={`email-${i}`} className="inline-flex items-center gap-1">
+          <a
+            href={`mailto:${email.value}`}
+            className="text-[var(--accent,#6366f1)] transition hover:underline"
+          >
+            {email.value}
+          </a>
+          {email.type === "personal" ? (
+            <span className="rounded-full bg-[var(--surface-2,#f1f6fd)] px-1.5 py-0.5 text-[10px] uppercase tracking-[0.08em] text-[var(--text-muted,#94a3b8)]">
+              personal
+            </span>
+          ) : null}
+        </span>
+      ))}
+      {phones.map((phone, i) => (
+        <span key={`phone-${i}`} className="inline-flex items-center gap-1">
+          <a
+            href={`tel:${phone.value}`}
+            className="text-[var(--text-dim,#475569)] transition hover:underline"
+          >
+            {phone.value}
+          </a>
+          {phone.type !== "work" ? (
+            <span className="rounded-full bg-[var(--surface-2,#f1f6fd)] px-1.5 py-0.5 text-[10px] uppercase tracking-[0.08em] text-[var(--text-muted,#94a3b8)]">
+              {phone.type}
+            </span>
+          ) : null}
+        </span>
+      ))}
+      {linkedinUrl ? (
+        <a
+          href={linkedinUrl}
+          target="_blank"
+          rel="noopener noreferrer"
+          className="inline-flex items-center gap-1 text-[var(--accent,#6366f1)] transition hover:underline"
+          aria-label="Open LinkedIn profile in new tab"
+        >
+          <ExternalLink className="h-3 w-3" strokeWidth={2} />
+          LinkedIn
+        </a>
+      ) : null}
     </div>
   );
 }
