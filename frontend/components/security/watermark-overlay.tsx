@@ -20,9 +20,21 @@ export function WatermarkOverlay({ email, userId, name }: WatermarkOverlayProps)
   // Timestamp is captured on mount and refreshed every minute so a leaked
   // screenshot reveals approximately when it was taken without forcing a
   // repaint on every render.
-  const [stamp, setStamp] = useState<string>(() => formatTimestamp(new Date()));
+  //
+  // Initial state is intentionally an empty string instead of
+  // ``formatTimestamp(new Date())``. The Next.js App Router server-side
+  // renders this client component once, and the initial useState
+  // function would run with the SERVER's clock; on hydration React then
+  // re-renders with the CLIENT's clock and the timestamps differ by
+  // seconds (and timezone). That mismatch surfaced as React errors
+  // #425/#418/#423 on every page load. Seeding to empty + populating
+  // inside useEffect (client-only) eliminates the mismatch; the
+  // watermark briefly shows without the timestamp for one frame, which
+  // is invisible at the overlay's 0.06 opacity.
+  const [stamp, setStamp] = useState<string>("");
 
   useEffect(() => {
+    setStamp(formatTimestamp(new Date()));
     const interval = window.setInterval(() => {
       setStamp(formatTimestamp(new Date()));
     }, 60_000);
