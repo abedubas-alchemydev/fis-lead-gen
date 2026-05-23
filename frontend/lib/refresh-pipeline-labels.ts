@@ -19,6 +19,8 @@ const PIPELINE_LABELS: Record<string, string> = {
   // ── Investment-advisor sub-pipelines ───────────────────────────
   investment_advisor_refresh_owners_officers: "owners",
   investment_advisor_resolve_website: "website",
+  investment_advisor_refresh_filings: "filings",
+  investment_advisor_enrich_contacts: "contacts",
 };
 
 /**
