@@ -14,6 +14,7 @@ import {
   refreshAdvisor,
 } from "@/lib/api";
 import { PageSpinner } from "@/components/ui/spinner";
+import { joinPipelineLabels } from "@/lib/refresh-pipeline-labels";
 import {
   buildAdvisorListUrl,
   encodeReturnParam,
@@ -323,7 +324,7 @@ export function AdvisorDetailClient({ advisorId }: { advisorId: string }) {
   if (refreshState.phase === "polling") {
     const label =
       refreshState.pipelinesRunning.length > 0
-        ? `Refreshing ${refreshState.pipelinesRunning.join(", ")}…`
+        ? `Refreshing ${joinPipelineLabels(refreshState.pipelinesRunning)}…`
         : "Refreshing advisor data…";
     return (
       <div className="px-7 pb-12 pt-7 lg:px-9">
