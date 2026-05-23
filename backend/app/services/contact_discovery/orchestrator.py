@@ -16,34 +16,37 @@ All:
 
 1. Check a 90-day cache (per-entity-type table, name + FK lookup). Cache
    hit returns the row without touching any provider.
-2. Otherwise walk the providers listed in ``settings.contact_discovery_chain``
-   in order, calling ``find_person`` or ``find_org`` per entity type.
-3. Accept the first result with ``confidence >=
-   settings.contact_discovery_min_confidence``.
-4. Persist that result as a typed row with the provider's native identifier
-   on ``discovery_source`` (e.g. ``pdl``, ``apollo_match``, ``apollo_org``,
-   ``hunter``, ``hunter_domain``, ``snov``, ``snov_domain``), the 0..100
-   ``confidence`` on ``discovery_confidence``, and the provider's full
-   ``emails`` / ``phones`` lists serialised into the JSONB columns
-   (multi-value providers fill them; single-value providers leave them
-   ``NULL`` and the schema layer synthesises a 1-element list from the
-   scalar on read).
+2. Otherwise fan out to every provider listed in
+   ``settings.contact_discovery_chain`` concurrently (``asyncio.gather``),
+   calling ``find_person`` or ``find_org`` per entity type.
+3. Keep every result with ``confidence >=
+   settings.contact_discovery_min_confidence`` and merge them into one
+   canonical ``DiscoveryResult`` (see ``_merge_discovery_results``).
+4. Persist that merged result as a typed row with the highest-confidence
+   contributor's native identifier on ``discovery_source`` (e.g. ``pdl``,
+   ``apollo_match``, ``apollo_org``, ``hunter``, ``hunter_domain``,
+   ``snov``, ``snov_domain``), its 0..100 ``confidence`` on
+   ``discovery_confidence``, and the merged multi-value ``emails`` /
+   ``phones`` lists serialised into the JSONB columns (multi-value
+   providers contribute typed hits directly; single-value providers
+   contribute their scalar email/phone lifted to a typed hit).
 
 The commit is left to the caller so the endpoint can batch multiple
 officers into a single transaction.
 
 Provider failures are swallowed deliberately. A provider that raises is
 logged and treated like a miss — one flaky upstream can't block the
-whole chain.
+fan-out.
 """
 
 from __future__ import annotations
 
+import asyncio
 import logging
 from dataclasses import asdict
 from datetime import datetime, timedelta, timezone
 from decimal import Decimal
-from typing import Any, Literal, Mapping
+from typing import Any, Awaitable, Literal, Mapping
 
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -56,6 +59,8 @@ from app.services.contact_discovery.apollo_match import ApolloMatchProvider
 from app.services.contact_discovery.base import (
     ContactDiscoveryProvider,
     DiscoveryResult,
+    EmailHit,
+    PhoneHit,
 )
 from app.services.contact_discovery.hunter import HunterProvider
 from app.services.contact_discovery.pdl import PdlProvider
@@ -247,35 +252,174 @@ async def _walk_chain(
     domain: str | None,
     cache_name: str,
 ) -> DiscoveryResult | None:
-    """Walk the configured chain and return the first confident hit."""
+    """Fan out to every configured provider in parallel and merge their hits.
+
+    Each provider in ``settings.contact_discovery_chain`` is invoked
+    concurrently via ``asyncio.gather`` so wall-clock latency is
+    ``max(provider_times)`` instead of the old serial ``sum``. Every
+    successful result that clears
+    ``settings.contact_discovery_min_confidence`` is handed to
+    ``_merge_discovery_results`` for union/dedupe; results that raise,
+    return ``None``, or fall below the threshold contribute nothing and are
+    skipped (mirroring the previous first-hit-wins miss handling). Returns
+    ``None`` when no provider clears the threshold.
+    """
     min_confidence = float(settings.contact_discovery_min_confidence)
     chain = [p.strip() for p in settings.contact_discovery_chain.split(",") if p.strip()]
+
+    valid: list[tuple[str, ContactDiscoveryProvider]] = []
     for provider_name in chain:
         provider = _PROVIDERS.get(provider_name)
         if provider is None:
             logger.warning("contact_discovery_chain references unknown provider %r", provider_name)
             continue
-        try:
-            if entity_type == "person":
-                result = await provider.find_person(first_name, last_name, org_name, domain)
-            else:
-                result = await provider.find_org(org_name, domain)
-        except Exception:  # noqa: BLE001 -- deliberately broad, see module docstring
-            logger.exception("Provider %s raised during discovery", provider_name)
-            result = None
-        if result is None:
+        valid.append((provider_name, provider))
+
+    if not valid:
+        return None
+
+    awaitables: list[Awaitable[DiscoveryResult | None]] = []
+    for _, provider in valid:
+        if entity_type == "person":
+            awaitables.append(provider.find_person(first_name, last_name, org_name, domain))
+        else:
+            awaitables.append(provider.find_org(org_name, domain))
+
+    raw_results = await asyncio.gather(*awaitables, return_exceptions=True)
+
+    kept: list[DiscoveryResult] = []
+    for (provider_name, _), outcome in zip(valid, raw_results):
+        if isinstance(outcome, BaseException):
+            # Mirror the previous broad swallow: one flaky upstream can't
+            # block the merge. Log full traceback for the audit trail.
+            logger.exception(
+                "Provider %s raised during discovery", provider_name, exc_info=outcome
+            )
             continue
-        if result.confidence < min_confidence:
+        if outcome is None:
+            continue
+        if outcome.confidence < min_confidence:
             logger.info(
                 "Provider %s returned %.1f for %s, below threshold %.1f",
                 provider_name,
-                result.confidence,
+                outcome.confidence,
                 cache_name,
                 min_confidence,
             )
             continue
-        return result
-    return None
+        kept.append(outcome)
+
+    return _merge_discovery_results(kept)
+
+
+def _merge_discovery_results(
+    results: list[DiscoveryResult],
+) -> DiscoveryResult | None:
+    """Merge multiple confident provider hits into one canonical result.
+
+    Semantics (see PR brief for the canonical spec):
+
+    - Empty input -> ``None``.
+    - ``emails``: union of every result's ``emails`` list plus each
+      result's scalar ``email`` lifted to an ``EmailHit(type="work")``.
+      Deduped on ``value.lower().strip()``; first occurrence in chain
+      order wins, so a typed PDL hit outranks a lifted scalar for the
+      same address.
+    - ``phones``: same union/dedupe shape. Deduped on ``value.strip()``
+      only (no lowercase — phone strings can carry meaningful punctuation
+      like ``+`` / ``(`` / ``-``).
+    - ``linkedin_url``: first non-null in chain order.
+    - Scalar ``email`` / ``phone``: the value from the merged list with
+      the highest non-null confidence (ties -> first in list). ``None``
+      when the merged list is empty.
+    - ``confidence``: max across results.
+    - ``provider``: the highest-confidence contributor's provider name
+      (``max(...)`` returns the first maximum on ties, preserving chain
+      order).
+    - ``raw``: a dict keyed by provider so audit consumers can still see
+      each provider's payload.
+    """
+    if not results:
+        return None
+
+    merged_emails: list[EmailHit] = []
+    seen_email_keys: set[str] = set()
+    for r in results:
+        for hit in r.emails:
+            key = hit.value.lower().strip()
+            if not key or key in seen_email_keys:
+                continue
+            seen_email_keys.add(key)
+            merged_emails.append(hit)
+        if r.email:
+            key = r.email.lower().strip()
+            if key and key not in seen_email_keys:
+                seen_email_keys.add(key)
+                merged_emails.append(
+                    EmailHit(
+                        value=r.email,
+                        type="work",
+                        confidence=r.confidence,
+                        source=r.provider,
+                    )
+                )
+
+    merged_phones: list[PhoneHit] = []
+    seen_phone_keys: set[str] = set()
+    for r in results:
+        for hit in r.phones:
+            key = hit.value.strip()
+            if not key or key in seen_phone_keys:
+                continue
+            seen_phone_keys.add(key)
+            merged_phones.append(hit)
+        if r.phone:
+            key = r.phone.strip()
+            if key and key not in seen_phone_keys:
+                seen_phone_keys.add(key)
+                merged_phones.append(
+                    PhoneHit(
+                        value=r.phone,
+                        type="work",
+                        confidence=r.confidence,
+                        source=r.provider,
+                    )
+                )
+
+    linkedin_url: str | None = None
+    for r in results:
+        if r.linkedin_url:
+            linkedin_url = r.linkedin_url
+            break
+
+    email_scalar = _highest_confidence_value(merged_emails)
+    phone_scalar = _highest_confidence_value(merged_phones)
+
+    top = max(results, key=lambda r: r.confidence)
+    return DiscoveryResult(
+        email=email_scalar,
+        phone=phone_scalar,
+        linkedin_url=linkedin_url,
+        confidence=top.confidence,
+        provider=top.provider,
+        raw={r.provider: r.raw for r in results},
+        emails=merged_emails,
+        phones=merged_phones,
+    )
+
+
+def _highest_confidence_value(
+    hits: list[EmailHit] | list[PhoneHit],
+) -> str | None:
+    """Return the ``value`` of the hit with the highest confidence.
+
+    ``None`` confidence is treated as 0 for ordering. On ties, the first
+    hit in input order wins (``max`` is stable for the first maximum).
+    """
+    if not hits:
+        return None
+    best = max(hits, key=lambda h: h.confidence if h.confidence is not None else 0.0)
+    return best.value
 
 
 async def _find_cached_executive(

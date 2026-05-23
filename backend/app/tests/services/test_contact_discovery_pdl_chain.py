@@ -1,12 +1,15 @@
 """Orchestrator chain tests for the People Data Labs provider.
 
-Validates that PDL slots into the existing apollo/hunter/snov chain when
+Validates that PDL slots into the apollo/hunter/snov fan-out when
 ``settings.contact_discovery_chain`` starts with ``pdl``:
 
-- PDL wins -> downstream providers are never called and the row's
-  ``emails`` / ``phones`` JSONB columns get PDL's multi-value lists.
-- PDL below the confidence threshold -> chain falls through to Apollo.
-- PDL hard error -> chain falls through to Apollo (graceful degradation).
+- PDL wins -> the row's ``emails`` / ``phones`` JSONB columns reflect
+  PDL's multi-value lists, merged with anything the other providers
+  also returned. Under the merge model every other provider is still
+  invoked in parallel.
+- PDL below the confidence threshold -> PDL doesn't contribute; Apollo's
+  contribution wins (other providers fanned out in parallel).
+- PDL hard error -> PDL doesn't contribute; Apollo's contribution wins.
 - ``find_org`` returns None instantly for organisation entities, so PDL
   makes no HTTP call and Apollo's ``find_org`` handles org-level hits.
 """
@@ -96,8 +99,12 @@ def _org_entity() -> dict[str, Any]:
 
 @pytest.mark.asyncio
 @respx.mock
-async def test_pdl_hit_skips_apollo_hunter_snov(patch_settings: None) -> None:
-    """PDL wins -> downstream providers never called; arrays populated."""
+async def test_pdl_hit_still_calls_apollo_hunter_snov(patch_settings: None) -> None:
+    """All four providers fan out in parallel. PDL is the highest-confidence
+    contributor here (likelihood=8 -> 80) so it wins the ``discovery_source``
+    label and the merged ``emails`` / ``phones`` lists mirror PDL's
+    multi-value payload (the other providers return None on the no-data
+    responses below)."""
     pdl_route = respx.post(pdl.PERSON_ENRICH_URL).mock(
         return_value=httpx.Response(
             200,
@@ -115,13 +122,16 @@ async def test_pdl_hit_skips_apollo_hunter_snov(patch_settings: None) -> None:
         )
     )
     apollo_route = respx.post(apollo_match.PEOPLE_MATCH_URL).mock(
-        return_value=httpx.Response(200)
+        return_value=httpx.Response(200, json={"person": None})
     )
     hunter_route = respx.get(hunter.EMAIL_FINDER_URL).mock(
-        return_value=httpx.Response(200)
+        return_value=httpx.Response(200, json={"data": {}})
+    )
+    respx.post(snov.OAUTH_URL).mock(
+        return_value=httpx.Response(200, json={"access_token": "tok", "expires_in": 3600})
     )
     snov_route = respx.post(snov.EMAIL_FINDER_URL).mock(
-        return_value=httpx.Response(200)
+        return_value=httpx.Response(200, json={"data": {}})
     )
 
     session = _FakeSession()
@@ -134,18 +144,21 @@ async def test_pdl_hit_skips_apollo_hunter_snov(patch_settings: None) -> None:
     assert row.emails is not None and len(row.emails) == 2
     assert row.phones is not None
     assert [p["type"] for p in row.phones] == ["mobile", "work"]
+    # Merge model: every chain provider is fanned out in parallel.
     assert pdl_route.called
-    assert not apollo_route.called
-    assert not hunter_route.called
-    assert not snov_route.called
+    assert apollo_route.called
+    assert hunter_route.called
+    assert snov_route.called
 
 
 @pytest.mark.asyncio
 @respx.mock
-async def test_pdl_below_threshold_falls_through_to_apollo(
+async def test_pdl_below_threshold_does_not_contribute_to_merge(
     patch_settings: None,
 ) -> None:
-    """likelihood=5 -> confidence=50 < 60 threshold -> Apollo tried next."""
+    """likelihood=5 -> confidence=50 < 60 threshold -> PDL doesn't
+    contribute to the merge. Apollo's verified-90 wins; Hunter and Snov
+    are also fanned out in parallel but return nothing here."""
     respx.post(pdl.PERSON_ENRICH_URL).mock(
         return_value=httpx.Response(
             200,
@@ -169,6 +182,15 @@ async def test_pdl_below_threshold_falls_through_to_apollo(
             },
         )
     )
+    respx.get(hunter.EMAIL_FINDER_URL).mock(
+        return_value=httpx.Response(200, json={"data": {}})
+    )
+    respx.post(snov.OAUTH_URL).mock(
+        return_value=httpx.Response(200, json={"access_token": "tok", "expires_in": 3600})
+    )
+    respx.post(snov.EMAIL_FINDER_URL).mock(
+        return_value=httpx.Response(200, json={"data": {}})
+    )
 
     session = _FakeSession()
     row = await discover_contact(_person_entity(), bd_id=1, session=session)
@@ -176,16 +198,22 @@ async def test_pdl_below_threshold_falls_through_to_apollo(
     assert row is not None
     assert row.discovery_source == "apollo_match"
     assert apollo_route.called
-    # Apollo doesn't populate the rich arrays, so JSONB columns stay NULL
-    # for synthesis to project the scalar at read time.
-    assert row.emails is None
+    # Apollo only contributed a scalar email and its scalar phone was None.
+    # The merge lifts that single email into a 1-element list, so the JSONB
+    # column is populated under the merge model (even though Apollo doesn't
+    # populate ``emails``/``phones`` natively).
+    assert row.emails is not None and len(row.emails) == 1
+    assert row.emails[0]["value"] == "jane@acme.com"
+    assert row.emails[0]["source"] == "apollo_match"
+    # No phone contributed by anyone; phones column stays NULL.
     assert row.phones is None
 
 
 @pytest.mark.asyncio
 @respx.mock
-async def test_pdl_5xx_falls_through_to_apollo(patch_settings: None) -> None:
-    """PDL transient error -> chain continues to Apollo (graceful degradation)."""
+async def test_pdl_5xx_does_not_contribute_to_merge(patch_settings: None) -> None:
+    """PDL transient error -> PDL contributes nothing to the merge. Apollo's
+    verified-90 wins (graceful degradation under the merge model)."""
     respx.post(pdl.PERSON_ENRICH_URL).mock(return_value=httpx.Response(500))
     apollo_route = respx.post(apollo_match.PEOPLE_MATCH_URL).mock(
         return_value=httpx.Response(
@@ -198,6 +226,15 @@ async def test_pdl_5xx_falls_through_to_apollo(patch_settings: None) -> None:
                 }
             },
         )
+    )
+    respx.get(hunter.EMAIL_FINDER_URL).mock(
+        return_value=httpx.Response(200, json={"data": {}})
+    )
+    respx.post(snov.OAUTH_URL).mock(
+        return_value=httpx.Response(200, json={"access_token": "tok", "expires_in": 3600})
+    )
+    respx.post(snov.EMAIL_FINDER_URL).mock(
+        return_value=httpx.Response(200, json={"data": {}})
     )
 
     session = _FakeSession()
@@ -213,9 +250,11 @@ async def test_pdl_5xx_falls_through_to_apollo(patch_settings: None) -> None:
 async def test_pdl_skipped_for_organization_entity(
     patch_settings: None, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """PDL.find_org returns None without HTTP -> chain falls to Apollo's find_org."""
+    """PDL.find_org returns None without HTTP -> Apollo's find_org carries
+    the merge for org-level hits. Hunter and Snov's domain endpoints are
+    also fanned out in parallel under the merge model."""
     # apollo_org returns confidence=55 which is below the default 60 floor;
-    # drop the threshold so this test exercises the org-level fall-through.
+    # drop the threshold so this test exercises the org-level merge.
     monkeypatch.setattr(settings, "contact_discovery_min_confidence", 50.0)
     pdl_route = respx.post(pdl.PERSON_ENRICH_URL).mock(
         return_value=httpx.Response(200)
@@ -230,6 +269,15 @@ async def test_pdl_skipped_for_organization_entity(
                 }
             },
         )
+    )
+    respx.get(hunter.DOMAIN_SEARCH_URL).mock(
+        return_value=httpx.Response(200, json={"data": {"emails": []}})
+    )
+    respx.post(snov.OAUTH_URL).mock(
+        return_value=httpx.Response(200, json={"access_token": "tok", "expires_in": 3600})
+    )
+    respx.post(snov.DOMAIN_SEARCH_URL).mock(
+        return_value=httpx.Response(200, json={"emails": []})
     )
 
     session = _FakeSession()
@@ -246,7 +294,11 @@ async def test_pdl_skipped_for_organization_entity(
 @respx.mock
 async def test_pdl_hit_persists_investor_contact(patch_settings: None) -> None:
     """The investor sibling (discover_investor_contact) shares the same chain
-    walk and persists an InvestorContact row with the JSONB arrays."""
+    walk and persists an InvestorContact row with the JSONB arrays.
+
+    Under the merge model the other providers are still fanned out in
+    parallel but contribute nothing (no-data responses below), so the
+    persisted row mirrors PDL's multi-value payload."""
     respx.post(pdl.PERSON_ENRICH_URL).mock(
         return_value=httpx.Response(
             200,
@@ -258,6 +310,18 @@ async def test_pdl_hit_persists_investor_contact(patch_settings: None) -> None:
                 },
             },
         )
+    )
+    respx.post(apollo_match.PEOPLE_MATCH_URL).mock(
+        return_value=httpx.Response(200, json={"person": None})
+    )
+    respx.get(hunter.EMAIL_FINDER_URL).mock(
+        return_value=httpx.Response(200, json={"data": {}})
+    )
+    respx.post(snov.OAUTH_URL).mock(
+        return_value=httpx.Response(200, json={"access_token": "tok", "expires_in": 3600})
+    )
+    respx.post(snov.EMAIL_FINDER_URL).mock(
+        return_value=httpx.Response(200, json={"data": {}})
     )
 
     session = _FakeSession()
