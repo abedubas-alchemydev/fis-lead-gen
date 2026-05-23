@@ -97,8 +97,9 @@ export function ContactRow<
       {entityKind === "broker-dealer" && contact.email ? (
         <span className="ml-auto">
           <OutreachButton
-            brokerDealerId={entityId}
-            brokerDealerName={entityName}
+            entityKind="broker_dealer"
+            entityId={entityId}
+            entityName={entityName}
             contact={contact as unknown as ExecutiveContactItem}
           />
         </span>

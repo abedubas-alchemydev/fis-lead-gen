@@ -136,11 +136,11 @@ _SUB_LABEL: dict[str, str] = {
 }
 
 
-# How many officers we hand to the discovery chain per advisor. The People
-# panel rarely shows more than a handful of executives, and each entity walks
-# the full Snov/Hunter/Apollo/PDL chain, so we cap the fan-out to keep one
-# refresh from hammering every provider for a firm with a long Schedule A.
-_MAX_OFFICERS_TO_ENRICH = 12
+# How many officers we hand to the discovery chain per advisor. Cooldown bounds
+# repeat cost; the cap exists only so a one-off firm with a 100-person
+# Schedule A can't fan-out the discovery chain that many times in one
+# background run.
+_MAX_OFFICERS_TO_ENRICH = 40
 
 
 def _split_officer_name(raw: str) -> tuple[str, str] | None:
@@ -196,6 +196,75 @@ def _domain_from_website(website: str | None) -> str | None:
     if host.startswith("www."):
         host = host[4:]
     return host or None
+
+
+# Sub-brand / portal prefixes that website resolvers commonly land on. Hunter /
+# Snov / Apollo all key domain lookups on the firm's apex (e.g. vanguard.com);
+# their indexes don't carry the per-portal hosts (investor.vanguard.com), so a
+# portal subdomain makes domain-based lookups whiff even when the firm is
+# otherwise well-indexed. Stripping these one-deep lifts hit rates without
+# mangling firms whose corporate domain genuinely lives on a subdomain.
+_PORTAL_SUBDOMAIN_PREFIXES: tuple[str, ...] = (
+    "www.",
+    "investor.",
+    "investors.",
+    "institutional.",
+    "corporate.",
+    "reports.",
+    "client.",
+    "advisor.",
+)
+
+
+def _canonicalize_domain(host: str | None) -> str | None:
+    """Given a bare host (output of ``_domain_from_website``), strip one
+    leading portal/sub-brand prefix so the discovery chain sees the firm's
+    canonical apex domain. Idempotent. Stops after a single strip so a real
+    company subdomain like ``foo.investor.com`` isn't reduced to ``investor.com``
+    (which would be a wholly different organisation).
+    """
+    if not host:
+        return None
+    for prefix in _PORTAL_SUBDOMAIN_PREFIXES:
+        if host.startswith(prefix):
+            return host[len(prefix):] or None
+    return host
+
+
+# Legal/corporate suffix tokens we keep upper-cased when title-casing a firm
+# name. Title-casing "VANGUARD GROUP INC" naively gives "Vanguard Group Inc",
+# which doesn't match the canonical form most providers index ("Vanguard Group
+# INC"). Restoring these suffixes makes name-based fallbacks (notably PDL's
+# org_name path) consistently match.
+_ORG_SUFFIX_UPPERCASE: frozenset[str] = frozenset(
+    {"LLC", "LP", "LLP", "LLLP", "INC", "CORP", "CO", "LTD", "PLC", "NA", "SA", "AG", "GMBH", "PC", "PA"}
+)
+
+
+def _normalize_org_name(name: str | None) -> str | None:
+    """Return ``name`` title-cased with legal-suffix tokens kept uppercase, so
+    the per-firm payload handed to the discovery chain matches the canonical
+    casing providers index on. Strips surrounding whitespace, collapses
+    internal whitespace runs. Returns ``None`` for empty / whitespace-only
+    input.
+    """
+    if not name:
+        return None
+    collapsed = " ".join(name.split())
+    if not collapsed:
+        return None
+    parts: list[str] = []
+    for token in collapsed.split(" "):
+        # Only bare alphabetic tokens count as legal suffixes. A token with
+        # trailing punctuation (e.g. "Co." in "Goldman Sachs & Co. LLC") is
+        # an in-name abbreviation, not the firm's terminal designator, so we
+        # title-case it like any other word and let the actual suffix
+        # ("LLC", "INC", etc.) be the one pinned upper.
+        if token.isalpha() and token.upper() in _ORG_SUFFIX_UPPERCASE:
+            parts.append(token.upper())
+        else:
+            parts.append(token.title())
+    return " ".join(parts)
 
 
 # The filings panel renders the 25 newest rows; cap stored history a little
@@ -859,7 +928,13 @@ async def _run_enrich_contacts(
                 await _finalize_child(child_id, status="failed", success=0, failure=1, summary=summary)
                 return "failed", summary
             firm_name = advisor.name
-            domain = _domain_from_website(advisor.website)
+            # Shape the discovery-chain payload: strip portal subdomains so
+            # Hunter/Snov/Apollo's domain-keyed lookups hit the firm's apex,
+            # and restore canonical casing on the org_name so PDL's name-based
+            # fallback matches a normalized index. The DB columns themselves
+            # stay untouched -- these helpers only flow into the per-call dict.
+            domain = _canonicalize_domain(_domain_from_website(advisor.website))
+            chain_org_name = _normalize_org_name(firm_name)
             executive_officers = advisor.executive_officers
 
             existing = (
@@ -935,7 +1010,7 @@ async def _run_enrich_contacts(
                         "type": "person",
                         "first_name": entry["first_name"],
                         "last_name": entry["last_name"],
-                        "org_name": firm_name,
+                        "org_name": chain_org_name,
                         "domain": domain,
                         "title": entry["title"],
                     }
@@ -974,7 +1049,7 @@ async def _run_enrich_contacts(
                 # the panel can still surface a public/org contact channel.
                 entity = {
                     "type": "organization",
-                    "org_name": firm_name,
+                    "org_name": chain_org_name,
                     "domain": domain,
                 }
                 row = await discover_advisor_contact(
