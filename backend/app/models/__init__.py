@@ -3,6 +3,7 @@ from app.models.advisor_filing import AdvisorFiling
 from app.models.audit_log import AuditLog
 from app.models.auth import Account, AuthSession, AuthUser, Verification
 from app.models.broker_dealer import BrokerDealer
+from app.models.clearing_agency_membership import ClearingAgencyMembership
 from app.models.clearing_arrangement import ClearingArrangement
 from app.models.clearing_partner_merge_suggestion import ClearingPartnerMergeSuggestion
 from app.models.competitor_provider import CompetitorProvider
@@ -39,6 +40,7 @@ __all__ = [
     "AuthSession",
     "AuthUser",
     "BrokerDealer",
+    "ClearingAgencyMembership",
     "ClearingArrangement",
     "ClearingPartnerMergeSuggestion",
     "CompetitorProvider",

@@ -5,6 +5,7 @@ from typing import Literal, Self
 
 from pydantic import BaseModel, ConfigDict, field_validator, model_validator
 
+from app.schemas.clearing_membership import ClearingMembershipItem
 from app.schemas.contact_hits import EmailHit, PhoneHit, synthesize_contact_arrays
 
 
@@ -58,6 +59,13 @@ class InvestmentAdvisorListItem(BaseModel):
     last_enrich_attempt_at: datetime | None = None
     created_at: datetime
     updated_at: datetime
+    # Clearing-agency / SRO membership labels (same shape as BD). Most IAs
+    # are correctly non-members; only dually-registered BD/IA firms match.
+    # ``member_agencies`` is attached per page with one batched query (no
+    # N+1); ``clearing_membership_checked_at`` is the evaluated-vs-unknown
+    # sentinel.
+    member_agencies: list[str] = []
+    clearing_membership_checked_at: datetime | None = None
 
 
 class InvestmentAdvisorDetail(InvestmentAdvisorListItem):
@@ -162,6 +170,9 @@ class InvestmentAdvisorProfileResponse(BaseModel):
     advisor: InvestmentAdvisorDetail
     contacts: list[AdvisorContactItem] = []
     filings: list[AdvisorFilingItem] = []
+    # Full clearing-agency / SRO membership rows with provenance (active +
+    # needs_review). Mostly empty for IAs — only dually-registered firms match.
+    clearing_memberships: list[ClearingMembershipItem] = []
     is_favorited: bool = False
 
 

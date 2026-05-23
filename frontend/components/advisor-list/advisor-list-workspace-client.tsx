@@ -32,6 +32,7 @@ import { BulkListPicker } from "@/components/list-picker/bulk-list-picker";
 import { ListPicker } from "@/components/list-picker/list-picker";
 import { Combo } from "@/components/ui/combo";
 import { Pill } from "@/components/ui/pill";
+import { agencyLabel } from "@/components/master-list/detail/clearing-membership-helpers";
 import { Segmented, type SegmentedItem } from "@/components/ui/segmented";
 import { Tag } from "@/components/ui/tag";
 import { ThemeToggle } from "@/components/ui/theme-toggle";
@@ -48,8 +49,14 @@ const COLUMNS = [
   { key: "regulatory_aum", label: "Regulatory AUM" },
   { key: "total_clients", label: "Clients" },
   { key: "files_13f", label: "13F" },
+  { key: "memberships", label: "Clearing Memberships" },
   { key: "last_filing_date", label: "Last Filing" },
 ] as const;
+
+// Display-only column with no backend sort key — header renders a plain
+// label (no sort button). The "Sort by" dropdown is driven by SORT_OPTIONS,
+// not COLUMNS, so it already excludes this.
+const NON_SORTABLE_KEYS = new Set<string>(["memberships"]);
 
 // Status + 13F-scope segmented catalogs — module-level so the arrays
 // stay referentially stable across renders. Mirror the master-list
@@ -801,6 +808,16 @@ export function AdvisorListWorkspaceClient() {
                 </th>
                 {COLUMNS.map((column) => {
                   const isSorted = state.sortBy === column.key;
+                  if (NON_SORTABLE_KEYS.has(column.key)) {
+                    return (
+                      <th
+                        key={column.key}
+                        className="whitespace-nowrap border-b border-[var(--border,rgba(30,64,175,0.1))] bg-[var(--surface-2,#f1f6fd)] px-5 py-3 text-[11px] font-semibold uppercase tracking-[0.08em] text-[var(--text-muted,#94a3b8)]"
+                      >
+                        {column.label}
+                      </th>
+                    );
+                  }
                   return (
                     <th
                       key={column.key}
@@ -1002,6 +1019,23 @@ function AdvisorRow({
           </a>
         ) : row.files_13f ? (
           <Pill variant="healthy">13F</Pill>
+        ) : (
+          <span className="text-[12px] text-[var(--text-muted,#94a3b8)]">—</span>
+        )}
+      </td>
+      <td className="px-5 py-3.5">
+        {row.member_agencies.length > 0 ? (
+          <span className="inline-flex flex-wrap items-center gap-1">
+            {row.member_agencies.map((code) => (
+              <Pill key={code} variant="member">
+                {agencyLabel(code)}
+              </Pill>
+            ))}
+          </span>
+        ) : row.clearing_membership_checked_at !== null ? (
+          <span className="text-[12px] text-[var(--text-muted,#94a3b8)]">
+            Not a member
+          </span>
         ) : (
           <span className="text-[12px] text-[var(--text-muted,#94a3b8)]">—</span>
         )}

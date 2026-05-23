@@ -14,6 +14,7 @@ from app.models.favorite_list import FavoriteList, FavoriteListItem
 from app.models.investment_advisor import InvestmentAdvisor
 from app.models.pipeline_run import PipelineRun
 from app.schemas.auth import AuthenticatedUser
+from app.schemas.clearing_membership import ClearingMembershipItem
 from app.schemas.favorite_list import FavoriteListWithMembership
 from app.schemas.investment_advisor import (
     AdvisoryActivityCount,
@@ -341,7 +342,10 @@ async def get_investment_advisor(
             status_code=status.HTTP_404_NOT_FOUND,
             detail=f"Investment advisor {advisor_id} not found.",
         )
-    return InvestmentAdvisorDetail.model_validate(advisor)
+    detail = InvestmentAdvisorDetail.model_validate(advisor)
+    membership_rows = await repository.list_clearing_memberships(db, advisor_id)
+    detail.member_agencies = sorted({m.agency for m in membership_rows if m.status == "active"})
+    return detail
 
 
 @router.get("/{advisor_id}/profile", response_model=InvestmentAdvisorProfileResponse)
@@ -366,11 +370,16 @@ async def get_investment_advisor_profile(
 
     contacts = await repository.list_advisor_contacts(db, advisor_id)
     filings = await repository.list_advisor_filings(db, advisor_id)
+    membership_rows = await repository.list_clearing_memberships(db, advisor_id)
+
+    detail = InvestmentAdvisorDetail.model_validate(advisor)
+    detail.member_agencies = sorted({m.agency for m in membership_rows if m.status == "active"})
 
     return InvestmentAdvisorProfileResponse(
-        advisor=InvestmentAdvisorDetail.model_validate(advisor),
+        advisor=detail,
         contacts=contacts,
         filings=filings,
+        clearing_memberships=[ClearingMembershipItem.model_validate(m) for m in membership_rows],
         is_favorited=await is_advisor_favorited(db, current_user.id, advisor_id),
     )
 

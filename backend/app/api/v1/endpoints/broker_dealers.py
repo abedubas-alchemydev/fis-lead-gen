@@ -36,6 +36,7 @@ from app.schemas.broker_dealer import (
     RegistrationComplianceSummary,
     ResolveWebsiteResponse,
 )
+from app.schemas.clearing_membership import ClearingMembershipItem
 from app.schemas.favorite_list import FavoriteListWithMembership
 from app.schemas.favorites import FavoriteResponse
 from app.services.contacts import ExecutiveContactService
@@ -400,6 +401,8 @@ async def get_broker_dealer(
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Broker-dealer not found.")
 
     detail = BrokerDealerDetail.model_validate(broker_dealer)
+    memberships = await repository.list_clearing_memberships(db, broker_dealer_id)
+    detail.member_agencies = sorted({m.agency for m in memberships if m.status == "active"})
     arrangements = await repository.list_clearing_arrangements(db, broker_dealer_id)
     financials = await repository.get_financial_metrics(db, broker_dealer_id)
     detail.current_clearing_unknown_reason = to_unknown_reason(
@@ -834,6 +837,7 @@ async def get_broker_dealer_profile(
 
     financials = await repository.get_financial_metrics(db, broker_dealer_id)
     clearing_arrangements = await repository.list_clearing_arrangements(db, broker_dealer_id)
+    membership_rows = await repository.list_clearing_memberships(db, broker_dealer_id)
     introducing_arrangements = await repository.list_introducing_arrangements(db, broker_dealer_id)
     industry_arrangements = await repository.list_industry_arrangements(db, broker_dealer_id)
     executive_contacts = await repository.get_executive_contacts(db, broker_dealer_id)
@@ -859,6 +863,7 @@ async def get_broker_dealer_profile(
     favorited, favorited_at = await is_favorited(db, current_user.id, broker_dealer_id)
 
     detail = BrokerDealerDetail.model_validate(broker_dealer)
+    detail.member_agencies = sorted({m.agency for m in membership_rows if m.status == "active"})
     detail.current_clearing_unknown_reason = to_unknown_reason(
         with_trigger_fields(
             derive_clearing_unknown_reason(
@@ -895,10 +900,13 @@ async def get_broker_dealer_profile(
         derive_executive_contact_unknown_reason(list(executive_contacts))
     )
 
+    membership_items = [ClearingMembershipItem.model_validate(m) for m in membership_rows]
+
     return BrokerDealerProfileResponse(
         broker_dealer=detail,
         financials=financial_items,
         clearing_arrangements=clearing_items,
+        clearing_memberships=membership_items,
         introducing_arrangements=introducing_arrangements,
         industry_arrangements=industry_arrangements,
         recent_alerts=recent_alerts,

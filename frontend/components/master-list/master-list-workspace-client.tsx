@@ -40,6 +40,7 @@ import {
 } from "@/components/ui/multi-select-filter";
 import { Dotmark, Segmented, type SegmentedItem } from "@/components/ui/segmented";
 import { Pill, type PillVariant } from "@/components/ui/pill";
+import { agencyLabel } from "@/components/master-list/detail/clearing-membership-helpers";
 import { Tag } from "@/components/ui/tag";
 import { ThemeToggle } from "@/components/ui/theme-toggle";
 import type {
@@ -58,6 +59,7 @@ const columns = [
   { key: "cik", label: "CIK" },
   { key: "current_clearing_partner", label: "Clearing Arrangement" },
   { key: "current_clearing_type", label: "Clearing Type" },
+  { key: "memberships", label: "Clearing Memberships" },
   { key: "health_status", label: "Financial Health" },
   { key: "lead_score", label: "Prospect Priority" },
   { key: "latest_net_capital", label: "Net Capital" },
@@ -65,6 +67,10 @@ const columns = [
   { key: "three_year_cagr", label: "3-Yr CAGR" },
   { key: "last_filing_date", label: "Last Filing" },
 ] as const;
+
+// Display-only columns with no backend sort key. The header renders a plain
+// label (no sort button) and they're omitted from the "Sort by" dropdown.
+const NON_SORTABLE_KEYS = new Set<string>(["memberships"]);
 
 // ── Segmented option catalogs ─────────────────────────────────────────────
 // Kept as module-level constants so the arrays are referentially stable
@@ -962,11 +968,13 @@ export function MasterListWorkspaceClient() {
               }
               className="h-[38px] rounded-[10px] border border-[var(--border,rgba(30,64,175,0.1))] bg-[var(--surface,#ffffff)] px-3 text-[13px] text-[var(--text,#0f172a)] outline-none transition focus:border-[var(--accent,#6366f1)] focus:shadow-[0_0_0_3px_rgba(99,102,241,0.15)]"
             >
-              {columns.map((column) => (
-                <option key={column.key} value={column.key}>
-                  {column.label}
-                </option>
-              ))}
+              {columns
+                .filter((column) => !NON_SORTABLE_KEYS.has(column.key))
+                .map((column) => (
+                  <option key={column.key} value={column.key}>
+                    {column.label}
+                  </option>
+                ))}
             </select>
           </div>
 
@@ -1104,6 +1112,16 @@ export function MasterListWorkspaceClient() {
                 </th>
                 {columns.map((column) => {
                   const isSorted = sortBy === column.key;
+                  if (NON_SORTABLE_KEYS.has(column.key)) {
+                    return (
+                      <th
+                        key={column.key}
+                        className="whitespace-nowrap border-b border-[var(--border,rgba(30,64,175,0.1))] bg-[var(--surface-2,#f1f6fd)] px-5 py-3 text-[11px] font-semibold uppercase tracking-[0.08em] text-[var(--text-muted,#94a3b8)]"
+                      >
+                        {column.label}
+                      </th>
+                    );
+                  }
                   return (
                     <th
                       key={column.key}
@@ -1272,6 +1290,23 @@ export function MasterListWorkspaceClient() {
                             />
                           ) : null}
                         </span>
+                      </td>
+                      <td className="px-5 py-3.5">
+                        {item.member_agencies.length > 0 ? (
+                          <span className="inline-flex flex-wrap items-center gap-1">
+                            {item.member_agencies.map((code) => (
+                              <Pill key={code} variant="member">
+                                {agencyLabel(code)}
+                              </Pill>
+                            ))}
+                          </span>
+                        ) : item.clearing_membership_checked_at !== null ? (
+                          <span className="text-[12px] text-[var(--text-muted,#94a3b8)]">
+                            Not a member
+                          </span>
+                        ) : (
+                          <span className="text-[var(--text-muted,#94a3b8)]">—</span>
+                        )}
                       </td>
                       <td className="px-5 py-3.5">
                         <span className="inline-flex items-center gap-1">
