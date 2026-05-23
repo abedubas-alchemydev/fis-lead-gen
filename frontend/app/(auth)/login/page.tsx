@@ -1,5 +1,13 @@
 import { AuthForm } from "@/components/auth/auth-form";
 
+// Force per-request server rendering so process.env is read from the
+// Cloud Run runtime, not from the CI build environment. Without this
+// Next.js statically pre-renders the page during `next build`, baking
+// in whatever the CI runner sees for MICROSOFT_/YAHOO_CLIENT_ID
+// (currently nothing) — which leaves the OAuth buttons stuck on
+// "Coming soon" even after the secrets land on Cloud Run.
+export const dynamic = "force-dynamic";
+
 // Outlook + Yahoo OAuth buttons render disabled with a "Coming soon"
 // hint when the corresponding credentials aren't configured yet. Reading
 // server-side here (env vars are not NEXT_PUBLIC_*) and passing flags

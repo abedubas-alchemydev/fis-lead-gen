@@ -2,6 +2,11 @@ import Link from "next/link";
 
 import { AuthForm } from "@/components/auth/auth-form";
 
+// Force per-request server rendering so process.env reflects Cloud Run
+// runtime, not the CI build environment. See login/page.tsx for the
+// full rationale.
+export const dynamic = "force-dynamic";
+
 // Mirror of login/page.tsx: gate Outlook + Yahoo buttons on credentials
 // being configured. See login/page.tsx for rationale.
 const microsoftEnabled = Boolean(
