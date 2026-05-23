@@ -43,6 +43,7 @@ import logging
 from dataclasses import dataclass
 from datetime import date, datetime, timedelta, timezone
 from typing import Iterable, Literal
+from urllib.parse import urlparse
 
 import httpx
 
@@ -54,11 +55,12 @@ from app.models.advisor_contact import AdvisorContact
 from app.models.advisor_filing import AdvisorFiling
 from app.models.investment_advisor import InvestmentAdvisor
 from app.models.pipeline_run import PipelineRun
-from app.services.apollo import ApolloClient, ApolloError
+from app.services.apollo import ApolloClient
 from app.services.brokercheck_pdf import (
     FinraPdfFetchError,
     FinraPdfNotFound,
 )
+from app.services.contact_discovery.orchestrator import discover_advisor_contact
 from app.services.edgar import EdgarService, build_edgar_filing_url
 from app.services.finra_pdf_service import fetch_brokercheck_pdf
 from app.services.gemini_responses import (
@@ -133,19 +135,67 @@ _SUB_LABEL: dict[str, str] = {
     SUB_ENRICH_CONTACTS: "contacts",
 }
 
-# Display title for an Apollo-sourced contact row keyed by the officer-rank
-# slug the Apollo client emits (mirrors focus_ceo_extraction._RANK_DISPLAY_TITLES).
-# The slug is the only title information the names-only fallback persists.
-_RANK_DISPLAY_TITLES: dict[str, str] = {
-    "ceo": "Chief Executive Officer",
-    "president": "President",
-    "coo": "Chief Operating Officer",
-    "cfo": "Chief Financial Officer",
-}
+
+# How many officers we hand to the discovery chain per advisor. The People
+# panel rarely shows more than a handful of executives, and each entity walks
+# the full Snov/Hunter/Apollo/PDL chain, so we cap the fan-out to keep one
+# refresh from hammering every provider for a firm with a long Schedule A.
+_MAX_OFFICERS_TO_ENRICH = 12
 
 
-def _rank_to_display_title(officer_rank: str) -> str:
-    return _RANK_DISPLAY_TITLES.get(officer_rank, "Executive Officer")
+def _split_officer_name(raw: str) -> tuple[str, str] | None:
+    """Split a Gemini-extracted officer name into ``(first_name, last_name)``.
+
+    The ``executive_officers`` blob stores names in the Form ADV Schedule A
+    "LAST, FIRST, MIDDLE" convention (e.g. ``"PEROLD, ANDRE, FRANCOIS"``). When
+    a comma is present the part before the first comma is the surname and the
+    next whitespace token is the given name (middle names / suffixes are
+    dropped — the discovery providers match on first+last). With no comma we
+    fall back to plain whitespace splitting: first token is the given name and
+    the last token the surname. Result is title-cased. Returns ``None`` when we
+    can't recover both halves (e.g. a single bare token, or blank input)."""
+    name = (raw or "").strip()
+    if not name:
+        return None
+    if "," in name:
+        last_part, _, rest = name.partition(",")
+        last = last_part.strip()
+        # ``rest`` may carry the middle name behind a second comma
+        # ("ANDRE, FRANCOIS"); take the first comma-delimited field, then its
+        # leading whitespace token, so a trailing comma never sticks to the
+        # given name.
+        first_field = rest.split(",")[0]
+        first_tokens = first_field.split()
+        first = first_tokens[0].strip() if first_tokens else ""
+    else:
+        tokens = name.split()
+        if len(tokens) < 2:
+            return None
+        first = tokens[0]
+        last = tokens[-1]
+    if not first or not last:
+        return None
+    return first.title(), last.title()
+
+
+def _domain_from_website(website: str | None) -> str | None:
+    """Extract a bare hostname from an advisor ``website`` for the discovery
+    chain's domain anchor. Strips scheme and a leading ``www.``; returns
+    ``None`` when there's no website or no parseable host (the chain still
+    tries org/name providers without a domain)."""
+    if not website:
+        return None
+    candidate = website.strip()
+    if not candidate:
+        return None
+    # urlparse only populates ``netloc`` when a scheme is present; bare
+    # "example.com" lands in ``path``. Prepend a scheme when none is given.
+    if "://" not in candidate:
+        candidate = f"http://{candidate}"
+    host = (urlparse(candidate).hostname or "").strip().lower()
+    if host.startswith("www."):
+        host = host[4:]
+    return host or None
 
 
 # The filings panel renders the 25 newest rows; cap stored history a little
@@ -787,11 +837,17 @@ async def _run_refresh_filings(
 async def _run_enrich_contacts(
     parent_run_id: int, advisor_id: int, trigger_source: str
 ) -> tuple[str, str]:
-    """Fill the People panel's contact channels via an Apollo people-search
-    (names-only, per the CSV-export PRD constraint) with a fallback to seeding
-    from the already-extracted ``executive_officers`` blob. Idempotent: if any
-    ``advisor_contacts`` row already exists, finishes without touching data.
-    Apollo provider errors leave the table untouched so a retry can happen."""
+    """Fill the People panel with real contact CHANNELS by running each
+    extracted officer through the shared multi-provider discovery chain
+    (Snov/Hunter/Apollo/PDL) via ``discover_advisor_contact``. Officers the
+    chain can't resolve still get a names-only row (source="adv") so the panel
+    shows everyone. Falls back to a single org-level lookup when no officers
+    were extracted.
+
+    Idempotent: if any ``advisor_contacts`` row already exists, finishes
+    without touching data. Provider failures inside the chain are swallowed by
+    the chain itself, so a miss simply yields no channels rather than aborting
+    the run."""
     child_id = await _create_child_run(
         parent_run_id, advisor_id, SUB_ENRICH_CONTACTS, trigger_source
     )
@@ -803,7 +859,7 @@ async def _run_enrich_contacts(
                 await _finalize_child(child_id, status="failed", success=0, failure=1, summary=summary)
                 return "failed", summary
             firm_name = advisor.name
-            crd = advisor.crd_number
+            domain = _domain_from_website(advisor.website)
             executive_officers = advisor.executive_officers
 
             existing = (
@@ -818,33 +874,40 @@ async def _run_enrich_contacts(
                 await _finalize_child(child_id, status="completed", success=1, failure=0, summary=summary)
                 return "completed", summary
 
-        # Tier 1: Apollo people-search (names only). On a provider error we
-        # don't bail — we fall through to the executive_officers seed below so
-        # the panel still fills from the data the Gemini ADV pass already
-        # extracted. (A 422 like the one Apollo returns for some large firms
-        # is not transient, so "leave empty and retry" would just keep the
-        # panel blank forever despite officers being on file.)
-        apollo_results = None
-        api_key = settings.apollo_api_key
-        if api_key and firm_name:
-            try:
-                apollo_results = await ApolloClient(api_key).search_executives(firm_name, crd)
-            except ApolloError as exc:
-                logger.info(
-                    "Apollo people-search errored for advisor %s (%s); falling back to "
-                    "executive_officers seed: %s",
-                    advisor_id,
-                    firm_name,
-                    str(exc)[:160],
-                )
+        # Build the per-officer work list up front (parse + cap), so the write
+        # session below only does DB work. Each entry carries the original
+        # display name so we can fall back to a names-only row on a miss.
+        officers: list[dict[str, str]] = (
+            executive_officers if isinstance(executive_officers, list) else []
+        )
+        work: list[dict[str, str]] = []
+        for officer in officers:
+            if not isinstance(officer, dict):
+                continue
+            display_name = str(officer.get("name") or "").strip()
+            split = _split_officer_name(display_name)
+            if split is None:
+                continue
+            first_name, last_name = split
+            title = str(officer.get("title") or "").strip() or "Executive Officer"
+            work.append(
+                {
+                    "display_name": display_name,
+                    "first_name": first_name,
+                    "last_name": last_name,
+                    "title": title,
+                }
+            )
+            if len(work) >= _MAX_OFFICERS_TO_ENRICH:
+                break
 
         now = datetime.now(timezone.utc)
-        inserted = 0
-        source = ""
+        with_channels = 0
+        names_only = 0
         async with SessionLocal() as db:
             advisor = await db.get(InvestmentAdvisor, advisor_id)
             if advisor is None:
-                summary = "Advisor row disappeared between search and write."
+                summary = "Advisor row disappeared between queue and write."
                 await _finalize_child(child_id, status="failed", success=0, failure=1, summary=summary)
                 return "failed", summary
 
@@ -862,41 +925,42 @@ async def _run_enrich_contacts(
                 await _finalize_child(child_id, status="completed", success=1, failure=0, summary=summary)
                 return "completed", summary
 
-            if apollo_results:
-                source = "apollo"
-                for executive in apollo_results:
-                    name = f"{executive.first_name} {executive.last_name}".strip()
-                    if not name:
-                        continue
-                    db.add(
-                        AdvisorContact(
-                            advisor_id=advisor_id,
-                            name=name[:255],
-                            title=_rank_to_display_title(executive.officer_rank)[:255],
-                            email=None,
-                            phone=None,
-                            linkedin_url=None,
-                            source="apollo",
-                            enriched_at=now,
-                        )
+            if work:
+                # Track names that received a discovered row so the names-only
+                # backfill below doesn't duplicate them. ``discover_advisor_contact``
+                # only adds a row on a chain HIT (provider found the person).
+                resolved_names: set[str] = set()
+                for entry in work:
+                    entity = {
+                        "type": "person",
+                        "first_name": entry["first_name"],
+                        "last_name": entry["last_name"],
+                        "org_name": firm_name,
+                        "domain": domain,
+                        "title": entry["title"],
+                    }
+                    row = await discover_advisor_contact(
+                        entity, advisor_id=advisor_id, session=db
                     )
-                    inserted += 1
-            elif isinstance(executive_officers, list):
-                # Tier 2: seed from the Gemini-extracted officers blob. Names +
-                # title only; channels NULL (a richer enrichment is out of scope).
-                source = "adv"
-                for officer in executive_officers:
-                    if not isinstance(officer, dict):
+                    if row is not None:
+                        resolved_names.add(entry["display_name"])
+                        with_channels += 1
+
+                # Backfill: any officer the chain couldn't resolve still gets a
+                # names-only row so the People panel shows the full roster. Skip
+                # names already inserted by discovery (and de-dupe within this
+                # loop) so we never write the same person twice.
+                seen = set(resolved_names)
+                for entry in work:
+                    display_name = entry["display_name"]
+                    if display_name in seen:
                         continue
-                    name = str(officer.get("name") or "").strip()
-                    if not name:
-                        continue
-                    title = (str(officer.get("title") or "Executive Officer").strip() or "Executive Officer")
+                    seen.add(display_name)
                     db.add(
                         AdvisorContact(
                             advisor_id=advisor_id,
-                            name=name[:255],
-                            title=title[:255],
+                            name=display_name[:255],
+                            title=entry["title"][:255],
                             email=None,
                             phone=None,
                             linkedin_url=None,
@@ -904,17 +968,31 @@ async def _run_enrich_contacts(
                             enriched_at=now,
                         )
                     )
-                    inserted += 1
+                    names_only += 1
+            elif firm_name:
+                # No officers extracted — try a single org-level discovery so
+                # the panel can still surface a public/org contact channel.
+                entity = {
+                    "type": "organization",
+                    "org_name": firm_name,
+                    "domain": domain,
+                }
+                row = await discover_advisor_contact(
+                    entity, advisor_id=advisor_id, session=db
+                )
+                if row is not None:
+                    with_channels += 1
 
+            inserted = with_channels + names_only
             if inserted:
                 await db.commit()
 
         if not inserted:
-            summary = "No contacts found (Apollo empty/absent, no executive_officers to seed from)."
+            summary = "No contacts found (no resolvable officers and no org-level match)."
             await _finalize_child(child_id, status="completed_with_errors", success=0, failure=1, summary=summary)
             return "completed_with_errors", summary
 
-        summary = f"Wrote {inserted} contact(s) from {source} (names only)."
+        summary = f"Enriched {inserted} contact(s) ({with_channels} with channels) for advisor."[:180]
         await _finalize_child(child_id, status="completed", success=1, failure=0, summary=summary)
         return "completed", summary
     except Exception as exc:

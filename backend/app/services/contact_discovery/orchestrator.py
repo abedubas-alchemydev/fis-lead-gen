@@ -1,6 +1,6 @@
 """Discovery chain orchestrator.
 
-Two public entry points share the same multi-provider chain walk:
+Three public entry points share the same multi-provider chain walk:
 
 1. ``discover_contact(entity, bd_id, session)`` — resolves a broker-dealer
    officer into a persisted ``ExecutiveContact`` row. Called by the
@@ -8,8 +8,11 @@ Two public entry points share the same multi-provider chain walk:
 2. ``discover_investor_contact(entity, investor_id, session)`` — the
    institutional-investor sibling. Called by ``POST
    /api/v1/institutional-investors/{id}/enrich``.
+3. ``discover_advisor_contact(entity, advisor_id, session)`` — the
+   investment-advisor sibling. Called by the IA refresh orchestrator's
+   ``_run_enrich_contacts`` sub-pipeline.
 
-Both:
+All:
 
 1. Check a 90-day cache (per-entity-type table, name + FK lookup). Cache
    hit returns the row without touching any provider.
@@ -46,6 +49,7 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.config import settings
+from app.models.advisor_contact import AdvisorContact
 from app.models.executive_contact import ExecutiveContact
 from app.models.investor_contact import InvestorContact
 from app.services.contact_discovery.apollo_match import ApolloMatchProvider
@@ -166,6 +170,49 @@ async def discover_investor_contact(
     return row
 
 
+async def discover_advisor_contact(
+    entity: Mapping[str, Any],
+    *,
+    advisor_id: int,
+    session: AsyncSession,
+) -> AdvisorContact | None:
+    """Resolve an investment-advisor officer into a persisted ``AdvisorContact``.
+
+    Mirror of ``discover_contact`` for the investment-advisor side. Same
+    chain semantics, same caching pattern; written separately because the
+    codebase deliberately avoids polymorphism across the three contact
+    tables (see ``AdvisorContact``'s class docstring).
+    """
+    parsed = _parse_entity(entity)
+    if parsed is None:
+        return None
+    entity_type, first_name, last_name, org_name, domain, title, cache_name = parsed
+
+    cached = await _find_cached_advisor(session, advisor_id=advisor_id, name=cache_name)
+    if cached is not None:
+        return cached
+
+    result = await _walk_chain(
+        entity_type,
+        first_name=first_name,
+        last_name=last_name,
+        org_name=org_name,
+        domain=domain,
+        cache_name=cache_name,
+    )
+    if result is None:
+        return None
+
+    row = _build_advisor_row(
+        advisor_id=advisor_id,
+        name=cache_name,
+        title=title or ("Executive" if entity_type == "person" else "Organization"),
+        result=result,
+    )
+    session.add(row)
+    return row
+
+
 def _parse_entity(entity: Mapping[str, Any]) -> _ParsedEntity | None:
     """Validate and unpack the endpoint-layer ``entity`` dict into a typed tuple."""
     entity_type_raw = str(entity.get("type") or "").strip().lower()
@@ -271,6 +318,26 @@ async def _find_cached_investor(
     return (await session.execute(stmt)).scalars().first()
 
 
+async def _find_cached_advisor(
+    session: AsyncSession,
+    *,
+    advisor_id: int,
+    name: str,
+) -> AdvisorContact | None:
+    threshold = datetime.now(timezone.utc) - timedelta(days=_CACHE_TTL_DAYS)
+    stmt = (
+        select(AdvisorContact)
+        .where(
+            AdvisorContact.advisor_id == advisor_id,
+            AdvisorContact.name == name,
+            AdvisorContact.enriched_at >= threshold,
+        )
+        .order_by(AdvisorContact.enriched_at.desc())
+        .limit(1)
+    )
+    return (await session.execute(stmt)).scalars().first()
+
+
 def _build_executive_row(
     *,
     bd_id: int,
@@ -309,6 +376,30 @@ def _build_investor_row(
     source = "apollo" if result.provider.startswith("apollo") else result.provider
     return InvestorContact(
         investor_id=investor_id,
+        name=name,
+        title=title[:255],
+        email=result.email,
+        phone=result.phone,
+        linkedin_url=result.linkedin_url,
+        emails=_array_or_none(result.emails),
+        phones=_array_or_none(result.phones),
+        source=source,
+        discovery_source=result.provider[:32],
+        discovery_confidence=Decimal(str(round(result.confidence, 2))),
+        enriched_at=datetime.now(timezone.utc),
+    )
+
+
+def _build_advisor_row(
+    *,
+    advisor_id: int,
+    name: str,
+    title: str,
+    result: DiscoveryResult,
+) -> AdvisorContact:
+    source = "apollo" if result.provider.startswith("apollo") else result.provider
+    return AdvisorContact(
+        advisor_id=advisor_id,
         name=name,
         title=title[:255],
         email=result.email,

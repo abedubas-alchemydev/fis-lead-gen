@@ -16,10 +16,11 @@ from app.services.advisor_refresh_orchestrator import (
     SUB_REFRESH_FILINGS,
     SUB_REFRESH_OWNERS_OFFICERS,
     SUB_RESOLVE_ADVISOR_WEBSITE,
+    _domain_from_website,
     _filing_priority,
     _parse_iso_date,
     _people_to_json,
-    _rank_to_display_title,
+    _split_officer_name,
     decide_pipelines,
 )
 from app.services.gemini_responses import (
@@ -195,11 +196,47 @@ def test_filing_priority_bands() -> None:
     assert _filing_priority("D") == "low"
 
 
-def test_rank_to_display_title() -> None:
-    assert _rank_to_display_title("ceo") == "Chief Executive Officer"
-    assert _rank_to_display_title("president") == "President"
-    assert _rank_to_display_title("other") == "Executive Officer"
-    assert _rank_to_display_title("unknown-slug") == "Executive Officer"
+# ── officer name-splitter: Form ADV "LAST, FIRST, MIDDLE" convention ───────
+
+
+def test_split_officer_name_last_first_middle() -> None:
+    # The canonical Schedule A shape: surname before the first comma, given
+    # name is the next token, middle name dropped, result title-cased.
+    assert _split_officer_name("PEROLD, ANDRE, FRANCOIS") == ("Andre", "Perold")
+
+
+def test_split_officer_name_last_first_only() -> None:
+    assert _split_officer_name("DOE, JANE") == ("Jane", "Doe")
+
+
+def test_split_officer_name_no_comma_falls_back_to_whitespace() -> None:
+    # No comma → first token is given name, last token is surname.
+    assert _split_officer_name("Jane Doe") == ("Jane", "Doe")
+    # Middle token ignored; first + last only.
+    assert _split_officer_name("john quincy adams") == ("John", "Adams")
+
+
+def test_split_officer_name_rejects_unsplittable() -> None:
+    assert _split_officer_name("") is None
+    assert _split_officer_name("   ") is None
+    assert _split_officer_name("Madonna") is None  # single bare token
+    assert _split_officer_name("Doe,") is None  # comma but no given name
+
+
+# ── website → bare-hostname domain anchor ──────────────────────────────────
+
+
+def test_domain_from_website_strips_scheme_and_www() -> None:
+    assert _domain_from_website("https://www.vanguard.com") == "vanguard.com"
+    assert _domain_from_website("http://institutional.vanguard.com/x") == "institutional.vanguard.com"
+    # Bare host with no scheme still parses.
+    assert _domain_from_website("Example.COM") == "example.com"
+
+
+def test_domain_from_website_none_or_blank() -> None:
+    assert _domain_from_website(None) is None
+    assert _domain_from_website("") is None
+    assert _domain_from_website("   ") is None
 
 
 def test_people_to_json_shapes_and_skips_blanks() -> None:
