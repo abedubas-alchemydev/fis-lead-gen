@@ -47,6 +47,7 @@ import {
   refreshFirm,
 } from "@/lib/api";
 import { PageSpinner } from "@/components/ui/spinner";
+import { joinPipelineLabels } from "@/lib/refresh-pipeline-labels";
 import { parseArrangementBlob } from "@/lib/arrangements";
 import { listScansForBrokerDealer } from "@/lib/email-extractor";
 import {
@@ -666,7 +667,7 @@ export function BrokerDealerDetailClient({ brokerDealerId }: { brokerDealerId: s
   if (refreshState.phase === "polling") {
     const label =
       refreshState.pipelinesRunning.length > 0
-        ? `Refreshing ${refreshState.pipelinesRunning.join(", ")}…`
+        ? `Refreshing ${joinPipelineLabels(refreshState.pipelinesRunning)}…`
         : "Refreshing firm data…";
     return (
       <div className="px-7 pb-12 pt-7 lg:px-9">
