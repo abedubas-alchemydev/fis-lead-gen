@@ -109,16 +109,15 @@ export function useInputGuards(): void {
 
     function onWindowFocus() {
       document.documentElement.removeAttribute("data-app-blurred");
-      // Best-effort clipboard wipe on regaining focus. Clipboard write
-      // outside a user gesture is permission-gated in most browsers; on
-      // those, navigator.clipboard.writeText() returns a Promise that
-      // rejects with NotAllowedError. A synchronous try/catch never sees
-      // the rejection — it escapes as "Uncaught (in promise)
-      // NotAllowedError" in the console on every focus/blur cycle. Attach
-      // a .catch() so the rejection is handled and silently swallowed.
-      navigator.clipboard?.writeText("").catch(() => {
-        // intentionally ignored
-      });
+      // NOTE: this used to wipe the clipboard via navigator.clipboard
+      // .writeText(""). Removed: window focus carries no user activation,
+      // so the call hit the clipboard-read=() Permissions-Policy and
+      // logged "ClipboardReadWrite permission has been blocked" on every
+      // focus — a warning the browser emits regardless of any .catch().
+      // It also clobbered whatever the user had copied in another app.
+      // The PrintScreen handler below still clears the clipboard (it runs
+      // under a keydown user activation, so the sanitized write is allowed
+      // without tripping the policy).
     }
 
     function onKeyDown(e: KeyboardEvent) {
