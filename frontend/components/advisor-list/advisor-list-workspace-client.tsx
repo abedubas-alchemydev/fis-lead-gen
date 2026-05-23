@@ -49,7 +49,7 @@ const COLUMNS = [
   { key: "regulatory_aum", label: "Regulatory AUM" },
   { key: "total_clients", label: "Clients" },
   { key: "files_13f", label: "13F" },
-  { key: "memberships", label: "Reputable Dispute Memberships" },
+  { key: "memberships", label: "Memberships" },
   { key: "last_filing_date", label: "Last Filing" },
 ] as const;
 
