@@ -44,8 +44,6 @@ from datetime import datetime, timezone
 from typing import Iterable, Literal
 
 import httpx
-from sqlalchemy import select
-from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.config import settings
 from app.db.session import SessionLocal
@@ -56,12 +54,11 @@ from app.services.brokercheck_pdf import (
     FinraPdfFetchError,
     FinraPdfNotFound,
     _parse_form_bd_pdf,
-    fetch_form_bd_detail,
 )
 from app.services.finra_pdf_service import fetch_brokercheck_pdf
 from app.services.serpapi import SerpAPIClient
 from app.services.serper import SerperClient
-from app.services.website_resolver import resolve_website
+from app.services.website_resolver import is_blocklisted_host, resolve_website
 
 
 # IA-only firms (Vanguard, BlackRock IA arms, etc.) have no BrokerCheck
@@ -144,7 +141,13 @@ def decide_pipelines(advisor: InvestmentAdvisor) -> GateDecision:
     else:
         to_skip.append(SUB_REFRESH_OWNERS_OFFICERS)
 
-    needs_website = not advisor.website
+    # Open the website gate when there's no website OR the stored one is a
+    # social/aggregator host. The IAPD bulk import populates ``website`` from
+    # the firm's ADV "website" field, which firms frequently fill with a
+    # social handle (Vanguard → x.com/vanguard_instl). is_blocklisted_host
+    # is the same denylist the resolver uses, so re-running the resolver on a
+    # blocklisted value lets it find the real corporate domain.
+    needs_website = not advisor.website or is_blocklisted_host(advisor.website)
     if needs_website:
         to_run.append(SUB_RESOLVE_ADVISOR_WEBSITE)
     else:
@@ -280,7 +283,7 @@ async def _run_refresh_owners_officers(
             try:
                 pdf_bytes = await _fetch_iapd_form_adv_pdf(crd)
             except FinraPdfNotFound:
-                summary = f"No PDF on file (BrokerCheck 404, IAPD 404)."
+                summary = "No PDF on file (BrokerCheck 404, IAPD 404)."
                 await _finalize_child(child_id, status="completed_with_errors", success=0, failure=1, summary=summary)
                 return "completed_with_errors", summary
             except FinraPdfFetchError as exc:
@@ -366,7 +369,25 @@ async def _run_resolve_advisor_website(
         )
 
         if not website:
-            summary = f"Provider waterfall returned no website ({reason or 'unknown'})."
+            # No valid candidate. If the row currently holds a blocklisted
+            # social/aggregator URL (the reason we re-ran), clear it: a wrong
+            # social link is worse than an empty field. Leave a genuine miss
+            # (website already NULL) untouched. Don't clear on a provider
+            # outage — that would discard data on a transient error.
+            cleared = False
+            if reason != "all_providers_errored" and not (reason or "").startswith("all_providers_errored"):
+                async with SessionLocal() as db:
+                    advisor = await db.get(InvestmentAdvisor, advisor_id)
+                    if advisor is not None and advisor.website and is_blocklisted_host(advisor.website):
+                        advisor.website = None
+                        advisor.website_source = None
+                        await db.commit()
+                        cleared = True
+            summary = (
+                "Cleared blocklisted social/aggregator website; no valid replacement found."
+                if cleared
+                else f"Provider waterfall returned no website ({reason or 'unknown'})."
+            )
             await _finalize_child(child_id, status="completed_with_errors", success=0, failure=1, summary=summary)
             return "completed_with_errors", summary
 
