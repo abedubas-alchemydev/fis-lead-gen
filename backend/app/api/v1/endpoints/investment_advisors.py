@@ -443,7 +443,12 @@ async def refresh_advisor_all(
 
     advisor_marker = f'"advisor_id": {advisor_id}'
 
-    # 409 — an in-flight refresh-all already exists for this advisor.
+    # An in-flight refresh-all already exists for this advisor. Rather than
+    # 409 (which the browser surfaces as a red console error even though the
+    # FE handles it cleanly), attach to the existing run and return 202 with
+    # that run_id. The FE polls run_id identically whether the run was just
+    # queued or already in flight, so the behavior is unchanged — only the
+    # cosmetic console error disappears.
     in_flight_stmt = (
         select(PipelineRun)
         .where(PipelineRun.pipeline_name == REFRESH_ADVISOR_ALL_PIPELINE_NAME)
@@ -454,14 +459,12 @@ async def refresh_advisor_all(
     )
     in_flight = (await db.execute(in_flight_stmt)).scalar_one_or_none()
     if in_flight is not None:
-        raise HTTPException(
-            status_code=status.HTTP_409_CONFLICT,
-            detail={
-                "message": "A refresh-all run is already in flight for this advisor.",
-                "run_id": in_flight.id,
-                "status": in_flight.status,
-                "advisor_id": advisor_id,
-            },
+        response.status_code = status.HTTP_202_ACCEPTED
+        return RefreshAdvisorResponse(
+            run_id=in_flight.id,
+            status="in_flight",
+            advisor_id=advisor_id,
+            reason="A refresh-all run is already in flight for this advisor.",
         )
 
     # 429 — per-(user, advisor) cooldown so rage-clicks don't burn provider
