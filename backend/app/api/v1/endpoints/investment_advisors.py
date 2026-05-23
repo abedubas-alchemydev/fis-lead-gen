@@ -1,15 +1,18 @@
 from __future__ import annotations
 
-from datetime import date
+import json
+import logging
+from datetime import date, datetime, timedelta, timezone
 
-from fastapi import APIRouter, Depends, HTTPException, Query, status
-from fastapi.responses import RedirectResponse
+from fastapi import APIRouter, BackgroundTasks, Body, Depends, HTTPException, Query, status
+from fastapi.responses import RedirectResponse, Response
 from sqlalchemy import exists, func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.db.session import get_db_session
 from app.models.favorite_list import FavoriteList, FavoriteListItem
 from app.models.investment_advisor import InvestmentAdvisor
+from app.models.pipeline_run import PipelineRun
 from app.schemas.auth import AuthenticatedUser
 from app.schemas.favorite_list import FavoriteListWithMembership
 from app.schemas.investment_advisor import (
@@ -18,12 +21,26 @@ from app.schemas.investment_advisor import (
     InvestmentAdvisorDetail,
     InvestmentAdvisorListResponse,
     InvestmentAdvisorProfileResponse,
+    RefreshAdvisorRequest,
+    RefreshAdvisorResponse,
 )
 from app.core.feature_permissions import INVESTMENT_ADVISORS
+from app.services.advisor_refresh_orchestrator import (
+    REFRESH_ADVISOR_ALL_PIPELINE_NAME,
+    decide_pipelines,
+    required_provider_keys,
+    run_advisor_refresh,
+)
 from app.services.auth import ensure_feature, get_current_user
 from app.services.edgar import EdgarService, build_edgar_filing_url
 from app.services.investment_advisors import InvestmentAdvisorRepository
 from app.services.user_lists import is_advisor_favorited
+
+logger = logging.getLogger(__name__)
+
+# Per-(user, advisor) cooldown for rage-click protection. Mirrors the
+# BD endpoint's _REFRESH_ALL_COOLDOWN_SECONDS.
+_REFRESH_ADVISOR_COOLDOWN_SECONDS = 30
 
 
 router = APIRouter(prefix="/investment-advisors")
@@ -339,4 +356,173 @@ async def get_investment_advisor_profile(
         contacts=contacts,
         filings=filings,
         is_favorited=await is_advisor_favorited(db, current_user.id, advisor_id),
+    )
+
+
+# ─── Per-advisor refresh-all orchestrator ─────────────────────────────────────
+# Mirrors the BD endpoint at
+# backend/app/api/v1/endpoints/broker_dealers.py:1481-1635. The FE calls this
+# on every /advisor-list/{id} page load; the orchestrator's per-pipeline gates
+# skip sub-pipelines whose target columns are already populated, so steady-
+# state cost is near-zero. See
+# backend/app/services/advisor_refresh_orchestrator.py for the per-pipeline
+# semantics.
+
+async def _run_advisor_refresh_background(
+    parent_run_id: int,
+    advisor_id: int,
+    trigger_source: str,
+    pipelines_to_run: tuple[str, ...],
+    pipelines_to_skip: tuple[str, ...],
+) -> None:
+    """Defensive wrapper so an unhandled exception in the background task
+    doesn't silently leave the parent PipelineRun stuck on ``queued``."""
+    try:
+        await run_advisor_refresh(
+            parent_run_id,
+            advisor_id,
+            trigger_source=trigger_source,
+            pipelines_to_run=pipelines_to_run,
+            pipelines_to_skip=pipelines_to_skip,
+        )
+    except Exception:
+        logger.exception(
+            "advisor-refresh background task failed (parent_run_id=%s advisor_id=%s)",
+            parent_run_id,
+            advisor_id,
+        )
+
+
+@router.post(
+    "/{advisor_id}/refresh-all",
+    response_model=RefreshAdvisorResponse,
+)
+async def refresh_advisor_all(
+    advisor_id: int,
+    background_tasks: BackgroundTasks,
+    response: Response,
+    body: RefreshAdvisorRequest = Body(default_factory=RefreshAdvisorRequest),
+    current_user: AuthenticatedUser = Depends(_require_investment_advisors),
+    db: AsyncSession = Depends(get_db_session),
+) -> RefreshAdvisorResponse:
+    """One button per row -> fan out to whatever sub-pipelines this advisor
+    actually needs.
+
+    Inspects the IA record at request start and runs only the sub-pipelines
+    whose target fields are still missing. If every gate fails, returns
+    200 + ``status="skipped"`` immediately with no PipelineRun row and
+    zero provider cost.
+
+    Async: when at least one gate is open, returns 202 with the parent
+    ``run_id`` and schedules a FastAPI BackgroundTask. The FE polls
+    ``GET /api/v1/pipeline/run/{run_id}`` until terminal.
+    """
+    advisor = await db.get(InvestmentAdvisor, advisor_id)
+    if advisor is None:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Investment advisor not found.",
+        )
+
+    decision = decide_pipelines(advisor)
+
+    if not decision.to_run:
+        return RefreshAdvisorResponse(
+            run_id=None,
+            status="skipped",
+            advisor_id=advisor_id,
+            reason="Already complete.",
+        )
+
+    missing_keys = required_provider_keys(decision.to_run)
+    if missing_keys:
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail=f"Provider not configured: {', '.join(missing_keys)}.",
+        )
+
+    advisor_marker = f'"advisor_id": {advisor_id}'
+
+    # 409 — an in-flight refresh-all already exists for this advisor.
+    in_flight_stmt = (
+        select(PipelineRun)
+        .where(PipelineRun.pipeline_name == REFRESH_ADVISOR_ALL_PIPELINE_NAME)
+        .where(PipelineRun.status.in_(("queued", "running")))
+        .where(PipelineRun.notes.ilike(f"%{advisor_marker}%"))
+        .order_by(PipelineRun.id.desc())
+        .limit(1)
+    )
+    in_flight = (await db.execute(in_flight_stmt)).scalar_one_or_none()
+    if in_flight is not None:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail={
+                "message": "A refresh-all run is already in flight for this advisor.",
+                "run_id": in_flight.id,
+                "status": in_flight.status,
+                "advisor_id": advisor_id,
+            },
+        )
+
+    # 429 — per-(user, advisor) cooldown so rage-clicks don't burn provider
+    # credits twice. Same shape as BD's cooldown guard.
+    cooldown_cutoff = datetime.now(timezone.utc) - timedelta(seconds=_REFRESH_ADVISOR_COOLDOWN_SECONDS)
+    user_marker = f"manual_single:{current_user.email}"
+    cooldown_stmt = (
+        select(PipelineRun)
+        .where(PipelineRun.pipeline_name == REFRESH_ADVISOR_ALL_PIPELINE_NAME)
+        .where(PipelineRun.trigger_source == user_marker)
+        .where(PipelineRun.notes.ilike(f"%{advisor_marker}%"))
+        .where(PipelineRun.started_at >= cooldown_cutoff)
+        .order_by(PipelineRun.id.desc())
+        .limit(1)
+    )
+    recent = (await db.execute(cooldown_stmt)).scalar_one_or_none()
+    if recent is not None:
+        elapsed = (datetime.now(timezone.utc) - recent.started_at).total_seconds()
+        retry_after = max(1, int(_REFRESH_ADVISOR_COOLDOWN_SECONDS - elapsed))
+        raise HTTPException(
+            status_code=status.HTTP_429_TOO_MANY_REQUESTS,
+            detail=f"Refresh-all cooldown active. Try again in {retry_after}s.",
+            headers={"Retry-After": str(retry_after)},
+        )
+
+    trigger_source = user_marker
+    parent_run = PipelineRun(
+        pipeline_name=REFRESH_ADVISOR_ALL_PIPELINE_NAME,
+        trigger_source=trigger_source,
+        status="queued",
+        total_items=len(decision.to_run),
+        processed_items=0,
+        success_count=0,
+        failure_count=0,
+        notes=json.dumps(
+            {
+                "advisor_id": advisor_id,
+                "stage": "queued",
+                "scope": body.scope,
+                "ran": list(decision.to_run),
+                "skipped": list(decision.to_skip),
+            }
+        ),
+    )
+    db.add(parent_run)
+    await db.commit()
+    await db.refresh(parent_run)
+
+    background_tasks.add_task(
+        _run_advisor_refresh_background,
+        parent_run.id,
+        advisor_id,
+        trigger_source,
+        decision.to_run,
+        decision.to_skip,
+    )
+
+    response.status_code = status.HTTP_202_ACCEPTED
+    return RefreshAdvisorResponse(
+        run_id=parent_run.id,
+        status=parent_run.status,
+        advisor_id=advisor_id,
+        reason=None,
     )

@@ -766,6 +766,95 @@ export async function refreshFirm(
   }
 }
 
+// ── Per-advisor refresh-all (IA analog of refreshFirm) ──────────────────────
+// Pairs with the BE endpoint POST /investment-advisors/{id}/refresh-all
+// (backend/app/api/v1/endpoints/investment_advisors.py). Same response
+// shape contract as refreshFirm so the FE detail client at
+// frontend/components/advisor-list/advisor-detail-client.tsx can mirror
+// the BD detail client's polling / 409 / skipped handling almost verbatim.
+//
+// The poll endpoint (getPipelineRunStatus -> /api/v1/pipeline/run/{run_id})
+// is the same for both BD and IA — both write to the shared pipeline_runs
+// table.
+export type RefreshAdvisorResponse = {
+  // null when status === "skipped" (no PipelineRun created).
+  run_id: number | null;
+  // "queued" | "skipped" | "running" (the last from 409 normalization).
+  status: string;
+  advisor_id: number;
+  // Only present on the 200 skipped path.
+  reason?: string;
+};
+
+type AdvisorConflictDetail = {
+  run_id: number;
+  status: string;
+  advisor_id: number;
+};
+
+function parseAdvisorConflictDetail(detail: string): AdvisorConflictDetail | null {
+  try {
+    const parsed = JSON.parse(detail) as unknown;
+    const candidates: unknown[] = [];
+    if (parsed && typeof parsed === "object") {
+      candidates.push(parsed);
+      if (
+        "detail" in parsed &&
+        parsed !== null &&
+        typeof (parsed as { detail: unknown }).detail === "object"
+      ) {
+        candidates.push((parsed as { detail: unknown }).detail);
+      }
+    }
+    for (const candidate of candidates) {
+      if (
+        candidate &&
+        typeof candidate === "object" &&
+        "run_id" in candidate &&
+        typeof (candidate as { run_id: unknown }).run_id === "number" &&
+        "status" in candidate &&
+        typeof (candidate as { status: unknown }).status === "string" &&
+        "advisor_id" in candidate &&
+        typeof (candidate as { advisor_id: unknown }).advisor_id === "number"
+      ) {
+        const obj = candidate as AdvisorConflictDetail;
+        return {
+          run_id: obj.run_id,
+          status: obj.status,
+          advisor_id: obj.advisor_id,
+        };
+      }
+    }
+  } catch {
+    // Non-JSON detail — fall through.
+  }
+  return null;
+}
+
+export async function refreshAdvisor(
+  advisorId: number,
+  scope: "all" = "all"
+): Promise<RefreshAdvisorResponse> {
+  try {
+    return await apiRequest<RefreshAdvisorResponse>(
+      `/api/v1/investment-advisors/${advisorId}/refresh-all`,
+      { method: "POST", body: JSON.stringify({ scope }) }
+    );
+  } catch (err) {
+    if (err instanceof ApiError && err.status === 409) {
+      const conflict = parseAdvisorConflictDetail(err.detail);
+      if (conflict) {
+        return {
+          run_id: conflict.run_id,
+          status: conflict.status,
+          advisor_id: conflict.advisor_id,
+        };
+      }
+    }
+    throw err;
+  }
+}
+
 export async function getPipelineRunStatus(
   runId: number
 ): Promise<PipelineRunDetail> {
