@@ -1,5 +1,6 @@
 import type { ReactNode } from "react";
 
+import { ChatbotWidget } from "@/components/chatbot/chatbot-widget";
 import { AppShell } from "@/components/layout/app-shell";
 import { SecurityShield } from "@/components/security/security-shield";
 import { Toaster } from "@/components/ui/toaster";
@@ -20,6 +21,7 @@ export default async function ProtectedAppLayout({ children }: { children: React
         <AppShell session={session}>{children}</AppShell>
       </ActivityProvider>
       <Toaster />
+      <ChatbotWidget />
     </>
   );
 }
