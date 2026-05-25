@@ -1,6 +1,6 @@
 "use client";
 
-import { MessageCircle, X } from "lucide-react";
+import { X } from "lucide-react";
 import { useCallback, useEffect, useRef, useState } from "react";
 
 import { ChatbotPanel, type ChatbotPanelHandle } from "./chatbot-panel";
@@ -13,6 +13,27 @@ const WELCOME_MESSAGE: ChatMessage = {
 };
 
 const STUB_REPLY = "Thanks! I can't reply for real yet, but I'll be here when chat goes live.";
+
+function DoxieIcon({ size = 24, strokeWidth = 2 }: { size?: number; strokeWidth?: number }) {
+  return (
+    <svg
+      xmlns="http://www.w3.org/2000/svg"
+      width={size}
+      height={size}
+      viewBox="0 0 24 24"
+      fill="none"
+      stroke="currentColor"
+      strokeWidth={strokeWidth}
+      strokeLinecap="round"
+      strokeLinejoin="round"
+      aria-hidden="true"
+    >
+      <path d="M14 2 H6 a2 2 0 0 0 -2 2 v16 a2 2 0 0 0 2 2 h12 a2 2 0 0 0 2 -2 V8 z" />
+      <polyline points="14 2 14 8 20 8" />
+      <path d="M8 16 q4 3 8 0" />
+    </svg>
+  );
+}
 
 export function ChatbotWidget() {
   const [isOpen, setIsOpen] = useState(false);
@@ -69,7 +90,7 @@ export function ChatbotWidget() {
         aria-controls="chatbot-panel"
         className="fixed bottom-6 right-6 z-40 grid h-14 w-14 place-items-center rounded-full bg-[var(--accent,#6366f1)] text-white shadow-lg shadow-[var(--accent,#6366f1)]/30 transition hover:scale-105 hover:bg-[var(--accent-2,#8b5cf6)] hover:shadow-xl active:scale-95 focus:outline-none focus:ring-2 focus:ring-[var(--accent,#6366f1)]/40 focus:ring-offset-2"
       >
-        {isOpen ? <X size={24} strokeWidth={2} /> : <MessageCircle size={24} strokeWidth={2} />}
+        {isOpen ? <X size={24} strokeWidth={2} /> : <DoxieIcon size={24} strokeWidth={2} />}
       </button>
 
       {isOpen ? (
