@@ -29,7 +29,7 @@ function DoxieIcon({ size = 24, strokeWidth = 2 }: { size?: number; strokeWidth?
       aria-hidden="true"
     >
       <path d="M12 3v2" />
-      <circle cx="12" cy="2" r="1" fill="#fbbf24" stroke="none" className="animate-pulse" />
+      <circle cx="12" cy="2" r="1" fill="#fbbf24" stroke="none" />
       <rect x="4" y="6" width="16" height="13" rx="3" fill="rgba(255,255,255,0.1)" />
       <line x1="3" y1="11" x2="3" y2="14" />
       <line x1="21" y1="11" x2="21" y2="14" />
