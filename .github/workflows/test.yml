@@ -8,7 +8,11 @@ on:
 
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
-  cancel-in-progress: true
+  # Cancel superseded PR runs (rapid iteration is fine) but queue runs on
+  # push events to develop/main so a follow-up merge does not cancel an
+  # in-flight Cloud Run deploy mid-flight, leaving the new image built
+  # but not deployed.
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 jobs:
   backend-unit:
