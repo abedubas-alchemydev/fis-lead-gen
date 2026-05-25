@@ -5,11 +5,12 @@ import { Clock, Mail } from "lucide-react";
 // Google/Microsoft/Yahoo have already verified the email at the IdP, so only
 // admin approval is pending. Email/password signups land here without the
 // query param and still see both cards.
-export default function PendingApprovalPage({
-  searchParams
-}: {
-  searchParams: { via?: string };
-}) {
+export default async function PendingApprovalPage(
+  props: {
+    searchParams: Promise<{ via?: string }>;
+  }
+) {
+  const searchParams = await props.searchParams;
   const viaOAuth = searchParams.via === "oauth";
 
   return (

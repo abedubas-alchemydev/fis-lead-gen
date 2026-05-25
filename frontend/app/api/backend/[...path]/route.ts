@@ -28,13 +28,14 @@ const RESPONSE_DROP_HEADERS = new Set<string>([
 ]);
 
 type RouteContext = {
-  params: {
+  params: Promise<{
     path: string[];
-  };
+  }>;
 };
 
-async function proxyRequest(request: NextRequest, { params }: RouteContext) {
-  const upstreamUrl = new URL(`/${params.path.join("/")}`, BACKEND_BASE_URL);
+async function proxyRequest(request: NextRequest, context: RouteContext) {
+  const { path } = await context.params;
+  const upstreamUrl = new URL(`/${path.join("/")}`, BACKEND_BASE_URL);
   request.nextUrl.searchParams.forEach((value, key) => {
     upstreamUrl.searchParams.append(key, value);
   });
