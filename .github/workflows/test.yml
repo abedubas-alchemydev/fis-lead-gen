@@ -216,7 +216,7 @@ jobs:
       # leaves the old image running on the old schema — safer than a
       # half-applied migration with new code.
       - name: Set up Python for migrations
-        uses: actions/setup-python@v5
+        uses: actions/setup-python@v6
         with:
           python-version: "3.11"
           cache: pip
