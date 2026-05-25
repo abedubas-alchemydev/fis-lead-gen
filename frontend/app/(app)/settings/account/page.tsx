@@ -14,7 +14,7 @@ const PROVIDER_LABELS: Record<string, string> = {
 export default async function AccountSettingsPage() {
   await getRequiredSession();
 
-  const accounts = await auth.api.listUserAccounts({ headers: headers() });
+  const accounts = await auth.api.listUserAccounts({ headers: await headers() });
   const hasPassword = accounts.some((a) => a.providerId === "credential");
   const oauthProviders = accounts
     .map((a) => a.providerId)

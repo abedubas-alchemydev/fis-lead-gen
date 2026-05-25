@@ -123,7 +123,7 @@ function scrubEvent(raw: RawEvent): ScrubbedEvent | null {
 }
 
 export async function POST(request: NextRequest) {
-  const session = await auth.api.getSession({ headers: headers() });
+  const session = await auth.api.getSession({ headers: await headers() });
   if (!session?.user) return new NextResponse(null, { status: 204 });
 
   let payload: { events?: unknown };

@@ -13,11 +13,12 @@ type UserRow = {
 
 export const dynamic = "force-dynamic";
 
-export default async function UserSavedFirmsPage({
-  params,
-}: {
-  params: { id: string };
-}) {
+export default async function UserSavedFirmsPage(
+  props: {
+    params: Promise<{ id: string }>;
+  }
+) {
+  const params = await props.params;
   const session = await getRequiredSession();
 
   if (session.user.role !== "admin") {

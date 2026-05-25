@@ -37,7 +37,7 @@ interface SecurityEventBody {
 }
 
 export async function POST(request: NextRequest) {
-  const session = await auth.api.getSession({ headers: headers() });
+  const session = await auth.api.getSession({ headers: await headers() });
   if (!session?.user) {
     // No session → silently drop; never reveal auth state to the client
     // logger. Status 204 keeps sendBeacon happy without leaking.

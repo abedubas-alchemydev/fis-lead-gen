@@ -1,5 +1,6 @@
 "use client";
 
+import Link from "next/link";
 import { useCallback, useEffect, useRef, useState } from "react";
 
 import {
@@ -149,9 +150,9 @@ export function VaultFolderDetail({ folderId }: { folderId: number }) {
       <div className="rounded-[30px] border border-red-200 bg-red-50/80 p-6 text-sm text-danger shadow-shell">
         {loadError ?? "Could not load this service."}
         <p className="mt-3">
-          <a href="/vault" className="font-medium text-[var(--accent,#6366f1)] underline-offset-4 hover:underline">
+          <Link href="/vault" className="font-medium text-[var(--accent,#6366f1)] underline-offset-4 hover:underline">
             Back to Vault
-          </a>
+          </Link>
         </p>
       </div>
     );

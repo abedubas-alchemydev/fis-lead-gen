@@ -1,3 +1,4 @@
+import Link from "next/link";
 import { notFound } from "next/navigation";
 
 import { TopActions } from "@/components/layout/top-actions";
@@ -10,11 +11,12 @@ import { VaultFolderDetail } from "@/components/vault/vault-folder-detail";
 // All data fetching happens client-side in <VaultFolderDetail/> via the
 // session cookie, mirroring the rest of the (app) shell. Server
 // component just enforces the route param shape + provides the chrome.
-export default function VaultFolderDetailPage({
-  params,
-}: {
-  params: { id: string };
-}) {
+export default async function VaultFolderDetailPage(
+  props: {
+    params: Promise<{ id: string }>;
+  }
+) {
+  const params = await props.params;
   const folderId = Number.parseInt(params.id, 10);
   if (!Number.isFinite(folderId) || folderId < 1) {
     notFound();
@@ -26,12 +28,12 @@ export default function VaultFolderDetailPage({
         <div className="min-w-0">
           <p className="text-[12px] uppercase tracking-[0.06em] text-[var(--text-muted,#94a3b8)]">
             Account <span className="text-[var(--text-dim,#475569)]">/</span>{" "}
-            <a
+            <Link
               href="/vault"
               className="transition hover:text-[var(--text-dim,#475569)] hover:underline"
             >
               Vault
-            </a>{" "}
+            </Link>{" "}
             <span className="text-[var(--text-dim,#475569)]">/</span> Service
           </p>
           <h1 className="mt-1 text-[24px] font-bold tracking-[-0.02em] text-[var(--text,#0f172a)]">
