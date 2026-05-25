@@ -9,10 +9,10 @@ import type { ChatMessage } from "./chatbot-message";
 const WELCOME_MESSAGE: ChatMessage = {
   id: 0,
   role: "assistant",
-  content: "Hi! I'm the DOX assistant. AI responses aren't wired up yet — this is a UI preview.",
+  content: "Hi there! I'm Doxie 👋 I'm not quite ready to chat yet, but I'll be here soon.",
 };
 
-const STUB_REPLY = "Thanks for the message! The AI backend isn't connected yet.";
+const STUB_REPLY = "Thanks! I can't reply for real yet, but I'll be here when chat goes live.";
 
 export function ChatbotWidget() {
   const [isOpen, setIsOpen] = useState(false);
@@ -64,7 +64,7 @@ export function ChatbotWidget() {
         ref={fabRef}
         type="button"
         onClick={() => setIsOpen((open) => !open)}
-        aria-label={isOpen ? "Close chatbot assistant" : "Open chatbot assistant"}
+        aria-label={isOpen ? "Close chat with Doxie" : "Open chat with Doxie"}
         aria-expanded={isOpen}
         aria-controls="chatbot-panel"
         className="fixed bottom-6 right-6 z-40 grid h-14 w-14 place-items-center rounded-full bg-[var(--accent,#6366f1)] text-white shadow-lg shadow-[var(--accent,#6366f1)]/30 transition hover:scale-105 hover:bg-[var(--accent-2,#8b5cf6)] hover:shadow-xl active:scale-95 focus:outline-none focus:ring-2 focus:ring-[var(--accent,#6366f1)]/40 focus:ring-offset-2"

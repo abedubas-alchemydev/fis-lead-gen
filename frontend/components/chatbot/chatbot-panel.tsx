@@ -64,14 +64,14 @@ export const ChatbotPanel = forwardRef<ChatbotPanelHandle, ChatbotPanelProps>(fu
       <header className="flex items-center justify-between border-b border-[var(--border,rgba(30,64,175,0.1))] bg-[var(--surface,#ffffff)] px-4 py-3">
         <div className="flex flex-col">
           <h2 id="chatbot-panel-title" className="text-sm font-semibold text-[var(--text,#0f172a)]">
-            AI Assistant
+            Chat with Doxie
           </h2>
-          <p className="text-xs text-[var(--text-muted,#94a3b8)]">UI preview · backend not connected</p>
+          <p className="text-xs text-[var(--text-muted,#94a3b8)]">Preview mode · chat coming soon</p>
         </div>
         <button
           type="button"
           onClick={onClose}
-          aria-label="Close chatbot"
+          aria-label="Close chat with Doxie"
           className="grid h-9 w-9 place-items-center rounded-lg text-[var(--text-dim,#475569)] transition hover:bg-[var(--surface-2,#f1f6fd)] hover:text-[var(--text,#0f172a)] focus:outline-none focus:ring-2 focus:ring-[var(--accent,#6366f1)]/40"
         >
           <X size={18} strokeWidth={2} />
