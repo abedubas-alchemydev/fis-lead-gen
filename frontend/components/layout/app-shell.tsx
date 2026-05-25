@@ -465,46 +465,52 @@ export function AppShell({
               Personal, Account). Each renders its label + a <nav> with its
               filtered items. Empty sections are dropped upstream. When
               collapsed, the text label is replaced by a thin divider between
-              groups (no divider above the first section). */}
-          {visibleSections.map((section, idx) => (
-            <Fragment key={section.label}>
-              {collapsed ? (
-                idx > 0 ? (
-                  <div
-                    className="mx-2 my-1.5 h-px bg-[var(--border,rgba(30,64,175,0.1))]"
-                    aria-hidden
-                  />
-                ) : null
-              ) : (
-                <SidebarSectionLabel>{section.label}</SidebarSectionLabel>
-              )}
-              <nav className="flex flex-col" aria-label={section.label}>
-                {section.items.map((entry) => {
-                  const live =
-                    entry.href === "/master-list"
-                      ? { ...entry, href: masterListHref }
-                      : entry;
-                  return (
-                    <SidebarNavLink
-                      key={entry.href}
-                      entry={live}
-                      active={isActivePath(entry.href)}
-                      badge={entry.badgeKey ? badges[entry.badgeKey] : null}
-                      collapsed={collapsed}
+              groups (no divider above the first section). Wrapped in a
+              flex-1 + min-h-0 + overflow-y-auto container so the middle
+              scrolls when nav exceeds viewport height while the brand
+              block (above) and user card (below) stay pinned. */}
+          <div className="flex min-h-0 flex-1 flex-col overflow-y-auto">
+            {visibleSections.map((section, idx) => (
+              <Fragment key={section.label}>
+                {collapsed ? (
+                  idx > 0 ? (
+                    <div
+                      className="mx-2 my-1.5 h-px bg-[var(--border,rgba(30,64,175,0.1))]"
+                      aria-hidden
                     />
-                  );
-                })}
-              </nav>
-            </Fragment>
-          ))}
+                  ) : null
+                ) : (
+                  <SidebarSectionLabel>{section.label}</SidebarSectionLabel>
+                )}
+                <nav className="flex flex-col" aria-label={section.label}>
+                  {section.items.map((entry) => {
+                    const live =
+                      entry.href === "/master-list"
+                        ? { ...entry, href: masterListHref }
+                        : entry;
+                    return (
+                      <SidebarNavLink
+                        key={entry.href}
+                        entry={live}
+                        active={isActivePath(entry.href)}
+                        badge={entry.badgeKey ? badges[entry.badgeKey] : null}
+                        collapsed={collapsed}
+                      />
+                    );
+                  })}
+                </nav>
+              </Fragment>
+            ))}
+          </div>
 
           {/* User card — pinned to bottom of sidebar. Matches mockup
               .user-card exactly: avatar + user-name + user-role, plus a
               sign-out icon button on the right (added 2026-05-04). When
               collapsed, name/role hide and the avatar + sign-out stack
-              vertically. */}
+              vertically. Pinning is now done by the flex-1 middle wrapper
+              above absorbing leftover space (no mt-auto needed). */}
           <div
-            className={`mt-auto flex rounded-[14px] border border-[var(--border,rgba(30,64,175,0.1))] bg-[var(--surface-2,#f1f6fd)] ${
+            className={`flex rounded-[14px] border border-[var(--border,rgba(30,64,175,0.1))] bg-[var(--surface-2,#f1f6fd)] ${
               collapsed ? "flex-col items-center gap-2 p-2" : "items-center gap-3 p-3.5"
             }`}
           >
