@@ -29,10 +29,16 @@ function DoxieIcon({ size = 24, strokeWidth = 2 }: { size?: number; strokeWidth?
       aria-hidden="true"
     >
       <path d="M12 3v2" />
-      <circle cx="12" cy="2" r="1" fill="#fbbf24" stroke="none" />
+      <circle cx="12" cy="2" r="1" fill="#fbbf24" stroke="none" className="animate-pulse" />
       <rect x="4" y="6" width="16" height="13" rx="3" fill="rgba(255,255,255,0.1)" />
+      <line x1="3" y1="11" x2="3" y2="14" />
+      <line x1="21" y1="11" x2="21" y2="14" />
       <circle cx="9" cy="12" r="1.3" fill="#22d3ee" stroke="none" />
       <circle cx="15" cy="12" r="1.3" fill="#22d3ee" stroke="none" />
+      <circle cx="9.4" cy="11.6" r="0.35" fill="#ffffff" stroke="none" />
+      <circle cx="15.4" cy="11.6" r="0.35" fill="#ffffff" stroke="none" />
+      <circle cx="7" cy="15.5" r="0.6" fill="#fb7185" stroke="none" opacity="0.7" />
+      <circle cx="17" cy="15.5" r="0.6" fill="#fb7185" stroke="none" opacity="0.7" />
       <path d="M9 16q3 2 6 0" />
     </svg>
   );
@@ -93,7 +99,7 @@ export function ChatbotWidget() {
         aria-controls="chatbot-panel"
         className="fixed bottom-6 right-6 z-40 grid h-14 w-14 place-items-center rounded-full bg-gradient-to-br from-[var(--accent,#6366f1)] to-[var(--accent-2,#8b5cf6)] text-white shadow-lg shadow-[var(--accent,#6366f1)]/30 transition hover:scale-105 hover:brightness-110 hover:shadow-xl active:scale-95 focus:outline-none focus:ring-2 focus:ring-[var(--accent,#6366f1)]/40 focus:ring-offset-2"
       >
-        {isOpen ? <X size={24} strokeWidth={2} /> : <DoxieIcon size={24} strokeWidth={2} />}
+        {isOpen ? <X size={24} strokeWidth={2} /> : <DoxieIcon size={32} strokeWidth={2} />}
       </button>
 
       {isOpen ? (
