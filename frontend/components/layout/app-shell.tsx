@@ -176,6 +176,18 @@ function MailAtIcon(props: IconProps) {
   );
 }
 
+// Key glyph for the My Account / change-password page.
+function KeyIcon(props: IconProps) {
+  return (
+    <IconBase {...props}>
+      <circle cx="8" cy="15" r="4" />
+      <path d="M10.85 12.15L21 2" />
+      <path d="M18 5l3 3" />
+      <path d="M15 8l3 3" />
+    </IconBase>
+  );
+}
+
 // Double-chevron used by the sidebar collapse toggle. Rotated 180° when
 // the sidebar is collapsed so a single icon serves both states.
 function ChevronsLeftIcon(props: IconProps) {
@@ -258,6 +270,7 @@ const navSections: ReadonlyArray<NavSection> = [
     label: "Account",
     items: [
       { href: "/settings", label: "Settings", icon: SettingsIcon, badgeKey: null, permissionKey: "settings" },
+      { href: "/settings/account" as Route, label: "My Account", icon: KeyIcon, badgeKey: null },
       { href: "/settings/email-accounts" as Route, label: "Email Accounts", icon: MailAtIcon, badgeKey: null },
       { href: "/settings/users" as Route, label: "Users", icon: UsersIcon, badgeKey: null, adminOnly: true, permissionKey: "users" },
       { href: "/settings/clearing-memberships" as Route, label: "Memberships", icon: ShieldCheckIcon, badgeKey: null, adminOnly: true },
