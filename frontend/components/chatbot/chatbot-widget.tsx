@@ -28,9 +28,12 @@ function DoxieIcon({ size = 24, strokeWidth = 2 }: { size?: number; strokeWidth?
       strokeLinejoin="round"
       aria-hidden="true"
     >
-      <path d="M14 2 H6 a2 2 0 0 0 -2 2 v16 a2 2 0 0 0 2 2 h12 a2 2 0 0 0 2 -2 V8 z" />
-      <polyline points="14 2 14 8 20 8" />
-      <path d="M8 16 q4 3 8 0" />
+      <path d="M12 3v2" />
+      <circle cx="12" cy="2" r="1" fill="currentColor" />
+      <rect x="4" y="6" width="16" height="13" rx="3" />
+      <circle cx="9" cy="12" r="1.2" fill="currentColor" />
+      <circle cx="15" cy="12" r="1.2" fill="currentColor" />
+      <path d="M9 16q3 2 6 0" />
     </svg>
   );
 }
