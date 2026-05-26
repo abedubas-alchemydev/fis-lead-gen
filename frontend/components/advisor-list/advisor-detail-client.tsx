@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import Link from "next/link";
 import type { Route } from "next";
 import { useRouter, useSearchParams } from "next/navigation";
@@ -13,8 +13,8 @@ import {
   getPipelineRunStatus,
   refreshAdvisor,
 } from "@/lib/api";
-import { PageSpinner } from "@/components/ui/spinner";
 import { DetailPageSkeleton } from "@/components/ui/detail-page-skeleton";
+import { RefreshingIndicator } from "@/components/ui/refreshing-indicator";
 import { joinPipelineLabels } from "@/lib/refresh-pipeline-labels";
 import {
   buildAdvisorListUrl,
@@ -197,17 +197,39 @@ export function AdvisorDetailClient({ advisorId }: { advisorId: string }) {
     };
   }, [advisorId]);
 
+  // Fetch /profile immediately on mount — stale-while-revalidate. The
+  // refresh-on-visit useEffect above runs in parallel; when it
+  // transitions to "ready" the effect below re-fetches /profile so the
+  // user picks up whatever fresh data the orchestrator produced without
+  // ever staring at a blocking spinner.
+  const loadProfile = useCallback(async () => {
+    try {
+      const response = await apiRequest<InvestmentAdvisorProfileResponse>(
+        `/api/v1/investment-advisors/${advisorId}/profile`,
+      );
+      setData(response);
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "Failed to load advisor");
+    }
+  }, [advisorId]);
+
   useEffect(() => {
-    // Wait for refresh-on-visit to finish before fetching /profile.
-    if (refreshState.phase !== "ready") return;
-    apiRequest<InvestmentAdvisorProfileResponse>(
-      `/api/v1/investment-advisors/${advisorId}/profile`,
-    )
-      .then(setData)
-      .catch((err) => {
-        setError(err instanceof Error ? err.message : "Failed to load advisor");
-      });
-  }, [advisorId, refreshState.phase]);
+    void loadProfile();
+  }, [loadProfile]);
+
+  // Re-fetch /profile when refresh-on-visit transitions from in-flight
+  // to ready, so the page picks up any new values the orchestrator
+  // wrote. The ref ensures we only re-fetch on the transition, not on
+  // initial mount where phase may already be "ready" via the "skipped"
+  // short-circuit.
+  const prevRefreshPhaseRef = useRef(refreshState.phase);
+  useEffect(() => {
+    const prev = prevRefreshPhaseRef.current;
+    prevRefreshPhaseRef.current = refreshState.phase;
+    if (refreshState.phase === "ready" && prev !== "ready") {
+      void loadProfile();
+    }
+  }, [refreshState.phase, loadProfile]);
 
   // Restore the user's filter/sort state on back-nav, falling back to
   // the bare list URL if no return envelope was passed.
@@ -315,27 +337,9 @@ export function AdvisorDetailClient({ advisorId }: { advisorId: string }) {
     return (returnEnvelope ? `${base}?return=${returnEnvelope}` : base) as Route;
   };
 
-  // Refresh-on-visit gate. Show loading screen while the BE orchestrator
-  // is queuing or running. Once ready, the /profile fetch above populates
-  // and the existing render path runs.
-  if (refreshState.phase === "queuing") {
-    return (
-      <div className="px-7 pb-12 pt-7 lg:px-9">
-        <PageSpinner label="Preparing fresh data for this advisor…" />
-      </div>
-    );
-  }
-  if (refreshState.phase === "polling") {
-    const label =
-      refreshState.pipelinesRunning.length > 0
-        ? `Refreshing ${joinPipelineLabels(refreshState.pipelinesRunning)}…`
-        : "Refreshing advisor data…";
-    return (
-      <div className="px-7 pb-12 pt-7 lg:px-9">
-        <PageSpinner label={label} />
-      </div>
-    );
-  }
+  // Refresh-on-visit is non-blocking — the RefreshingIndicator pill in
+  // the topbar communicates progress while /profile renders with
+  // whatever the DB has now. See refreshState useEffect above.
 
   if (error) {
     return (
@@ -381,6 +385,15 @@ export function AdvisorDetailClient({ advisorId }: { advisorId: string }) {
             <h1 className="text-[24px] font-bold tracking-[-0.02em] text-[var(--text,#0f172a)]">
               {advisor.name}
             </h1>
+            {refreshState.phase !== "ready" ? (
+              <RefreshingIndicator
+                label={
+                  refreshState.phase === "polling" && refreshState.pipelinesRunning.length > 0
+                    ? `Refreshing ${joinPipelineLabels(refreshState.pipelinesRunning)}…`
+                    : "Refreshing data…"
+                }
+              />
+            ) : null}
             <ListPicker
               firmId={advisor.id}
               variant="detail"

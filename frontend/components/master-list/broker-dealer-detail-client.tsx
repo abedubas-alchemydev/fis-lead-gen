@@ -1,7 +1,7 @@
 "use client";
 
 import Link from "next/link";
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useRouter, useSearchParams } from "next/navigation";
 import type { Route } from "next";
 
@@ -47,8 +47,8 @@ import {
   getPipelineRunStatus,
   refreshFirm,
 } from "@/lib/api";
-import { PageSpinner } from "@/components/ui/spinner";
 import { DetailPageSkeleton } from "@/components/ui/detail-page-skeleton";
+import { RefreshingIndicator } from "@/components/ui/refreshing-indicator";
 import { joinPipelineLabels } from "@/lib/refresh-pipeline-labels";
 import { parseArrangementBlob } from "@/lib/arrangements";
 import { listScansForBrokerDealer } from "@/lib/email-extractor";
@@ -444,12 +444,12 @@ export function BrokerDealerDetailClient({ brokerDealerId }: { brokerDealerId: s
     setProfile(response);
   }, [brokerDealerId]);
 
+  // Fetch /profile immediately on mount — stale-while-revalidate.
+  // The refresh-on-visit useEffect above runs in parallel; when it
+  // transitions to "ready" the effect below re-fetches /profile so
+  // the user picks up whatever fresh data the orchestrator produced
+  // without ever staring at a blocking spinner.
   useEffect(() => {
-    // Wait for refresh-on-visit to finish before fetching /profile so
-    // the page renders with the freshest data the orchestrator can
-    // produce. While refreshState.phase is "queuing" or "polling" the
-    // loading-screen branches below intercept the render anyway.
-    if (refreshState.phase !== "ready") return;
     let active = true;
     async function loadProfile() {
       try {
@@ -469,7 +469,23 @@ export function BrokerDealerDetailClient({ brokerDealerId }: { brokerDealerId: s
     return () => {
       active = false;
     };
-  }, [brokerDealerId, refreshState.phase]);
+  }, [brokerDealerId]);
+
+  // When refresh-on-visit transitions from in-flight (queuing/polling)
+  // to ready, re-fetch /profile so the visible page picks up any new
+  // values the orchestrator wrote. The ref ensures we only re-fetch on
+  // the transition, not on initial mount where phase may already be
+  // "ready" via the "skipped" short-circuit.
+  const prevRefreshPhaseRef = useRef(refreshState.phase);
+  useEffect(() => {
+    const prev = prevRefreshPhaseRef.current;
+    prevRefreshPhaseRef.current = refreshState.phase;
+    if (refreshState.phase === "ready" && prev !== "ready") {
+      void reloadProfile().catch(() => {
+        /* re-fetch is best-effort; the stale view is still useful */
+      });
+    }
+  }, [refreshState.phase, reloadProfile]);
 
   // Hydrate the inline "Discovered Emails" section. Two sources, in
   // precedence order:
@@ -656,27 +672,9 @@ export function BrokerDealerDetailClient({ brokerDealerId }: { brokerDealerId: s
       }));
   }, [profile]);
 
-  // Refresh-on-visit gate. Show the loading screen while the BE
-  // orchestrator is queuing or running. Once it goes "ready" the
-  // /profile fetch below populates and the existing render path runs.
-  if (refreshState.phase === "queuing") {
-    return (
-      <div className="px-7 pb-12 pt-7 lg:px-9">
-        <PageSpinner label="Preparing fresh data for this firm…" />
-      </div>
-    );
-  }
-  if (refreshState.phase === "polling") {
-    const label =
-      refreshState.pipelinesRunning.length > 0
-        ? `Refreshing ${joinPipelineLabels(refreshState.pipelinesRunning)}…`
-        : "Refreshing firm data…";
-    return (
-      <div className="px-7 pb-12 pt-7 lg:px-9">
-        <PageSpinner label={label} />
-      </div>
-    );
-  }
+  // Refresh-on-visit is non-blocking — the RefreshingIndicator pill in
+  // the topbar communicates progress while /profile renders with
+  // whatever the DB has now. See refreshState useEffect above.
 
   if (error) {
     return (
@@ -743,6 +741,15 @@ export function BrokerDealerDetailClient({ brokerDealerId }: { brokerDealerId: s
               variant="detail"
               initialFavorited={profile.is_favorited}
             />
+            {refreshState.phase !== "ready" ? (
+              <RefreshingIndicator
+                label={
+                  refreshState.phase === "polling" && refreshState.pipelinesRunning.length > 0
+                    ? `Refreshing ${joinPipelineLabels(refreshState.pipelinesRunning)}…`
+                    : "Refreshing data…"
+                }
+              />
+            ) : null}
           </div>
           <FirmWebsiteLink firmId={bd.id} firmName={bd.name} website={bd.website} />
           <div className="mt-2 flex flex-wrap items-center gap-x-3 gap-y-1 text-[12px] text-[var(--text-muted,#94a3b8)]">
