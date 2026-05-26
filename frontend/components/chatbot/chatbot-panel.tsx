@@ -73,7 +73,7 @@ export const ChatbotPanel = forwardRef<ChatbotPanelHandle, ChatbotPanelProps>(fu
           type="button"
           onClick={onClose}
           aria-label="Close chat with Doxie"
-          className="grid h-9 w-9 place-items-center rounded-lg text-[var(--text-dim,#475569)] transition hover:bg-[var(--surface-2,#f1f6fd)] hover:text-[var(--text,#0f172a)] focus:outline-none focus:ring-2 focus:ring-[var(--accent,#6366f1)]/40"
+          className="grid h-9 w-9 place-items-center rounded-lg text-[var(--text-dim,#475569)] transition hover:bg-[var(--surface-2,#f1f6fd)] hover:text-[var(--text,#0f172a)] focus:outline-none focus:ring-2 focus:ring-[var(--doxie,#6366f1)]/40"
         >
           <X size={18} strokeWidth={2} />
         </button>
@@ -108,13 +108,13 @@ export const ChatbotPanel = forwardRef<ChatbotPanelHandle, ChatbotPanelProps>(fu
           placeholder={isSending ? "Doxie is thinking…" : "Type a message…"}
           aria-label="Chat message"
           disabled={isSending}
-          className="max-h-32 min-h-[40px] flex-1 resize-none rounded-xl border border-[var(--border,rgba(30,64,175,0.1))] bg-[var(--surface,#ffffff)] px-3 py-2 text-sm text-[var(--text,#0f172a)] placeholder:text-[var(--text-muted,#94a3b8)] focus:border-[var(--accent,#6366f1)] focus:outline-none focus:ring-2 focus:ring-[var(--accent,#6366f1)]/30 disabled:cursor-not-allowed disabled:opacity-60"
+          className="max-h-32 min-h-[40px] flex-1 resize-none rounded-xl border border-[var(--border,rgba(30,64,175,0.1))] bg-[var(--surface,#ffffff)] px-3 py-2 text-sm text-[var(--text,#0f172a)] placeholder:text-[var(--text-muted,#94a3b8)] focus:border-[var(--doxie,#6366f1)] focus:outline-none focus:ring-2 focus:ring-[var(--doxie,#6366f1)]/30 disabled:cursor-not-allowed disabled:opacity-60"
         />
         <button
           type="submit"
           disabled={sendDisabled}
           aria-label="Send message"
-          className="grid h-10 w-10 shrink-0 place-items-center rounded-xl bg-[var(--accent,#6366f1)] text-white shadow-sm transition hover:bg-[var(--accent-2,#8b5cf6)] disabled:cursor-not-allowed disabled:opacity-50 focus:outline-none focus:ring-2 focus:ring-[var(--accent,#6366f1)]/40 focus:ring-offset-2"
+          className="grid h-10 w-10 shrink-0 place-items-center rounded-xl bg-[var(--doxie,#6366f1)] text-white shadow-sm transition hover:bg-[var(--doxie-2,#8b5cf6)] disabled:cursor-not-allowed disabled:opacity-50 focus:outline-none focus:ring-2 focus:ring-[var(--doxie,#6366f1)]/40 focus:ring-offset-2"
         >
           <Send size={16} strokeWidth={2} />
         </button>

@@ -168,7 +168,7 @@ export function ChatbotWidget() {
         aria-label={isOpen ? "Close chat with Doxie" : "Open chat with Doxie"}
         aria-expanded={isOpen}
         aria-controls="chatbot-panel"
-        className="fixed bottom-6 right-6 z-40 grid h-14 w-14 place-items-center rounded-full bg-gradient-to-br from-[var(--accent,#6366f1)] to-[var(--accent-2,#8b5cf6)] text-white shadow-lg shadow-[var(--accent,#6366f1)]/30 transition hover:scale-105 hover:brightness-110 hover:shadow-xl active:scale-95 focus:outline-none focus:ring-2 focus:ring-[var(--accent,#6366f1)]/40 focus:ring-offset-2"
+        className="fixed bottom-6 right-6 z-40 grid h-14 w-14 place-items-center rounded-full bg-gradient-to-br from-[var(--doxie,#6366f1)] to-[var(--doxie-2,#8b5cf6)] text-white shadow-lg shadow-[var(--doxie,#6366f1)]/30 transition hover:scale-105 hover:brightness-110 hover:shadow-xl active:scale-95 focus:outline-none focus:ring-2 focus:ring-[var(--doxie,#6366f1)]/40 focus:ring-offset-2"
       >
         {isOpen ? <X size={24} strokeWidth={2} /> : <DoxieIcon size={32} strokeWidth={2} />}
       </button>
