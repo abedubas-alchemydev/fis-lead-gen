@@ -8,6 +8,10 @@ export interface ChatMessage {
   content: string;
   pending?: boolean;
   error?: boolean;
+  // Active tool-call indicator shown alongside the typing dots while
+  // Doxie is executing a tool (e.g. "Searching broker-dealers…"). Cleared
+  // when the tool completes or the model starts streaming text.
+  toolStatus?: string;
 }
 
 function TypingDots() {
@@ -28,14 +32,21 @@ export function ChatbotMessage({
   role,
   content,
   pending,
-  error
+  error,
+  toolStatus
 }: {
   role: ChatRole;
   content: string;
   pending?: boolean;
   error?: boolean;
+  toolStatus?: string;
 }) {
   const isUser = role === "user";
+  // Show the pending-state bubble (dots, optionally with a tool label)
+  // only when no text has streamed in yet. Once any token arrives,
+  // switch to rendering the accumulating content.
+  const showPendingState = pending && content.length === 0;
+
   return (
     <div className={clsx("flex w-full", isUser ? "justify-end" : "justify-start")}>
       <div
@@ -48,7 +59,18 @@ export function ChatbotMessage({
               : "rounded-2xl rounded-tl-md bg-[var(--surface-2,#f1f6fd)] text-[var(--text,#0f172a)]"
         )}
       >
-        {pending ? <TypingDots /> : content}
+        {showPendingState ? (
+          toolStatus ? (
+            <span className="inline-flex items-center gap-2">
+              <TypingDots />
+              <span className="text-[var(--text-muted,#94a3b8)]">{toolStatus}</span>
+            </span>
+          ) : (
+            <TypingDots />
+          )
+        ) : (
+          content
+        )}
       </div>
     </div>
   );

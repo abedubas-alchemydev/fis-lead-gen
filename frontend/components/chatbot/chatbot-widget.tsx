@@ -7,9 +7,10 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import {
   ApiError,
   loadDoxieHistory,
-  sendDoxieMessage,
   startNewDoxieChat,
-  type DoxieChatMessage
+  streamDoxieMessage,
+  type DoxieChatMessage,
+  type DoxieStreamEvent
 } from "@/lib/api";
 
 import { ChatbotPanel, type ChatbotPanelHandle } from "./chatbot-panel";
@@ -20,6 +21,25 @@ const WELCOME_MESSAGE: ChatMessage = {
   role: "assistant",
   content: "Hi! I'm Doxie 👋 Ask me anything about the app or the data you're looking at."
 };
+
+// Human-readable status labels shown while a tool is running. Falls back
+// to a generic "Looking things up…" for any new tool the FE doesn't
+// recognize so a backend addition doesn't break the UI before the FE
+// catches up.
+const TOOL_STATUS_LABELS: Record<string, string> = {
+  search_broker_dealers: "Searching broker-dealers…",
+  get_broker_dealer_profile: "Loading broker-dealer profile…",
+  search_investment_advisors: "Searching investment advisors…",
+  get_investment_advisor_profile: "Loading advisor profile…",
+  search_institutional_investors: "Searching institutional investors…",
+  get_institutional_investor_profile: "Loading investor profile…",
+  list_broker_dealers_by_filter: "Filtering broker-dealers…",
+  list_investment_advisors_by_filter: "Filtering investment advisors…"
+};
+
+function toolStatusFor(name: string): string {
+  return TOOL_STATUS_LABELS[name] ?? "Looking things up…";
+}
 
 function errorMessageFor(error: unknown): string {
   if (error instanceof ApiError) {
@@ -40,6 +60,20 @@ function errorMessageFor(error: unknown): string {
     }
   }
   return "Something went wrong reaching Doxie. Please try again.";
+}
+
+// Map a stream-event error code to a user-friendly fallback message.
+// In-stream errors land here AFTER the SSE response was already 200, so
+// we can't surface them as HTTP status codes — they replace the pending
+// bubble's content with an inline message.
+function streamErrorMessageFor(code: string, message: string): string {
+  if (code === "config") {
+    return "Doxie is offline right now — the chat service isn't configured on this environment.";
+  }
+  if (code === "persistence") {
+    return "Doxie answered but the message couldn't be saved. Try again in a moment.";
+  }
+  return message || "Doxie hit a snag mid-reply. Please try again.";
 }
 
 function DoxieIcon({ size = 24, strokeWidth = 2 }: { size?: number; strokeWidth?: number }) {
@@ -78,9 +112,6 @@ export function ChatbotWidget() {
   const [input, setInput] = useState("");
   const [isSending, setIsSending] = useState(false);
   const [isLoadingHistory, setIsLoadingHistory] = useState(false);
-  // Lazy history-load: only fetch the first time the panel opens. Re-opens
-  // reuse the in-memory state so we don't flash a loading indicator every
-  // time the user toggles the FAB.
   const historyLoadedRef = useRef(false);
 
   const fabRef = useRef<HTMLButtonElement>(null);
@@ -128,7 +159,6 @@ export function ChatbotWidget() {
         const history = await loadDoxieHistory();
         if (cancelled) return;
         if (history.messages.length === 0) {
-          // First-time user — keep the welcome message.
           return;
         }
         const restored: ChatMessage[] = history.messages.map((m) => {
@@ -138,9 +168,6 @@ export function ChatbotWidget() {
         setMessages(restored);
       } catch (error) {
         if (cancelled) return;
-        // Don't replace the welcome message with an error on first open —
-        // just log and let the user start fresh. The next send still
-        // works (the BE persists each turn independently).
         // eslint-disable-next-line no-console
         console.warn("Doxie history load failed", error);
       } finally {
@@ -180,31 +207,72 @@ export function ChatbotWidget() {
     setInput("");
     setIsSending(true);
 
+    function patchPending(updater: (current: ChatMessage) => ChatMessage) {
+      setMessages((prev) =>
+        prev.map((m) => (m.id === pendingId ? updater(m) : m))
+      );
+    }
+
+    function handleEvent(event: DoxieStreamEvent) {
+      switch (event.type) {
+        case "tool_call":
+          patchPending((m) => ({ ...m, toolStatus: toolStatusFor(event.name) }));
+          break;
+        case "tool_result":
+          // Clear the per-tool label; if another tool_call follows it'll
+          // replace it. A "done" or first text_delta finalises pending.
+          patchPending((m) => ({ ...m, toolStatus: undefined }));
+          break;
+        case "text_delta":
+          patchPending((m) => ({
+            ...m,
+            // First delta clears pending so the bubble switches from
+            // dots to streaming text.
+            pending: false,
+            toolStatus: undefined,
+            content: m.content + event.text
+          }));
+          break;
+        case "done":
+          patchPending((m) => ({
+            ...m,
+            pending: false,
+            toolStatus: undefined,
+            // If no deltas streamed (e.g. iteration cap fallback), the
+            // ``reply`` carries the final text — use it.
+            content: m.content || event.reply
+          }));
+          break;
+        case "error":
+          patchPending(() => ({
+            id: pendingId,
+            role: "assistant",
+            content: streamErrorMessageFor(event.code, event.message),
+            error: true
+          }));
+          break;
+      }
+    }
+
     try {
-      const reply = await sendDoxieMessage(historyForApi, {
-        path: pathname ?? undefined,
-        title: typeof document !== "undefined" ? document.title : undefined
+      await streamDoxieMessage({
+        messages: historyForApi,
+        pageContext: {
+          path: pathname ?? undefined,
+          title: typeof document !== "undefined" ? document.title : undefined
+        },
+        onEvent: handleEvent
       });
-      setMessages((prev) =>
-        prev.map((m) =>
-          m.id === pendingId
-            ? { id: pendingId, role: "assistant", content: reply }
-            : m
-        )
-      );
     } catch (error) {
-      setMessages((prev) =>
-        prev.map((m) =>
-          m.id === pendingId
-            ? {
-                id: pendingId,
-                role: "assistant",
-                content: errorMessageFor(error),
-                error: true
-              }
-            : m
-        )
-      );
+      // Network / HTTP-level failure before / during the stream — the BE
+      // never sent a ``done`` event so the pending bubble still shows
+      // dots. Replace it with an error message.
+      patchPending(() => ({
+        id: pendingId,
+        role: "assistant",
+        content: errorMessageFor(error),
+        error: true
+      }));
     } finally {
       setIsSending(false);
     }
@@ -212,17 +280,12 @@ export function ChatbotWidget() {
 
   const handleNewChat = useCallback(async () => {
     if (isSending) return;
-    // Optimistically clear so the user sees the empty state immediately;
-    // if the archive call fails, we restore. Keeping the spinner in the
-    // header would feel sluggish for a one-click action.
     const previous = messages;
     setMessages([WELCOME_MESSAGE]);
     setInput("");
     try {
       await startNewDoxieChat();
     } catch (error) {
-      // Restore + show an inline error so the user knows their old chat
-      // isn't gone — just the archive didn't take. They can retry.
       setMessages([
         ...previous,
         {

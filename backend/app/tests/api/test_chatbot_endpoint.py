@@ -31,6 +31,7 @@ from app.services.gemini_responses import (
 )
 
 ENDPOINT_POST = "/api/v1/chatbot/messages"
+ENDPOINT_STREAM = "/api/v1/chatbot/messages/stream"
 ENDPOINT_GET = "/api/v1/chatbot/messages"
 ENDPOINT_NEW = "/api/v1/chatbot/conversations/new"
 
@@ -56,17 +57,26 @@ def _bypass_auth() -> object:
 
 
 class _StubChatbotService:
-    """Drop-in replacement for ``ChatbotService``."""
+    """Drop-in replacement for ``ChatbotService``.
+
+    ``stream_events`` controls what ``chat_stream`` yields — leave empty
+    to default to a single text + done sequence. The async-generator
+    stub exists so the streaming endpoint tests can drive event-by-event
+    behaviour without spinning up Gemini.
+    """
 
     def __init__(
         self,
         *,
         reply: str | None = None,
         raises: Exception | None = None,
+        stream_events: list[dict[str, Any]] | None = None,
     ) -> None:
         self.reply = reply
         self.raises = raises
+        self.stream_events = stream_events
         self.calls: list[dict[str, object]] = []
+        self.stream_calls: list[dict[str, object]] = []
 
     async def chat(
         self,
@@ -90,6 +100,37 @@ class _StubChatbotService:
             raise self.raises
         assert self.reply is not None
         return self.reply
+
+    async def chat_stream(
+        self,
+        *,
+        messages: Sequence[ChatbotMessage],
+        user: AuthenticatedUser,
+        db: Any,
+        page_context: ChatbotPageContext | None = None,
+        tools: Any = None,
+    ):
+        self.stream_calls.append(
+            {
+                "messages": list(messages),
+                "page_context": page_context,
+                "user": user,
+                "db": db,
+                "tools": tools,
+            }
+        )
+        if self.raises is not None:
+            raise self.raises
+        events = self.stream_events
+        if events is None:
+            # Default: single text delta + done with the configured reply.
+            reply = self.reply or "ok"
+            events = [
+                {"type": "text_delta", "text": reply},
+                {"type": "done", "reply": reply},
+            ]
+        for event in events:
+            yield event
 
 
 @dataclass
@@ -197,6 +238,33 @@ async def _post_message(payload: dict[str, object]) -> httpx.Response:
     transport = httpx.ASGITransport(app=app)
     async with httpx.AsyncClient(transport=transport, base_url="http://testserver") as client:
         return await client.post(ENDPOINT_POST, json=payload)
+
+
+async def _post_stream(payload: dict[str, object]) -> httpx.Response:
+    transport = httpx.ASGITransport(app=app)
+    async with httpx.AsyncClient(transport=transport, base_url="http://testserver") as client:
+        return await client.post(ENDPOINT_STREAM, json=payload)
+
+
+def _parse_sse_events(body: bytes) -> list[dict[str, Any]]:
+    """Decode an SSE response body into a list of parsed event dicts."""
+    import json as _json
+
+    text = body.decode("utf-8")
+    events: list[dict[str, Any]] = []
+    for raw in text.split("\n\n"):
+        if not raw.strip():
+            continue
+        data_lines = [
+            line[5:].lstrip() for line in raw.split("\n") if line.startswith("data:")
+        ]
+        if not data_lines:
+            continue
+        try:
+            events.append(_json.loads("\n".join(data_lines)))
+        except _json.JSONDecodeError:
+            continue
+    return events
 
 
 async def _get_history() -> httpx.Response:
@@ -417,6 +485,116 @@ async def test_new_conversation_returns_new_id(monkeypatch: pytest.MonkeyPatch) 
     )
 
 
+# ── POST /messages/stream — SSE ─────────────────────────────────────────
+
+
+async def test_stream_returns_event_stream_content_type_and_events_in_order(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    chatbot, history = _install_stubs(
+        monkeypatch,
+        chatbot=_StubChatbotService(
+            stream_events=[
+                {"type": "tool_call", "name": "search_broker_dealers"},
+                {"type": "tool_result", "name": "search_broker_dealers", "error": None},
+                {"type": "text_delta", "text": "Hi "},
+                {"type": "text_delta", "text": "there."},
+                {"type": "done", "reply": "Hi there."},
+            ]
+        ),
+    )
+
+    response = await _post_stream(
+        {"messages": [{"role": "user", "content": "find Apex"}]}
+    )
+    assert response.status_code == 200
+    assert response.headers["content-type"].startswith("text/event-stream")
+    assert response.headers.get("cache-control") == "no-cache"
+
+    events = _parse_sse_events(response.content)
+    assert [e["type"] for e in events] == [
+        "tool_call",
+        "tool_result",
+        "text_delta",
+        "text_delta",
+        "done",
+    ]
+    # Service was called once via the streaming method, not the regular one.
+    assert len(chatbot.stream_calls) == 1
+    assert chatbot.calls == []
+    # User turn persisted before stream + assistant turn after done.
+    appends = [c for c in history.calls if c["method"] == "append_message"]
+    assert [a["role"] for a in appends] == ["user", "assistant"]
+    assert appends[1]["content"] == "Hi there."
+
+
+async def test_stream_rejects_bad_payload_before_opening_stream(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    chatbot, history = _install_stubs(
+        monkeypatch, chatbot=_StubChatbotService(reply="ignored")
+    )
+
+    response = await _post_stream(
+        {
+            "messages": [
+                {"role": "user", "content": "hi"},
+                {"role": "assistant", "content": "hello"},
+            ]
+        }
+    )
+    assert response.status_code == 400
+    # Neither service was touched.
+    assert chatbot.stream_calls == []
+    assert history.calls == []
+
+
+async def test_stream_rejects_oversized_conversation(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    chatbot, history = _install_stubs(
+        monkeypatch, chatbot=_StubChatbotService(reply="ignored")
+    )
+
+    big = "x" * 8000
+    payload_messages = [
+        {"role": "user" if i % 2 == 0 else "assistant", "content": big}
+        for i in range(5)
+    ]
+    payload_messages.append({"role": "user", "content": big})
+
+    response = await _post_stream({"messages": payload_messages})
+    assert response.status_code == 413
+    assert chatbot.stream_calls == []
+    assert history.calls == []
+
+
+async def test_stream_error_event_does_not_persist_assistant_turn(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """When the stream terminates with an ``error`` event (no ``done``),
+    the assistant-turn append must be skipped — the user message stays
+    on record but no empty assistant row is inserted."""
+    _, history = _install_stubs(
+        monkeypatch,
+        chatbot=_StubChatbotService(
+            stream_events=[
+                {"type": "error", "code": "extraction", "message": "boom"},
+            ]
+        ),
+    )
+
+    response = await _post_stream(
+        {"messages": [{"role": "user", "content": "hi"}]}
+    )
+    assert response.status_code == 200  # SSE response opened successfully
+    events = _parse_sse_events(response.content)
+    assert [e["type"] for e in events] == ["error"]
+    appends = [c for c in history.calls if c["method"] == "append_message"]
+    # Only the user turn was persisted.
+    assert [a["role"] for a in appends] == ["user"]
+
+
 # ── Auth gate ───────────────────────────────────────────────────────────
 
 
@@ -426,6 +604,7 @@ async def test_requires_authenticated_session() -> None:
     try:
         for fetch in (
             _post_message({"messages": [{"role": "user", "content": "hi"}]}),
+            _post_stream({"messages": [{"role": "user", "content": "hi"}]}),
             _get_history(),
             _post_new_conversation(),
         ):

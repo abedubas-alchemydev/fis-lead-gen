@@ -1187,3 +1187,120 @@ export async function startNewDoxieChat(): Promise<number> {
   );
   return response.conversation_id;
 }
+
+// ── Doxie streaming chat (SSE) ────────────────────────────────────────────
+// Events emitted by the BE stream endpoint. Mirrors the dicts yielded by
+// `ChatbotService.chat_stream` (see backend/app/services/chatbot.py).
+export type DoxieStreamEvent =
+  | { type: "text_delta"; text: string }
+  | { type: "tool_call"; name: string }
+  | { type: "tool_result"; name: string; error?: string | null }
+  | { type: "done"; reply: string }
+  | { type: "error"; code: string; message: string };
+
+export interface StreamDoxieMessageOptions {
+  messages: DoxieChatMessage[];
+  pageContext?: DoxiePageContext;
+  signal?: AbortSignal;
+  onEvent: (event: DoxieStreamEvent) => void;
+}
+
+// Native EventSource is GET-only and can't carry a request body, so we
+// roll our own POST → SSE reader with `fetch` + a streaming reader. SSE
+// framing: events are separated by a blank line; ``data:`` lines carry
+// the JSON payload. The BE sets `Cache-Control: no-cache` +
+// `X-Accel-Buffering: no` so Cloud Run / Next.js don't buffer.
+export async function streamDoxieMessage({
+  messages,
+  pageContext,
+  signal,
+  onEvent
+}: StreamDoxieMessageOptions): Promise<void> {
+  const body: { messages: DoxieChatMessage[]; page_context?: DoxiePageContext } = {
+    messages
+  };
+  if (pageContext && (pageContext.path || pageContext.title)) {
+    body.page_context = pageContext;
+  }
+
+  const url = `${resolveApiBaseUrl()}/api/v1/chatbot/messages/stream`;
+  const response = await fetch(url, {
+    method: "POST",
+    credentials: "include",
+    headers: {
+      "Content-Type": "application/json",
+      Accept: "text/event-stream"
+    },
+    body: JSON.stringify(body),
+    signal
+  });
+
+  if (!response.ok) {
+    const text = await response.text();
+    let detail = text;
+    try {
+      const parsed = JSON.parse(text) as unknown;
+      if (
+        parsed &&
+        typeof parsed === "object" &&
+        "detail" in parsed &&
+        typeof (parsed as { detail: unknown }).detail === "string"
+      ) {
+        detail = (parsed as { detail: string }).detail;
+      }
+    } catch {
+      // Non-JSON body — fall back to raw text.
+    }
+    throw new ApiError(response.status, detail);
+  }
+
+  if (!response.body) {
+    throw new ApiError(0, "Doxie stream returned no body.");
+  }
+
+  const reader = response.body.getReader();
+  const decoder = new TextDecoder("utf-8");
+  // Buffer carries incomplete chunks across reads — SSE events can be
+  // split arbitrarily across TCP segments.
+  let buffer = "";
+
+  function dispatchBuffered(): void {
+    // Process every complete event (blank-line terminated) in the buffer.
+    // Anything after the last delimiter is a partial event for the next
+    // read to complete.
+    let separatorIdx = buffer.indexOf("\n\n");
+    while (separatorIdx !== -1) {
+      const rawEvent = buffer.slice(0, separatorIdx);
+      buffer = buffer.slice(separatorIdx + 2);
+      separatorIdx = buffer.indexOf("\n\n");
+
+      const dataLines: string[] = [];
+      for (const line of rawEvent.split("\n")) {
+        if (line.startsWith("data:")) {
+          dataLines.push(line.slice(5).trimStart());
+        }
+        // Ignore comment lines (": keep-alive") and event-type lines —
+        // the BE only emits `data:` events.
+      }
+      if (dataLines.length === 0) continue;
+      const payload = dataLines.join("\n");
+      try {
+        const event = JSON.parse(payload) as DoxieStreamEvent;
+        onEvent(event);
+      } catch {
+        // A malformed event shouldn't kill the stream; skip and continue.
+      }
+    }
+  }
+
+  while (true) {
+    const { done, value } = await reader.read();
+    if (done) break;
+    buffer += decoder.decode(value, { stream: true });
+    dispatchBuffered();
+  }
+  // Flush any final bytes left in the decoder + dispatch any trailing
+  // complete events (rare — the BE always terminates with a blank line).
+  buffer += decoder.decode();
+  dispatchBuffered();
+}
