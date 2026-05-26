@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from datetime import datetime
 from typing import Literal
 
 from pydantic import BaseModel, ConfigDict, Field
@@ -38,3 +39,29 @@ class ChatbotResponse(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     reply: str
+
+
+class ChatbotHistoryMessage(BaseModel):
+    """One persisted message as returned by GET /chatbot/messages."""
+    model_config = ConfigDict(from_attributes=True)
+
+    id: int
+    role: ChatbotRole
+    content: str
+    created_at: datetime
+
+
+class ChatbotHistoryResponse(BaseModel):
+    """Persisted history for the user's active conversation."""
+    model_config = ConfigDict(extra="forbid")
+
+    conversation_id: int
+    messages: list[ChatbotHistoryMessage]
+
+
+class ChatbotNewConversationResponse(BaseModel):
+    """Result of POST /chatbot/conversations/new — caller drops local
+    history and starts a fresh thread keyed on this id."""
+    model_config = ConfigDict(extra="forbid")
+
+    conversation_id: int

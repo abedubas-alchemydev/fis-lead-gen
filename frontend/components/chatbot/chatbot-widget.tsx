@@ -4,7 +4,13 @@ import { X } from "lucide-react";
 import { usePathname } from "next/navigation";
 import { useCallback, useEffect, useRef, useState } from "react";
 
-import { ApiError, sendDoxieMessage, type DoxieChatMessage } from "@/lib/api";
+import {
+  ApiError,
+  loadDoxieHistory,
+  sendDoxieMessage,
+  startNewDoxieChat,
+  type DoxieChatMessage
+} from "@/lib/api";
 
 import { ChatbotPanel, type ChatbotPanelHandle } from "./chatbot-panel";
 import type { ChatMessage } from "./chatbot-message";
@@ -25,6 +31,9 @@ function errorMessageFor(error: unknown): string {
     }
     if (error.status === 413) {
       return "This conversation is too long — start a new chat and try again.";
+    }
+    if (error.status === 500) {
+      return "Doxie answered but the message couldn't be saved. Try again in a moment.";
     }
     if (error.status === 401) {
       return "Your session expired. Refresh the page to sign back in.";
@@ -68,6 +77,11 @@ export function ChatbotWidget() {
   const [messages, setMessages] = useState<ReadonlyArray<ChatMessage>>([WELCOME_MESSAGE]);
   const [input, setInput] = useState("");
   const [isSending, setIsSending] = useState(false);
+  const [isLoadingHistory, setIsLoadingHistory] = useState(false);
+  // Lazy history-load: only fetch the first time the panel opens. Re-opens
+  // reuse the in-memory state so we don't flash a loading indicator every
+  // time the user toggles the FAB.
+  const historyLoadedRef = useRef(false);
 
   const fabRef = useRef<HTMLButtonElement>(null);
   const panelRef = useRef<ChatbotPanelHandle>(null);
@@ -100,6 +114,43 @@ export function ChatbotWidget() {
   // Focus the input when the panel opens.
   useEffect(() => {
     if (isOpen) panelRef.current?.focusInput();
+  }, [isOpen]);
+
+  // Lazy-load persisted history on first panel open.
+  useEffect(() => {
+    if (!isOpen || historyLoadedRef.current) return;
+    historyLoadedRef.current = true;
+
+    let cancelled = false;
+    setIsLoadingHistory(true);
+    void (async () => {
+      try {
+        const history = await loadDoxieHistory();
+        if (cancelled) return;
+        if (history.messages.length === 0) {
+          // First-time user — keep the welcome message.
+          return;
+        }
+        const restored: ChatMessage[] = history.messages.map((m) => {
+          const id = nextIdRef.current++;
+          return { id, role: m.role, content: m.content };
+        });
+        setMessages(restored);
+      } catch (error) {
+        if (cancelled) return;
+        // Don't replace the welcome message with an error on first open —
+        // just log and let the user start fresh. The next send still
+        // works (the BE persists each turn independently).
+        // eslint-disable-next-line no-console
+        console.warn("Doxie history load failed", error);
+      } finally {
+        if (!cancelled) setIsLoadingHistory(false);
+      }
+    })();
+
+    return () => {
+      cancelled = true;
+    };
   }, [isOpen]);
 
   const handleSend = useCallback(async () => {
@@ -159,6 +210,31 @@ export function ChatbotWidget() {
     }
   }, [input, isSending, messages, pathname]);
 
+  const handleNewChat = useCallback(async () => {
+    if (isSending) return;
+    // Optimistically clear so the user sees the empty state immediately;
+    // if the archive call fails, we restore. Keeping the spinner in the
+    // header would feel sluggish for a one-click action.
+    const previous = messages;
+    setMessages([WELCOME_MESSAGE]);
+    setInput("");
+    try {
+      await startNewDoxieChat();
+    } catch (error) {
+      // Restore + show an inline error so the user knows their old chat
+      // isn't gone — just the archive didn't take. They can retry.
+      setMessages([
+        ...previous,
+        {
+          id: nextIdRef.current++,
+          role: "assistant",
+          content: errorMessageFor(error),
+          error: true
+        }
+      ]);
+    }
+  }, [isSending, messages]);
+
   return (
     <>
       <button
@@ -181,7 +257,9 @@ export function ChatbotWidget() {
           onInputChange={setInput}
           onSend={handleSend}
           onClose={closePanel}
+          onNewChat={handleNewChat}
           isSending={isSending}
+          isLoadingHistory={isLoadingHistory}
         />
       ) : null}
     </>

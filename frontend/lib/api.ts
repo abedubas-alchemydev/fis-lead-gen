@@ -1156,3 +1156,34 @@ export async function sendDoxieMessage(
   );
   return response.reply;
 }
+
+// Persisted history for the user's active conversation. Empty messages
+// array on first open (BE creates the conversation lazily).
+export interface DoxieHistoryMessage {
+  id: number;
+  role: DoxieChatRole;
+  content: string;
+  created_at: string;
+}
+
+export interface DoxieHistoryResponse {
+  conversation_id: number;
+  messages: DoxieHistoryMessage[];
+}
+
+export async function loadDoxieHistory(): Promise<DoxieHistoryResponse> {
+  return apiRequest<DoxieHistoryResponse>("/api/v1/chatbot/messages", {
+    method: "GET"
+  });
+}
+
+// Archive the current Doxie conversation and start a fresh one. The
+// returned conversation_id is informational — the FE just needs to know
+// the archive succeeded so it can clear the message list.
+export async function startNewDoxieChat(): Promise<number> {
+  const response = await apiRequest<{ conversation_id: number }>(
+    "/api/v1/chatbot/conversations/new",
+    { method: "POST" }
+  );
+  return response.conversation_id;
+}
