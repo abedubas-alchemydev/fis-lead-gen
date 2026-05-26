@@ -34,8 +34,10 @@ from fastapi import HTTPException
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.feature_permissions import (
+    ALERTS,
     INSTITUTIONAL_INVESTORS,
     INVESTMENT_ADVISORS,
+    INVESTORS,
     MASTER_LIST,
 )
 from app.schemas.auth import AuthenticatedUser
@@ -46,6 +48,7 @@ from app.schemas.broker_dealer import (
 from app.schemas.institutional_investor import InstitutionalInvestorListItem
 from app.schemas.investment_advisor import InvestmentAdvisorListItem
 from app.schemas.pipeline import ClearingArrangementItem
+from app.services.alerts import AlertRepository
 from app.services.auth import ensure_feature
 from app.services.broker_dealers import BrokerDealerRepository
 from app.services.chatbot_semantic import (
@@ -53,12 +56,15 @@ from app.services.chatbot_semantic import (
     ENTITY_TYPE_BROKER_DEALER,
 )
 from app.services.chatbot_urls import (
+    ALERTS_URL,
     bd_detail_url,
     bd_list_url,
     ia_detail_url,
     ia_list_url,
     ii_detail_url,
+    investors_url,
 )
+from app.services.form4_transactions import Form4TransactionRepository
 from app.services.institutional_investors import InstitutionalInvestorRepository
 from app.services.investment_advisors import InvestmentAdvisorRepository
 
@@ -369,7 +375,29 @@ def _project_ii_profile(item: InstitutionalInvestorListItem) -> dict[str, Any]:
 _bd_repo = BrokerDealerRepository()
 _ia_repo = InvestmentAdvisorRepository()
 _ii_repo = InstitutionalInvestorRepository()
+_form4_repo = Form4TransactionRepository()
+_alerts_repo = AlertRepository()
 _semantic_service = ChatbotSemanticService()
+
+
+# Form 4 / Investors tab — values mirror the FE's days preset whitelist
+# and default. The repo accepts any positive int; we just cap for
+# safety so a chatty model can't request a 10,000-day window.
+FORM4_DAYS_DEFAULT = 90
+FORM4_DAYS_MAX = 365
+FORM4_RESULT_LIMIT_MAX = 10
+FORM4_RESULT_LIMIT_DEFAULT = 5
+
+# Alerts feed — small caps because the alerts page paginates and we
+# just want a "what's new" snapshot in the chat.
+ALERTS_RESULT_LIMIT_MAX = 15
+ALERTS_RESULT_LIMIT_DEFAULT = 6
+
+# Per-firm filing enumeration cap. Used by ``list_filings_for_firm``
+# which is the precursor enumeration tool for the future PDF-summarize
+# tools — 5 filings is a useful default that doesn't burn prompt tokens.
+FILINGS_LIST_LIMIT_DEFAULT = 5
+FILINGS_LIST_LIMIT_MAX = 25
 
 
 # Semantic search returns at most this many hits regardless of what
@@ -887,6 +915,367 @@ async def _execute_list_investment_advisors_by_filter(
     }
 
 
+# ── Form 4 (Investors tab) ────────────────────────────────────────────────
+
+
+# Maps the BE `ad_code` (A/D) to the FE `/investors?tab=` param. The FE
+# tab enum is buyers (acquired) / sellers (disposed) / all — Doxie's
+# tool surface uses ad_code directly because that's the column name in
+# the DB and the more natural concept for the model to reason about.
+_AD_CODE_TO_TAB: dict[str, str] = {"A": "buyers", "D": "sellers"}
+
+
+def _project_form4_consolidated(row: Any) -> dict[str, Any]:
+    """Compact projection of one ``ConsolidatedPersonRow``.
+
+    The full dataclass has 27 fields including raw address parts and
+    favorites flags; Doxie doesn't need any of that. We keep the insider
+    identity, the issuer they traded against, the aggregate shares/value,
+    and a single ``link`` into the /investors workspace pre-filtered by
+    ticker so the user can drill in.
+    """
+    ticker = getattr(row, "issuer_ticker", None)
+    ad_code = getattr(row, "ad_code", None)
+    out: dict[str, Any] = {
+        "reporting_owner_name": getattr(row, "reporting_owner_name", None),
+        "reporting_owner_cik": getattr(row, "reporting_owner_cik", None),
+        "reporting_owner_title": getattr(row, "reporting_owner_title", None),
+        "reporting_owner_state": getattr(row, "reporting_owner_state", None),
+        "is_director": getattr(row, "reporting_owner_is_director", None),
+        "is_officer": getattr(row, "reporting_owner_is_officer", None),
+        "is_ten_pct": getattr(row, "reporting_owner_is_ten_pct", None),
+        "issuer_name": getattr(row, "issuer_name", None),
+        "issuer_ticker": ticker,
+        "ad_code": ad_code,
+        # Human-readable bucket so Doxie doesn't have to remember the A/D
+        # convention. ``acquired`` = insider bought; ``disposed`` = sold.
+        "transaction_kind": "acquired" if ad_code == "A" else "disposed" if ad_code == "D" else None,
+        "security_title": getattr(row, "security_title", None),
+        "transaction_date": getattr(row, "transaction_date", None),
+        "shares": getattr(row, "shares", None),
+        "transaction_value": getattr(row, "transaction_value", None),
+        "txn_count": getattr(row, "txn_count", None),
+        "filed_at": getattr(row, "filed_at", None),
+        "source_filing_url": getattr(row, "source_filing_url", None),
+    }
+    # Deep-link into /investors pre-filtered. ``ticker`` is the most
+    # useful narrowing — drops to the relevant issuer; ``tab`` maps from
+    # ad_code. When neither is present we still send the user to the
+    # bare /investors page.
+    out["link"] = investors_url(
+        ticker=ticker,
+        tab=_AD_CODE_TO_TAB.get(ad_code) if ad_code else None,
+    )
+    return _jsonable(out)
+
+
+async def _execute_search_form4_filings(
+    user: AuthenticatedUser,
+    db: AsyncSession,
+    args: Mapping[str, Any],
+) -> dict[str, Any]:
+    """Search recent Form 4 insider filings.
+
+    Takes any combination of free-text query, A/D bucket, ticker, days-
+    back window, and min transaction value. At least one of these must
+    be set so a chatty model can't enumerate the whole table — the BD /
+    IA tools follow the same "filter required" rule.
+
+    Note: The original plan called for a separate ``get_form4_investor_profile``
+    tool but the Form 4 schema has no per-insider entity (each row is a
+    transaction, not an investor profile). A search with ``query=<name>``
+    covers the same use case.
+    """
+    denial = _check_feature(user, INVESTORS)
+    if denial is not None:
+        return denial
+
+    query = _opt_str(args, "query")
+    ticker = _opt_str(args, "ticker")
+    ad_code_raw = _opt_str(args, "ad_code")
+    ad_code: str | None = None
+    if ad_code_raw:
+        upper = ad_code_raw.upper()
+        if upper in ("A", "D"):
+            ad_code = upper
+        else:
+            return {
+                "error": "invalid_args",
+                "message": "Argument 'ad_code' must be 'A' (acquired/buy) or 'D' (disposed/sell).",
+            }
+
+    min_value = _opt_float(args, "min_value")
+    raw_days = args.get("days")
+    try:
+        days = int(raw_days) if raw_days is not None else FORM4_DAYS_DEFAULT
+    except (TypeError, ValueError):
+        days = FORM4_DAYS_DEFAULT
+    days = max(1, min(days, FORM4_DAYS_MAX))
+
+    if query is None and ticker is None and ad_code is None and min_value is None:
+        return {
+            "error": "invalid_args",
+            "message": (
+                "At least one of 'query', 'ticker', 'ad_code', or 'min_value' "
+                "must be set. Use ad_code='A' for insider buys, 'D' for sells."
+            ),
+        }
+
+    try:
+        raw_limit = int(args["limit"]) if args.get("limit") is not None else FORM4_RESULT_LIMIT_DEFAULT
+    except (TypeError, ValueError):
+        raw_limit = FORM4_RESULT_LIMIT_DEFAULT
+    limit = max(1, min(raw_limit, FORM4_RESULT_LIMIT_MAX))
+
+    try:
+        from decimal import Decimal as _Decimal
+
+        rows, total = await _form4_repo.list_consolidated_persons(
+            db,
+            ad_code=ad_code,  # type: ignore[arg-type]
+            ticker=ticker,
+            days=days,
+            min_value=_Decimal(str(min_value)) if min_value is not None else None,
+            max_value=None,
+            search=query,
+            states=None,
+            sort_by="transaction_date",
+            sort_dir="desc",
+            page=1,
+            limit=limit,
+            user_id=None,
+        )
+    except Exception:
+        logger.exception("doxie tool failed", extra={"tool": "search_form4_filings"})
+        return {
+            "error": "tool_error",
+            "message": "Lookup failed; ask the user to try again.",
+        }
+
+    return {
+        "items": [_project_form4_consolidated(r) for r in rows],
+        "total_matched": total,
+        # ``list_link`` echoes the filters so the user lands on the same
+        # cut of the /investors workspace.
+        "list_link": investors_url(
+            tab=_AD_CODE_TO_TAB.get(ad_code) if ad_code else None,
+            q=query,
+            ticker=ticker,
+            days=days if days != FORM4_DAYS_DEFAULT else None,
+            min_value=min_value,
+        ),
+    }
+
+
+# ── Per-firm filing enumeration ───────────────────────────────────────────
+
+
+def _project_filing(row: Any, *, firm_type: str, firm_id: int) -> dict[str, Any]:
+    """Compact projection of one filing alert / advisor / investor filing.
+
+    All three filing tables share the same shape (id, form_type, filed_at,
+    summary, source_filing_url) so one projection serves them all. The
+    ``link`` is a deep-link to the parent firm's detail page — Part C will
+    add a separate ``summarize_*_filing`` tool that returns the PDF
+    summary itself, and the ``filing_id`` here is the handle that tool
+    accepts to identify which filing to fetch.
+    """
+    out: dict[str, Any] = {
+        "filing_id": getattr(row, "id", None),
+        "form_type": getattr(row, "form_type", None),
+        "filed_at": getattr(row, "filed_at", None),
+        "summary": getattr(row, "summary", None),
+        "source_filing_url": getattr(row, "source_filing_url", None),
+        "priority": getattr(row, "priority", None),
+    }
+    if firm_type == "bd":
+        out["link"] = bd_detail_url(firm_id)
+    elif firm_type == "ia":
+        out["link"] = ia_detail_url(firm_id)
+    elif firm_type == "ii":
+        out["link"] = ii_detail_url(firm_id)
+    return _jsonable(out)
+
+
+async def _execute_list_filings_for_firm(
+    user: AuthenticatedUser,
+    db: AsyncSession,
+    args: Mapping[str, Any],
+) -> dict[str, Any]:
+    """List recent filings attached to a BD / IA / II.
+
+    Wraps three repository methods behind one tool so the model can ask
+    "what filings does Apex Clearing have?" without having to know which
+    table to look in. The shape returned is identical across firm types
+    so Doxie can format the result uniformly.
+
+    Part C uses this as the enumeration step before opening one PDF: the
+    ``filing_id`` returned here is the handle the ``summarize_*_filing``
+    tools accept.
+    """
+    firm_type_raw = _opt_str(args, "firm_type")
+    if not firm_type_raw:
+        return {
+            "error": "invalid_args",
+            "message": "Argument 'firm_type' must be 'bd', 'ia', or 'ii'.",
+        }
+    firm_type = firm_type_raw.lower()
+    if firm_type not in ("bd", "ia", "ii"):
+        return {
+            "error": "invalid_args",
+            "message": "Argument 'firm_type' must be 'bd', 'ia', or 'ii'.",
+        }
+
+    # Each firm type is gated on its own feature key — keeps Doxie from
+    # leaking even filing metadata to a user who shouldn't see the firm.
+    feature_key = {
+        "bd": MASTER_LIST,
+        "ia": INVESTMENT_ADVISORS,
+        "ii": INSTITUTIONAL_INVESTORS,
+    }[firm_type]
+    denial = _check_feature(user, feature_key)
+    if denial is not None:
+        return denial
+
+    try:
+        firm_id = int(args.get("firm_id"))
+    except (TypeError, ValueError):
+        return {
+            "error": "invalid_args",
+            "message": "Argument 'firm_id' must be an integer.",
+        }
+
+    form_type_filter = _opt_str(args, "form_type")
+    try:
+        raw_limit = int(args["limit"]) if args.get("limit") is not None else FILINGS_LIST_LIMIT_DEFAULT
+    except (TypeError, ValueError):
+        raw_limit = FILINGS_LIST_LIMIT_DEFAULT
+    limit = max(1, min(raw_limit, FILINGS_LIST_LIMIT_MAX))
+
+    try:
+        if firm_type == "bd":
+            # The BD filing-history repo doesn't accept a limit — slice
+            # client-side. ``get_filing_history`` returns filings sorted
+            # by filed_at desc, so the head is the most recent.
+            all_filings = await _alerts_repo.get_filing_history(db, firm_id)
+            filings = list(all_filings)
+        elif firm_type == "ia":
+            filings = list(await _ia_repo.list_advisor_filings(db, firm_id, limit=limit))
+        else:  # ii
+            filings = list(await _ii_repo.list_investor_filings(db, firm_id, limit=limit))
+    except Exception:
+        logger.exception(
+            "doxie tool failed", extra={"tool": "list_filings_for_firm"}
+        )
+        return {
+            "error": "tool_error",
+            "message": "Lookup failed; ask the user to try again.",
+        }
+
+    if form_type_filter:
+        filings = [f for f in filings if getattr(f, "form_type", None) == form_type_filter]
+
+    items = [
+        _project_filing(f, firm_type=firm_type, firm_id=firm_id)
+        for f in filings[:limit]
+    ]
+    return {
+        "items": items,
+        "total_matched": len(items),
+    }
+
+
+# ── Filing alerts ─────────────────────────────────────────────────────────
+
+
+def _project_alert(item: Any) -> dict[str, Any]:
+    """Compact projection of one ``AlertListItem``."""
+    bd_id = getattr(item, "bd_id", None)
+    out: dict[str, Any] = {
+        "id": getattr(item, "id", None),
+        "bd_id": bd_id,
+        "firm_name": getattr(item, "firm_name", None),
+        "form_type": getattr(item, "form_type", None),
+        "priority": getattr(item, "priority", None),
+        "filed_at": getattr(item, "filed_at", None),
+        "summary": getattr(item, "summary", None),
+        "source_filing_url": getattr(item, "source_filing_url", None),
+        "is_read": getattr(item, "is_read", None),
+    }
+    # Deep-link to the firm whose filing triggered the alert. Sending
+    # the user to a per-alert page would also be fine, but the firm
+    # detail is the more useful destination ("see what Apex filed").
+    if bd_id is not None:
+        out["link"] = bd_detail_url(bd_id)
+    return _jsonable(out)
+
+
+async def _execute_get_recent_alerts(
+    user: AuthenticatedUser,
+    db: AsyncSession,
+    args: Mapping[str, Any],
+) -> dict[str, Any]:
+    """Recent filing alerts feed.
+
+    Useful for "what's new?" prompts — "any new Form X-17A-5 filings
+    this week?" Gated on the ``alerts`` feature so a viewer without
+    that page can't pull a global feed through Doxie.
+
+    Filtering knobs mirror what the /alerts page surfaces: form_type,
+    priority, optional broker_dealer_id, and is_read. All optional.
+    """
+    denial = _check_feature(user, ALERTS)
+    if denial is not None:
+        return denial
+
+    form_type = _opt_str(args, "form_type")
+    priority = _opt_str(args, "priority")
+    bd_id_raw = args.get("broker_dealer_id")
+    bd_id: int | None = None
+    if bd_id_raw is not None:
+        try:
+            bd_id = int(bd_id_raw)
+        except (TypeError, ValueError):
+            return {
+                "error": "invalid_args",
+                "message": "Argument 'broker_dealer_id' must be an integer.",
+            }
+
+    is_read = _opt_bool(args, "is_read")
+
+    try:
+        raw_limit = int(args["limit"]) if args.get("limit") is not None else ALERTS_RESULT_LIMIT_DEFAULT
+    except (TypeError, ValueError):
+        raw_limit = ALERTS_RESULT_LIMIT_DEFAULT
+    limit = max(1, min(raw_limit, ALERTS_RESULT_LIMIT_MAX))
+
+    try:
+        response = await _alerts_repo.list_alerts(
+            db,
+            form_types=[form_type] if form_type else [],
+            priorities=[priority] if priority else [],
+            is_read=is_read,
+            broker_dealer_id=bd_id,
+            page=1,
+            limit=limit,
+        )
+    except Exception:
+        logger.exception("doxie tool failed", extra={"tool": "get_recent_alerts"})
+        return {
+            "error": "tool_error",
+            "message": "Lookup failed; ask the user to try again.",
+        }
+
+    return {
+        "items": [_project_alert(item) for item in response.items],
+        "total_matched": response.meta.total,
+        # The alerts page itself has no URL-state for form_type filter
+        # (the route only takes params at route-mount time, not synced
+        # via useUrlSyncedState) — so the link is the bare alerts URL.
+        "list_link": ALERTS_URL,
+    }
+
+
 # ── Tool declarations ────────────────────────────────────────────────────
 
 _SEARCH_PARAMETERS_SCHEMA: dict[str, Any] = {
@@ -1066,6 +1455,136 @@ _IA_LIST_FILTER_PARAMETERS_SCHEMA: dict[str, Any] = {
 }
 
 
+_FORM4_SEARCH_PARAMETERS_SCHEMA: dict[str, Any] = {
+    "type": "object",
+    "properties": {
+        "query": {
+            "type": "string",
+            "description": (
+                "Free-text needle matched against reporting-owner name, "
+                "issuer name, and issuer ticker (case-insensitive)."
+            ),
+        },
+        "ad_code": {
+            "type": "string",
+            "enum": ["A", "D"],
+            "description": (
+                "'A' for insider buys (acquired), 'D' for insider sells "
+                "(disposed). Omit to include both."
+            ),
+        },
+        "ticker": {
+            "type": "string",
+            "description": "Issuer ticker (exact, case-insensitive). E.g. 'AAPL'.",
+        },
+        "days": {
+            "type": "integer",
+            "minimum": 1,
+            "maximum": FORM4_DAYS_MAX,
+            "description": (
+                f"Lookback window in days. Defaults to {FORM4_DAYS_DEFAULT}, "
+                f"capped at {FORM4_DAYS_MAX}."
+            ),
+        },
+        "min_value": {
+            "type": "number",
+            "description": "Minimum aggregated transaction_value in dollars.",
+        },
+        "limit": {
+            "type": "integer",
+            "minimum": 1,
+            "maximum": FORM4_RESULT_LIMIT_MAX,
+            "description": (
+                f"Max rows to return. Defaults to {FORM4_RESULT_LIMIT_DEFAULT}, "
+                f"capped at {FORM4_RESULT_LIMIT_MAX}."
+            ),
+        },
+    },
+    "required": [],
+}
+
+
+_FILINGS_FOR_FIRM_PARAMETERS_SCHEMA: dict[str, Any] = {
+    "type": "object",
+    "properties": {
+        "firm_type": {
+            "type": "string",
+            "enum": ["bd", "ia", "ii"],
+            "description": (
+                "Which firm table to read: 'bd' (broker-dealers — Form X-17A-5 "
+                "/ FOCUS), 'ia' (investment advisors — Form ADV / 13F-HR), "
+                "or 'ii' (institutional investors — Form 13F-HR / Schedule "
+                "13D-G)."
+            ),
+        },
+        "firm_id": {
+            "type": "integer",
+            "minimum": 1,
+            "description": (
+                "Internal numeric id of the firm. Get this from the search / "
+                "profile tools (broker_dealer_id, advisor_id, investor_id)."
+            ),
+        },
+        "form_type": {
+            "type": "string",
+            "description": (
+                "Optional exact form-type filter (e.g. 'Form X-17A-5', "
+                "'Form ADV', 'Form 13F-HR'). Case-sensitive match."
+            ),
+        },
+        "limit": {
+            "type": "integer",
+            "minimum": 1,
+            "maximum": FILINGS_LIST_LIMIT_MAX,
+            "description": (
+                f"Max filings to return. Defaults to "
+                f"{FILINGS_LIST_LIMIT_DEFAULT}, capped at "
+                f"{FILINGS_LIST_LIMIT_MAX}."
+            ),
+        },
+    },
+    "required": ["firm_type", "firm_id"],
+}
+
+
+_RECENT_ALERTS_PARAMETERS_SCHEMA: dict[str, Any] = {
+    "type": "object",
+    "properties": {
+        "form_type": {
+            "type": "string",
+            "description": (
+                "Exact form-type filter, e.g. 'Form BD', 'Form X-17A-5', "
+                "'Form 17a-11'."
+            ),
+        },
+        "priority": {
+            "type": "string",
+            "description": "Priority band: 'high', 'medium', or 'low'.",
+        },
+        "broker_dealer_id": {
+            "type": "integer",
+            "minimum": 1,
+            "description": "Restrict to alerts for one broker-dealer.",
+        },
+        "is_read": {
+            "type": "boolean",
+            "description": "If false, only return unread alerts. Omit for all.",
+        },
+        "limit": {
+            "type": "integer",
+            "minimum": 1,
+            "maximum": ALERTS_RESULT_LIMIT_MAX,
+            "description": (
+                f"Max alerts to return. Defaults to "
+                f"{ALERTS_RESULT_LIMIT_DEFAULT}, capped at "
+                f"{ALERTS_RESULT_LIMIT_MAX}."
+            ),
+        },
+    },
+    "required": [],
+}
+
+
 TOOL_REGISTRY: dict[str, Tool] = {
     "search_broker_dealers": Tool(
         name="search_broker_dealers",
@@ -1178,5 +1697,50 @@ TOOL_REGISTRY: dict[str, Tool] = {
         parameters_schema=_SEMANTIC_SEARCH_PARAMETERS_SCHEMA,
         feature_key=MASTER_LIST,
         execute=_execute_semantic_firm_search,
+    ),
+    "search_form4_filings": Tool(
+        name="search_form4_filings",
+        description=(
+            "Search recent Form 4 insider transactions. Form 4 is filed "
+            "by corporate insiders (directors, officers, 10%+ owners) within "
+            "~2 business days of buying or selling their company's stock. "
+            "At least one of query / ad_code / ticker / min_value must be "
+            "set (no whole-table dumps). Use ad_code='A' for insider buys, "
+            "'D' for sells. Results are aggregated per (insider × issuer × "
+            "buy/sell) so one row summarises a person's total recent "
+            "activity in one stock."
+        ),
+        parameters_schema=_FORM4_SEARCH_PARAMETERS_SCHEMA,
+        feature_key=INVESTORS,
+        execute=_execute_search_form4_filings,
+    ),
+    "list_filings_for_firm": Tool(
+        name="list_filings_for_firm",
+        description=(
+            "Enumerate recent filings attached to a specific broker-dealer, "
+            "investment advisor, or institutional investor. Returns metadata "
+            "(filing_id, form_type, filed_at, summary, source_filing_url) — "
+            "NOT the PDF contents. The filing_id this returns is the handle "
+            "the future PDF-summarize tools will accept to fetch the "
+            "document. Call after a search/profile tool has identified the "
+            "firm id."
+        ),
+        parameters_schema=_FILINGS_FOR_FIRM_PARAMETERS_SCHEMA,
+        # ``feature_key`` is set per-firm-type inside the execute func;
+        # this top-level value is informational only.
+        feature_key=MASTER_LIST,
+        execute=_execute_list_filings_for_firm,
+    ),
+    "get_recent_alerts": Tool(
+        name="get_recent_alerts",
+        description=(
+            "Recent filing-alerts feed (the data behind the /alerts page). "
+            "Useful for 'what's new this week?' or 'any new Form BD "
+            "registrations?' style questions. Optional filters: form_type, "
+            "priority, broker_dealer_id, is_read."
+        ),
+        parameters_schema=_RECENT_ALERTS_PARAMETERS_SCHEMA,
+        feature_key=ALERTS,
+        execute=_execute_get_recent_alerts,
     ),
 }
