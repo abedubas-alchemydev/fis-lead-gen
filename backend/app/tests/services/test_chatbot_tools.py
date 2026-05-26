@@ -1,0 +1,643 @@
+"""Unit tests for ``app.services.chatbot_tools``.
+
+Repo dependencies are stubbed via ``monkeypatch.setattr`` on the module-
+level ``_bd_repo`` / ``_ia_repo`` singletons, so the AsyncSession argument
+is purely ceremonial (the stubs ignore it). This keeps the suite fast and
+keeps the assertions focused on the tool wrapper's responsibilities:
+auth gating, argument validation + clamping, projection shape, and the
+never-raise error-dict contract.
+
+The schema-drift guard at the bottom asserts every projected key exists as
+a real attribute on the underlying Pydantic schema; that catches an
+accidental rename on ``BrokerDealerListItem`` / ``InvestmentAdvisorListItem``
+before it manifests as a broken Doxie reply in production.
+"""
+
+from __future__ import annotations
+
+import secrets
+from dataclasses import dataclass
+from datetime import date, datetime
+from decimal import Decimal
+from typing import Any
+from unittest.mock import AsyncMock
+
+import pytest
+
+from app.core.feature_permissions import INVESTMENT_ADVISORS, MASTER_LIST
+from app.schemas.auth import AuthenticatedUser
+from app.schemas.broker_dealer import BrokerDealerListItem
+from app.schemas.investment_advisor import InvestmentAdvisorListItem
+from app.services import chatbot_tools
+
+
+# ── Fixtures ────────────────────────────────────────────────────────────
+
+
+def _make_user(*, role: str = "viewer", features: list[str] | None = None) -> AuthenticatedUser:
+    return AuthenticatedUser(
+        id=f"tool-test-{secrets.token_hex(4)}",
+        name="Tool Tester",
+        email="tools-test@example.com",
+        role=role,
+        feature_permissions=features or [],
+        session_expires_at=datetime(2099, 1, 1),
+    )
+
+
+@pytest.fixture
+def bd_user() -> AuthenticatedUser:
+    return _make_user(features=[MASTER_LIST])
+
+
+@pytest.fixture
+def ia_user() -> AuthenticatedUser:
+    return _make_user(features=[INVESTMENT_ADVISORS])
+
+
+@pytest.fixture
+def no_access_user() -> AuthenticatedUser:
+    return _make_user(features=[])
+
+
+@pytest.fixture
+def db_stub() -> object:
+    """Sentinel passed through to the (mocked) repo. Never actually touched."""
+    return object()
+
+
+@dataclass
+class _ListMetaStub:
+    total: int
+    page: int = 1
+    limit: int = 5
+    total_pages: int = 1
+    pipeline_refreshed_at: datetime | None = None
+
+
+@dataclass
+class _ListResponseStub:
+    items: list[Any]
+    meta: _ListMetaStub
+
+
+def _make_bd_orm(**overrides: Any) -> Any:
+    """Plain object with attrs that satisfy BrokerDealerListItem.model_validate.
+
+    A SimpleNamespace-style shim is simpler than spinning up an ORM instance
+    just to feed Pydantic's ``from_attributes`` path.
+    """
+    defaults: dict[str, Any] = {
+        "id": 42,
+        "cik": "0001234567",
+        "crd_number": "12345",
+        "sec_file_number": "8-99999",
+        "name": "Acme Securities LLC",
+        "city": "New York",
+        "state": "NY",
+        "status": "active",
+        "branch_count": 3,
+        "business_type": "broker",
+        "registration_date": date(2010, 1, 1),
+        "matched_source": "finra",
+        "last_filing_date": date(2026, 1, 15),
+        "filings_index_url": "https://example.com/edgar",
+        "required_min_capital": Decimal("250000"),
+        "latest_net_capital": Decimal("1500000"),
+        "latest_excess_net_capital": Decimal("1250000"),
+        "latest_total_assets": Decimal("5000000"),
+        "yoy_growth": 0.12,
+        "three_year_cagr": 0.08,
+        "health_status": "ok",
+        "is_deficient": False,
+        "latest_deficiency_filed_at": None,
+        "lead_score": 0.72,
+        "lead_priority": "warm",
+        "current_clearing_partner": "Apex Clearing",
+        "current_clearing_type": "fully_disclosed",
+        "current_clearing_is_competitor": False,
+        "current_clearing_source_filing_url": None,
+        "current_clearing_extraction_confidence": 0.9,
+        "last_audit_report_date": None,
+        "website": "acme.example.com",
+        "website_source": "finra",
+        "types_of_business": ["broker_dealer"],
+        "direct_owners": None,
+        "executive_officers": None,
+        "firm_operations_text": None,
+        "clearing_classification": "fully_disclosed",
+        "clearing_raw_text": None,
+        "is_niche_restricted": False,
+        "formation_date": None,
+        "total_assets_yoy": 0.10,
+        "types_of_business_total": 1,
+        "types_of_business_other": None,
+        "dba_names": None,
+        "last_enrich_attempt_at": None,
+        "created_at": datetime(2024, 1, 1),
+        "member_agencies": [],
+        "clearing_membership_checked_at": None,
+        "current_clearing_unknown_reason": None,
+        "financial_unknown_reason": None,
+    }
+    defaults.update(overrides)
+
+    class _Obj:
+        pass
+
+    obj = _Obj()
+    for k, v in defaults.items():
+        setattr(obj, k, v)
+    return obj
+
+
+def _make_ia_orm(**overrides: Any) -> Any:
+    defaults: dict[str, Any] = {
+        "id": 77,
+        "cik": "0007654321",
+        "crd_number": "98765",
+        "sec_file_number": "801-12345",
+        "name": "Beta Advisors LP",
+        "legal_name": "Beta Advisors L.P.",
+        "city": "Boston",
+        "state": "MA",
+        "status": "active",
+        "matched_source": "iapd",
+        "registration_date": date(2012, 6, 15),
+        "formation_date": date(2011, 1, 1),
+        "last_filing_date": date(2026, 3, 31),
+        "filings_index_url": "https://example.com/iapd",
+        "website": "beta.example.com",
+        "website_source": "finra",
+        "regulatory_aum": Decimal("8000000000"),
+        "discretionary_aum": Decimal("7500000000"),
+        "non_discretionary_aum": Decimal("500000000"),
+        "total_clients": 142,
+        "advisory_activities": ["portfolio_management"],
+        "client_types": ["pooled_investment_vehicles"],
+        "client_counts": None,
+        "direct_owners": None,
+        "indirect_owners": None,
+        "executive_officers": None,
+        "firm_operations_text": None,
+        "files_13f": True,
+        "latest_13f_filing_date": date(2026, 2, 15),
+        "last_enrich_attempt_at": None,
+        "created_at": datetime(2024, 1, 1),
+        "updated_at": datetime(2024, 6, 1),
+        "member_agencies": [],
+        "clearing_membership_checked_at": None,
+    }
+    defaults.update(overrides)
+
+    class _Obj:
+        pass
+
+    obj = _Obj()
+    for k, v in defaults.items():
+        setattr(obj, k, v)
+    return obj
+
+
+# ── _jsonable helper ────────────────────────────────────────────────────
+
+
+def test_jsonable_coerces_decimal_date_and_datetime() -> None:
+    out = chatbot_tools._jsonable(
+        {
+            "amount": Decimal("1.50"),
+            "as_of": date(2026, 5, 1),
+            "stamp": datetime(2026, 5, 1, 12, 30),
+            "nested": [Decimal("2"), {"d": date(2025, 1, 1)}],
+            "plain": "x",
+        }
+    )
+    assert out == {
+        "amount": 1.5,
+        "as_of": "2026-05-01",
+        "stamp": "2026-05-01T12:30:00",
+        "nested": [2.0, {"d": "2025-01-01"}],
+        "plain": "x",
+    }
+
+
+# ── search_broker_dealers ───────────────────────────────────────────────
+
+
+class TestSearchBrokerDealers:
+    async def test_happy_path_returns_projected_summary(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        bd_user: AuthenticatedUser,
+        db_stub: object,
+    ) -> None:
+        orm_row = _make_bd_orm(name="Apex Clearing Corporation")
+        list_item = BrokerDealerListItem.model_validate(orm_row)
+        monkeypatch.setattr(
+            chatbot_tools._bd_repo,
+            "list_broker_dealers",
+            AsyncMock(return_value=_ListResponseStub(items=[list_item], meta=_ListMetaStub(total=1))),
+        )
+
+        tool = chatbot_tools.TOOL_REGISTRY["search_broker_dealers"]
+        result = await tool.execute(bd_user, db_stub, {"query": "Apex"})
+
+        assert result["total_matched"] == 1
+        assert len(result["items"]) == 1
+        item = result["items"][0]
+        assert set(item.keys()) == set(chatbot_tools._BD_SUMMARY_KEYS)
+        assert item["name"] == "Apex Clearing Corporation"
+        # Decimal must have been coerced to float by _jsonable.
+        assert isinstance(item["latest_net_capital"], float)
+
+    async def test_403_returns_no_access_dict_does_not_raise(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        no_access_user: AuthenticatedUser,
+        db_stub: object,
+    ) -> None:
+        # Repo must not be called.
+        called = AsyncMock()
+        monkeypatch.setattr(chatbot_tools._bd_repo, "list_broker_dealers", called)
+
+        tool = chatbot_tools.TOOL_REGISTRY["search_broker_dealers"]
+        result = await tool.execute(no_access_user, db_stub, {"query": "anything"})
+
+        assert result["error"] == "no_access"
+        assert MASTER_LIST in result["message"]
+        called.assert_not_called()
+
+    async def test_empty_query_returns_invalid_args(
+        self,
+        bd_user: AuthenticatedUser,
+        db_stub: object,
+    ) -> None:
+        tool = chatbot_tools.TOOL_REGISTRY["search_broker_dealers"]
+        result = await tool.execute(bd_user, db_stub, {"query": "  "})
+        assert result["error"] == "invalid_args"
+
+    async def test_missing_query_returns_invalid_args(
+        self,
+        bd_user: AuthenticatedUser,
+        db_stub: object,
+    ) -> None:
+        tool = chatbot_tools.TOOL_REGISTRY["search_broker_dealers"]
+        result = await tool.execute(bd_user, db_stub, {})
+        assert result["error"] == "invalid_args"
+
+    async def test_limit_is_clamped_to_max(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        bd_user: AuthenticatedUser,
+        db_stub: object,
+    ) -> None:
+        captured: dict[str, Any] = {}
+
+        async def fake_list(_db: Any, **kwargs: Any) -> Any:
+            captured.update(kwargs)
+            return _ListResponseStub(items=[], meta=_ListMetaStub(total=0))
+
+        monkeypatch.setattr(chatbot_tools._bd_repo, "list_broker_dealers", fake_list)
+
+        tool = chatbot_tools.TOOL_REGISTRY["search_broker_dealers"]
+        await tool.execute(bd_user, db_stub, {"query": "Acme", "limit": 999})
+        assert captured["limit"] == chatbot_tools.SEARCH_RESULT_LIMIT_MAX
+
+        captured.clear()
+        await tool.execute(bd_user, db_stub, {"query": "Acme", "limit": 0})
+        assert captured["limit"] == 1
+
+    async def test_repo_exception_returns_tool_error(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        bd_user: AuthenticatedUser,
+        db_stub: object,
+    ) -> None:
+        async def boom(_db: Any, **_kwargs: Any) -> Any:
+            raise RuntimeError("repo blew up")
+
+        monkeypatch.setattr(chatbot_tools._bd_repo, "list_broker_dealers", boom)
+
+        tool = chatbot_tools.TOOL_REGISTRY["search_broker_dealers"]
+        result = await tool.execute(bd_user, db_stub, {"query": "Acme"})
+        assert result["error"] == "tool_error"
+
+
+# ── get_broker_dealer_profile ───────────────────────────────────────────
+
+
+class TestGetBrokerDealerProfile:
+    async def test_happy_path_includes_financials_and_arrangements(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        bd_user: AuthenticatedUser,
+        db_stub: object,
+    ) -> None:
+        orm_bd = _make_bd_orm()
+
+        class _FinOrm:
+            def __init__(self, **kw: Any) -> None:
+                self.id = 1
+                self.bd_id = 42
+                self.report_date = date(2026, 3, 31)
+                self.net_capital = Decimal("1500000")
+                self.excess_net_capital = Decimal("1250000")
+                self.total_assets = Decimal("5000000")
+                self.required_min_capital = Decimal("250000")
+                self.source_filing_url = None
+                self.extraction_status = "parsed"
+                self.created_at = datetime(2024, 1, 1)
+                self.unknown_reason = None
+                self.__dict__.update(kw)
+
+        class _ArrOrm:
+            def __init__(self, **kw: Any) -> None:
+                self.id = 1
+                self.bd_id = 42
+                self.filing_year = 2025
+                self.report_date = date(2025, 12, 31)
+                self.source_filing_url = None
+                self.source_pdf_url = None
+                self.clearing_partner = "Apex"
+                self.clearing_type = "fully_disclosed"
+                self.agreement_date = None
+                self.extraction_confidence = 0.9
+                self.extraction_status = "parsed"
+                self.extraction_notes = None
+                self.is_competitor = False
+                self.is_verified = False
+                self.extracted_at = datetime(2025, 12, 31)
+                self.created_at = datetime(2025, 12, 31)
+                self.unknown_reason = None
+                self.__dict__.update(kw)
+
+        monkeypatch.setattr(
+            chatbot_tools._bd_repo,
+            "get_broker_dealer",
+            AsyncMock(return_value=orm_bd),
+        )
+        monkeypatch.setattr(
+            chatbot_tools._bd_repo,
+            "get_financial_metrics",
+            AsyncMock(return_value=[_FinOrm(), _FinOrm(), _FinOrm(), _FinOrm()]),
+        )
+        monkeypatch.setattr(
+            chatbot_tools._bd_repo,
+            "list_clearing_arrangements",
+            AsyncMock(return_value=[_ArrOrm(filing_year=2024), _ArrOrm(filing_year=2023)]),
+        )
+
+        tool = chatbot_tools.TOOL_REGISTRY["get_broker_dealer_profile"]
+        result = await tool.execute(bd_user, db_stub, {"broker_dealer_id": 42})
+
+        # Summary + profile-extra keys all present.
+        for k in (*chatbot_tools._BD_SUMMARY_KEYS, *chatbot_tools._BD_PROFILE_EXTRA_KEYS):
+            assert k in result
+        # Financials capped at PROFILE_FINANCIALS_LIMIT (3) even though 4 returned.
+        assert len(result["latest_financials"]) == chatbot_tools.PROFILE_FINANCIALS_LIMIT
+        assert len(result["clearing_arrangements"]) == 2
+        # All Decimals/dates JSON-friendly.
+        f = result["latest_financials"][0]
+        assert isinstance(f["net_capital"], float)
+        assert isinstance(f["report_date"], str)
+
+    async def test_not_found_returns_structured_dict(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        bd_user: AuthenticatedUser,
+        db_stub: object,
+    ) -> None:
+        monkeypatch.setattr(
+            chatbot_tools._bd_repo,
+            "get_broker_dealer",
+            AsyncMock(return_value=None),
+        )
+        tool = chatbot_tools.TOOL_REGISTRY["get_broker_dealer_profile"]
+        result = await tool.execute(bd_user, db_stub, {"broker_dealer_id": 9999})
+        assert result["error"] == "not_found"
+
+    async def test_invalid_id_returns_invalid_args(
+        self,
+        bd_user: AuthenticatedUser,
+        db_stub: object,
+    ) -> None:
+        tool = chatbot_tools.TOOL_REGISTRY["get_broker_dealer_profile"]
+        result = await tool.execute(bd_user, db_stub, {"broker_dealer_id": "abc"})
+        assert result["error"] == "invalid_args"
+
+    async def test_403_returns_no_access(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        no_access_user: AuthenticatedUser,
+        db_stub: object,
+    ) -> None:
+        called = AsyncMock()
+        monkeypatch.setattr(chatbot_tools._bd_repo, "get_broker_dealer", called)
+
+        tool = chatbot_tools.TOOL_REGISTRY["get_broker_dealer_profile"]
+        result = await tool.execute(no_access_user, db_stub, {"broker_dealer_id": 42})
+        assert result["error"] == "no_access"
+        called.assert_not_called()
+
+
+# ── search_investment_advisors ──────────────────────────────────────────
+
+
+class TestSearchInvestmentAdvisors:
+    async def test_happy_path_uses_files_13f_none(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        ia_user: AuthenticatedUser,
+        db_stub: object,
+    ) -> None:
+        captured: dict[str, Any] = {}
+
+        async def fake_list(_db: Any, **kwargs: Any) -> Any:
+            captured.update(kwargs)
+            return _ListResponseStub(items=[], meta=_ListMetaStub(total=0))
+
+        monkeypatch.setattr(chatbot_tools._ia_repo, "list_investment_advisors", fake_list)
+
+        tool = chatbot_tools.TOOL_REGISTRY["search_investment_advisors"]
+        await tool.execute(ia_user, db_stub, {"query": "Vanguard"})
+
+        # files_13f=None disables the hard 13F scope the master-list
+        # endpoint defaults to — search should reach every advisor.
+        assert captured["files_13f"] is None
+        assert captured["search"] == "Vanguard"
+
+    async def test_returns_summary_keys(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        ia_user: AuthenticatedUser,
+        db_stub: object,
+    ) -> None:
+        item = InvestmentAdvisorListItem.model_validate(_make_ia_orm())
+        monkeypatch.setattr(
+            chatbot_tools._ia_repo,
+            "list_investment_advisors",
+            AsyncMock(return_value=_ListResponseStub(items=[item], meta=_ListMetaStub(total=1))),
+        )
+        tool = chatbot_tools.TOOL_REGISTRY["search_investment_advisors"]
+        result = await tool.execute(ia_user, db_stub, {"query": "Beta"})
+        assert set(result["items"][0].keys()) == set(chatbot_tools._IA_SUMMARY_KEYS)
+
+    async def test_403_returns_no_access(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        no_access_user: AuthenticatedUser,
+        db_stub: object,
+    ) -> None:
+        called = AsyncMock()
+        monkeypatch.setattr(chatbot_tools._ia_repo, "list_investment_advisors", called)
+        tool = chatbot_tools.TOOL_REGISTRY["search_investment_advisors"]
+        result = await tool.execute(no_access_user, db_stub, {"query": "Beta"})
+        assert result["error"] == "no_access"
+        called.assert_not_called()
+
+    async def test_repo_exception_returns_tool_error(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        ia_user: AuthenticatedUser,
+        db_stub: object,
+    ) -> None:
+        async def boom(_db: Any, **_kwargs: Any) -> Any:
+            raise RuntimeError("boom")
+
+        monkeypatch.setattr(chatbot_tools._ia_repo, "list_investment_advisors", boom)
+        tool = chatbot_tools.TOOL_REGISTRY["search_investment_advisors"]
+        result = await tool.execute(ia_user, db_stub, {"query": "Beta"})
+        assert result["error"] == "tool_error"
+
+
+# ── get_investment_advisor_profile ──────────────────────────────────────
+
+
+class TestGetInvestmentAdvisorProfile:
+    async def test_happy_path_caps_advisory_and_client_lists(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        ia_user: AuthenticatedUser,
+        db_stub: object,
+    ) -> None:
+        long_activities = [f"activity_{i}" for i in range(50)]
+        long_client_types = [f"client_{i}" for i in range(50)]
+        orm = _make_ia_orm(
+            advisory_activities=long_activities,
+            client_types=long_client_types,
+        )
+        monkeypatch.setattr(
+            chatbot_tools._ia_repo,
+            "get_investment_advisor",
+            AsyncMock(return_value=orm),
+        )
+        tool = chatbot_tools.TOOL_REGISTRY["get_investment_advisor_profile"]
+        result = await tool.execute(ia_user, db_stub, {"advisor_id": 77})
+
+        for k in (*chatbot_tools._IA_SUMMARY_KEYS, *chatbot_tools._IA_PROFILE_EXTRA_KEYS):
+            assert k in result
+        assert len(result["advisory_activities"]) == chatbot_tools.ADVISORY_LIST_CAP
+        assert len(result["client_types"]) == chatbot_tools.CLIENT_TYPE_LIST_CAP
+
+    async def test_not_found_returns_structured_dict(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        ia_user: AuthenticatedUser,
+        db_stub: object,
+    ) -> None:
+        monkeypatch.setattr(
+            chatbot_tools._ia_repo,
+            "get_investment_advisor",
+            AsyncMock(return_value=None),
+        )
+        tool = chatbot_tools.TOOL_REGISTRY["get_investment_advisor_profile"]
+        result = await tool.execute(ia_user, db_stub, {"advisor_id": 9999})
+        assert result["error"] == "not_found"
+
+    async def test_invalid_id_returns_invalid_args(
+        self,
+        ia_user: AuthenticatedUser,
+        db_stub: object,
+    ) -> None:
+        tool = chatbot_tools.TOOL_REGISTRY["get_investment_advisor_profile"]
+        result = await tool.execute(ia_user, db_stub, {"advisor_id": None})
+        assert result["error"] == "invalid_args"
+
+
+# ── Admin bypass ────────────────────────────────────────────────────────
+
+
+async def test_admin_bypasses_feature_gate_on_every_tool(
+    monkeypatch: pytest.MonkeyPatch,
+    db_stub: object,
+) -> None:
+    """Admins implicitly bypass ``ensure_feature``; tools should reach the repo
+    for every name in the registry without 403'ing."""
+    admin = _make_user(role="admin", features=[])
+
+    monkeypatch.setattr(
+        chatbot_tools._bd_repo,
+        "list_broker_dealers",
+        AsyncMock(return_value=_ListResponseStub(items=[], meta=_ListMetaStub(total=0))),
+    )
+    monkeypatch.setattr(
+        chatbot_tools._bd_repo,
+        "get_broker_dealer",
+        AsyncMock(return_value=None),
+    )
+    monkeypatch.setattr(
+        chatbot_tools._ia_repo,
+        "list_investment_advisors",
+        AsyncMock(return_value=_ListResponseStub(items=[], meta=_ListMetaStub(total=0))),
+    )
+    monkeypatch.setattr(
+        chatbot_tools._ia_repo,
+        "get_investment_advisor",
+        AsyncMock(return_value=None),
+    )
+
+    # Each call should reach a non-403 outcome.
+    r1 = await chatbot_tools.TOOL_REGISTRY["search_broker_dealers"].execute(
+        admin, db_stub, {"query": "x"}
+    )
+    r2 = await chatbot_tools.TOOL_REGISTRY["get_broker_dealer_profile"].execute(
+        admin, db_stub, {"broker_dealer_id": 1}
+    )
+    r3 = await chatbot_tools.TOOL_REGISTRY["search_investment_advisors"].execute(
+        admin, db_stub, {"query": "x"}
+    )
+    r4 = await chatbot_tools.TOOL_REGISTRY["get_investment_advisor_profile"].execute(
+        admin, db_stub, {"advisor_id": 1}
+    )
+    for r in (r1, r2, r3, r4):
+        assert r.get("error") != "no_access"
+
+
+# ── Schema-drift guard ──────────────────────────────────────────────────
+
+
+def test_bd_projection_keys_exist_on_schema() -> None:
+    """Every key the BD projections emit must be a real field on
+    ``BrokerDealerListItem``. If this fails, someone renamed a schema
+    field — update the projection in ``chatbot_tools._BD_SUMMARY_KEYS`` or
+    ``_BD_PROFILE_EXTRA_KEYS`` in lockstep."""
+    fields = set(BrokerDealerListItem.model_fields.keys())
+    for key in (*chatbot_tools._BD_SUMMARY_KEYS, *chatbot_tools._BD_PROFILE_EXTRA_KEYS):
+        assert key in fields, f"BD projection key {key!r} missing from BrokerDealerListItem"
+
+
+def test_ia_projection_keys_exist_on_schema() -> None:
+    fields = set(InvestmentAdvisorListItem.model_fields.keys())
+    for key in (*chatbot_tools._IA_SUMMARY_KEYS, *chatbot_tools._IA_PROFILE_EXTRA_KEYS):
+        assert key in fields, f"IA projection key {key!r} missing from InvestmentAdvisorListItem"
+
+
+def test_tool_registry_has_expected_names() -> None:
+    """Lock down the public tool surface — adding a new tool should be a
+    deliberate change that also updates the iteration tests."""
+    assert set(chatbot_tools.TOOL_REGISTRY.keys()) == {
+        "search_broker_dealers",
+        "get_broker_dealer_profile",
+        "search_investment_advisors",
+        "get_investment_advisor_profile",
+    }

@@ -11,7 +11,7 @@ from __future__ import annotations
 
 import secrets
 from datetime import datetime
-from typing import Sequence
+from typing import Any, Sequence
 
 import httpx
 import pytest
@@ -50,7 +50,13 @@ def _bypass_auth() -> object:
 
 
 class _StubChatbotService:
-    """Drop-in replacement for ``ChatbotService`` capturing its inputs."""
+    """Drop-in replacement for ``ChatbotService`` capturing its inputs.
+
+    Signature mirrors ``ChatbotService.chat`` after the Phase 2 refactor:
+    accepts ``user`` + ``db`` (threaded by the endpoint via Depends) and an
+    optional ``tools`` mapping (defaults to the production registry in real
+    code; we ignore it here since the stub never dispatches).
+    """
 
     def __init__(
         self,
@@ -66,9 +72,20 @@ class _StubChatbotService:
         self,
         *,
         messages: Sequence[ChatbotMessage],
+        user: AuthenticatedUser,
+        db: Any,
         page_context: ChatbotPageContext | None = None,
+        tools: Any = None,
     ) -> str:
-        self.calls.append({"messages": list(messages), "page_context": page_context})
+        self.calls.append(
+            {
+                "messages": list(messages),
+                "page_context": page_context,
+                "user": user,
+                "db": db,
+                "tools": tools,
+            }
+        )
         if self.raises is not None:
             raise self.raises
         assert self.reply is not None
@@ -175,6 +192,23 @@ async def test_maps_gemini_extraction_error_to_502(
 
     assert response.status_code == 502
     assert "try again" in response.json()["detail"].lower()
+
+
+async def test_threads_user_and_db_into_service(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The endpoint must forward ``current_user`` and the DB session into
+    ``chatbot_service.chat`` so the tool dispatcher can enforce per-user
+    feature permissions and run repo queries."""
+    stub = _install_stub_service(monkeypatch, _StubChatbotService(reply="ok"))
+
+    response = await _post({"messages": [{"role": "user", "content": "hi"}]})
+
+    assert response.status_code == 200
+    assert len(stub.calls) == 1
+    call = stub.calls[0]
+    assert isinstance(call["user"], AuthenticatedUser)
+    # We can't easily assert the concrete AsyncSession type without
+    # opening one, but it must be non-None and forwarded as a kwarg.
+    assert call["db"] is not None
 
 
 async def test_requires_authenticated_session() -> None:

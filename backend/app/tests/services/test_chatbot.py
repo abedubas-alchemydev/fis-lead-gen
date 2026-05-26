@@ -9,18 +9,42 @@ guard, and the empty-parts (safety-filter) failure mode.
 from __future__ import annotations
 
 import json
+import secrets
+from datetime import datetime
 
 import httpx
 import pytest
 import respx
 
 from app.core.config import settings
+from app.schemas.auth import AuthenticatedUser
 from app.schemas.chatbot import ChatbotMessage, ChatbotPageContext
 from app.services.chatbot import DOXIE_SYSTEM_PROMPT, ChatbotService
 from app.services.gemini_responses import (
     GeminiConfigurationError,
     GeminiExtractionError,
 )
+
+
+# Phase 2 added required ``user`` + ``db`` kwargs to ``chat()``. Pass
+# ``tools={}`` everywhere in this module so the Phase 1 behaviour these
+# tests cover (no tool calls, no tool-usage prompt, no `tools` field on
+# the wire) stays the regression contract.
+@pytest.fixture
+def user() -> AuthenticatedUser:
+    return AuthenticatedUser(
+        id=f"phase1-test-{secrets.token_hex(4)}",
+        name="Phase1 Tester",
+        email="phase1-test@example.com",
+        role="viewer",
+        feature_permissions=[],
+        session_expires_at=datetime(2099, 1, 1),
+    )
+
+
+@pytest.fixture
+def db_stub() -> object:
+    return object()
 
 _GEMINI_BASE = "https://generativelanguage.googleapis.com/v1beta"
 _GEMINI_CHAT_URL = f"{_GEMINI_BASE}/models/gemini-2.5-flash:generateContent"
@@ -63,6 +87,8 @@ def _reply_payload(text: str = "Hello from Doxie!") -> dict[str, object]:
 @pytest.mark.asyncio
 async def test_chat_returns_reply_text_and_sends_doxie_system_prompt(
     patch_gemini: None,
+    user: AuthenticatedUser,
+    db_stub: object,
 ) -> None:
     captured: dict[str, bytes] = {}
 
@@ -73,7 +99,10 @@ async def test_chat_returns_reply_text_and_sends_doxie_system_prompt(
     route = respx.post(_GEMINI_CHAT_URL).mock(side_effect=capture)
 
     reply = await ChatbotService().chat(
-        messages=[ChatbotMessage(role="user", content="Hello")]
+        messages=[ChatbotMessage(role="user", content="Hello")],
+        user=user,
+        db=db_stub,
+        tools={},
     )
 
     assert reply == "Hi there!"
@@ -99,6 +128,8 @@ async def test_chat_returns_reply_text_and_sends_doxie_system_prompt(
 @pytest.mark.asyncio
 async def test_chat_maps_assistant_role_to_model_for_gemini(
     patch_gemini: None,
+    user: AuthenticatedUser,
+    db_stub: object,
 ) -> None:
     captured: dict[str, bytes] = {}
 
@@ -113,7 +144,10 @@ async def test_chat_maps_assistant_role_to_model_for_gemini(
             ChatbotMessage(role="user", content="Hi"),
             ChatbotMessage(role="assistant", content="Hello back"),
             ChatbotMessage(role="user", content="How are you?"),
-        ]
+        ],
+        user=user,
+        db=db_stub,
+        tools={},
     )
 
     body = json.loads(captured["body"])
@@ -126,6 +160,8 @@ async def test_chat_maps_assistant_role_to_model_for_gemini(
 @pytest.mark.asyncio
 async def test_chat_folds_page_context_into_system_prompt(
     patch_gemini: None,
+    user: AuthenticatedUser,
+    db_stub: object,
 ) -> None:
     captured: dict[str, bytes] = {}
 
@@ -137,9 +173,12 @@ async def test_chat_folds_page_context_into_system_prompt(
 
     await ChatbotService().chat(
         messages=[ChatbotMessage(role="user", content="What is this firm?")],
+        user=user,
+        db=db_stub,
         page_context=ChatbotPageContext(
             path="/broker-dealers/123", title="Acme Securities — Doxie"
         ),
+        tools={},
     )
 
     body = json.loads(captured["body"])
@@ -151,32 +190,46 @@ async def test_chat_folds_page_context_into_system_prompt(
 @pytest.mark.asyncio
 async def test_chat_raises_when_api_key_missing(
     monkeypatch: pytest.MonkeyPatch,
+    user: AuthenticatedUser,
+    db_stub: object,
 ) -> None:
     monkeypatch.setattr(settings, "gemini_api_key", None)
     with pytest.raises(GeminiConfigurationError):
         await ChatbotService().chat(
-            messages=[ChatbotMessage(role="user", content="hi")]
+            messages=[ChatbotMessage(role="user", content="hi")],
+            user=user,
+            db=db_stub,
+            tools={},
         )
 
 
 @respx.mock
 @pytest.mark.asyncio
 async def test_chat_raises_extraction_error_on_persistent_5xx(
-    patch_gemini: None, no_backoff_sleep: None
+    patch_gemini: None,
+    no_backoff_sleep: None,
+    user: AuthenticatedUser,
+    db_stub: object,
 ) -> None:
     respx.post(_GEMINI_CHAT_URL).mock(
         return_value=httpx.Response(503, text="upstream unavailable")
     )
     with pytest.raises(GeminiExtractionError):
         await ChatbotService().chat(
-            messages=[ChatbotMessage(role="user", content="hi")]
+            messages=[ChatbotMessage(role="user", content="hi")],
+            user=user,
+            db=db_stub,
+            tools={},
         )
 
 
 @respx.mock
 @pytest.mark.asyncio
 async def test_chat_retries_transient_5xx_then_succeeds(
-    patch_gemini: None, no_backoff_sleep: None
+    patch_gemini: None,
+    no_backoff_sleep: None,
+    user: AuthenticatedUser,
+    db_stub: object,
 ) -> None:
     route = respx.post(_GEMINI_CHAT_URL).mock(
         side_effect=[
@@ -186,7 +239,10 @@ async def test_chat_retries_transient_5xx_then_succeeds(
     )
 
     reply = await ChatbotService().chat(
-        messages=[ChatbotMessage(role="user", content="hi")]
+        messages=[ChatbotMessage(role="user", content="hi")],
+        user=user,
+        db=db_stub,
+        tools={},
     )
 
     assert reply == "recovered"
@@ -197,6 +253,8 @@ async def test_chat_retries_transient_5xx_then_succeeds(
 @pytest.mark.asyncio
 async def test_chat_raises_on_empty_safety_blocked_response(
     patch_gemini: None,
+    user: AuthenticatedUser,
+    db_stub: object,
 ) -> None:
     """Gemini returns an empty parts array with finishReason=SAFETY when its
     safety filter trips. The service must surface that as a clean error
@@ -215,6 +273,9 @@ async def test_chat_raises_on_empty_safety_blocked_response(
 
     with pytest.raises(GeminiExtractionError) as exc:
         await ChatbotService().chat(
-            messages=[ChatbotMessage(role="user", content="hi")]
+            messages=[ChatbotMessage(role="user", content="hi")],
+            user=user,
+            db=db_stub,
+            tools={},
         )
     assert "SAFETY" in str(exc.value)
