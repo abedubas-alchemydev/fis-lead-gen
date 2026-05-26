@@ -76,7 +76,7 @@ export function AuthForm({
   }
 
   return (
-    <form onSubmit={handleSubmit} className="space-y-5">
+    <form onSubmit={handleSubmit} className="space-y-4">
       <div className="space-y-2">
         <GoogleButton mode={mode} />
         <MicrosoftButton mode={mode} enabled={microsoftEnabled} />
