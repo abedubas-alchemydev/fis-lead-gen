@@ -3,7 +3,9 @@ from __future__ import annotations
 import logging
 
 from fastapi import APIRouter, Depends, HTTPException, status
+from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.db.session import get_db_session
 from app.schemas.auth import AuthenticatedUser
 from app.schemas.chatbot import ChatbotRequest, ChatbotResponse
 from app.services.auth import get_current_user
@@ -29,6 +31,7 @@ _MAX_TOTAL_CHARS = 40_000
 async def post_chatbot_message(
     payload: ChatbotRequest,
     current_user: AuthenticatedUser = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db_session),
 ) -> ChatbotResponse:
     if payload.messages[-1].role != "user":
         raise HTTPException(
@@ -49,6 +52,8 @@ async def post_chatbot_message(
     try:
         reply = await chatbot_service.chat(
             messages=payload.messages,
+            user=current_user,
+            db=db,
             page_context=payload.page_context,
         )
     except GeminiConfigurationError as exc:
