@@ -33,7 +33,7 @@ import logging
 from collections import OrderedDict
 from dataclasses import dataclass
 from time import monotonic
-from typing import Any, Mapping, Sequence
+from typing import Any, AsyncIterator, Mapping, Sequence
 
 import httpx
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -416,6 +416,233 @@ class ChatbotService:
 
         await _tool_cache_put(call.name, call.args, user.id, result)
         return result
+
+    async def chat_stream(
+        self,
+        *,
+        messages: Sequence[ChatbotMessage],
+        user: AuthenticatedUser,
+        db: AsyncSession,
+        page_context: ChatbotPageContext | None = None,
+        tools: Mapping[str, Tool] | None = None,
+    ) -> AsyncIterator[dict[str, Any]]:
+        """Streaming sibling of :meth:`chat`.
+
+        Yields a sequence of event dicts that the endpoint forwards over
+        Server-Sent Events. Event shapes:
+
+        - ``{type: "text_delta", text: "..."}`` — partial reply text emitted
+          by Gemini. Multiple deltas concatenate into the final reply.
+        - ``{type: "tool_call", name: "..."}`` — emitted just before
+          dispatching a tool. The FE shows a per-tool status indicator
+          (e.g. "Looking up Acme Securities…").
+        - ``{type: "tool_result", name: "...", error?: "..."}`` — emitted
+          after the tool returns; ``error`` is set when the tool returned
+          a structured error dict so the FE can dim the status line.
+        - ``{type: "done", reply: "..."}`` — final event; carries the full
+          assistant reply so the endpoint can persist it without
+          re-concatenating deltas.
+        - ``{type: "error", code: "config" | "extraction", message: "..."}``
+          — failure event. The generator returns after emitting it.
+
+        Concretely runs the same iteration loop as ``chat`` but reads each
+        Gemini call via the streaming endpoint so text reaches the FE
+        token-by-token. Tool dispatch + iteration math + safety brakes are
+        identical to the non-streaming path (and share ``_dispatch_tool``
+        with its cache + timeout guards).
+        """
+        if not settings.gemini_api_key:
+            yield {
+                "type": "error",
+                "code": "config",
+                "message": "GEMINI_API_KEY is not configured.",
+            }
+            return
+        if not messages:
+            yield {
+                "type": "error",
+                "code": "extraction",
+                "message": "messages must contain at least one entry.",
+            }
+            return
+
+        active_tools: Mapping[str, Tool] = (
+            TOOL_REGISTRY if tools is None else tools
+        )
+        contents = self._build_contents(messages)
+        deadline = monotonic() + CHAT_WALL_CLOCK_BUDGET_S
+
+        for iteration in range(MAX_TOOL_ITERATIONS + 1):
+            if monotonic() > deadline:
+                logger.warning(
+                    "doxie stream exceeded wall-clock budget user_id=%s "
+                    "iterations_used=%d",
+                    user.id,
+                    iteration,
+                )
+                yield {
+                    "type": "error",
+                    "code": "extraction",
+                    "message": "Chat exceeded the wall-clock budget; aborting.",
+                }
+                return
+
+            payload = self._build_payload(
+                contents=contents,
+                page_context=page_context,
+                tools=active_tools,
+            )
+
+            accumulated_parts: list[dict[str, Any]] = []
+            function_calls: list[_FunctionCall] = []
+            iteration_text = ""
+
+            try:
+                async for chunk in self._stream_gemini_chunks(payload):
+                    candidates = chunk.get("candidates", [])
+                    if not isinstance(candidates, list) or not candidates:
+                        continue
+                    content = candidates[0].get("content", {})
+                    parts = (
+                        content.get("parts", []) if isinstance(content, dict) else []
+                    )
+                    if not isinstance(parts, list):
+                        continue
+                    for part in parts:
+                        if not isinstance(part, dict):
+                            continue
+                        accumulated_parts.append(part)
+                        text = part.get("text")
+                        fc = part.get("functionCall")
+                        if isinstance(text, str) and text:
+                            iteration_text += text
+                            yield {"type": "text_delta", "text": text}
+                        if isinstance(fc, dict):
+                            name = fc.get("name")
+                            args = fc.get("args") or {}
+                            if isinstance(name, str) and isinstance(args, dict):
+                                function_calls.append(
+                                    _FunctionCall(name=name, args=args)
+                                )
+            except GeminiExtractionError as exc:
+                yield {
+                    "type": "error",
+                    "code": "extraction",
+                    "message": str(exc),
+                }
+                return
+
+            # Terminal iteration: no tool calls means the buffered text IS
+            # the final reply. iteration_text was already streamed as
+            # deltas to the FE — we just close with done.
+            if not function_calls:
+                yield {"type": "done", "reply": iteration_text}
+                return
+
+            # Iteration cap. Surface whatever text we have or a fallback,
+            # but never raise into a 5xx.
+            if iteration == MAX_TOOL_ITERATIONS:
+                logger.warning(
+                    "doxie stream max tool iterations hit user_id=%s",
+                    user.id,
+                )
+                fallback = iteration_text or (
+                    "I wasn't able to finalize that lookup. "
+                    "Could you rephrase the question?"
+                )
+                if not iteration_text:
+                    yield {"type": "text_delta", "text": fallback}
+                yield {"type": "done", "reply": fallback}
+                return
+
+            # Non-terminal: dispatch tools, emit progress events, continue.
+            contents.append({"role": "model", "parts": accumulated_parts})
+            response_parts: list[dict[str, Any]] = []
+            for call in function_calls:
+                logger.info(
+                    "doxie stream tool dispatch user_id=%s tool=%s",
+                    user.id,
+                    call.name,
+                )
+                yield {"type": "tool_call", "name": call.name}
+                result = await self._dispatch_tool(
+                    call, tools=active_tools, user=user, db=db
+                )
+                yield {
+                    "type": "tool_result",
+                    "name": call.name,
+                    # Surface only the error code (not the data) — the FE
+                    # uses it to dim the status line; the model gets the
+                    # full result in the next iteration's contents.
+                    "error": result.get("error"),
+                }
+                response_parts.append(
+                    {
+                        "functionResponse": {
+                            "name": call.name,
+                            "response": result,
+                        }
+                    }
+                )
+            contents.append({"role": "user", "parts": response_parts})
+
+        # Defensive: the loop body always yields done or error before
+        # falling through. This is the unreachable guard.
+        yield {
+            "type": "error",
+            "code": "extraction",
+            "message": "Tool iteration loop exited unexpectedly.",
+        }
+
+    async def _stream_gemini_chunks(
+        self, payload: dict[str, Any]
+    ) -> AsyncIterator[dict[str, Any]]:
+        """Yield parsed JSON chunks from Gemini's streamGenerateContent SSE.
+
+        Translates HTTP errors into :class:`GeminiExtractionError` so the
+        generator's caller has a single error type to handle. Skips
+        malformed SSE lines silently — Gemini occasionally emits keep-
+        alive blanks, and a bad chunk shouldn't kill the whole stream.
+        """
+        url = (
+            f"{self.base_url}/models/{settings.gemini_chat_model}"
+            f":streamGenerateContent?alt=sse"
+        )
+        headers = {"x-goog-api-key": settings.gemini_api_key}
+        try:
+            async with httpx.AsyncClient(timeout=self.timeout) as client:
+                async with client.stream(
+                    "POST", url, headers=headers, json=payload
+                ) as response:
+                    response.raise_for_status()
+                    async for line in response.aiter_lines():
+                        if not line or not line.startswith("data: "):
+                            continue
+                        data = line[6:].strip()
+                        if not data or data == "[DONE]":
+                            continue
+                        try:
+                            yield json.loads(data)
+                        except json.JSONDecodeError:
+                            logger.warning(
+                                "Gemini SSE chunk was not valid JSON: %s",
+                                data[:200],
+                            )
+                            continue
+        except httpx.HTTPStatusError as exc:
+            detail = ""
+            try:
+                detail = (await exc.response.aread()).decode(errors="replace")
+            except Exception:  # noqa: BLE001
+                pass
+            raise GeminiExtractionError(
+                f"Gemini stream failed with status {exc.response.status_code}: "
+                f"{detail[:200] or 'No response body.'}"
+            ) from exc
+        except httpx.HTTPError as exc:
+            raise GeminiExtractionError(
+                "Gemini stream failed due to a network error."
+            ) from exc
 
     async def _post_with_retries(self, payload: dict[str, Any]) -> dict[str, Any]:
         url = (

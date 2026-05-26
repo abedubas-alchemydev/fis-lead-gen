@@ -117,6 +117,7 @@ export const ChatbotPanel = forwardRef<ChatbotPanelHandle, ChatbotPanelProps>(fu
               content={message.content}
               pending={message.pending}
               error={message.error}
+              toolStatus={message.toolStatus}
             />
           ))
         )}

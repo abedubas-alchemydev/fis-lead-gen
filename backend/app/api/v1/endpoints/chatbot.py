@@ -1,8 +1,11 @@
 from __future__ import annotations
 
+import json
 import logging
+from typing import AsyncIterator
 
 from fastapi import APIRouter, Depends, HTTPException, status
+from fastapi.responses import StreamingResponse
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.db.session import get_db_session
@@ -147,6 +150,122 @@ async def get_chatbot_messages(
     return ChatbotHistoryResponse(
         conversation_id=conversation.id,
         messages=[ChatbotHistoryMessage.model_validate(row) for row in rows],
+    )
+
+
+def _shared_validate(payload: ChatbotRequest) -> None:
+    """Shared validation used by both the streaming and non-streaming POSTs."""
+    if payload.messages[-1].role != "user":
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="The last message must be from the user.",
+        )
+    total_chars = sum(len(m.content) for m in payload.messages)
+    if total_chars > _MAX_TOTAL_CHARS:
+        raise HTTPException(
+            status_code=status.HTTP_413_REQUEST_ENTITY_TOO_LARGE,
+            detail=(
+                f"Conversation exceeds maximum size "
+                f"({total_chars} > {_MAX_TOTAL_CHARS} characters)."
+            ),
+        )
+
+
+@router.post("/messages/stream")
+async def post_chatbot_message_stream(
+    payload: ChatbotRequest,
+    current_user: AuthenticatedUser = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db_session),
+) -> StreamingResponse:
+    """SSE variant of POST /messages.
+
+    Same validation + persistence contract as the non-streaming endpoint:
+    user turn is saved before the stream opens, assistant turn is saved
+    after the ``done`` event fires. Errors mid-stream surface as a final
+    ``{type: "error", code, message}`` event rather than HTTP 5xx — the
+    FE has already started rendering and the SSE response status is
+    locked to 200 the moment the first byte is sent.
+
+    SSE format: ``data: <json>\\n\\n`` per event. The wrapper adds
+    ``Cache-Control: no-cache`` and ``X-Accel-Buffering: no`` so the
+    Cloud Run / Next.js proxy chain doesn't buffer.
+    """
+    _shared_validate(payload)
+
+    conversation = await chatbot_history_service.get_or_create_active_conversation(
+        db, user_id=current_user.id
+    )
+    last_user_message = payload.messages[-1]
+    await chatbot_history_service.append_message(
+        db,
+        conversation_id=conversation.id,
+        role="user",
+        content=last_user_message.content,
+        page_context=payload.page_context,
+    )
+
+    async def _sse_stream() -> AsyncIterator[bytes]:
+        final_reply = ""
+        try:
+            async for event in chatbot_service.chat_stream(
+                messages=payload.messages,
+                user=current_user,
+                db=db,
+                page_context=payload.page_context,
+            ):
+                if event.get("type") == "done":
+                    final_reply = event.get("reply", "")
+                yield f"data: {json.dumps(event)}\n\n".encode("utf-8")
+                if event.get("type") in ("done", "error"):
+                    break
+        except Exception as exc:  # noqa: BLE001
+            # Generator should yield errors as events, not raise — but
+            # defend against an unhandled crash mid-stream so the FE
+            # always sees a terminal event.
+            logger.exception(
+                "Doxie stream crashed (user_id=%s)", current_user.id
+            )
+            crash = {
+                "type": "error",
+                "code": "extraction",
+                "message": "Doxie crashed mid-reply. Please try again.",
+            }
+            yield f"data: {json.dumps(crash)}\n\n".encode("utf-8")
+            return
+
+        # Persist the assistant turn after a clean done. A failure here
+        # would diverge history from what the user saw, but we've already
+        # committed to the 200 SSE response — emit a follow-up error
+        # event so the FE can flag the inconsistency.
+        if final_reply:
+            try:
+                await chatbot_history_service.append_message(
+                    db,
+                    conversation_id=conversation.id,
+                    role="assistant",
+                    content=final_reply,
+                )
+            except Exception:
+                logger.exception(
+                    "Doxie history persistence failed for streamed "
+                    "assistant turn (user_id=%s conversation_id=%s)",
+                    current_user.id,
+                    conversation.id,
+                )
+                persist_err = {
+                    "type": "error",
+                    "code": "persistence",
+                    "message": "Reply couldn't be saved to history.",
+                }
+                yield f"data: {json.dumps(persist_err)}\n\n".encode("utf-8")
+
+    return StreamingResponse(
+        _sse_stream(),
+        media_type="text/event-stream",
+        headers={
+            "Cache-Control": "no-cache",
+            "X-Accel-Buffering": "no",
+        },
     )
 
 
