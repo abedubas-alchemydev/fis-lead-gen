@@ -41,7 +41,7 @@ export function AuthHero() {
           width={384}
           height={384}
           priority
-          className="h-72 w-72 object-contain lg:h-80 lg:w-80 xl:h-96 xl:w-96"
+          className="h-72 w-72 object-contain lg:h-80 lg:w-80 2xl:h-96 2xl:w-96"
         />
       </div>
 
