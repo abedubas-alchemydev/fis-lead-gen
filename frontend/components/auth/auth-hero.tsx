@@ -33,19 +33,16 @@ const KPIS: Kpi[] = [
 export function AuthHero() {
   return (
     <aside className="hidden bg-[#162635] text-white lg:flex lg:flex-col lg:justify-between lg:px-14 lg:py-12">
-      {/* Top row: logo + tag */}
-      <div className="relative flex items-center">
+      {/* Top row: centered logo */}
+      <div className="flex justify-center">
         <Image
-          src="/logo.png"
+          src="/dox-logo.png"
           alt="DOX"
-          width={120}
-          height={38}
+          width={384}
+          height={384}
           priority
-          className="h-9 w-auto"
+          className="h-80 w-80 object-contain lg:h-96 lg:w-96"
         />
-        <span className="ml-4 border-l border-white/15 pl-4 text-[10px] font-semibold uppercase tracking-[0.32em] text-white/55">
-          Institutional Intelligence
-        </span>
       </div>
 
       {/* Middle: headline + KPIs */}
