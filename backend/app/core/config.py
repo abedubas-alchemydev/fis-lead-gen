@@ -179,6 +179,13 @@ class Settings(BaseSettings):
     # flat. Smaller PDFs stay on the inline base64 path (fewer round-trips,
     # lower latency). Set above gemini_inline_pdf_max_size_mb to disable.
     gemini_files_api_threshold_mb: int = 20
+    # Free-form chat model for the in-app Doxie chatbot (separate from
+    # ``gemini_pdf_model`` so chat tuning doesn't affect the PDF extraction
+    # pipeline). Flash is the production default — sub-second TTFB and ~5×
+    # cheaper than Pro per token, sufficient for general-purpose conversation.
+    gemini_chat_model: str = "gemini-2.5-flash"
+    gemini_chat_max_output_tokens: int = 1024
+    gemini_chat_temperature: float = 0.7
     # When True, the LLM-bound clearing-extraction path uploads PDFs to the
     # provider Files API (Gemini / OpenAI) instead of inline base64. ADR-0001
     # phase 2. Default off so the rollout is reversible by flag flip; the

@@ -18,6 +18,7 @@ export interface ChatbotPanelProps {
   onInputChange: (value: string) => void;
   onSend: () => void;
   onClose: () => void;
+  isSending?: boolean;
 }
 
 export interface ChatbotPanelHandle {
@@ -25,7 +26,7 @@ export interface ChatbotPanelHandle {
 }
 
 export const ChatbotPanel = forwardRef<ChatbotPanelHandle, ChatbotPanelProps>(function ChatbotPanel(
-  { messages, input, onInputChange, onSend, onClose },
+  { messages, input, onInputChange, onSend, onClose, isSending = false },
   ref,
 ) {
   const inputRef = useRef<HTMLTextAreaElement>(null);
@@ -43,7 +44,7 @@ export const ChatbotPanel = forwardRef<ChatbotPanelHandle, ChatbotPanelProps>(fu
   function handleKeyDown(event: KeyboardEvent<HTMLTextAreaElement>) {
     if (event.key === "Enter" && !event.shiftKey) {
       event.preventDefault();
-      if (input.trim().length > 0) onSend();
+      if (!isSending && input.trim().length > 0) onSend();
     }
   }
 
@@ -51,7 +52,7 @@ export const ChatbotPanel = forwardRef<ChatbotPanelHandle, ChatbotPanelProps>(fu
     onInputChange(event.target.value);
   }
 
-  const sendDisabled = input.trim().length === 0;
+  const sendDisabled = isSending || input.trim().length === 0;
 
   return (
     <div
@@ -66,7 +67,7 @@ export const ChatbotPanel = forwardRef<ChatbotPanelHandle, ChatbotPanelProps>(fu
           <h2 id="chatbot-panel-title" className="text-sm font-semibold text-[var(--text,#0f172a)]">
             Chat with Doxie
           </h2>
-          <p className="text-xs text-[var(--text-muted,#94a3b8)]">Preview mode · chat coming soon</p>
+          <p className="text-xs text-[var(--text-muted,#94a3b8)]">Your in-app AI assistant</p>
         </div>
         <button
           type="button"
@@ -80,7 +81,13 @@ export const ChatbotPanel = forwardRef<ChatbotPanelHandle, ChatbotPanelProps>(fu
 
       <div className="flex-1 space-y-3 overflow-y-auto px-4 py-4">
         {messages.map((message) => (
-          <ChatbotMessage key={message.id} role={message.role} content={message.content} />
+          <ChatbotMessage
+            key={message.id}
+            role={message.role}
+            content={message.content}
+            pending={message.pending}
+            error={message.error}
+          />
         ))}
         <div ref={endRef} />
       </div>
@@ -98,9 +105,10 @@ export const ChatbotPanel = forwardRef<ChatbotPanelHandle, ChatbotPanelProps>(fu
           onChange={handleChange}
           onKeyDown={handleKeyDown}
           rows={1}
-          placeholder="Type a message…"
+          placeholder={isSending ? "Doxie is thinking…" : "Type a message…"}
           aria-label="Chat message"
-          className="max-h-32 min-h-[40px] flex-1 resize-none rounded-xl border border-[var(--border,rgba(30,64,175,0.1))] bg-[var(--surface,#ffffff)] px-3 py-2 text-sm text-[var(--text,#0f172a)] placeholder:text-[var(--text-muted,#94a3b8)] focus:border-[var(--accent,#6366f1)] focus:outline-none focus:ring-2 focus:ring-[var(--accent,#6366f1)]/30"
+          disabled={isSending}
+          className="max-h-32 min-h-[40px] flex-1 resize-none rounded-xl border border-[var(--border,rgba(30,64,175,0.1))] bg-[var(--surface,#ffffff)] px-3 py-2 text-sm text-[var(--text,#0f172a)] placeholder:text-[var(--text-muted,#94a3b8)] focus:border-[var(--accent,#6366f1)] focus:outline-none focus:ring-2 focus:ring-[var(--accent,#6366f1)]/30 disabled:cursor-not-allowed disabled:opacity-60"
         />
         <button
           type="submit"

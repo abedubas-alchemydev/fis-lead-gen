@@ -4,6 +4,7 @@ from app.api.v1.endpoints import (
     alerts,
     auth,
     broker_dealers,
+    chatbot,
     clearing_memberships_admin,
     contacts,
     email_extractor,
@@ -48,3 +49,4 @@ api_router.include_router(outreach.router, tags=["outreach"])
 api_router.include_router(contacts.router, tags=["contacts"])
 api_router.include_router(users_admin.router, tags=["users-admin"])
 api_router.include_router(clearing_memberships_admin.router)
+api_router.include_router(chatbot.router, tags=["chatbot"])
