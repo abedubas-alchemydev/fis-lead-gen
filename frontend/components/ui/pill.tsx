@@ -23,6 +23,7 @@ export type PillVariant =
   | "critical"
   | "warning"
   | "info"
+  | "member"
   | "form";
 
 const variantClasses: Record<PillVariant, string> = {
@@ -41,6 +42,7 @@ const variantClasses: Record<PillVariant, string> = {
   critical: "bg-[rgba(239,68,68,0.12)] text-[var(--pill-red-text,#b91c1c)] border-[rgba(239,68,68,0.25)]",
   warning: "bg-[rgba(245,158,11,0.12)] text-[var(--pill-amber-text,#b45309)] border-[rgba(245,158,11,0.25)]",
   info: "bg-[rgba(59,130,246,0.12)] text-[var(--pill-blue-text,#1d4ed8)] border-[rgba(59,130,246,0.25)]",
+  member: "bg-[rgba(20,184,166,0.12)] text-[var(--pill-teal-text,#0f766e)] border-[rgba(20,184,166,0.25)]",
   form:
     "bg-[var(--surface-3,#dbeafe)] text-[var(--text-dim,#475569)] border-[var(--border-2,rgba(30,64,175,0.16))] font-mono",
 };

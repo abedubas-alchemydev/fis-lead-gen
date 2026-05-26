@@ -3,7 +3,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import Link from "next/link";
 import type { Route } from "next";
-import { useRouter, useSearchParams } from "next/navigation";
+import { useUrlSyncedState } from "@/lib/use-url-synced-state";
 
 import {
   ArrowDown,
@@ -40,6 +40,7 @@ import {
 } from "@/components/ui/multi-select-filter";
 import { Dotmark, Segmented, type SegmentedItem } from "@/components/ui/segmented";
 import { Pill, type PillVariant } from "@/components/ui/pill";
+import { agencyLabel } from "@/components/master-list/detail/clearing-membership-helpers";
 import { Tag } from "@/components/ui/tag";
 import { ThemeToggle } from "@/components/ui/theme-toggle";
 import type {
@@ -58,6 +59,7 @@ const columns = [
   { key: "cik", label: "CIK" },
   { key: "current_clearing_partner", label: "Clearing Arrangement" },
   { key: "current_clearing_type", label: "Clearing Type" },
+  { key: "memberships", label: "Memberships" },
   { key: "health_status", label: "Financial Health" },
   { key: "lead_score", label: "Prospect Priority" },
   { key: "latest_net_capital", label: "Net Capital" },
@@ -65,6 +67,10 @@ const columns = [
   { key: "three_year_cagr", label: "3-Yr CAGR" },
   { key: "last_filing_date", label: "Last Filing" },
 ] as const;
+
+// Display-only columns with no backend sort key. The header renders a plain
+// label (no sort button) and they're omitted from the "Sort by" dropdown.
+const NON_SORTABLE_KEYS = new Set<string>(["memberships"]);
 
 // ── Segmented option catalogs ─────────────────────────────────────────────
 // Kept as module-level constants so the arrays are referentially stable
@@ -170,35 +176,16 @@ export function MasterListWorkspaceClient() {
   // instance with default state and threw away every filter, the
   // current page, and the sort. Lifting it into URL search params makes
   // back-nav, share-links, and full reloads all restore the same view.
-  const router = useRouter();
-  const searchParams = useSearchParams();
-  const queryState = useMemo<MasterListQueryState>(
-    () => fromSearchParams(searchParams),
-    [searchParams],
-  );
-
-  // Commit a state change to the URL. router.replace (not push) so the
-  // back button still goes to the previous *route*, not the previous
-  // *filter combo* — Deshorn doesn't want to mash Back five times to
-  // get past his last filter mutation.
-  const commit = useCallback(
-    (next: MasterListQueryState) => {
-      router.replace(buildMasterListUrl(next) as Route, { scroll: false });
-    },
-    [router],
-  );
-
-  const updateState = useCallback(
-    (patch: Partial<MasterListQueryState>) => {
-      // Re-parse the URL at call time instead of closing over queryState.
-      // Belt-and-suspenders against any stale-closure regression where a
-      // pagination/sort/filter handler captured an older queryState ref —
-      // every patch is now applied on top of the live URL.
-      const current = fromSearchParams(searchParams);
-      commit({ ...current, ...patch });
-    },
-    [commit, searchParams],
-  );
+  // The URL is the canonical store (back-nav + share-links round-trip), but a
+  // synchronous local mirror is the source of truth for rendering + merging
+  // edits. router.replace is async, so reading filter state straight off the
+  // URL drops rapid successive edits — ticking several multi-select
+  // checkboxes would keep only the last one. See useUrlSyncedState.
+  const {
+    state: queryState,
+    updateState,
+    replaceState,
+  } = useUrlSyncedState(fromSearchParams, buildMasterListUrl);
 
   const stateFilter = queryState.state;
   const search = queryState.search;
@@ -495,7 +482,7 @@ export function MasterListWorkspaceClient() {
 
   function clearFilters() {
     setSearchInput("");
-    commit(clearAllFilters(queryState));
+    replaceState(clearAllFilters(queryState));
   }
 
   const filtersActive = hasActiveFilters(queryState);
@@ -506,9 +493,9 @@ export function MasterListWorkspaceClient() {
     if (stateFilter !== "") count += 1;
     if (healthFilter !== "All") count += 1;
     if (prospectPriorityFilter !== "All") count += 1;
-    if (clearingPartnerFilter.length > 0) count += 1;
+    count += clearingPartnerFilter.length;
     if (clearingTypeFilter !== "All") count += 1;
-    if (typesOfBusinessFilter.length > 0) count += 1;
+    count += typesOfBusinessFilter.length;
     if (minNetCapitalFilter !== null) count += 1;
     if (maxNetCapitalFilter !== null) count += 1;
     if (registeredAfterFilter !== null) count += 1;
@@ -812,7 +799,12 @@ export function MasterListWorkspaceClient() {
             max={maxNetCapitalFilter}
             onChange={(patch) => {
               const next: Partial<MasterListQueryState> = { page: 1 };
-              if (patch.min !== undefined) next.minNetCapital = patch.min;
+              // ≥ $0 is a no-op for non-negative net capital, so collapse
+              // min=0 to null. Max stays as-is — max=0 is a meaningful
+              // "show non-positive net capital" filter.
+              if (patch.min !== undefined) {
+                next.minNetCapital = patch.min === 0 ? null : patch.min;
+              }
               if (patch.max !== undefined) next.maxNetCapital = patch.max;
               updateState(next);
             }}
@@ -846,6 +838,7 @@ export function MasterListWorkspaceClient() {
             {clearingPartnerFilter.map((partner) => (
               <Tag
                 key={`partner-${partner}`}
+                title={`Partner: ${partner}`}
                 onDismiss={() =>
                   updateState({
                     clearingPartner: clearingPartnerFilter.filter(
@@ -884,6 +877,7 @@ export function MasterListWorkspaceClient() {
             {typesOfBusinessFilter.map((type) => (
               <Tag
                 key={`tob-${type}`}
+                title={`Business: ${type}`}
                 onDismiss={() =>
                   updateState({
                     typesOfBusiness: typesOfBusinessFilter.filter(
@@ -974,11 +968,13 @@ export function MasterListWorkspaceClient() {
               }
               className="h-[38px] rounded-[10px] border border-[var(--border,rgba(30,64,175,0.1))] bg-[var(--surface,#ffffff)] px-3 text-[13px] text-[var(--text,#0f172a)] outline-none transition focus:border-[var(--accent,#6366f1)] focus:shadow-[0_0_0_3px_rgba(99,102,241,0.15)]"
             >
-              {columns.map((column) => (
-                <option key={column.key} value={column.key}>
-                  {column.label}
-                </option>
-              ))}
+              {columns
+                .filter((column) => !NON_SORTABLE_KEYS.has(column.key))
+                .map((column) => (
+                  <option key={column.key} value={column.key}>
+                    {column.label}
+                  </option>
+                ))}
             </select>
           </div>
 
@@ -1116,6 +1112,16 @@ export function MasterListWorkspaceClient() {
                 </th>
                 {columns.map((column) => {
                   const isSorted = sortBy === column.key;
+                  if (NON_SORTABLE_KEYS.has(column.key)) {
+                    return (
+                      <th
+                        key={column.key}
+                        className="whitespace-nowrap border-b border-[var(--border,rgba(30,64,175,0.1))] bg-[var(--surface-2,#f1f6fd)] px-5 py-3 text-[11px] font-semibold uppercase tracking-[0.08em] text-[var(--text-muted,#94a3b8)]"
+                      >
+                        {column.label}
+                      </th>
+                    );
+                  }
                   return (
                     <th
                       key={column.key}
@@ -1284,6 +1290,23 @@ export function MasterListWorkspaceClient() {
                             />
                           ) : null}
                         </span>
+                      </td>
+                      <td className="px-5 py-3.5">
+                        {item.member_agencies.length > 0 ? (
+                          <span className="inline-flex flex-wrap items-center gap-1">
+                            {item.member_agencies.map((code) => (
+                              <Pill key={code} variant="member">
+                                {agencyLabel(code)}
+                              </Pill>
+                            ))}
+                          </span>
+                        ) : item.clearing_membership_checked_at !== null ? (
+                          <span className="text-[12px] text-[var(--text-muted,#94a3b8)]">
+                            Not a member
+                          </span>
+                        ) : (
+                          <span className="text-[var(--text-muted,#94a3b8)]">—</span>
+                        )}
                       </td>
                       <td className="px-5 py-3.5">
                         <span className="inline-flex items-center gap-1">

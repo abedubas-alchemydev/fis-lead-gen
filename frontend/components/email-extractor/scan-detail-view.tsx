@@ -5,9 +5,11 @@ import {
   CheckCircle2,
   Linkedin,
   Loader2,
+  Phone,
+  Search,
   XCircle,
 } from "lucide-react";
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 
 import { EmailExtractorErrorCard } from "@/components/email-extractor/email-extractor-error-card";
 import { EmptyScanResultsState } from "@/components/email-extractor/empty-scan-results-state";
@@ -255,6 +257,15 @@ function EnrichmentCell({
             {row.enriched_company}
           </span>
         ) : null}
+        {row.enriched_phone ? (
+          <a
+            href={`tel:${row.enriched_phone}`}
+            className="inline-flex items-center gap-1 text-[var(--text-dim,#475569)] hover:underline"
+          >
+            <Phone className="h-3.5 w-3.5" strokeWidth={2} />
+            {row.enriched_phone}
+          </a>
+        ) : null}
         {row.enriched_linkedin_url ? (
           <a
             href={row.enriched_linkedin_url}
@@ -336,9 +347,6 @@ function ResultsTable({
               Email
             </th>
             <th className="px-4 py-2.5 text-[11px] font-semibold uppercase tracking-[0.08em] text-[var(--text-muted,#94a3b8)]">
-              Source
-            </th>
-            <th className="px-4 py-2.5 text-[11px] font-semibold uppercase tracking-[0.08em] text-[var(--text-muted,#94a3b8)]">
               Confidence
             </th>
             <th className="px-4 py-2.5 text-[11px] font-semibold uppercase tracking-[0.08em] text-[var(--text-muted,#94a3b8)]">
@@ -354,9 +362,6 @@ function ResultsTable({
             <tr key={row.id} className="align-top">
               <td className="px-4 py-3 font-mono text-[12px] text-[var(--text,#0f172a)]">
                 {row.email}
-              </td>
-              <td className="px-4 py-3 text-[12px] text-[var(--text-muted,#94a3b8)]">
-                {row.source}
               </td>
               <td className="px-4 py-3 text-[12px] tabular-nums text-[var(--text-dim,#475569)]">
                 {formatConfidence(row.confidence)}
@@ -443,6 +448,7 @@ export function ScanDetailView({
   const [verifyInFlight, setVerifyInFlight] = useState<Set<number>>(new Set());
   const [verifyErrors, setVerifyErrors] = useState<Record<number, string>>({});
   const [enrichInFlight, setEnrichInFlight] = useState<Set<number>>(new Set());
+  const [searchQuery, setSearchQuery] = useState("");
   const toast = useToast();
 
   const pollRef = useRef<ReturnType<typeof setInterval> | null>(null);
@@ -562,6 +568,20 @@ export function ScanDetailView({
     scan?.discovered_emails.filter(
       (row) => row.enrichment_status !== "enriched"
     ).length ?? 0;
+
+  const filteredEmails = useMemo(() => {
+    if (!scan) return [];
+    const q = searchQuery.trim().toLowerCase();
+    if (!q) return scan.discovered_emails;
+    return scan.discovered_emails.filter(
+      (row) =>
+        row.email.toLowerCase().includes(q) ||
+        (row.enriched_name?.toLowerCase().includes(q) ?? false) ||
+        (row.enriched_title?.toLowerCase().includes(q) ?? false) ||
+        (row.enriched_company?.toLowerCase().includes(q) ?? false) ||
+        (row.enriched_phone?.toLowerCase().includes(q) ?? false)
+    );
+  }, [scan, searchQuery]);
 
   const finishVerify = useCallback(
     (
@@ -831,15 +851,45 @@ export function ScanDetailView({
         ) : scan.discovered_emails.length === 0 ? (
           <EmptyScanResultsState />
         ) : (
-          <ResultsTable
-            rows={scan.discovered_emails}
-            localVerifications={localVerifications}
-            verifyInFlight={verifyInFlight}
-            verifyErrors={verifyErrors}
-            onVerify={handleVerify}
-            enrichInFlight={enrichInFlight}
-            onEnrich={handleEnrich}
-          />
+          <div className="flex flex-col gap-3">
+            <div className="flex flex-col gap-2 sm:flex-row sm:items-center sm:justify-between">
+              <div className="relative w-full sm:max-w-sm">
+                <Search
+                  className="pointer-events-none absolute left-2.5 top-1/2 h-4 w-4 -translate-y-1/2 text-[var(--text-muted,#94a3b8)]"
+                  strokeWidth={2}
+                />
+                <input
+                  type="search"
+                  value={searchQuery}
+                  onChange={(e) => setSearchQuery(e.target.value)}
+                  placeholder="Search email, name, title, company, or phone"
+                  aria-label="Search discovered emails"
+                  className="w-full rounded-md border border-[var(--border,rgba(30,64,175,0.1))] bg-[var(--surface,#ffffff)] py-1.5 pl-8 pr-3 text-[13px] text-[var(--text,#0f172a)] placeholder:text-[var(--text-muted,#94a3b8)] focus:border-[var(--blue,#3b82f6)] focus:outline-none focus:ring-2 focus:ring-[rgba(59,130,246,0.2)]"
+                />
+              </div>
+              {searchQuery.trim() !== "" ? (
+                <p className="text-[12px] text-[var(--text-muted,#94a3b8)]">
+                  Showing {filteredEmails.length} of{" "}
+                  {scan.discovered_emails.length}
+                </p>
+              ) : null}
+            </div>
+            {filteredEmails.length === 0 ? (
+              <div className="rounded-xl border border-dashed border-[var(--border,rgba(30,64,175,0.1))] bg-[var(--surface-2,#f1f6fd)] px-4 py-6 text-center text-[13px] text-[var(--text-muted,#94a3b8)]">
+                No emails match &ldquo;{searchQuery}&rdquo;.
+              </div>
+            ) : (
+              <ResultsTable
+                rows={filteredEmails}
+                localVerifications={localVerifications}
+                verifyInFlight={verifyInFlight}
+                verifyErrors={verifyErrors}
+                onVerify={handleVerify}
+                enrichInFlight={enrichInFlight}
+                onEnrich={handleEnrich}
+              />
+            )}
+          </div>
         )}
       </SectionPanel>
     </div>

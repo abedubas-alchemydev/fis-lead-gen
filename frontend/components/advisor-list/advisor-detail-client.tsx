@@ -1,34 +1,204 @@
 "use client";
 
-import { useEffect, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import Link from "next/link";
 import type { Route } from "next";
-import { useSearchParams } from "next/navigation";
+import { useRouter, useSearchParams } from "next/navigation";
 
-import { ArrowLeft, ExternalLink } from "lucide-react";
+import { ArrowLeft, ArrowRight, ExternalLink, Globe, Search } from "lucide-react";
 
-import { apiRequest } from "@/lib/api";
+import {
+  apiRequest,
+  buildApiPath,
+  getPipelineRunStatus,
+  refreshAdvisor,
+} from "@/lib/api";
+import { PageSpinner } from "@/components/ui/spinner";
+import { joinPipelineLabels } from "@/lib/refresh-pipeline-labels";
 import {
   buildAdvisorListUrl,
+  encodeReturnParam,
   parseReturnParam,
   ADVISOR_LIST_STATE_DEFAULTS,
+  type AdvisorListQueryState,
 } from "@/lib/advisor-list-state";
 import { formatCurrency, formatDate } from "@/lib/format";
+import { ListPicker } from "@/components/list-picker/list-picker";
+import { OutreachButton } from "@/components/master-list/outreach-button";
 import { Pill } from "@/components/ui/pill";
+import { agencyLabel } from "@/components/master-list/detail/clearing-membership-helpers";
 import { SectionPanel } from "@/components/ui/section-panel";
-import type { InvestmentAdvisorProfileResponse } from "@/lib/types";
+import type {
+  AdvisorContactItem,
+  InvestmentAdvisorListResponse,
+  InvestmentAdvisorProfileResponse,
+} from "@/lib/types";
+
+// Secondary button preset — copied from broker-dealer-detail-client.tsx so the
+// Previous/Next nav buttons match the master-list detail page exactly.
+const SECONDARY_BTN =
+  "inline-flex items-center justify-center gap-2 rounded-[10px] border border-[var(--border-2,rgba(30,64,175,0.16))] bg-[var(--surface,#ffffff)] px-4 py-2 text-[13px] font-medium text-[var(--text-dim,#475569)] transition hover:bg-[var(--surface-2,#f1f6fd)] hover:text-[var(--text,#0f172a)] disabled:cursor-not-allowed disabled:opacity-45";
+
+// Compact website display: strip protocol/www/trailing slash and take the
+// first path segment. Mirrors ResolvedLink in firm-website-link.tsx.
+function cleanWebsiteDisplay(website: string): string {
+  return (
+    website
+      .replace(/^https?:\/\//i, "")
+      .replace(/^www\./i, "")
+      .replace(/\/+$/, "")
+      .split("/")[0]
+      ?.toLowerCase() ?? website
+  );
+}
+
+// Builds the same /api/v1/investment-advisors query the advisor workspace
+// emits, from a recovered AdvisorListQueryState, so Next/Previous walk the
+// *exact* same result set the user was looking at when they clicked in. Keep
+// in lock step with the params object in advisor-list-workspace-client.tsx.
+function listApiPathFromState(
+  state: AdvisorListQueryState,
+  pageOverride?: number,
+): string {
+  const params: Record<string, string | number | string[]> = {
+    sort_by: state.sortBy,
+    sort_dir: state.sortDir,
+    page: pageOverride ?? state.page,
+    limit: state.limit,
+  };
+  if (state.search) params.q = state.search;
+  if (state.state) params.state = [state.state];
+  if (state.status !== "All") params.status = [state.status];
+  // BE defaults files_13f=true, so only send the explicit "false" override.
+  if (state.filesThirteenF === "all") params.files_13f = "false";
+  if (state.advisoryActivities.length > 0) {
+    params.advisory_activities = state.advisoryActivities;
+  }
+  if (state.clientTypes.length > 0) {
+    params.client_types = state.clientTypes;
+  }
+  if (state.minRegulatoryAum !== null) {
+    params.min_regulatory_aum = state.minRegulatoryAum;
+  }
+  if (state.maxRegulatoryAum !== null) {
+    params.max_regulatory_aum = state.maxRegulatoryAum;
+  }
+  if (state.registeredAfter !== null) {
+    params.registered_after = state.registeredAfter;
+  }
+  if (state.registeredBefore !== null) {
+    params.registered_before = state.registeredBefore;
+  }
+  return buildApiPath("/api/v1/investment-advisors", params);
+}
 
 // Detail view for /advisor-list/{id}. Mirrors the design system used on
 // /master-list/{id}: page topbar with breadcrumbs + h1 + meta line, KPI
 // strip of MiniStat tiles, and SectionPanel cards on a 2-column grid.
 export function AdvisorDetailClient({ advisorId }: { advisorId: string }) {
+  const router = useRouter();
   const searchParams = useSearchParams();
   const [data, setData] = useState<InvestmentAdvisorProfileResponse | null>(
     null,
   );
   const [error, setError] = useState<string | null>(null);
+  const [prevId, setPrevId] = useState<number | null>(null);
+  const [nextId, setNextId] = useState<number | null>(null);
+
+  // Refresh-on-visit gating. Mirrors broker-dealer-detail-client.tsx — we
+  // POST /refresh-all on mount so the BE's per-pipeline gates can fill any
+  // missing column (executive_officers, website) before we render. The
+  // /profile fetch below is gated on `refreshState.phase === "ready"` so
+  // the user sees the loading screen until the orchestrator's child
+  // pipelines finish (or short-circuit). Errors fall through to "ready" —
+  // refresh is best-effort, never blocks the page indefinitely.
+  type RefreshPhase =
+    | { phase: "queuing" }
+    | { phase: "polling"; runId: number; pipelinesRunning: string[] }
+    | { phase: "ready" };
+  const [refreshState, setRefreshState] = useState<RefreshPhase>({ phase: "queuing" });
+
+  // Refresh-on-visit: POST /refresh-all and poll the parent PipelineRun
+  // until terminal. Same handler shape + 180s poll deadline as the BD
+  // detail page (see broker-dealer-detail-client.tsx, PR #482).
+  useEffect(() => {
+    const numericId = Number(advisorId);
+    if (!Number.isFinite(numericId)) {
+      setRefreshState({ phase: "ready" });
+      return;
+    }
+    let active = true;
+    let pollTimer: ReturnType<typeof setTimeout> | null = null;
+
+    function parsePipelinesRunning(notes: string | null): string[] {
+      if (!notes) return [];
+      try {
+        const parsed = JSON.parse(notes) as { ran?: unknown };
+        if (Array.isArray(parsed.ran)) {
+          return parsed.ran.filter((x): x is string => typeof x === "string");
+        }
+      } catch {
+        /* notes isn't structured JSON yet (early in lifecycle) */
+      }
+      return [];
+    }
+
+    async function pollUntilTerminal(runId: number) {
+      const deadline = Date.now() + 180_000;
+      const TERMINAL = new Set(["completed", "completed_with_errors", "failed"]);
+      while (active && Date.now() < deadline) {
+        try {
+          const detail = await getPipelineRunStatus(runId);
+          if (!active) return;
+          if (TERMINAL.has(detail.status)) {
+            setRefreshState({ phase: "ready" });
+            return;
+          }
+          setRefreshState({
+            phase: "polling",
+            runId,
+            pipelinesRunning: parsePipelinesRunning(detail.notes),
+          });
+        } catch {
+          // Transient poll error — wait and try again.
+        }
+        await new Promise<void>((resolve) => {
+          pollTimer = setTimeout(resolve, 2000);
+        });
+      }
+      if (active) setRefreshState({ phase: "ready" });
+    }
+
+    async function run() {
+      try {
+        const result = await refreshAdvisor(numericId, "all");
+        if (!active) return;
+        if (result.status === "skipped" || result.run_id === null) {
+          setRefreshState({ phase: "ready" });
+          return;
+        }
+        setRefreshState({
+          phase: "polling",
+          runId: result.run_id,
+          pipelinesRunning: [],
+        });
+        await pollUntilTerminal(result.run_id);
+      } catch {
+        // 429 / 503 / network — fall through so the page renders.
+        if (active) setRefreshState({ phase: "ready" });
+      }
+    }
+    void run();
+
+    return () => {
+      active = false;
+      if (pollTimer !== null) clearTimeout(pollTimer);
+    };
+  }, [advisorId]);
 
   useEffect(() => {
+    // Wait for refresh-on-visit to finish before fetching /profile.
+    if (refreshState.phase !== "ready") return;
     apiRequest<InvestmentAdvisorProfileResponse>(
       `/api/v1/investment-advisors/${advisorId}/profile`,
     )
@@ -36,16 +206,135 @@ export function AdvisorDetailClient({ advisorId }: { advisorId: string }) {
       .catch((err) => {
         setError(err instanceof Error ? err.message : "Failed to load advisor");
       });
-  }, [advisorId]);
+  }, [advisorId, refreshState.phase]);
 
   // Restore the user's filter/sort state on back-nav, falling back to
   // the bare list URL if no return envelope was passed.
-  const returnState = parseReturnParam(searchParams.get("return"));
+  const returnState = useMemo(
+    () => parseReturnParam(searchParams.get("return")),
+    [searchParams],
+  );
+  const returnEnvelope = useMemo(
+    () => (returnState ? encodeReturnParam(returnState) : ""),
+    [returnState],
+  );
   const backHref = (
     returnState
       ? buildAdvisorListUrl(returnState)
       : buildAdvisorListUrl(ADVISOR_LIST_STATE_DEFAULTS)
   ) as Route;
+
+  // Resolve adjacent advisor IDs for Previous/Next. With a return envelope,
+  // walk the same filtered/sorted page the user came from and step ±1 (fetching
+  // the neighbouring page at a boundary); without one (deep link), fall back to
+  // the global /adjacent order. Mirrors broker-dealer-detail-client.tsx.
+  useEffect(() => {
+    let active = true;
+    const numericId = Number(advisorId);
+
+    async function resolveFromAdjacent() {
+      try {
+        const adj = await apiRequest<{
+          prev_id: number | null;
+          next_id: number | null;
+        }>(`/api/v1/investment-advisors/${advisorId}/adjacent`);
+        if (!active) return;
+        setPrevId(adj.prev_id);
+        setNextId(adj.next_id);
+      } catch {
+        if (active) {
+          setPrevId(null);
+          setNextId(null);
+        }
+      }
+    }
+
+    async function resolveFromReturnState(state: AdvisorListQueryState) {
+      const response = await apiRequest<InvestmentAdvisorListResponse>(
+        listApiPathFromState(state),
+      );
+      if (!active) return;
+
+      const idx = response.items.findIndex((item) => item.id === numericId);
+      if (idx === -1) {
+        // The advisor dropped out of the user's view (data refresh / filter
+        // change). Fall back to the global walker so the buttons still work.
+        await resolveFromAdjacent();
+        return;
+      }
+
+      let prev: number | null = null;
+      let next: number | null = null;
+
+      if (idx > 0) {
+        prev = response.items[idx - 1].id;
+      } else if (response.meta.page > 1) {
+        const prevPage = await apiRequest<InvestmentAdvisorListResponse>(
+          listApiPathFromState(state, response.meta.page - 1),
+        );
+        if (!active) return;
+        if (prevPage.items.length > 0) {
+          prev = prevPage.items[prevPage.items.length - 1].id;
+        }
+      }
+
+      if (idx < response.items.length - 1) {
+        next = response.items[idx + 1].id;
+      } else if (response.meta.page < response.meta.total_pages) {
+        const nextPage = await apiRequest<InvestmentAdvisorListResponse>(
+          listApiPathFromState(state, response.meta.page + 1),
+        );
+        if (!active) return;
+        if (nextPage.items.length > 0) {
+          next = nextPage.items[0].id;
+        }
+      }
+
+      setPrevId(prev);
+      setNextId(next);
+    }
+
+    if (returnState && Number.isFinite(numericId)) {
+      void resolveFromReturnState(returnState).catch(() => {
+        if (active) void resolveFromAdjacent();
+      });
+    } else {
+      void resolveFromAdjacent();
+    }
+
+    return () => {
+      active = false;
+    };
+  }, [advisorId, returnState]);
+
+  // Same-shape /advisor-list/{id} link that preserves the return envelope so
+  // chaining Next/Previous keeps the user's filtered context.
+  const buildAdjacentHref = (id: number): Route => {
+    const base = `/advisor-list/${id}`;
+    return (returnEnvelope ? `${base}?return=${returnEnvelope}` : base) as Route;
+  };
+
+  // Refresh-on-visit gate. Show loading screen while the BE orchestrator
+  // is queuing or running. Once ready, the /profile fetch above populates
+  // and the existing render path runs.
+  if (refreshState.phase === "queuing") {
+    return (
+      <div className="px-7 pb-12 pt-7 lg:px-9">
+        <PageSpinner label="Preparing fresh data for this advisor…" />
+      </div>
+    );
+  }
+  if (refreshState.phase === "polling") {
+    const label =
+      refreshState.pipelinesRunning.length > 0
+        ? `Refreshing ${joinPipelineLabels(refreshState.pipelinesRunning)}…`
+        : "Refreshing advisor data…";
+    return (
+      <div className="px-7 pb-12 pt-7 lg:px-9">
+        <PageSpinner label={label} />
+      </div>
+    );
+  }
 
   if (error) {
     return (
@@ -108,9 +397,17 @@ export function AdvisorDetailClient({ advisorId }: { advisorId: string }) {
             <span className="text-[var(--text-dim,#475569)]">/</span> Firm
             Detail
           </p>
-          <h1 className="mt-1 text-[24px] font-bold tracking-[-0.02em] text-[var(--text,#0f172a)]">
-            {advisor.name}
-          </h1>
+          <div className="mt-1 flex flex-wrap items-center gap-3">
+            <h1 className="text-[24px] font-bold tracking-[-0.02em] text-[var(--text,#0f172a)]">
+              {advisor.name}
+            </h1>
+            <ListPicker
+              firmId={advisor.id}
+              variant="detail"
+              entityType="advisor"
+              initialFavorited={data.is_favorited}
+            />
+          </div>
           {advisor.legal_name && advisor.legal_name !== advisor.name ? (
             <p className="mt-1 text-[13px] text-[var(--text-dim,#475569)]">
               Legal name:{" "}
@@ -119,6 +416,33 @@ export function AdvisorDetailClient({ advisorId }: { advisorId: string }) {
               </span>
             </p>
           ) : null}
+          {/* Website + Google fallback — header-level, mirrors master-list. */}
+          <div className="mt-1.5 flex flex-wrap items-center gap-x-4 gap-y-1.5">
+            {advisor.website ? (
+              <a
+                href={
+                  advisor.website.startsWith("http")
+                    ? advisor.website
+                    : `https://${advisor.website}`
+                }
+                target="_blank"
+                rel="noopener noreferrer"
+                className="inline-flex items-center gap-1.5 text-[13px] text-[var(--accent,#6366f1)] transition hover:underline"
+              >
+                <Globe className="h-3.5 w-3.5" strokeWidth={2} />
+                {cleanWebsiteDisplay(advisor.website)}
+              </a>
+            ) : null}
+            <a
+              href={`https://www.google.com/search?q=${encodeURIComponent(`${advisor.name} investment advisor`)}`}
+              target="_blank"
+              rel="noopener noreferrer"
+              className="inline-flex items-center gap-1.5 text-[13px] text-[var(--text-dim,#475569)] transition hover:text-[var(--text,#0f172a)] hover:underline"
+            >
+              <Search className="h-3.5 w-3.5" strokeWidth={2} />
+              Search Google for this firm
+            </a>
+          </div>
           <div className="mt-2 flex flex-wrap items-center gap-x-3 gap-y-1 text-[12px] text-[var(--text-muted,#94a3b8)]">
             {advisor.crd_number ? (
               <span>
@@ -161,21 +485,43 @@ export function AdvisorDetailClient({ advisorId }: { advisorId: string }) {
       </div>
 
       {/* ── Status pills row ────────────────────────────────────────────── */}
-      {advisor.files_13f ? (
+      {advisor.files_13f || advisor.member_agencies.length > 0 ? (
         <div className="mb-5 flex flex-wrap items-center gap-2">
-          <Pill variant="healthy">13F filer</Pill>
+          {advisor.files_13f ? <Pill variant="healthy">13F filer</Pill> : null}
+          {advisor.member_agencies.map((code) => (
+            <Pill key={code} variant="member">
+              {agencyLabel(code)} member
+            </Pill>
+          ))}
         </div>
       ) : null}
 
-      {/* ── Back-nav row ────────────────────────────────────────────────── */}
-      <div className="mb-5">
+      {/* ── Prev / Back / Next nav row ──────────────────────────────────── */}
+      <div className="mb-5 flex items-center justify-between gap-3">
+        <button
+          type="button"
+          disabled={!prevId}
+          onClick={() => prevId && router.push(buildAdjacentHref(prevId))}
+          className={SECONDARY_BTN}
+        >
+          <ArrowLeft className="h-4 w-4" strokeWidth={2} aria-hidden />
+          Previous
+        </button>
         <Link
           href={backHref}
-          className="inline-flex items-center gap-1.5 text-[12px] uppercase tracking-[0.08em] text-[var(--text-muted,#94a3b8)] transition hover:text-[var(--text,#0f172a)]"
+          className="text-[12px] uppercase tracking-[0.08em] text-[var(--text-muted,#94a3b8)] transition hover:text-[var(--text,#0f172a)]"
         >
-          <ArrowLeft className="h-3.5 w-3.5" strokeWidth={2} aria-hidden />
           Back to advisors
         </Link>
+        <button
+          type="button"
+          disabled={!nextId}
+          onClick={() => nextId && router.push(buildAdjacentHref(nextId))}
+          className={SECONDARY_BTN}
+        >
+          Next
+          <ArrowRight className="h-4 w-4" strokeWidth={2} aria-hidden />
+        </button>
       </div>
 
       {/* ── KPI strip ───────────────────────────────────────────────────── */}
@@ -288,7 +634,7 @@ export function AdvisorDetailClient({ advisorId }: { advisorId: string }) {
         </SectionPanel>
 
         {/* Firm overview */}
-        <SectionPanel eyebrow="Overview" title="Registration & web presence">
+        <SectionPanel eyebrow="Overview" title="Registration & filings">
           <div className="grid gap-3 md:grid-cols-2">
             <MiniStat
               label="Status"
@@ -300,43 +646,17 @@ export function AdvisorDetailClient({ advisorId }: { advisorId: string }) {
               value={formatDate(advisor.registration_date)}
               compact
             />
-            <MiniStat
-              label="Formation date"
-              value={formatDate(advisor.formation_date)}
-              compact
-            />
+            {/* Formation date intentionally not rendered: Form ADV doesn't
+                ask for it and the IAPD per-firm payload doesn't carry one,
+                so the column would be "Not available" for nearly every IA.
+                Field remains on the schema/model — re-enable if a corporate-
+                records source (OpenCorporates / state SOS) is ever wired. */}
             <MiniStat
               label="Source"
               value={advisor.matched_source || "—"}
               compact
             />
           </div>
-
-          {advisor.website ? (
-            <div className="mt-4 rounded-2xl bg-[var(--surface-2,#f1f6fd)] px-4 py-3">
-              <p className="text-[11px] font-semibold uppercase tracking-[0.08em] text-[var(--text-muted,#94a3b8)]">
-                Website
-              </p>
-              <a
-                href={advisor.website}
-                target="_blank"
-                rel="noopener noreferrer"
-                className="mt-1 inline-flex items-center gap-1 text-[13px] font-medium text-[var(--accent,#6366f1)] hover:underline"
-              >
-                {advisor.website}
-                <ExternalLink className="h-3 w-3" strokeWidth={2} />
-              </a>
-              {advisor.website_source ? (
-                <p className="mt-1 text-[11px] uppercase tracking-[0.08em] text-[var(--text-muted,#94a3b8)]">
-                  Source: {advisor.website_source}
-                </p>
-              ) : null}
-            </div>
-          ) : (
-            <p className="mt-4 text-sm text-[var(--text-muted,#94a3b8)]">
-              No website on file.
-            </p>
-          )}
 
           {advisor.filings_index_url ? (
             <a
@@ -363,63 +683,103 @@ export function AdvisorDetailClient({ advisorId }: { advisorId: string }) {
           ) : null}
 
           {directOwners.length > 0 ? (
-            <PeopleSubGroup title="Direct owners">
-              {directOwners.map((owner, i) => (
-                <PersonCard
-                  key={`direct-${i}`}
-                  name={owner.name ?? "—"}
-                  title={owner.title ?? null}
-                  extra={
-                    owner.ownership_pct
-                      ? `Ownership: ${owner.ownership_pct}`
-                      : null
-                  }
-                />
-              ))}
-            </PeopleSubGroup>
+            <PeopleTable
+              title="Direct owners"
+              items={directOwners}
+              columns={[
+                {
+                  header: "Name",
+                  cell: (o) => (
+                    <span className="font-semibold text-[var(--text,#0f172a)]">
+                      {o.name ?? "—"}
+                    </span>
+                  ),
+                },
+                { header: "Title", cell: (o) => o.title ?? "—" },
+                {
+                  header: "Ownership",
+                  cell: (o) => o.ownership_pct ?? "—",
+                  className: "whitespace-nowrap",
+                },
+              ]}
+            />
           ) : null}
 
           {executiveOfficers.length > 0 ? (
-            <PeopleSubGroup title="Executive officers">
-              {executiveOfficers.map((officer, i) => (
-                <PersonCard
-                  key={`officer-${i}`}
-                  name={officer.name ?? "—"}
-                  title={officer.title ?? null}
-                />
-              ))}
-            </PeopleSubGroup>
+            <PeopleTable
+              title="Executive officers"
+              items={executiveOfficers}
+              columns={[
+                {
+                  header: "Name",
+                  cell: (o) => (
+                    <span className="font-semibold text-[var(--text,#0f172a)]">
+                      {o.name ?? "—"}
+                    </span>
+                  ),
+                },
+                { header: "Title", cell: (o) => o.title ?? "—" },
+              ]}
+            />
           ) : null}
 
           {indirectOwners.length > 0 ? (
-            <PeopleSubGroup title="Indirect owners">
-              {indirectOwners.map((owner, i) => (
-                <PersonCard
-                  key={`indirect-${i}`}
-                  name={owner.name ?? "—"}
-                  title={owner.title ?? null}
-                  extra={
-                    owner.ownership_pct
-                      ? `Ownership: ${owner.ownership_pct}`
-                      : null
-                  }
-                />
-              ))}
-            </PeopleSubGroup>
+            <PeopleTable
+              title="Indirect owners"
+              items={indirectOwners}
+              columns={[
+                {
+                  header: "Name",
+                  cell: (o) => (
+                    <span className="font-semibold text-[var(--text,#0f172a)]">
+                      {o.name ?? "—"}
+                    </span>
+                  ),
+                },
+                { header: "Title", cell: (o) => o.title ?? "—" },
+                {
+                  header: "Ownership",
+                  cell: (o) => o.ownership_pct ?? "—",
+                  className: "whitespace-nowrap",
+                },
+              ]}
+            />
           ) : null}
 
           {contacts.length > 0 ? (
-            <PeopleSubGroup title="Enriched contacts">
-              {contacts.map((contact) => (
-                <PersonCard
-                  key={`contact-${contact.id}`}
-                  name={contact.name}
-                  title={contact.title}
-                  email={contact.email}
-                  source={`${contact.source} · ${formatDate(contact.enriched_at)}`}
-                />
-              ))}
-            </PeopleSubGroup>
+            <PeopleTable
+              title="Enriched contacts"
+              items={contacts}
+              columns={[
+                {
+                  header: "Name",
+                  cell: (c) => (
+                    <span className="font-semibold text-[var(--text,#0f172a)]">
+                      {c.name}
+                    </span>
+                  ),
+                },
+                { header: "Title", cell: (c) => c.title ?? "—" },
+                {
+                  header: "Channels",
+                  cell: (c) => <ContactChannelsCell contact={c} />,
+                  className: "break-all",
+                },
+                {
+                  header: "Outreach",
+                  cell: (c) =>
+                    c.email ? (
+                      <OutreachButton
+                        entityKind="advisor"
+                        entityId={Number(advisorId)}
+                        entityName={advisor.name}
+                        contact={c}
+                      />
+                    ) : null,
+                  className: "whitespace-nowrap",
+                },
+              ]}
+            />
           ) : null}
         </SectionPanel>
 
@@ -516,59 +876,167 @@ function MiniStat({
   );
 }
 
-function PeopleSubGroup({
+// The People panel renders up to four groups (direct owners, executive
+// officers, indirect owners, enriched contacts). For large IAs each group can
+// have dozens of rows (Vanguard: 61 direct owners, 27 officers), so we render
+// each group as its own paginated table. State lives in the table so the
+// surrounding panel doesn't have to track per-group page indices.
+const PEOPLE_TABLE_PAGE_SIZE = 10;
+
+type PeopleColumn<T> = {
+  header: string;
+  cell: (item: T) => React.ReactNode;
+  className?: string;
+};
+
+function PeopleTable<T>({
   title,
-  children,
+  items,
+  columns,
+  pageSize = PEOPLE_TABLE_PAGE_SIZE,
 }: {
   title: string;
-  children: React.ReactNode;
+  items: readonly T[];
+  columns: readonly PeopleColumn<T>[];
+  pageSize?: number;
 }) {
+  const [page, setPage] = useState(0);
+  const total = items.length;
+  const totalPages = Math.max(1, Math.ceil(total / pageSize));
+  // ``items`` may shrink on a parent re-render — clamp the active page so we
+  // never slice past the end after the source list got shorter.
+  const safePage = Math.min(page, totalPages - 1);
+  const start = safePage * pageSize;
+  const visible = items.slice(start, start + pageSize);
+  const showPager = total > pageSize;
+
   return (
-    <div className="mb-4 last:mb-0">
-      <p className="text-[13px] font-semibold text-[var(--text,#0f172a)]">
-        {title}
-      </p>
-      <div className="mt-2 space-y-2">{children}</div>
+    <div className="mb-5 last:mb-0">
+      <div className="mb-2 flex flex-wrap items-center justify-between gap-3">
+        <p className="text-[13px] font-semibold text-[var(--text,#0f172a)]">
+          {total > 0 ? `${title} (${total})` : title}
+        </p>
+        {showPager ? (
+          <div className="flex items-center gap-2 text-xs text-[var(--text-muted,#94a3b8)]">
+            <button
+              type="button"
+              onClick={() => setPage((p) => Math.max(0, p - 1))}
+              disabled={safePage === 0}
+              className="rounded-md px-2 py-1 hover:bg-[var(--surface-2,#f1f6fd)] disabled:cursor-not-allowed disabled:opacity-40 disabled:hover:bg-transparent"
+              aria-label={`Previous page of ${title}`}
+            >
+              Prev
+            </button>
+            <span aria-live="polite">
+              {start + 1}–{Math.min(start + pageSize, total)} of {total}
+            </span>
+            <button
+              type="button"
+              onClick={() => setPage((p) => Math.min(totalPages - 1, p + 1))}
+              disabled={safePage >= totalPages - 1}
+              className="rounded-md px-2 py-1 hover:bg-[var(--surface-2,#f1f6fd)] disabled:cursor-not-allowed disabled:opacity-40 disabled:hover:bg-transparent"
+              aria-label={`Next page of ${title}`}
+            >
+              Next
+            </button>
+          </div>
+        ) : null}
+      </div>
+      <div className="overflow-hidden rounded-2xl border border-[var(--border,rgba(30,64,175,0.1))]">
+        <table className="w-full text-sm">
+          <thead className="bg-[var(--surface-2,#f1f6fd)] text-left text-xs uppercase tracking-wide text-[var(--text-muted,#94a3b8)]">
+            <tr>
+              {columns.map((c) => (
+                <th
+                  key={c.header}
+                  className={`px-4 py-2 font-semibold ${c.className ?? ""}`}
+                >
+                  {c.header}
+                </th>
+              ))}
+            </tr>
+          </thead>
+          <tbody>
+            {visible.map((item, i) => (
+              <tr
+                key={start + i}
+                className="border-t border-[var(--border,rgba(30,64,175,0.1))] text-[var(--text-dim,#475569)]"
+              >
+                {columns.map((c) => (
+                  <td
+                    key={c.header}
+                    className={`px-4 py-2 align-top ${c.className ?? ""}`}
+                  >
+                    {c.cell(item)}
+                  </td>
+                ))}
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      </div>
     </div>
   );
 }
 
-function PersonCard({
-  name,
-  title,
-  email,
-  extra,
-  source,
-}: {
-  name: string;
-  title?: string | null;
-  email?: string | null;
-  extra?: string | null;
-  source?: string;
-}) {
+// Multi-channel cell renderer for the Enriched contacts table. Mirrors the
+// pattern from master-list/detail/contact-row.tsx so the IA surface shows
+// the same emails[] / phones[] / linkedin_url payload the BD surface does
+// — chips for personal email + non-work phone type, work phones unbadged,
+// LinkedIn as an external-link icon. Returns an em-dash when none of the
+// three are populated so empty rows still anchor the row height.
+function ContactChannelsCell({ contact }: { contact: AdvisorContactItem }) {
+  const emails = contact.emails ?? [];
+  const phones = contact.phones ?? [];
+  const linkedinUrl = contact.linkedin_url;
+
+  if (emails.length === 0 && phones.length === 0 && !linkedinUrl) {
+    return <span className="text-[var(--text-muted,#94a3b8)]">—</span>;
+  }
+
   return (
-    <div className="rounded-2xl bg-[var(--surface-2,#f1f6fd)] px-4 py-3 text-sm text-[var(--text-dim,#475569)]">
-      <p className="font-semibold text-[var(--text,#0f172a)]">{name}</p>
-      {title ? <p className="mt-1">{title}</p> : null}
-      {email ? (
-        <p className="mt-1">
+    <div className="flex flex-col gap-1 text-xs">
+      {emails.map((email, i) => (
+        <span key={`email-${i}`} className="inline-flex items-center gap-1">
           <a
-            href={`mailto:${email}`}
-            className="text-[var(--accent,#6366f1)] hover:underline"
+            href={`mailto:${email.value}`}
+            className="text-[var(--accent,#6366f1)] transition hover:underline"
           >
-            {email}
+            {email.value}
           </a>
-        </p>
-      ) : null}
-      {extra ? (
-        <p className="mt-1 text-xs text-[var(--text-muted,#94a3b8)]">
-          {extra}
-        </p>
-      ) : null}
-      {source ? (
-        <p className="mt-1 text-[11px] uppercase tracking-[0.08em] text-[var(--text-muted,#94a3b8)]">
-          {source}
-        </p>
+          {email.type === "personal" ? (
+            <span className="rounded-full bg-[var(--surface-2,#f1f6fd)] px-1.5 py-0.5 text-[10px] uppercase tracking-[0.08em] text-[var(--text-muted,#94a3b8)]">
+              personal
+            </span>
+          ) : null}
+        </span>
+      ))}
+      {phones.map((phone, i) => (
+        <span key={`phone-${i}`} className="inline-flex items-center gap-1">
+          <a
+            href={`tel:${phone.value}`}
+            className="text-[var(--text-dim,#475569)] transition hover:underline"
+          >
+            {phone.value}
+          </a>
+          {phone.type !== "work" ? (
+            <span className="rounded-full bg-[var(--surface-2,#f1f6fd)] px-1.5 py-0.5 text-[10px] uppercase tracking-[0.08em] text-[var(--text-muted,#94a3b8)]">
+              {phone.type}
+            </span>
+          ) : null}
+        </span>
+      ))}
+      {linkedinUrl ? (
+        <a
+          href={linkedinUrl}
+          target="_blank"
+          rel="noopener noreferrer"
+          className="inline-flex items-center gap-1 text-[var(--accent,#6366f1)] transition hover:underline"
+          aria-label="Open LinkedIn profile in new tab"
+        >
+          <ExternalLink className="h-3 w-3" strokeWidth={2} />
+          LinkedIn
+        </a>
       ) : null}
     </div>
   );

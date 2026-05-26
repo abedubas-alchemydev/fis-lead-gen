@@ -3,11 +3,9 @@ import { headers } from "next/headers";
 
 import { auth, db } from "@/lib/auth";
 
-export async function POST(
-  _request: Request,
-  { params }: { params: { id: string } }
-) {
-  const session = await auth.api.getSession({ headers: headers() });
+export async function POST(_request: Request, props: { params: Promise<{ id: string }> }) {
+  const params = await props.params;
+  const session = await auth.api.getSession({ headers: await headers() });
 
   if (!session?.user) {
     return NextResponse.json({ error: "Unauthorized" }, { status: 401 });

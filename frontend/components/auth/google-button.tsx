@@ -31,7 +31,7 @@ export function GoogleButton({ mode }: { mode: "login" | "signup" }) {
       await authClient.signIn.social({
         provider: "google",
         callbackURL: "/dashboard",
-        errorCallbackURL: "/pending-approval"
+        errorCallbackURL: "/pending-approval?via=oauth"
       });
     } catch {
       // signIn.social does a full-page navigation, so reaching this
@@ -47,7 +47,7 @@ export function GoogleButton({ mode }: { mode: "login" | "signup" }) {
       type="button"
       onClick={handleClick}
       disabled={isPending}
-      className="flex w-full items-center justify-center gap-3 rounded-xl border border-slate-200 bg-white px-4 py-3 text-sm font-medium text-navy shadow-sm transition hover:border-slate-300 hover:bg-slate-50 disabled:cursor-not-allowed disabled:opacity-60"
+      className="flex w-full items-center justify-center gap-3 rounded-xl border border-[var(--border,rgba(30,64,175,0.1))] bg-[var(--surface,#ffffff)] px-4 py-3 text-sm font-medium text-[var(--text,#0f172a)] shadow-sm transition hover:border-[var(--border-2,rgba(30,64,175,0.16))] hover:bg-[var(--surface-2,#f1f6fd)] disabled:cursor-not-allowed disabled:opacity-60"
     >
       {isPending ? (
         <Loader2 className="h-4 w-4 animate-spin" aria-hidden />

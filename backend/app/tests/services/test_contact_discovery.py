@@ -4,9 +4,12 @@ Coverage:
 
 * Per-provider happy path (person + org).
 * Per-provider no-match (empty / missing body).
-* Transient errors (500, 429) -> provider returns None, chain continues.
-* Confidence below threshold -> result filtered out, chain continues.
-* Orchestrator chain order (Apollo hit -> Hunter skipped).
+* Transient errors (500, 429) -> provider returns None, contributes nothing
+  to the merge.
+* Confidence below threshold -> result filtered out, doesn't contribute.
+* Orchestrator fan-out: every configured provider is invoked in parallel
+  (``asyncio.gather``); results are merged into a single canonical
+  ``DiscoveryResult`` with union/dedupe semantics on emails/phones.
 * Cache hit returns cached row without touching any provider.
 * Snov token refresh on 401.
 
@@ -299,7 +302,10 @@ async def test_snov_oauth_failure_returns_none(patch_settings: None) -> None:
 
 @pytest.mark.asyncio
 @respx.mock
-async def test_orchestrator_apollo_hit_skips_hunter_and_snov(patch_settings: None) -> None:
+async def test_orchestrator_apollo_hit_still_calls_hunter_and_snov(patch_settings: None) -> None:
+    """All providers fan out in parallel; Apollo's verified-90 wins the
+    ``discovery_source`` field but Hunter and Snov are still invoked (they
+    just return None on the empty-body responses below)."""
     apollo_route = respx.post(apollo_match.PEOPLE_MATCH_URL).mock(
         return_value=httpx.Response(
             200,
@@ -312,8 +318,15 @@ async def test_orchestrator_apollo_hit_skips_hunter_and_snov(patch_settings: Non
             },
         )
     )
-    hunter_route = respx.get(hunter.EMAIL_FINDER_URL).mock(return_value=httpx.Response(200))
-    snov_route = respx.post(snov.EMAIL_FINDER_URL).mock(return_value=httpx.Response(200))
+    hunter_route = respx.get(hunter.EMAIL_FINDER_URL).mock(
+        return_value=httpx.Response(200, json={"data": {}})
+    )
+    respx.post(snov.OAUTH_URL).mock(
+        return_value=httpx.Response(200, json={"access_token": "tok", "expires_in": 3600})
+    )
+    snov_route = respx.post(snov.EMAIL_FINDER_URL).mock(
+        return_value=httpx.Response(200, json={"data": {}})
+    )
 
     session = _FakeSession()
     entity = {
@@ -328,18 +341,24 @@ async def test_orchestrator_apollo_hit_skips_hunter_and_snov(patch_settings: Non
 
     assert row is not None
     assert row.email == "bryan@example.com"
+    # Highest-confidence contributor wins the discovery_source label even
+    # under merge semantics.
     assert row.discovery_source == "apollo_match"
     assert row.discovery_confidence == Decimal("90.00")
     assert session.added == [row]
+    # Merge model: every provider is fanned out in parallel even when one
+    # already returns a confident hit.
     assert apollo_route.called
-    assert not hunter_route.called
-    assert not snov_route.called
+    assert hunter_route.called
+    assert snov_route.called
 
 
 @pytest.mark.asyncio
 @respx.mock
-async def test_orchestrator_below_threshold_tries_next(patch_settings: None) -> None:
-    """Apollo's 45 ('guessed') is below the 60 threshold, so Hunter should be tried."""
+async def test_orchestrator_below_threshold_does_not_contribute(patch_settings: None) -> None:
+    """Apollo's 45 ('guessed') is below the 60 threshold so it doesn't
+    contribute to the merge. Hunter's 82 wins; Snov is also fanned out in
+    parallel under the merge model but returns nothing here."""
     respx.post(apollo_match.PEOPLE_MATCH_URL).mock(
         return_value=httpx.Response(
             200,
@@ -358,6 +377,12 @@ async def test_orchestrator_below_threshold_tries_next(patch_settings: None) -> 
             json={"data": {"email": "bryan.real@example.com", "score": 82}},
         )
     )
+    respx.post(snov.OAUTH_URL).mock(
+        return_value=httpx.Response(200, json={"access_token": "tok", "expires_in": 3600})
+    )
+    respx.post(snov.EMAIL_FINDER_URL).mock(
+        return_value=httpx.Response(200, json={"data": {}})
+    )
 
     session = _FakeSession()
     entity = {
@@ -371,6 +396,7 @@ async def test_orchestrator_below_threshold_tries_next(patch_settings: None) -> 
     row = await discover_contact(entity, bd_id=18344, session=session)
 
     assert row is not None
+    # Apollo's below-threshold email must NOT appear in the merge.
     assert row.email == "bryan.real@example.com"
     assert row.discovery_source == "hunter"
     assert row.discovery_confidence == Decimal("82.00")
@@ -441,8 +467,8 @@ async def test_orchestrator_all_providers_miss_returns_none(patch_settings: None
 async def test_orchestrator_organization_uses_find_org(patch_settings: None) -> None:
     """Organisation-type entities must route to ``find_org`` (not ``find_person``).
 
-    This also covers the case where the person endpoint would have 404'd:
-    we should never hit it when the entity is an organisation.
+    Under the merge model every provider's ``find_org`` runs in parallel;
+    person endpoints must never be hit when the entity is an organisation.
     """
     person_route = respx.post(apollo_match.PEOPLE_MATCH_URL).mock(return_value=httpx.Response(200))
     respx.post(apollo_match.ORG_ENRICH_URL).mock(
@@ -456,7 +482,7 @@ async def test_orchestrator_organization_uses_find_org(patch_settings: None) -> 
             },
         )
     )
-    # Apollo org confidence is 55, below the 60 threshold -> chain continues to Hunter.
+    # Apollo org confidence is 55, below the 60 threshold -> doesn't contribute.
     hunter_route = respx.get(hunter.DOMAIN_SEARCH_URL).mock(
         return_value=httpx.Response(
             200,
@@ -466,6 +492,13 @@ async def test_orchestrator_organization_uses_find_org(patch_settings: None) -> 
                 }
             },
         )
+    )
+    # Snov find_org is also fanned out in parallel under the merge model.
+    respx.post(snov.OAUTH_URL).mock(
+        return_value=httpx.Response(200, json={"access_token": "tok", "expires_in": 3600})
+    )
+    snov_domain_route = respx.post(snov.DOMAIN_SEARCH_URL).mock(
+        return_value=httpx.Response(200, json={"emails": []})
     )
 
     session = _FakeSession()
@@ -482,3 +515,4 @@ async def test_orchestrator_organization_uses_find_org(patch_settings: None) -> 
     assert row.discovery_source == "hunter_domain"
     assert not person_route.called
     assert hunter_route.called
+    assert snov_domain_route.called

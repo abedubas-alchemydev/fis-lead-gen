@@ -96,13 +96,34 @@ export async function apiRequest<T>(path: string, init?: RequestInit): Promise<T
 import type {
   FavoriteList,
   FavoriteListWithMembership,
-  PaginatedFavoriteListItems
+  PaginatedFavoriteListItems,
+  ReportingOwnerItemAddResponse
 } from "@/types/favorite-list";
 import type {
+  AdjacentResponse,
+  AdminUserActivitiesResponse,
+  AdminUserActivityFilter,
+  AdminUserSavedFirmsResponse,
+  ClearingMembershipDecisionResponse,
+  ClearingMembershipReviewListResponse,
+  LinkedProvidersResponse,
+  ContactSearchResponse,
+  InstitutionalInvestorListResponse,
+  InstitutionalInvestorProfileResponse,
+  InvestorEnrichResponse,
+  InvestorListResponse,
+  OutreachAdvisorDraftRequest,
+  OutreachAdvisorSendRequest,
   OutreachDraft,
   OutreachDraftRequest,
+  OutreachInvestorDraftRequest,
+  OutreachInvestorSendRequest,
+  OutreachSendDetail,
   OutreachSendRequest,
   OutreachSendResponse,
+  OutreachSendStatus,
+  OutreachSendsListResponse,
+  OutreachSendsScope,
   PipelineRunItem,
   PipelineStatusResponse,
   PipelineTriggerResponse,
@@ -112,6 +133,35 @@ import type {
   VaultFolderUpdate,
   WipeBdDataResponse
 } from "@/lib/types";
+
+// ── Investors tab (SEC Form 4 insider transactions) ───────────────────
+export async function getInvestors(opts: {
+  tab?: "buyers" | "sellers" | "all";
+  ticker?: string;
+  days?: number;
+  minValue?: number;
+  page?: number;
+  limit?: number;
+}): Promise<InvestorListResponse> {
+  return apiRequest<InvestorListResponse>(
+    buildApiPath("/api/v1/investors", {
+      tab: opts.tab && opts.tab !== "all" ? opts.tab : undefined,
+      ticker: opts.ticker || undefined,
+      days: opts.days,
+      min_value: opts.minValue,
+      page: opts.page,
+      limit: opts.limit
+    })
+  );
+}
+
+export async function enrichInvestor(
+  id: number
+): Promise<InvestorEnrichResponse> {
+  return apiRequest<InvestorEnrichResponse>(`/api/v1/investors/${id}/enrich`, {
+    method: "POST"
+  });
+}
 
 export async function getFavoriteLists(): Promise<FavoriteList[]> {
   return apiRequest<FavoriteList[]>("/api/v1/favorite-lists");
@@ -208,6 +258,277 @@ export async function addFirmsToListBatch(
       body: JSON.stringify({ broker_dealer_ids: firmIds }),
     }
   );
+}
+
+// ── Investment-advisor variants (favorites for advisor-list) ──────────────
+// Parallel to the BD-side helpers above. The BE has separate endpoints
+// at /advisor-items (vs /items) so the polymorphic XOR check on
+// favorite_list_item is satisfied: advisor rows write advisor_id and
+// leave broker_dealer_id NULL.
+
+export async function getListsForAdvisor(
+  advisorId: number
+): Promise<FavoriteListWithMembership[]> {
+  return apiRequest<FavoriteListWithMembership[]>(
+    `/api/v1/investment-advisors/${advisorId}/favorite-lists`
+  );
+}
+
+export async function addAdvisorToList(
+  listId: number,
+  advisorId: number
+): Promise<void> {
+  await apiRequest<void>(
+    `/api/v1/favorite-lists/${listId}/advisor-items`,
+    {
+      method: "POST",
+      body: JSON.stringify({ advisor_id: advisorId }),
+    }
+  );
+}
+
+export async function removeAdvisorFromList(
+  listId: number,
+  advisorId: number
+): Promise<void> {
+  await apiRequest<void>(
+    `/api/v1/favorite-lists/${listId}/advisor-items/${advisorId}`,
+    { method: "DELETE" }
+  );
+}
+
+export async function addAdvisorsToListBatch(
+  listId: number,
+  advisorIds: number[]
+): Promise<AddFirmsToListBatchResponse> {
+  return apiRequest<AddFirmsToListBatchResponse>(
+    `/api/v1/favorite-lists/${listId}/advisor-items/batch`,
+    {
+      method: "POST",
+      body: JSON.stringify({ advisor_ids: advisorIds }),
+    }
+  );
+}
+
+// Same-origin proxy GET; BE 302s to the latest 13F-HR primary document
+// on SEC EDGAR. Use as an <a href> so right-click "Open in new tab" works.
+export function getInvestmentAdvisorLatest13fPath(advisorId: number): string {
+  return `/api/backend/api/v1/investment-advisors/${advisorId}/13f/latest`;
+}
+
+// ── Institutional Investor variants (favorites for /investors firm list) ──
+// Parallel to BD + advisor helpers; the BE has /investor-items endpoints
+// that satisfy the 3-way XOR on favorite_list_item by writing
+// institutional_investor_id and leaving the other two FKs NULL.
+
+export async function getListsForInstitutionalInvestor(
+  investorId: number
+): Promise<FavoriteListWithMembership[]> {
+  return apiRequest<FavoriteListWithMembership[]>(
+    `/api/v1/institutional-investors/${investorId}/favorite-lists`
+  );
+}
+
+export async function addInstitutionalInvestorToList(
+  listId: number,
+  investorId: number
+): Promise<void> {
+  await apiRequest<void>(
+    `/api/v1/favorite-lists/${listId}/investor-items`,
+    {
+      method: "POST",
+      body: JSON.stringify({ institutional_investor_id: investorId }),
+    }
+  );
+}
+
+export async function removeInstitutionalInvestorFromList(
+  listId: number,
+  investorId: number
+): Promise<void> {
+  await apiRequest<void>(
+    `/api/v1/favorite-lists/${listId}/investor-items/${investorId}`,
+    { method: "DELETE" }
+  );
+}
+
+export async function addInstitutionalInvestorsToListBatch(
+  listId: number,
+  investorIds: number[]
+): Promise<AddFirmsToListBatchResponse> {
+  return apiRequest<AddFirmsToListBatchResponse>(
+    `/api/v1/favorite-lists/${listId}/investor-items/batch`,
+    {
+      method: "POST",
+      body: JSON.stringify({ institutional_investor_ids: investorIds }),
+    }
+  );
+}
+
+// ── Reporting-owner (Form 4 insider) variants ─────────────────────────────
+// Insiders are addressed by CIK (string), not a surrogate id: the
+// /investors feed only carries the CIK and the ``reporting_owners`` row
+// is lazy-created on first favorite. The membership lookup lives under
+// the /investors router (the owner isn't a firm), while add/remove sit on
+// /favorite-lists like the other types. ``addReportingOwnerToList``
+// returns the resolved ``reporting_owner_id`` so a row that had none can
+// be un-favorited (DELETE by id) without re-resolving the CIK.
+
+export async function getListsForReportingOwner(
+  cik: string
+): Promise<FavoriteListWithMembership[]> {
+  return apiRequest<FavoriteListWithMembership[]>(
+    `/api/v1/investors/reporting-owners/${encodeURIComponent(cik)}/favorite-lists`
+  );
+}
+
+export async function addReportingOwnerToList(
+  listId: number,
+  cik: string
+): Promise<ReportingOwnerItemAddResponse> {
+  return apiRequest<ReportingOwnerItemAddResponse>(
+    `/api/v1/favorite-lists/${listId}/reporting-owner-items`,
+    {
+      method: "POST",
+      body: JSON.stringify({ cik }),
+    }
+  );
+}
+
+export async function removeReportingOwnerFromList(
+  listId: number,
+  reportingOwnerId: number
+): Promise<void> {
+  await apiRequest<void>(
+    `/api/v1/favorite-lists/${listId}/reporting-owner-items/${reportingOwnerId}`,
+    { method: "DELETE" }
+  );
+}
+
+// ── Cross-entity contact search ────────────────────────────────────────
+// Both POST endpoints accept JSON bodies. find-by-email optionally
+// triggers an Apollo /people/match fallback when ``enrich_via_apollo``
+// is true and no local hit was found -- caller opts in to spend.
+
+export async function findContactsByEmail(
+  email: string,
+  options?: { enrichViaApollo?: boolean }
+): Promise<ContactSearchResponse> {
+  return apiRequest<ContactSearchResponse>("/api/v1/contacts/find-by-email", {
+    method: "POST",
+    body: JSON.stringify({
+      email,
+      enrich_via_apollo: options?.enrichViaApollo ?? false,
+    }),
+  });
+}
+
+export async function findContactsByDomain(
+  domain: string
+): Promise<ContactSearchResponse> {
+  return apiRequest<ContactSearchResponse>("/api/v1/contacts/find-by-domain", {
+    method: "POST",
+    body: JSON.stringify({ domain }),
+  });
+}
+
+// ── Adjacent-entity navigation (Next button on detail pages) ──────────
+// All three endpoints return {prev_id, next_id} walking the default
+// sorted list for their respective firm type. FE detail pages call
+// these as a fallback when no return-envelope reconstructs the user's
+// filtered list.
+
+export async function getAdjacentAdvisor(advisorId: number): Promise<AdjacentResponse> {
+  return apiRequest<AdjacentResponse>(
+    `/api/v1/investment-advisors/${advisorId}/adjacent`
+  );
+}
+
+export async function getAdjacentInstitutionalInvestor(
+  investorId: number
+): Promise<AdjacentResponse> {
+  return apiRequest<AdjacentResponse>(
+    `/api/v1/institutional-investors/${investorId}/adjacent`
+  );
+}
+
+// ── Polymorphic outreach (advisor + investor) ──────────────────────────
+// Parallel to the BD-side outreach helpers in lib/email-extractor.ts /
+// existing draft helpers. Each pair (draft + send) targets the matching
+// /outreach/{advisor,investor}-{draft,send} endpoint.
+
+export async function generateAdvisorOutreachDraft(
+  payload: OutreachAdvisorDraftRequest
+): Promise<OutreachDraft> {
+  return apiRequest<OutreachDraft>("/api/v1/outreach/advisor-draft", {
+    method: "POST",
+    body: JSON.stringify(payload),
+  });
+}
+
+export async function sendAdvisorOutreach(
+  payload: OutreachAdvisorSendRequest
+): Promise<OutreachSendResponse> {
+  return apiRequest<OutreachSendResponse>("/api/v1/outreach/advisor-send", {
+    method: "POST",
+    body: JSON.stringify(payload),
+  });
+}
+
+export async function generateInvestorOutreachDraft(
+  payload: OutreachInvestorDraftRequest
+): Promise<OutreachDraft> {
+  return apiRequest<OutreachDraft>("/api/v1/outreach/investor-draft", {
+    method: "POST",
+    body: JSON.stringify(payload),
+  });
+}
+
+export async function sendInvestorOutreach(
+  payload: OutreachInvestorSendRequest
+): Promise<OutreachSendResponse> {
+  return apiRequest<OutreachSendResponse>("/api/v1/outreach/investor-send", {
+    method: "POST",
+    body: JSON.stringify(payload),
+  });
+}
+
+// ── Institutional Investors list + profile ─────────────────────────────
+// Mirrors the advisor-list helpers. Filters are query-string params; the
+// list endpoint defaults to total_aum-DESC ordering, the FE workspace
+// client overrides per user preference.
+
+export async function fetchInstitutionalInvestors(
+  params: {
+    q?: string;
+    state?: string[];
+    status?: string[];
+    min_total_aum?: number;
+    max_total_aum?: number;
+    filed_13f_after?: string;
+    filed_13f_before?: string;
+    only_with_advisor_link?: boolean;
+    sort_by?: string;
+    sort_dir?: "asc" | "desc";
+    page?: number;
+    limit?: number;
+  } = {}
+): Promise<InstitutionalInvestorListResponse> {
+  return apiRequest<InstitutionalInvestorListResponse>(
+    buildApiPath("/api/v1/institutional-investors", params as Record<string, string | number | boolean | string[] | undefined>)
+  );
+}
+
+export async function fetchInstitutionalInvestorProfile(
+  investorId: number | string
+): Promise<InstitutionalInvestorProfileResponse> {
+  return apiRequest<InstitutionalInvestorProfileResponse>(
+    `/api/v1/institutional-investors/${investorId}/profile`
+  );
+}
+
+export async function fetchInstitutionalInvestorStates(): Promise<string[]> {
+  return apiRequest<string[]>("/api/v1/institutional-investors/states");
 }
 
 // ── Tier 2 pipeline triggers ──────────────────────────────────────────────
@@ -447,6 +768,95 @@ export async function refreshFirm(
   }
 }
 
+// ── Per-advisor refresh-all (IA analog of refreshFirm) ──────────────────────
+// Pairs with the BE endpoint POST /investment-advisors/{id}/refresh-all
+// (backend/app/api/v1/endpoints/investment_advisors.py). Same response
+// shape contract as refreshFirm so the FE detail client at
+// frontend/components/advisor-list/advisor-detail-client.tsx can mirror
+// the BD detail client's polling / 409 / skipped handling almost verbatim.
+//
+// The poll endpoint (getPipelineRunStatus -> /api/v1/pipeline/run/{run_id})
+// is the same for both BD and IA — both write to the shared pipeline_runs
+// table.
+export type RefreshAdvisorResponse = {
+  // null when status === "skipped" (no PipelineRun created).
+  run_id: number | null;
+  // "queued" | "skipped" | "running" (the last from 409 normalization).
+  status: string;
+  advisor_id: number;
+  // Only present on the 200 skipped path.
+  reason?: string;
+};
+
+type AdvisorConflictDetail = {
+  run_id: number;
+  status: string;
+  advisor_id: number;
+};
+
+function parseAdvisorConflictDetail(detail: string): AdvisorConflictDetail | null {
+  try {
+    const parsed = JSON.parse(detail) as unknown;
+    const candidates: unknown[] = [];
+    if (parsed && typeof parsed === "object") {
+      candidates.push(parsed);
+      if (
+        "detail" in parsed &&
+        parsed !== null &&
+        typeof (parsed as { detail: unknown }).detail === "object"
+      ) {
+        candidates.push((parsed as { detail: unknown }).detail);
+      }
+    }
+    for (const candidate of candidates) {
+      if (
+        candidate &&
+        typeof candidate === "object" &&
+        "run_id" in candidate &&
+        typeof (candidate as { run_id: unknown }).run_id === "number" &&
+        "status" in candidate &&
+        typeof (candidate as { status: unknown }).status === "string" &&
+        "advisor_id" in candidate &&
+        typeof (candidate as { advisor_id: unknown }).advisor_id === "number"
+      ) {
+        const obj = candidate as AdvisorConflictDetail;
+        return {
+          run_id: obj.run_id,
+          status: obj.status,
+          advisor_id: obj.advisor_id,
+        };
+      }
+    }
+  } catch {
+    // Non-JSON detail — fall through.
+  }
+  return null;
+}
+
+export async function refreshAdvisor(
+  advisorId: number,
+  scope: "all" = "all"
+): Promise<RefreshAdvisorResponse> {
+  try {
+    return await apiRequest<RefreshAdvisorResponse>(
+      `/api/v1/investment-advisors/${advisorId}/refresh-all`,
+      { method: "POST", body: JSON.stringify({ scope }) }
+    );
+  } catch (err) {
+    if (err instanceof ApiError && err.status === 409) {
+      const conflict = parseAdvisorConflictDetail(err.detail);
+      if (conflict) {
+        return {
+          run_id: conflict.run_id,
+          status: conflict.status,
+          advisor_id: conflict.advisor_id,
+        };
+      }
+    }
+    throw err;
+  }
+}
+
 export async function getPipelineRunStatus(
   runId: number
 ): Promise<PipelineRunDetail> {
@@ -499,13 +909,14 @@ export async function generateOutreachDraft(
   });
 }
 
-// ── Send outreach via the user's Gmail ─────────────────────────────────────
+// ── Send outreach via the user's chosen provider ──────────────────────────
 // POST /api/v1/outreach/send transmits the (possibly user-edited) draft
-// through Gmail's API using the OAuth token Better Auth stored when the
-// user signed in via Google. 412 responses are recoverable by the modal:
-//   - "google_account_not_linked" → linkSocial with no extra scopes
-//   - "gmail_scope_required" → linkSocial with the gmail.send scope
-// Both flows trigger Google's incremental consent popup.
+// through the provider the user picked (or Gmail by default if no
+// provider is set). 412 responses are recoverable by the modal — each
+// provider has its own pair:
+//   - "<provider>_account_not_linked" → linkSocial without the send scope
+//   - "<provider>_scope_required" / "gmail_scope_required" → linkSocial WITH the send scope
+// Both flows trigger the provider's incremental consent popup.
 export async function sendOutreachEmail(
   payload: OutreachSendRequest
 ): Promise<OutreachSendResponse> {
@@ -513,6 +924,81 @@ export async function sendOutreachEmail(
     method: "POST",
     body: JSON.stringify(payload)
   });
+}
+
+// Which email providers the caller has linked + whether each one
+// already has the send scope. Drives the Outreach modal picker.
+export async function getLinkedProviders(): Promise<LinkedProvidersResponse> {
+  return apiRequest<LinkedProvidersResponse>(
+    "/api/v1/outreach/linked-providers"
+  );
+}
+
+// List of outreach sends (success + failure). Body is omitted from the
+// list response to keep the payload small — call getOutreachSend when
+// expanding a row. ``scope`` defaults to "mine" (caller's own sends);
+// admins can pass "all" to fetch every user's sends with a Sender
+// column populated.
+export async function listOutreachSends(opts: {
+  limit?: number;
+  offset?: number;
+  status?: OutreachSendStatus;
+  scope?: OutreachSendsScope;
+}): Promise<OutreachSendsListResponse> {
+  return apiRequest<OutreachSendsListResponse>(
+    buildApiPath("/api/v1/outreach/sends", {
+      limit: opts.limit,
+      offset: opts.offset,
+      status: opts.status,
+      scope: opts.scope
+    })
+  );
+}
+
+export async function getOutreachSend(
+  sendId: number,
+  scope?: OutreachSendsScope
+): Promise<OutreachSendDetail> {
+  return apiRequest<OutreachSendDetail>(
+    buildApiPath(`/api/v1/outreach/sends/${sendId}`, { scope })
+  );
+}
+
+// Admin-only flat view of every firm a target user has saved across all
+// their favorite lists. Backend gates with role === "admin"; a non-admin
+// caller will receive 403 from apiRequest as an ApiError.
+export async function getUserSavedFirms(
+  userId: string,
+  opts?: { limit?: number; offset?: number; listId?: number }
+): Promise<AdminUserSavedFirmsResponse> {
+  return apiRequest<AdminUserSavedFirmsResponse>(
+    buildApiPath(`/api/v1/users/${userId}/saved-firms`, {
+      limit: opts?.limit,
+      offset: opts?.offset,
+      list_id: opts?.listId
+    })
+  );
+}
+
+// Admin-only unified activity feed for one user (logins/logouts, firm
+// views, saves, outreach sends). `type` collapses login + logout under
+// one filter chip BE-side; the row's own event_type preserves the
+// discriminator for the FE glyph. 403 if the caller isn't an admin.
+export async function getUserActivities(
+  userId: string,
+  opts?: {
+    limit?: number;
+    offset?: number;
+    type?: AdminUserActivityFilter | undefined;
+  }
+): Promise<AdminUserActivitiesResponse> {
+  return apiRequest<AdminUserActivitiesResponse>(
+    buildApiPath(`/api/v1/users/${userId}/activities`, {
+      limit: opts?.limit,
+      offset: opts?.offset,
+      type: opts?.type
+    })
+  );
 }
 
 // ── Vault folder file uploads ─────────────────────────────────────────────
@@ -595,4 +1081,226 @@ export async function retryVaultFile(
     `/api/v1/vault/folders/${folderId}/files/${fileId}/retry`,
     { method: "POST" }
   );
+}
+
+// ── Clearing-membership admin review queue ────────────────────────────
+// Surfaces `status='needs_review'` rows from the directory importer (the
+// safety path for ambiguous name matches) so an admin can approve the
+// correct candidate or reject a wrong one. Approve flips the row to
+// `match_method='manual'` server-side so re-imports preserve the decision.
+
+export async function getClearingMembershipReviewQueue(opts: {
+  limit?: number;
+  offset?: number;
+} = {}): Promise<ClearingMembershipReviewListResponse> {
+  return apiRequest<ClearingMembershipReviewListResponse>(
+    buildApiPath("/api/v1/clearing-memberships/review", {
+      limit: opts.limit,
+      offset: opts.offset,
+    })
+  );
+}
+
+export async function approveClearingMembership(
+  membershipId: number
+): Promise<ClearingMembershipDecisionResponse> {
+  return apiRequest<ClearingMembershipDecisionResponse>(
+    `/api/v1/clearing-memberships/${membershipId}/approve`,
+    { method: "POST" }
+  );
+}
+
+export async function rejectClearingMembership(
+  membershipId: number
+): Promise<ClearingMembershipDecisionResponse> {
+  return apiRequest<ClearingMembershipDecisionResponse>(
+    `/api/v1/clearing-memberships/${membershipId}/reject`,
+    { method: "POST" }
+  );
+}
+
+// ── Doxie chatbot (in-app Gemini-backed assistant) ────────────────────────
+// Backs the ChatbotWidget. The endpoint expects a non-empty conversation
+// history terminated by a user message; the BE folds the optional
+// page-context into the system prompt so Doxie can reason about where
+// the user is in the app without per-route summary fetches.
+
+export type DoxieChatRole = "user" | "assistant";
+
+export interface DoxieChatMessage {
+  role: DoxieChatRole;
+  content: string;
+}
+
+export interface DoxiePageContext {
+  path?: string;
+  title?: string;
+}
+
+export async function sendDoxieMessage(
+  messages: DoxieChatMessage[],
+  pageContext?: DoxiePageContext
+): Promise<string> {
+  const body: { messages: DoxieChatMessage[]; page_context?: DoxiePageContext } = {
+    messages
+  };
+  if (pageContext && (pageContext.path || pageContext.title)) {
+    body.page_context = pageContext;
+  }
+  const response = await apiRequest<{ reply: string }>(
+    "/api/v1/chatbot/messages",
+    {
+      method: "POST",
+      body: JSON.stringify(body)
+    }
+  );
+  return response.reply;
+}
+
+// Persisted history for the user's active conversation. Empty messages
+// array on first open (BE creates the conversation lazily).
+export interface DoxieHistoryMessage {
+  id: number;
+  role: DoxieChatRole;
+  content: string;
+  created_at: string;
+}
+
+export interface DoxieHistoryResponse {
+  conversation_id: number;
+  messages: DoxieHistoryMessage[];
+}
+
+export async function loadDoxieHistory(): Promise<DoxieHistoryResponse> {
+  return apiRequest<DoxieHistoryResponse>("/api/v1/chatbot/messages", {
+    method: "GET"
+  });
+}
+
+// Archive the current Doxie conversation and start a fresh one. The
+// returned conversation_id is informational — the FE just needs to know
+// the archive succeeded so it can clear the message list.
+export async function startNewDoxieChat(): Promise<number> {
+  const response = await apiRequest<{ conversation_id: number }>(
+    "/api/v1/chatbot/conversations/new",
+    { method: "POST" }
+  );
+  return response.conversation_id;
+}
+
+// ── Doxie streaming chat (SSE) ────────────────────────────────────────────
+// Events emitted by the BE stream endpoint. Mirrors the dicts yielded by
+// `ChatbotService.chat_stream` (see backend/app/services/chatbot.py).
+export type DoxieStreamEvent =
+  | { type: "text_delta"; text: string }
+  | { type: "tool_call"; name: string }
+  | { type: "tool_result"; name: string; error?: string | null }
+  | { type: "done"; reply: string }
+  | { type: "error"; code: string; message: string };
+
+export interface StreamDoxieMessageOptions {
+  messages: DoxieChatMessage[];
+  pageContext?: DoxiePageContext;
+  signal?: AbortSignal;
+  onEvent: (event: DoxieStreamEvent) => void;
+}
+
+// Native EventSource is GET-only and can't carry a request body, so we
+// roll our own POST → SSE reader with `fetch` + a streaming reader. SSE
+// framing: events are separated by a blank line; ``data:`` lines carry
+// the JSON payload. The BE sets `Cache-Control: no-cache` +
+// `X-Accel-Buffering: no` so Cloud Run / Next.js don't buffer.
+export async function streamDoxieMessage({
+  messages,
+  pageContext,
+  signal,
+  onEvent
+}: StreamDoxieMessageOptions): Promise<void> {
+  const body: { messages: DoxieChatMessage[]; page_context?: DoxiePageContext } = {
+    messages
+  };
+  if (pageContext && (pageContext.path || pageContext.title)) {
+    body.page_context = pageContext;
+  }
+
+  const url = `${resolveApiBaseUrl()}/api/v1/chatbot/messages/stream`;
+  const response = await fetch(url, {
+    method: "POST",
+    credentials: "include",
+    headers: {
+      "Content-Type": "application/json",
+      Accept: "text/event-stream"
+    },
+    body: JSON.stringify(body),
+    signal
+  });
+
+  if (!response.ok) {
+    const text = await response.text();
+    let detail = text;
+    try {
+      const parsed = JSON.parse(text) as unknown;
+      if (
+        parsed &&
+        typeof parsed === "object" &&
+        "detail" in parsed &&
+        typeof (parsed as { detail: unknown }).detail === "string"
+      ) {
+        detail = (parsed as { detail: string }).detail;
+      }
+    } catch {
+      // Non-JSON body — fall back to raw text.
+    }
+    throw new ApiError(response.status, detail);
+  }
+
+  if (!response.body) {
+    throw new ApiError(0, "Doxie stream returned no body.");
+  }
+
+  const reader = response.body.getReader();
+  const decoder = new TextDecoder("utf-8");
+  // Buffer carries incomplete chunks across reads — SSE events can be
+  // split arbitrarily across TCP segments.
+  let buffer = "";
+
+  function dispatchBuffered(): void {
+    // Process every complete event (blank-line terminated) in the buffer.
+    // Anything after the last delimiter is a partial event for the next
+    // read to complete.
+    let separatorIdx = buffer.indexOf("\n\n");
+    while (separatorIdx !== -1) {
+      const rawEvent = buffer.slice(0, separatorIdx);
+      buffer = buffer.slice(separatorIdx + 2);
+      separatorIdx = buffer.indexOf("\n\n");
+
+      const dataLines: string[] = [];
+      for (const line of rawEvent.split("\n")) {
+        if (line.startsWith("data:")) {
+          dataLines.push(line.slice(5).trimStart());
+        }
+        // Ignore comment lines (": keep-alive") and event-type lines —
+        // the BE only emits `data:` events.
+      }
+      if (dataLines.length === 0) continue;
+      const payload = dataLines.join("\n");
+      try {
+        const event = JSON.parse(payload) as DoxieStreamEvent;
+        onEvent(event);
+      } catch {
+        // A malformed event shouldn't kill the stream; skip and continue.
+      }
+    }
+  }
+
+  while (true) {
+    const { done, value } = await reader.read();
+    if (done) break;
+    buffer += decoder.decode(value, { stream: true });
+    dispatchBuffered();
+  }
+  // Flush any final bytes left in the decoder + dispatch any trailing
+  // complete events (rare — the BE always terminates with a blank line).
+  buffer += decoder.decode();
+  dispatchBuffered();
 }

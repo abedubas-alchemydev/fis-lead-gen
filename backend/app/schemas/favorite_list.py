@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from datetime import datetime
+from typing import Literal
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 
@@ -24,12 +25,29 @@ class FavoriteListResponse(BaseModel):
 
 
 class FavoriteListItemResponse(BaseModel):
-    """One row in ``GET /api/v1/favorite-lists/{list_id}/items``."""
+    """One row in ``GET /api/v1/favorite-lists/{list_id}/items``.
+
+    Polymorphic shape across four entity types: broker_dealer, advisor,
+    institutional_investor, reporting_owner (Form 4 insider). Each row
+    sets exactly one id/name pair matching its ``entity_type``
+    discriminator; the other pairs are ``None``. Keeping legacy field
+    names populated preserves backwards compatibility with the FE
+    contracts shipped before each entity type landed.
+    """
 
     model_config = ConfigDict(from_attributes=True)
 
-    broker_dealer_id: int
-    broker_dealer_name: str
+    entity_type: Literal[
+        "broker_dealer", "advisor", "institutional_investor", "reporting_owner"
+    ]
+    broker_dealer_id: int | None = None
+    broker_dealer_name: str | None = None
+    advisor_id: int | None = None
+    advisor_name: str | None = None
+    institutional_investor_id: int | None = None
+    institutional_investor_name: str | None = None
+    reporting_owner_id: int | None = None
+    reporting_owner_name: str | None = None
     added_at: datetime
 
 
@@ -104,6 +122,106 @@ class FavoriteListItemBatchResponse(BaseModel):
     added: int
     skipped_existing: int
     skipped_unknown: list[int]
+
+
+class FavoriteListAdvisorItemCreate(BaseModel):
+    """Request body for ``POST /api/v1/favorite-lists/{list_id}/advisor-items``."""
+
+    advisor_id: int = Field(ge=1)
+
+
+class FavoriteListAdvisorItemBatchCreate(BaseModel):
+    """Request body for ``POST /api/v1/favorite-lists/{list_id}/advisor-items/batch``."""
+
+    advisor_ids: list[int] = Field(min_length=1, max_length=200)
+
+    @field_validator("advisor_ids")
+    @classmethod
+    def _dedupe_and_validate(cls, value: list[int]) -> list[int]:
+        deduped = list(dict.fromkeys(value))
+        for advisor_id in deduped:
+            if advisor_id < 1:
+                raise ValueError("advisor_ids must be positive integers")
+        return deduped
+
+
+class FavoriteListAdvisorItemResponse(BaseModel):
+    """Response shape for single-advisor add to a favorite list."""
+
+    model_config = ConfigDict(from_attributes=True)
+
+    advisor_id: int
+    advisor_name: str
+    added_at: datetime
+
+
+class FavoriteListInvestorItemCreate(BaseModel):
+    """Request body for ``POST /api/v1/favorite-lists/{list_id}/investor-items``."""
+
+    institutional_investor_id: int = Field(ge=1)
+
+
+class FavoriteListInvestorItemBatchCreate(BaseModel):
+    """Request body for ``POST /api/v1/favorite-lists/{list_id}/investor-items/batch``."""
+
+    institutional_investor_ids: list[int] = Field(min_length=1, max_length=200)
+
+    @field_validator("institutional_investor_ids")
+    @classmethod
+    def _dedupe_and_validate(cls, value: list[int]) -> list[int]:
+        deduped = list(dict.fromkeys(value))
+        for investor_id in deduped:
+            if investor_id < 1:
+                raise ValueError(
+                    "institutional_investor_ids must be positive integers"
+                )
+        return deduped
+
+
+class FavoriteListInvestorItemResponse(BaseModel):
+    """Response shape for single-investor add to a favorite list."""
+
+    model_config = ConfigDict(from_attributes=True)
+
+    institutional_investor_id: int
+    institutional_investor_name: str
+    added_at: datetime
+
+
+class FavoriteListReportingOwnerItemCreate(BaseModel):
+    """Body for ``POST /api/v1/favorite-lists/{list_id}/reporting-owner-items``.
+
+    Identified by CIK (string) rather than a surrogate id: the /investors
+    feed only carries the reporting owner's CIK, and the
+    ``reporting_owners`` row is lazy-created on first favorite. The server
+    resolves the canonical (most-recent) name from Form 4 history, so no
+    client-supplied name is trusted.
+    """
+
+    cik: str = Field(min_length=1, max_length=16)
+
+    @field_validator("cik")
+    @classmethod
+    def _strip(cls, v: str) -> str:
+        stripped = v.strip()
+        if not stripped:
+            raise ValueError("cik must not be blank")
+        return stripped
+
+
+class FavoriteListReportingOwnerItemResponse(BaseModel):
+    """Response shape for single reporting-owner add to a favorite list.
+
+    ``reporting_owner_id`` is the surrogate id resolved (or freshly
+    created) for the posted CIK; the FE keeps it so subsequent toggles can
+    DELETE by id without another CIK round-trip.
+    """
+
+    model_config = ConfigDict(from_attributes=True)
+
+    reporting_owner_id: int
+    reporting_owner_name: str
+    added_at: datetime
 
 
 class FavoriteListWithMembership(FavoriteListResponse):

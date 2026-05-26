@@ -317,6 +317,66 @@ async def test_is_favorited_returns_true_with_created_at() -> None:
         await _cleanup([user_id], [bd_id])
 
 
+async def test_is_favorited_true_when_only_on_custom_list() -> None:
+    """A firm on a non-default list still counts as favorited.
+
+    Regression for the heart-icon bug: previously ``is_favorited`` only checked
+    the user's default list, so adding a firm through the picker's "+ New list"
+    flow (which never touches the default list) left the heart empty even
+    though the firm was clearly favorited. The function now checks every list
+    the user owns.
+    """
+    user_id = await _make_user()
+    bd_id = await _make_broker_dealer()
+    try:
+        async with SessionLocal() as session:
+            custom = FavoriteList(
+                user_id=user_id, name="Test Adviso List", is_default=False
+            )
+            session.add(custom)
+            await session.flush()
+            session.add(
+                FavoriteListItem(list_id=custom.id, broker_dealer_id=bd_id)
+            )
+            await session.commit()
+
+        async with SessionLocal() as session:
+            favorited, favorited_at = await is_favorited(session, user_id, bd_id)
+
+        assert favorited is True
+        assert isinstance(favorited_at, datetime)
+    finally:
+        await _cleanup([user_id], [bd_id])
+
+
+async def test_is_favorited_returns_earliest_timestamp_across_lists() -> None:
+    """``favorited_at`` is the earliest add across all of the user's lists."""
+    user_id = await _make_user()
+    bd_id = await _make_broker_dealer()
+    try:
+        # Default list (oldest add) + a later custom list — favorited_at
+        # should track the default-list add, not the later custom one.
+        async with SessionLocal() as session:
+            await add_favorite(session, user_id, bd_id)
+        earliest = (await _default_list_items(user_id))[0].created_at
+
+        async with SessionLocal() as session:
+            custom = FavoriteList(user_id=user_id, name="Later list")
+            session.add(custom)
+            await session.flush()
+            session.add(
+                FavoriteListItem(list_id=custom.id, broker_dealer_id=bd_id)
+            )
+            await session.commit()
+
+        async with SessionLocal() as session:
+            _, favorited_at = await is_favorited(session, user_id, bd_id)
+
+        assert favorited_at == earliest
+    finally:
+        await _cleanup([user_id], [bd_id])
+
+
 async def test_list_favorites_pagination() -> None:
     user_id = await _make_user()
     bd_ids = [await _make_broker_dealer(name=f"BD-{i}") for i in range(5)]

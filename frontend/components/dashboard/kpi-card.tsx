@@ -82,7 +82,7 @@ export function KpiCard({
       ? "bg-emerald-500/12 text-emerald-500"
       : trend?.direction === "down"
         ? "bg-red-500/12 text-red-500"
-        : "bg-white/5 text-slate-400";
+        : "bg-[var(--surface-2,#f1f6fd)] text-[var(--text-muted,#94a3b8)]";
 
   const content = (
     // .kpi: bg var(--surface), 1px border var(--border), 16px radius, 20px

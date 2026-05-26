@@ -298,12 +298,13 @@ async def is_favorited(
     user_id: str,
     bd_id: int,
 ) -> tuple[bool, datetime | None]:
-    """Check whether the user has favorited this broker-dealer.
+    """Check whether the user has favorited this broker-dealer on any list.
 
-    Returns ``(False, None)`` when the user has no default list yet, or when
-    the firm isn't pinned to it. The profile endpoint uses this to stamp
-    ``is_favorited`` + ``favorited_at`` onto the response so the heart toggle
-    renders in the correct state on first paint.
+    Returns ``(True, earliest_created_at)`` when the firm appears on at least
+    one of the user's favorite lists (default OR custom); ``(False, None)``
+    otherwise. The profile endpoint uses this to stamp ``is_favorited`` +
+    ``favorited_at`` onto the response so the heart icon paints correctly on
+    first render — see the FE picker comment on any-list semantics.
 
     Args:
         db: Async DB session.
@@ -311,20 +312,55 @@ async def is_favorited(
         bd_id: Broker-dealer primary key.
 
     Returns:
-        ``(is_favorited, favorited_at)``: ``(True, datetime)`` when the firm
-        is on the user's default list; ``(False, None)`` otherwise.
+        ``(is_favorited, favorited_at)``: ``(True, datetime)`` when the firm is
+        on at least one of the user's lists, with ``favorited_at`` set to the
+        earliest add timestamp across those lists; ``(False, None)`` otherwise.
     """
-    list_id = await _get_default_list_id(db, user_id)
-    if list_id is None:
-        return False, None
-    stmt = select(FavoriteListItem.created_at).where(
-        FavoriteListItem.list_id == list_id,
-        FavoriteListItem.broker_dealer_id == bd_id,
+    stmt = (
+        select(func.min(FavoriteListItem.created_at))
+        .select_from(FavoriteListItem)
+        .join(FavoriteList, FavoriteList.id == FavoriteListItem.list_id)
+        .where(
+            FavoriteList.user_id == user_id,
+            FavoriteListItem.broker_dealer_id == bd_id,
+        )
     )
     created_at = (await db.execute(stmt)).scalar_one_or_none()
     if created_at is None:
         return False, None
     return True, created_at
+
+
+async def is_advisor_favorited(
+    db: AsyncSession,
+    user_id: str,
+    advisor_id: int,
+) -> bool:
+    """Check whether the user has favorited this investment advisor on any list.
+
+    Advisor analogue of ``is_favorited`` — same any-list semantics, keyed on
+    ``FavoriteListItem.advisor_id``. The advisor profile response carries only a
+    boolean (no ``favorited_at``), so this returns ``bool`` rather than the
+    ``(bool, datetime)`` tuple.
+
+    Args:
+        db: Async DB session.
+        user_id: BetterAuth user id.
+        advisor_id: Investment-advisor primary key.
+
+    Returns:
+        ``True`` when the advisor is on at least one of the user's lists.
+    """
+    stmt = (
+        select(FavoriteListItem.id)
+        .join(FavoriteList, FavoriteList.id == FavoriteListItem.list_id)
+        .where(
+            FavoriteList.user_id == user_id,
+            FavoriteListItem.advisor_id == advisor_id,
+        )
+        .limit(1)
+    )
+    return (await db.execute(stmt)).scalar_one_or_none() is not None
 
 
 def _bd_to_summary(broker_dealer: BrokerDealer) -> dict[str, object]:

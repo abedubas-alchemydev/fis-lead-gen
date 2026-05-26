@@ -14,12 +14,21 @@ import { createPortal } from "react-dom";
 import { useToast } from "@/components/ui/use-toast";
 import {
   ApiError,
+  addAdvisorToList,
   addFirmToList,
+  addReportingOwnerToList,
   createFavoriteList,
+  getListsForAdvisor,
   getListsForFirm,
+  getListsForReportingOwner,
+  removeAdvisorFromList,
   removeFirmFromList,
+  removeReportingOwnerFromList,
 } from "@/lib/api";
-import type { FavoriteListWithMembership } from "@/types/favorite-list";
+import type {
+  FavoriteListEntityType,
+  FavoriteListWithMembership,
+} from "@/types/favorite-list";
 
 const MAX_NEW_LIST_NAME_LENGTH = 80;
 
@@ -38,31 +47,87 @@ const MAX_NEW_LIST_NAME_LENGTH = 80;
 //     to open + one click to toggle the default checkbox.
 //   - Outside-click closes (mousedown handler — same pattern as
 //     multi-select-filter.tsx)
-//   - For variant="detail", the trigger heart fills based on the
-//     default list's `is_member` once the picker has fetched, with
-//     `initialDefaultMember` as a pre-fetch seed so the heart isn't
+//   - For variant="detail"/"row-heart", the trigger heart fills when
+//     the firm appears on ANY of the user's lists (default OR custom),
+//     with `initialFavorited` as a pre-fetch seed so the heart isn't
 //     misleading on first paint.
 //
 // IDs are integers (FavoriteList.id: number) — see the comment in
 // frontend/types/favorite-list.ts.
 
-export type ListPickerVariant = "row" | "detail";
+export type ListPickerVariant = "row" | "detail" | "row-heart";
 
 export interface ListPickerProps {
+  // The id of the entity the picker is saving. Combined with
+  // ``entityType`` it routes to the right BE endpoint. Pre-existing call
+  // sites that pass only ``firmId`` keep working — entityType defaults to
+  // "broker_dealer". For entityType="reporting_owner" this is the
+  // reporting_owners surrogate id, which may be 0 until the insider is
+  // first favorited — use ``reportingOwnerCik`` for the add path.
   firmId: number;
   variant: ListPickerVariant;
-  // Seeds the heart fill on variant="detail" before the picker has
-  // fetched. Read from BrokerDealerProfileResponse.is_favorited which
-  // mirrors default-list membership for the legacy single-favorite
-  // surface. Ignored on variant="row".
-  initialDefaultMember?: boolean;
+  // Discriminates the four favoritable entity types. Defaults to
+  // "broker_dealer" so master-list / firm-detail callers don't change.
+  entityType?: FavoriteListEntityType;
+  // Reporting-owner (insider) CIK. Required when
+  // entityType="reporting_owner": the membership lookup and the add path
+  // key on CIK because the surrogate id is lazy-created on first favorite.
+  reportingOwnerCik?: string;
+  // Seeds the heart fill on variant="detail"/"row-heart" before the
+  // picker has fetched, mirroring any-list membership. Ignored on
+  // variant="row" (the Save pill has no filled state).
+  initialFavorited?: boolean;
 }
 
 export function ListPicker({
   firmId,
   variant,
-  initialDefaultMember = false,
+  entityType = "broker_dealer",
+  reportingOwnerCik,
+  initialFavorited = false,
 }: ListPickerProps) {
+  // Reporting owners are lazy-created, so a row may not have a surrogate
+  // id until its first favorite. Seed from ``firmId`` and capture the id
+  // the add endpoint resolves so a later un-favorite can DELETE by id. A
+  // ref (not state) keeps the toggle callbacks free of stale closures.
+  const reportingOwnerIdRef = useRef(firmId);
+  useEffect(() => {
+    if (firmId) reportingOwnerIdRef.current = firmId;
+  }, [firmId]);
+
+  const fetchLists = useCallback(
+    () =>
+      entityType === "reporting_owner"
+        ? getListsForReportingOwner(reportingOwnerCik ?? "")
+        : entityType === "advisor"
+          ? getListsForAdvisor(firmId)
+          : getListsForFirm(firmId),
+    [entityType, firmId, reportingOwnerCik],
+  );
+  const addToList = useCallback(
+    async (listId: number) => {
+      if (entityType === "reporting_owner") {
+        const res = await addReportingOwnerToList(listId, reportingOwnerCik ?? "");
+        reportingOwnerIdRef.current = res.reporting_owner_id;
+        return;
+      }
+      if (entityType === "advisor") {
+        await addAdvisorToList(listId, firmId);
+        return;
+      }
+      await addFirmToList(listId, firmId);
+    },
+    [entityType, firmId, reportingOwnerCik],
+  );
+  const removeFromList = useCallback(
+    (listId: number) =>
+      entityType === "reporting_owner"
+        ? removeReportingOwnerFromList(listId, reportingOwnerIdRef.current)
+        : entityType === "advisor"
+          ? removeAdvisorFromList(listId, firmId)
+          : removeFirmFromList(listId, firmId),
+    [entityType, firmId],
+  );
   const [open, setOpen] = useState(false);
   const [lists, setLists] = useState<FavoriteListWithMembership[] | null>(null);
   const [fetchError, setFetchError] = useState<string | null>(null);
@@ -105,7 +170,7 @@ export function ListPicker({
     if (!trigger) return;
     const rect = trigger.getBoundingClientRect();
     const top = rect.bottom + 8; // matches the prior `mt-2` spacing
-    if (variant === "row") {
+    if (variant === "row" || variant === "row-heart") {
       // Anchor popover's right edge to trigger's right edge — keeps the
       // 18rem-wide panel from drifting off the viewport's right side.
       setPosition({ top, right: window.innerWidth - rect.right });
@@ -157,7 +222,7 @@ export function ListPicker({
     let active = true;
 
     setFetchError(null);
-    getListsForFirm(firmId)
+    fetchLists()
       .then((data) => {
         if (!active || controller.signal.aborted) return;
         // Sort: default first, then by created_at asc — same ordering
@@ -179,15 +244,16 @@ export function ListPicker({
       active = false;
       controller.abort();
     };
-  }, [open, lists, firmId]);
+  }, [open, lists, fetchLists]);
 
-  // Default-list membership drives the trigger's filled-heart state on
-  // variant="detail". Falls back to the seed before the first fetch.
-  const defaultIsMember = useMemo(() => {
-    if (lists === null) return initialDefaultMember;
-    const def = lists.find((l) => l.is_default);
-    return def ? def.is_member : initialDefaultMember;
-  }, [lists, initialDefaultMember]);
+  // Any-list membership drives the trigger's filled-heart state on
+  // variant="detail" / "row-heart" — a firm pinned to any of the user's
+  // lists (default OR custom) reads as "favorited" overall. Falls back
+  // to the seed before the first fetch.
+  const isFavorited = useMemo(() => {
+    if (lists === null) return initialFavorited;
+    return lists.some((l) => l.is_member);
+  }, [lists, initialFavorited]);
 
   const handleToggle = useCallback(
     async (list: FavoriteListWithMembership) => {
@@ -216,9 +282,9 @@ export function ListPicker({
 
       try {
         if (next) {
-          await addFirmToList(list.id, firmId);
+          await addToList(list.id);
         } else {
-          await removeFirmFromList(list.id, firmId);
+          await removeFromList(list.id);
         }
       } catch (err: unknown) {
         // Revert
@@ -248,7 +314,7 @@ export function ListPicker({
         });
       }
     },
-    [firmId, pendingIds, toast],
+    [addToList, removeFromList, pendingIds, toast],
   );
 
   // Auto-focus the input the moment the inline form expands.
@@ -302,7 +368,7 @@ export function ListPicker({
         // so the user can retry the membership manually.
         let isMember = false;
         try {
-          await addFirmToList(created.id, firmId);
+          await addToList(created.id);
           isMember = true;
         } catch (err) {
           const message =
@@ -335,17 +401,17 @@ export function ListPicker({
         setNewListSubmitting(false);
       }
     },
-    [firmId, newListSubmitting, newListValue, toast],
+    [addToList, newListSubmitting, newListValue, toast],
   );
 
   const triggerLabel = useMemo(() => {
-    if (variant === "detail") {
-      return defaultIsMember
+    if (variant === "detail" || variant === "row-heart") {
+      return isFavorited
         ? "Open favorite-list picker (favorited)"
         : "Open favorite-list picker";
     }
     return "Save to a list";
-  }, [variant, defaultIsMember]);
+  }, [variant, isFavorited]);
 
   const popoverPanel =
     open && position ? (
@@ -516,7 +582,18 @@ export function ListPicker({
         <DetailTrigger
           open={open}
           onClick={togglePicker}
-          favorited={defaultIsMember}
+          favorited={isFavorited}
+          ariaLabel={triggerLabel}
+        />
+      ) : variant === "row-heart" ? (
+        <RowHeartTrigger
+          open={open}
+          onClick={(e) => {
+            e.preventDefault();
+            e.stopPropagation();
+            togglePicker();
+          }}
+          favorited={isFavorited}
           ariaLabel={triggerLabel}
         />
       ) : (
@@ -604,6 +681,46 @@ function RowTrigger({
       <Heart className="h-3 w-3" strokeWidth={2.5} aria-hidden />
       Save
       <ChevronDown className="h-3 w-3" strokeWidth={2.5} aria-hidden />
+    </button>
+  );
+}
+
+// Compact heart trigger for feed-style rows (e.g. /investors, which has
+// no row checkboxes). Like DetailTrigger but sized to sit inline next to
+// a row's action buttons; the fill follows ``favorited`` so an insider's
+// saved state reads at a glance. stopPropagation guards against any
+// row-level click handler swallowing the toggle.
+function RowHeartTrigger({
+  open,
+  onClick,
+  favorited,
+  ariaLabel,
+}: {
+  open: boolean;
+  onClick: (event: React.MouseEvent<HTMLButtonElement>) => void;
+  favorited: boolean;
+  ariaLabel: string;
+}) {
+  return (
+    <button
+      type="button"
+      onClick={onClick}
+      aria-haspopup="dialog"
+      aria-expanded={open}
+      aria-label={ariaLabel}
+      title={ariaLabel}
+      className={`inline-flex h-7 w-7 items-center justify-center rounded-full border transition ${
+        favorited
+          ? "border-red-200 bg-red-500/15 text-red-500 hover:bg-red-500/20"
+          : "border-[var(--border-2,rgba(30,64,175,0.16))] bg-[var(--surface,#ffffff)] text-[var(--text-dim,#475569)] hover:bg-[var(--surface-2,#f1f6fd)] hover:text-[var(--text,#0f172a)]"
+      }`}
+    >
+      <Heart
+        className="h-4 w-4"
+        strokeWidth={2}
+        fill={favorited ? "currentColor" : "none"}
+        aria-hidden
+      />
     </button>
   );
 }

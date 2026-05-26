@@ -64,7 +64,7 @@ export function PipelinesAdminClient() {
         />
         <PipelineTriggerCard
           pipelineName="Initial Load"
-          cadence="Weekly · Sunday 06:00 UTC"
+          cadence="Daily · 06:00 UTC"
           eta="15–30 minutes"
           description="Fetches newly-registered broker-dealers from FINRA so they show up in master list and the email-extractor flow."
           runAction={runInitialLoad}

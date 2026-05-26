@@ -1,18 +1,26 @@
 "use client";
 
+import Link from "next/link";
 import { useCallback, useEffect, useRef, useState } from "react";
 
 import {
   ApiError,
   deleteVaultFile,
   deleteVaultFolder,
+  getLinkedProviders,
   listVaultFiles,
   listVaultFolders,
   retryVaultFile,
   updateVaultFolder
 } from "@/lib/api";
-import type { VaultFolder, VaultFolderFile } from "@/lib/types";
+import type {
+  EmailProviderId,
+  LinkedProviderItem,
+  VaultFolder,
+  VaultFolderFile
+} from "@/lib/types";
 
+import { ExpandableTextarea } from "./expandable-textarea";
 import { VaultFileRow } from "./vault-file-row";
 import { VaultFileUploader } from "./vault-file-uploader";
 import { VaultInstructionsEditor } from "./vault-instructions-editor";
@@ -131,7 +139,7 @@ export function VaultFolderDetail({ folderId }: { folderId: number }) {
 
   if (loading) {
     return (
-      <div className="rounded-[30px] border border-white/80 bg-white/88 p-10 text-sm text-slate-500 shadow-shell backdrop-blur">
+      <div className="rounded-[30px] border border-[var(--border,rgba(30,64,175,0.1))] bg-[var(--surface,#ffffff)]/95 p-10 text-sm text-[var(--text-muted,#94a3b8)] shadow-shell backdrop-blur">
         Loading service...
       </div>
     );
@@ -142,9 +150,9 @@ export function VaultFolderDetail({ folderId }: { folderId: number }) {
       <div className="rounded-[30px] border border-red-200 bg-red-50/80 p-6 text-sm text-danger shadow-shell">
         {loadError ?? "Could not load this service."}
         <p className="mt-3">
-          <a href="/vault" className="font-medium text-blue underline-offset-4 hover:underline">
+          <Link href="/vault" className="font-medium text-[var(--accent,#6366f1)] underline-offset-4 hover:underline">
             Back to Vault
-          </a>
+          </Link>
         </p>
       </div>
     );
@@ -162,14 +170,14 @@ export function VaultFolderDetail({ folderId }: { folderId: number }) {
         }}
       />
 
-      <section className="rounded-2xl border border-slate-200 bg-white p-5 shadow-sm">
+      <section className="rounded-2xl border border-[var(--border,rgba(30,64,175,0.1))] bg-[var(--surface,#ffffff)] p-5 shadow-sm">
         <header className="flex items-center justify-between">
-          <h2 className="text-sm font-semibold text-navy">Reference files</h2>
-          <p className="text-[11px] uppercase tracking-[0.18em] text-slate-500">
+          <h2 className="text-sm font-semibold text-[var(--text,#0f172a)]">Reference files</h2>
+          <p className="text-[11px] uppercase tracking-[0.18em] text-[var(--text-muted,#94a3b8)]">
             {files.length} / 20
           </p>
         </header>
-        <p className="mt-1 text-xs leading-5 text-slate-500">
+        <p className="mt-1 text-xs leading-5 text-[var(--text-muted,#94a3b8)]">
           Uploaded files are extracted, chunked, and embedded so the Outreach
           AI can pull the most relevant passages into each draft.
           PDF, DOCX, PPTX, XLSX, TXT, MD, RTF, CSV, HTML, JSON. Up to 10 MB
@@ -185,7 +193,7 @@ export function VaultFolderDetail({ folderId }: { folderId: number }) {
         </div>
 
         {files.length === 0 ? (
-          <p className="mt-5 text-xs italic text-slate-400">
+          <p className="mt-5 text-xs italic text-[var(--text-muted,#94a3b8)]">
             No files attached yet — drafts will fall back to the description
             + instructions only.
           </p>
@@ -208,6 +216,12 @@ export function VaultFolderDetail({ folderId }: { folderId: number }) {
   );
 }
 
+const PROVIDER_LABEL: Record<EmailProviderId, string> = {
+  google: "Gmail",
+  microsoft: "Outlook",
+  yahoo: "Yahoo Mail"
+};
+
 function FolderEditor({
   folder,
   onSaved,
@@ -220,6 +234,12 @@ function FolderEditor({
   const [name, setName] = useState(folder.name);
   const [description, setDescription] = useState(folder.description);
   const [instructions, setInstructions] = useState(folder.outreach_instructions);
+  const [defaultSenderAccountId, setDefaultSenderAccountId] = useState<
+    string | null
+  >(folder.default_sender_account_id);
+  const [linkedProviders, setLinkedProviders] = useState<LinkedProviderItem[]>(
+    []
+  );
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [savedAt, setSavedAt] = useState<number | null>(null);
@@ -232,12 +252,39 @@ function FolderEditor({
     setName(folder.name);
     setDescription(folder.description);
     setInstructions(folder.outreach_instructions);
-  }, [folder.id, folder.name, folder.description, folder.outreach_instructions]);
+    setDefaultSenderAccountId(folder.default_sender_account_id);
+  }, [
+    folder.id,
+    folder.name,
+    folder.description,
+    folder.outreach_instructions,
+    folder.default_sender_account_id
+  ]);
+
+  // Lazy load linked accounts so the dropdown is populated. Failure is
+  // non-fatal -- the picker just shows "None" until the user retries
+  // by reopening the page.
+  useEffect(() => {
+    let cancelled = false;
+    (async () => {
+      try {
+        const result = await getLinkedProviders();
+        if (cancelled) return;
+        setLinkedProviders(result.items);
+      } catch {
+        // No-op: the rest of the editor still works without a picker.
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, []);
 
   const dirty =
     name !== folder.name ||
     description !== folder.description ||
-    instructions !== folder.outreach_instructions;
+    instructions !== folder.outreach_instructions ||
+    defaultSenderAccountId !== folder.default_sender_account_id;
 
   async function handleSave() {
     if (!dirty || saving) return;
@@ -247,7 +294,8 @@ function FolderEditor({
       const updated = await updateVaultFolder(folder.id, {
         name: name.trim(),
         description,
-        outreach_instructions: instructions
+        outreach_instructions: instructions,
+        default_sender_account_id: defaultSenderAccountId
       });
       onSaved(updated);
       setSavedAt(Date.now());
@@ -271,38 +319,52 @@ function FolderEditor({
   }
 
   return (
-    <section className="rounded-2xl border border-slate-200 bg-white p-5 shadow-sm">
+    <section className="rounded-2xl border border-[var(--border,rgba(30,64,175,0.1))] bg-[var(--surface,#ffffff)] p-5 shadow-sm">
       <div className="space-y-4">
-        <label className="block text-xs font-medium uppercase tracking-[0.18em] text-slate-500">
+        <label className="block text-xs font-medium uppercase tracking-[0.18em] text-[var(--text-muted,#94a3b8)]">
           Service name
           <input
             type="text"
             value={name}
             onChange={(event) => setName(event.target.value)}
             maxLength={NAME_MAX}
-            className="mt-2 block w-full rounded-xl border border-slate-200 bg-white px-3 py-2 text-sm text-navy outline-none transition focus:border-blue focus:ring-2 focus:ring-blue/20"
+            className="mt-2 block w-full rounded-xl border border-[var(--border,rgba(30,64,175,0.1))] bg-[var(--surface,#ffffff)] px-3 py-2 text-sm text-[var(--text,#0f172a)] outline-none transition focus:border-[var(--accent,#6366f1)] focus:ring-2 focus:ring-[var(--accent,#6366f1)]/20"
           />
         </label>
-        <label className="block text-xs font-medium uppercase tracking-[0.18em] text-slate-500">
-          Description
-          <textarea
-            value={description}
-            onChange={(event) => setDescription(event.target.value)}
-            maxLength={DESCRIPTION_MAX}
-            rows={5}
-            placeholder="What you offer, your differentiators, typical client profile..."
-            className="mt-2 block w-full rounded-xl border border-slate-200 bg-white px-3 py-2 text-sm leading-6 text-navy outline-none transition focus:border-blue focus:ring-2 focus:ring-blue/20"
-          />
-          <span className="mt-1 block text-[11px] text-slate-400">
-            {description.length.toLocaleString()} / {DESCRIPTION_MAX.toLocaleString()}{" "}
-            characters
-          </span>
-        </label>
+        <ExpandableTextarea
+          label="Description"
+          value={description}
+          onChange={setDescription}
+          maxLength={DESCRIPTION_MAX}
+          placeholder="What you offer, your differentiators, typical client profile..."
+        />
         <VaultInstructionsEditor
           value={instructions}
           onChange={setInstructions}
           maxLength={INSTRUCTIONS_MAX}
         />
+        <label className="block text-xs font-medium uppercase tracking-[0.18em] text-[var(--text-muted,#94a3b8)]">
+          Default sender for this service
+          <select
+            value={defaultSenderAccountId ?? ""}
+            onChange={(event) =>
+              setDefaultSenderAccountId(event.target.value || null)
+            }
+            className="mt-2 block w-full rounded-xl border border-[var(--border,rgba(30,64,175,0.1))] bg-[var(--surface,#ffffff)] px-3 py-2 text-sm text-[var(--text,#0f172a)] outline-none transition focus:border-[var(--accent,#6366f1)] focus:ring-2 focus:ring-[var(--accent,#6366f1)]/20"
+          >
+            <option value="">None (use first available)</option>
+            {linkedProviders.map((p) => (
+              <option key={p.account_id} value={p.account_id}>
+                {p.email_address ?? `${PROVIDER_LABEL[p.provider]} account`}{" "}
+                ({PROVIDER_LABEL[p.provider]})
+              </option>
+            ))}
+          </select>
+          <p className="mt-1 text-[11px] leading-4 text-[var(--text-muted,#94a3b8)]">
+            Outreach for this service preselects this address. Users can
+            override per-send.
+          </p>
+        </label>
       </div>
 
       {error ? (
@@ -319,7 +381,7 @@ function FolderEditor({
               type="button"
               onClick={() => setConfirmDelete(false)}
               disabled={deleting}
-              className="font-medium text-slate-600 underline-offset-4 hover:underline"
+              className="font-medium text-[var(--text-dim,#475569)] underline-offset-4 hover:underline"
             >
               Cancel
             </button>
@@ -336,7 +398,7 @@ function FolderEditor({
           <button
             type="button"
             onClick={() => setConfirmDelete(true)}
-            className="text-xs font-medium text-slate-500 underline-offset-4 transition hover:text-danger hover:underline"
+            className="text-xs font-medium text-[var(--text-muted,#94a3b8)] underline-offset-4 transition hover:text-danger hover:underline"
           >
             Delete service
           </button>
@@ -350,7 +412,7 @@ function FolderEditor({
             type="button"
             onClick={() => void handleSave()}
             disabled={!dirty || saving || !name.trim()}
-            className="inline-flex h-10 items-center rounded-xl bg-navy px-4 text-sm font-semibold text-white shadow-lg shadow-navy/15 transition hover:bg-[#112b54] disabled:cursor-not-allowed disabled:opacity-60"
+            className="inline-flex h-10 items-center rounded-xl bg-[var(--accent,#6366f1)] px-4 text-sm font-semibold text-white shadow-lg shadow-[var(--accent,#6366f1)]/20 transition hover:bg-[var(--accent-2,#8b5cf6)] disabled:cursor-not-allowed disabled:opacity-60"
           >
             {saving ? "Saving..." : "Save changes"}
           </button>

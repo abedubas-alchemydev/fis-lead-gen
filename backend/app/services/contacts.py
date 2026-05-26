@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import logging
+from dataclasses import asdict
 from datetime import datetime, timedelta, timezone
 import re
 
@@ -11,12 +12,27 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.core.config import settings
 from app.models.broker_dealer import BrokerDealer
 from app.models.executive_contact import ExecutiveContact
+from app.services.contact_discovery import pdl
+from app.services.contact_discovery._shared import first_apollo_phone
+from app.services.contact_discovery.base import DiscoveryResult
 
 logger = logging.getLogger(__name__)
 
 
 class ContactEnrichmentUnavailableError(RuntimeError):
     pass
+
+
+class ContactNotFoundError(RuntimeError):
+    pass
+
+
+class NoEmailForLookupError(RuntimeError):
+    """find_phone_for_contact() called on a contact with no email to look up."""
+
+
+class ApolloLookupError(RuntimeError):
+    """Apollo /people/match returned a transient failure (network / 5xx / 429)."""
 
 
 class ExecutiveContactService:
@@ -275,6 +291,105 @@ class ExecutiveContactService:
                 continue
 
         return [], apollo_errored
+
+    async def find_phone_for_contact(
+        self, db: AsyncSession, contact_id: int
+    ) -> ExecutiveContact:
+        """Per-person phone lookup. Tries PDL first, falls back to Apollo.
+
+        Used by the "Find phone" button on the broker-dealer detail page.
+        PDL is the primary path because PR #419's audit showed Apollo
+        ``/people/match`` returns ``phone_numbers=[]`` for 0/105 historical
+        rows on the current plan. PDL returns multi-value phones (mobile +
+        work) which land in the ``phones`` JSONB column; the scalar
+        ``phone`` gets PDL's best single number (mobile if present).
+
+        Apollo runs as a fallback when PDL has no match, no key, or a hard
+        error -- preserving existing behaviour for emails PDL doesn't know.
+        Apollo's transient errors (5xx / network) still raise
+        ``ApolloLookupError`` so the FE shows a 502; PDL errors are silenced
+        and fall through (graceful degradation -- a flaky upstream shouldn't
+        break the per-row button).
+
+        Never regresses an existing non-null phone. Never overwrites
+        name / title / company / linkedin (which may come from higher-trust
+        sources like FOCUS PDF).
+        """
+        contact = await db.get(ExecutiveContact, contact_id)
+        if contact is None:
+            raise ContactNotFoundError(f"contact {contact_id} not found")
+        if not contact.email:
+            raise NoEmailForLookupError("contact has no email to look up")
+
+        if not settings.pdl_api_key and not settings.apollo_api_key:
+            raise ContactEnrichmentUnavailableError(
+                "Contact enrichment is disabled. Set PDL_API_KEY (preferred) "
+                "or APOLLO_API_KEY in the backend .env file."
+            )
+
+        # ── PDL primary ──────────────────────────────────────────────
+        pdl_hit: DiscoveryResult | None = None
+        if settings.pdl_api_key:
+            try:
+                pdl_hit = await pdl.enrich_by_email(contact.email)
+            except Exception as exc:  # noqa: BLE001 -- treat any PDL error as miss + fall through
+                logger.warning("PDL enrich_by_email failed for %s: %s", contact.email, exc)
+
+        if pdl_hit and pdl_hit.phones:
+            contact.phones = [asdict(hit) for hit in pdl_hit.phones]
+            if pdl_hit.phone:
+                contact.phone = pdl_hit.phone
+            contact.enriched_at = datetime.now(timezone.utc)
+            await db.commit()
+            await db.refresh(contact)
+            return contact
+
+        # ── Apollo fallback ──────────────────────────────────────────
+        api_key = settings.apollo_api_key
+        if not api_key:
+            # PDL configured but missed; no Apollo to fall back on. Bump
+            # enriched_at so the UI shows "tried, nothing found" instead of
+            # a stale row.
+            contact.enriched_at = datetime.now(timezone.utc)
+            await db.commit()
+            await db.refresh(contact)
+            return contact
+
+        headers = {
+            "Cache-Control": "no-cache",
+            "Content-Type": "application/json",
+            "X-Api-Key": api_key,
+        }
+        try:
+            async with httpx.AsyncClient(timeout=20) as client:
+                response = await client.post(
+                    self._APOLLO_MATCH_URL,
+                    json={"email": contact.email},
+                    headers=headers,
+                )
+        except httpx.HTTPError as exc:
+            raise ApolloLookupError(f"network: {exc.__class__.__name__}: {exc}") from exc
+
+        if response.status_code != 200:
+            snippet = response.text[:200] if response.text else "(no body)"
+            raise ApolloLookupError(f"http {response.status_code}: {snippet}")
+
+        try:
+            data = response.json()
+        except ValueError as exc:
+            raise ApolloLookupError(f"invalid json: {exc}") from exc
+
+        person = data.get("person") if isinstance(data, dict) else None
+        phone = first_apollo_phone(person.get("phone_numbers")) if isinstance(person, dict) else None
+
+        # Don't regress an existing phone if Apollo had nothing for us.
+        if phone:
+            contact.phone = phone
+        contact.enriched_at = datetime.now(timezone.utc)
+
+        await db.commit()
+        await db.refresh(contact)
+        return contact
 
     @staticmethod
     def _guess_domains(company_name: str) -> list[str]:

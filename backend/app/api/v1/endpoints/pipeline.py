@@ -32,6 +32,7 @@ from app.services.cloud_run_client import (
 )
 from app.services.deficiency_watcher import DeficiencyWatcherService
 from app.services.filing_monitor import FilingMonitorService
+from app.services.form4_watcher import Form4WatcherService
 from app.services.pipeline import ClearingPipelineService
 from app.services.registration_watcher import RegistrationWatcherService
 
@@ -46,6 +47,7 @@ pipeline_service = ClearingPipelineService()
 filing_monitor_service = FilingMonitorService()
 registration_watcher_service = RegistrationWatcherService()
 deficiency_watcher_service = DeficiencyWatcherService()
+form4_watcher_service = Form4WatcherService()
 
 
 def _ensure_admin(current_user: AuthenticatedUser) -> None:
@@ -360,6 +362,29 @@ async def run_deficiency_monitor(
     return _trigger_response(run)
 
 
+@scheduled_router.post("/form4-watcher", response_model=PipelineTriggerResponse)
+async def run_form4_watcher(
+    caller: str = Depends(_ensure_admin_or_scheduler_sa),
+    db: AsyncSession = Depends(get_db_session),
+) -> PipelineTriggerResponse:
+    """Trigger the SEC Form 4 (insider transactions) watcher.
+
+    Populates ``form4_transactions`` which backs the Investors tab.
+    Streams the last ``settings.form4_lookback_days`` days of Form 4
+    filings out of EDGAR's full-text search, parses each XML, and
+    upserts one row per (reportingOwner × transaction) pair that
+    clears the $50K value floor.
+
+    Synchronous: typical run is 30-90 seconds (a day's worth of Form 4
+    filings is ~200-500, each costs one index.json + one XML fetch at
+    the 8 req/sec pacing). Well inside Cloud Run's request timeout.
+    """
+    run = await form4_watcher_service.run(
+        db, trigger_source=f"scheduled:{caller}"
+    )
+    return _trigger_response(run)
+
+
 @scheduled_router.post("/populate-all", response_model=PipelineTriggerResponse)
 async def run_populate_all(
     background_tasks: BackgroundTasks,
@@ -424,14 +449,17 @@ async def get_pipeline_run_status(
 
 @scheduled_router.post("/initial-load", response_model=PipelineTriggerResponse)
 async def run_initial_load(
-    background_tasks: BackgroundTasks,
     caller: str = Depends(_ensure_admin_or_scheduler_sa),
     db: AsyncSession = Depends(get_db_session),
 ) -> PipelineTriggerResponse:
     """Trigger the FINRA + SEC EDGAR re-bootstrap.
 
-    Asynchronous: harvest-and-merge runs 15–30 minutes. Same queued-run
-    pattern as ``/populate-all`` so Cloud Scheduler gets a fast 200.
+    Synchronous: the handler awaits the harvest in-process (15–30 min)
+    before returning, mirroring ``filing-monitor``. Cloud Scheduler must
+    use ``--attempt-deadline=1800s``. The earlier ``BackgroundTasks``
+    pattern silently dropped the work on Cloud Run because the request
+    lifecycle ended before the coroutine could run — every prior staging
+    ``initial_load`` run sat ``status='running'`` indefinitely.
     """
     run = await _create_queued_run(
         db,
@@ -439,7 +467,8 @@ async def run_initial_load(
         trigger_source=f"scheduled:{caller}",
         notes="Queued from /pipeline/run/initial-load.",
     )
-    background_tasks.add_task(_run_initial_load_background, run.id, caller)
+    await _run_initial_load_background(run.id, caller)
+    await db.refresh(run)
     return _trigger_response(run)
 
 

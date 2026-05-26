@@ -34,6 +34,7 @@ class Officer(BaseModel):
     position_start: Optional[str] = None           # FINRA stores as MM/YYYY strings
     ownership_code: Optional[str] = None           # e.g. '75% or more', '25% but less than 50%'
     pr: Optional[bool] = None                      # public reporting flag
+    phone: Optional[str] = None                    # rare on BrokerCheck PDFs; non-null when listed
     raw: Optional[str] = None                      # raw paragraph for audit
 
 
@@ -97,6 +98,7 @@ class FirmProfile(BaseModel):
     firm_name: Optional[str] = None
     legal_name: Optional[str] = None
     is_registered: Optional[bool] = None
+    business_phone: Optional[str] = None           # "Business Telephone Number" from Main Office Location
 
     officers: list[Officer] = Field(default_factory=list)
     types_of_business: TypesOfBusiness = Field(default_factory=TypesOfBusiness)

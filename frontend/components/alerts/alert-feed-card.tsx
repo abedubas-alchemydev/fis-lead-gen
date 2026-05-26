@@ -12,14 +12,14 @@ const DOT_STYLE: Record<PriorityKey, string> = {
   critical: "bg-red-500 shadow-[0_0_0_4px_rgba(239,68,68,0.15)]",
   high: "bg-amber-500 shadow-[0_0_0_4px_rgba(245,158,11,0.15)]",
   medium: "bg-blue-500 shadow-[0_0_0_4px_rgba(59,130,246,0.15)]",
-  low: "bg-slate-400 shadow-[0_0_0_4px_rgba(148,163,184,0.15)]"
+  low: "bg-[var(--text-muted,#94a3b8)] shadow-[0_0_0_4px_rgba(148,163,184,0.15)]"
 };
 
 const PILL_STYLE: Record<PriorityKey, string> = {
   critical: "bg-red-500/12 text-red-700 border-red-500/25",
   high: "bg-amber-500/12 text-amber-700 border-amber-500/25",
   medium: "bg-blue-500/12 text-blue-700 border-blue-500/25",
-  low: "bg-slate-100 text-slate-600 border-slate-200"
+  low: "bg-[var(--surface-3,#dbeafe)] text-[var(--text-dim,#475569)] border-[var(--border,rgba(30,64,175,0.1))]"
 };
 
 const PILL_LABEL: Record<PriorityKey, string> = {
@@ -46,11 +46,11 @@ export function AlertFeedCard({
   onMarkRead?: (alertId: number) => void;
 }) {
   return (
-    <article className="rounded-2xl border border-slate-200/70 bg-white p-5 shadow-[0_1px_2px_rgba(15,23,42,0.04),0_4px_14px_rgba(15,23,42,0.05)]">
+    <article className="flex h-full flex-col rounded-2xl border border-[var(--border,rgba(30,64,175,0.1))] bg-[var(--surface,#ffffff)] p-5 shadow-[var(--shadow-card,0_1px_2px_rgba(15,23,42,0.04),0_4px_14px_rgba(15,23,42,0.05))]">
       <div className="mb-4 flex items-start justify-between gap-4">
         <div>
-          <h2 className="text-[15px] font-semibold tracking-[-0.01em] text-slate-900">Activity feed</h2>
-          <p className="mt-0.5 text-xs text-slate-500">Recent filing alerts</p>
+          <h2 className="text-[15px] font-semibold tracking-[-0.01em] text-[var(--text,#0f172a)]">Activity feed</h2>
+          <p className="mt-0.5 text-xs text-[var(--text-muted,#94a3b8)]">Recent filing alerts</p>
         </div>
         <Link
           href="/alerts"
@@ -71,15 +71,15 @@ export function AlertFeedCard({
         {loading ? (
           <div className="space-y-3">
             {Array.from({ length: 4 }).map((_, index) => (
-              <div key={`alert-loading-${index}`} className="border-t border-slate-200/70 py-3.5 first:border-t-0">
-                <div className="h-3 w-32 animate-pulse rounded bg-slate-100" />
-                <div className="mt-2 h-4 w-48 animate-pulse rounded bg-slate-100" />
-                <div className="mt-2 h-3 w-full animate-pulse rounded bg-slate-100" />
+              <div key={`alert-loading-${index}`} className="border-t border-[var(--border,rgba(30,64,175,0.1))] py-3.5 first:border-t-0">
+                <div className="h-3 w-32 animate-pulse rounded bg-[var(--surface-3,#dbeafe)]" />
+                <div className="mt-2 h-4 w-48 animate-pulse rounded bg-[var(--surface-3,#dbeafe)]" />
+                <div className="mt-2 h-3 w-full animate-pulse rounded bg-[var(--surface-3,#dbeafe)]" />
               </div>
             ))}
           </div>
         ) : alerts.length === 0 ? (
-          <div className="rounded-lg border border-dashed border-slate-200 px-4 py-8 text-center text-sm text-slate-500">
+          <div className="rounded-lg border border-dashed border-[var(--border,rgba(30,64,175,0.1))] px-4 py-8 text-center text-sm text-[var(--text-muted,#94a3b8)]">
             No filing alerts have been generated yet.
           </div>
         ) : (
@@ -89,7 +89,7 @@ export function AlertFeedCard({
               return (
                 <div
                   key={alert.id}
-                  className={`flex gap-3 border-t border-slate-200/70 py-3.5 first:border-t-0 ${
+                  className={`flex gap-3 border-t border-[var(--border,rgba(30,64,175,0.1))] py-3.5 first:border-t-0 ${
                     alert.is_read ? "opacity-60" : ""
                   }`}
                 >
@@ -104,20 +104,20 @@ export function AlertFeedCard({
                       >
                         {PILL_LABEL[priority]}
                       </span>
-                      <span className="rounded-full border border-slate-200 bg-slate-100 px-2 py-0.5 font-mono text-[10px] font-semibold uppercase tracking-wide text-slate-600">
+                      <span className="rounded-full border border-[var(--border,rgba(30,64,175,0.1))] bg-[var(--surface-3,#dbeafe)] px-2 py-0.5 font-mono text-[10px] font-semibold uppercase tracking-wide text-[var(--text-dim,#475569)]">
                         {alert.form_type}
                       </span>
-                      <span className="ml-auto text-[11px] text-slate-500">
+                      <span className="ml-auto text-[11px] text-[var(--text-muted,#94a3b8)]">
                         {formatRelativeTime(alert.filed_at)}
                       </span>
                     </div>
                     <Link
                       href={`/master-list/${alert.bd_id}`}
-                      className="mb-1 block text-sm font-semibold text-slate-900 transition hover:text-violet-600"
+                      className="mb-1 block text-sm font-semibold text-[var(--text,#0f172a)] transition hover:text-violet-600"
                     >
                       {alert.firm_name}
                     </Link>
-                    <p className="text-[12.5px] leading-5 text-slate-600">{alert.summary}</p>
+                    <p className="text-[12.5px] leading-5 text-[var(--text-dim,#475569)]">{alert.summary}</p>
                     <div className="mt-2.5 flex gap-2">
                       <Link
                         href={`/master-list/${alert.bd_id}`}
@@ -129,7 +129,7 @@ export function AlertFeedCard({
                         <button
                           type="button"
                           onClick={() => onMarkRead(alert.id)}
-                          className="rounded-md border border-slate-200 bg-transparent px-2.5 py-1 text-[11px] font-semibold text-slate-600 transition hover:bg-slate-50 hover:text-slate-900"
+                          className="rounded-md border border-[var(--border,rgba(30,64,175,0.1))] bg-transparent px-2.5 py-1 text-[11px] font-semibold text-[var(--text-dim,#475569)] transition hover:bg-[var(--surface-2,#f1f6fd)] hover:text-[var(--text,#0f172a)]"
                         >
                           Mark read
                         </button>

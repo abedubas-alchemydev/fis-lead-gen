@@ -87,6 +87,52 @@ export type BrokerDealerListItem = {
   types_of_business_other: string | null;
   dba_names: string[] | null;
   created_at: string;
+  // Clearing-agency / SRO membership labels. `member_agencies` is the set of
+  // agency codes (OCC/DTC/NSCC/FICC-GOV/FICC-MBS) the firm actively belongs
+  // to. `clearing_membership_checked_at` is the sentinel: null ⇒ never
+  // evaluated (render nothing); non-null + empty `member_agencies` ⇒ "Not a
+  // member".
+  member_agencies: string[];
+  clearing_membership_checked_at: string | null;
+};
+
+// One clearing-agency / SRO membership with provenance (firm detail page).
+export type ClearingMembershipItem = {
+  agency: string;
+  member_number: string | null;
+  member_name_raw: string;
+  source_file: string;
+  source_version: string | null;
+  match_method: string;
+  match_confidence: number | null;
+  status: string;
+};
+
+// Admin review-queue row: one needs_review candidate joined to its firm.
+export type ClearingMembershipReviewRow = {
+  id: number;
+  agency: string;
+  member_number: string | null;
+  member_name_raw: string;
+  source_file: string;
+  source_version: string | null;
+  match_method: string;
+  match_confidence: number | null;
+  firm_side: "broker_dealer" | "investment_advisor";
+  firm_id: number;
+  firm_name: string;
+  created_at: string;
+};
+
+export type ClearingMembershipReviewListResponse = {
+  items: ClearingMembershipReviewRow[];
+  total: number;
+};
+
+export type ClearingMembershipDecisionResponse = {
+  id: number;
+  status: string;
+  match_method: string;
 };
 
 export type BrokerDealerListResponse = {
@@ -159,6 +205,74 @@ export type AlertListResponse = {
 export type AlertReadResponse = {
   id: number;
   is_read: boolean;
+};
+
+// ── Investors tab (SEC Form 4 insider transactions) ───────────────────
+// One row per (reporting-person × Form 4 transaction) pair already
+// passed through the $50K / last-3-months filter on the BE. ad_code is
+// "A" (acquired/buy) or "D" (disposed/sell) — the FE partitions the
+// two product-facing lists on that field.
+export type InvestorItem = {
+  id: number;
+  accession_number: string;
+  is_derivative: boolean;
+
+  issuer_cik: string;
+  issuer_name: string;
+  issuer_ticker: string | null;
+
+  reporting_owner_cik: string;
+  reporting_owner_name: string;
+  reporting_owner_title: string | null;
+  reporting_owner_is_director: boolean;
+  reporting_owner_is_officer: boolean;
+  reporting_owner_is_ten_pct: boolean;
+  reporting_owner_street1: string | null;
+  reporting_owner_street2: string | null;
+  reporting_owner_city: string | null;
+  reporting_owner_state: string | null;
+  reporting_owner_zip: string | null;
+
+  security_title: string | null;
+  transaction_date: string;
+  transaction_code: string | null;
+  ad_code: "A" | "D";
+  shares: number | null;
+  price_per_share: number | null;
+  transaction_value: number | null;
+  txn_count: number;
+
+  enriched_phone: string | null;
+  enriched_email: string | null;
+  enriched_at: string | null;
+
+  source_filing_url: string | null;
+  filed_at: string;
+
+  // Favorites (insider). ``reporting_owner_id`` is the surrogate id of the
+  // insider's reporting_owners row, or null until first favorited (the
+  // heart then adds by ``reporting_owner_cik``). ``is_favorited`` reflects
+  // membership in the caller's default list.
+  reporting_owner_id: number | null;
+  is_favorited: boolean;
+};
+
+export type InvestorListResponse = {
+  items: InvestorItem[];
+  meta: {
+    page: number;
+    limit: number;
+    total: number;
+    total_pages: number;
+  };
+};
+
+export type InvestorEnrichResponse = {
+  txn_id: number;
+  enriched_phone: string | null;
+  enriched_email: string | null;
+  enriched_at: string;
+  matched: boolean;
 };
 
 export type AlertsBulkReadResponse = {
@@ -247,6 +361,20 @@ export type FilingHistoryPageResponse = {
 //   - "finra"  — name fell back to the FINRA executive-officers list
 export type ExecutiveSource = "sec" | "apollo" | "finra";
 
+export type EmailHit = {
+  value: string;
+  type: "work" | "personal";
+  confidence: number | null;
+  source: string;
+};
+
+export type PhoneHit = {
+  value: string;
+  type: "mobile" | "work" | "hq";
+  confidence: number | null;
+  source: string;
+};
+
 export type ExecutiveContactItem = {
   id: number;
   bd_id: number;
@@ -257,6 +385,8 @@ export type ExecutiveContactItem = {
   linkedin_url: string | null;
   source: ExecutiveSource;
   enriched_at: string;
+  emails: EmailHit[];
+  phones: PhoneHit[];
 };
 
 export type RegistrationComplianceSummary = {
@@ -302,6 +432,9 @@ export type BrokerDealerProfileResponse = {
   broker_dealer: BrokerDealerListItem;
   financials: FinancialMetricItem[];
   clearing_arrangements: ClearingArrangementItem[];
+  // Full clearing-agency / SRO membership rows with provenance (active +
+  // needs_review).
+  clearing_memberships: ClearingMembershipItem[];
   introducing_arrangements: IntroducingArrangementItem[];
   industry_arrangements: IndustryArrangementItem[];
   recent_alerts: AlertListItem[];
@@ -415,11 +548,13 @@ export type ClearingPartnerMergeSuggestionItem = {
 export type ClearingPartnerMergeSuggestionList = {
   items: ClearingPartnerMergeSuggestionItem[];
   pending_count: number;
+  unmatched_count: number;
 };
 
 export type ClearingPartnerClusteringRunResponse = {
   new_pending_count: number;
   total_pending_count: number;
+  unmatched_count: number;
 };
 
 export type ClearingPartnerMergeSuggestionAccept = {
@@ -433,20 +568,6 @@ export type DataRefreshResponse = {
   filing_monitor_run_id: number;
   clearing_pipeline_run_id: number;
   refreshed_broker_dealers: number;
-};
-
-export type ExportPreviewResponse = {
-  matching_records: number;
-  export_limit: number;
-  remaining_exports_today: number;
-  requested_records: number;
-};
-
-export type ExportCsvResponse = {
-  filename: string;
-  content: string;
-  exported_records: number;
-  remaining_exports_today: number;
 };
 
 export type FocusCeoExtractionResponse = {
@@ -472,6 +593,10 @@ export type VaultFolder = {
   name: string;
   description: string;
   outreach_instructions: string;
+  // PK of the ``account`` row this folder defaults to when the user
+  // opens the Outreach modal for any of this folder's contacts. Null
+  // means "no default — apply the user-level fallback chain instead."
+  default_sender_account_id: string | null;
   created_at: string;
   updated_at: string;
 };
@@ -480,12 +605,16 @@ export type VaultFolderCreate = {
   name: string;
   description: string;
   outreach_instructions?: string;
+  default_sender_account_id?: string | null;
 };
 
 export type VaultFolderUpdate = {
   name?: string;
   description?: string;
   outreach_instructions?: string;
+  // ``null`` clears the default, a string sets it. Omit to leave alone
+  // (the FE forms use react-state -> explicit-null to clear).
+  default_sender_account_id?: string | null;
 };
 
 // File rows attached to a folder. The status walks
@@ -528,6 +657,13 @@ export type OutreachSendRequest = {
   folder_id: number;
   subject: string;
   body: string;
+  // Legacy field kept for back-compat. Once ``sender_account_id`` is
+  // set the server derives the provider from the account row.
+  provider?: EmailProviderId;
+  // PK of the ``account`` row to send from. Optional; server applies
+  // the 3-tier fallback (folder default -> first send-scoped -> first
+  // linked) when omitted.
+  sender_account_id?: string | null;
 };
 
 export type OutreachSendResponse = {
@@ -535,6 +671,176 @@ export type OutreachSendResponse = {
   gmail_message_id: string;
   sent_at: string;
   status: string;
+};
+
+// Per-user "sent outreach" history. Body is omitted from list payload to
+// keep response sizes down — fetch via OutreachSendDetail when the user
+// expands a row. folder_id/folder_name are nullable because folder
+// deletion sets ON DELETE SET NULL on the audit row.
+export type OutreachSendStatus = "sent" | "failed";
+
+// Per-user send transport. Drives the provider picker on the Outreach
+// modal and the per-row provider badge on the Sent Outreach view.
+// Apple is intentionally absent — iCloud SMTP is app-specific-password
+// only (no OAuth), which breaks the refresh-token flow.
+export type EmailProviderId = "google" | "microsoft" | "yahoo";
+
+export type OutreachSendItem = {
+  id: number;
+  sent_at: string;
+  status: string;
+  subject: string;
+  // Which transport ran this send. Backfilled to "google" on the
+  // migration 0049 upgrade, so pre-PR-C rows are all google.
+  provider: EmailProviderId;
+  gmail_message_id: string | null;
+  error: string | null;
+  broker_dealer_id: number;
+  broker_dealer_name: string;
+  contact_id: number;
+  contact_name: string;
+  contact_email: string | null;
+  folder_id: number | null;
+  folder_name: string | null;
+  // Populated only when the admin "all users" scope is requested. Null
+  // on the per-user (default) scope.
+  user_id?: string | null;
+  sender_name?: string | null;
+  sender_email?: string | null;
+};
+
+// GET /api/v1/outreach/linked-providers — used by the Outreach modal to
+// decide whether to render a provider picker (2+ linked), a "Connect"
+// CTA (0 linked), or just use the only linked provider implicitly
+// (1 linked).
+export type LinkedProviderItem = {
+  // PK of the ``account`` row -- one entry per linked account, not
+  // per provider type (a user can link multiple Google accounts).
+  // FE passes this back as ``sender_account_id`` on the send call.
+  account_id: string;
+  // OAuth provider's external user id. Used by Better Auth's
+  // /unlink-account endpoint to disambiguate which account to drop
+  // when the user has multiple of the same provider linked.
+  provider_account_id: string;
+  provider: EmailProviderId;
+  // The mailbox the OAuth token is bound to (e.g. "alice@firm.com").
+  // Null for legacy accounts linked before the post-link hook --
+  // the picker labels those by provider name in that case.
+  email_address: string | null;
+  scope: string | null;
+  has_send_scope: boolean;
+  linked_at: string;
+};
+
+export type LinkedProvidersResponse = {
+  items: LinkedProviderItem[];
+};
+
+export type OutreachSendsScope = "mine" | "all";
+
+export type OutreachSendsListResponse = {
+  items: OutreachSendItem[];
+  total: number;
+  limit: number;
+  offset: number;
+};
+
+export type OutreachSendDetail = OutreachSendItem & {
+  body: string;
+};
+
+// ── Admin per-user views (admin-only consumers) ──
+//
+// Mirrors backend/app/schemas/users_admin.py. The saved-firms payload
+// flattens both polymorphic item types — broker-dealers and investment
+// advisors — into one stream with an `item_type` discriminator so the
+// admin table renders a single sortable list. `lists` is the unfiltered
+// summary used by the filter-pill row.
+
+export type AdminUserBrief = {
+  id: string;
+  email: string;
+  name: string;
+};
+
+export type AdminSavedFirmListSummary = {
+  id: number;
+  name: string;
+  is_default: boolean;
+  item_count: number;
+};
+
+export type AdminSavedFirmRow = {
+  item_type: "broker_dealer" | "advisor";
+  target_id: number;
+  target_name: string;
+  list_id: number;
+  list_name: string;
+  list_is_default: boolean;
+  saved_at: string;
+};
+
+export type AdminUserSavedFirmsResponse = {
+  items: AdminSavedFirmRow[];
+  total: number;
+  limit: number;
+  offset: number;
+  lists: AdminSavedFirmListSummary[];
+  user: AdminUserBrief;
+};
+
+// Unified per-user activity feed used by /settings/users/{id}/activities.
+// `event_type` discriminates the row glyph + tooltip. `target_*` is set
+// when the activity is bound to a firm (view, save, outreach); login /
+// logout rows leave it null. `details` carries event-specific extras
+// (login → ip + user_agent; save → list_name; view → visit_count;
+// outreach → status + error + subject).
+export type AdminUserActivityEventType =
+  | "login"
+  | "logout"
+  | "view"
+  | "save"
+  | "outreach"
+  | "nav_view"
+  | "nav_click"
+  | "link_open"
+  | "search_query"
+  | "input_used";
+
+// Query-string ``?type=`` value when calling
+// /api/v1/users/{id}/activities. Granular event_type rows are
+// collapsed into family chips on the FE — login+logout → "login",
+// nav_*+link_open → "nav", search_query → "search", input_used →
+// "input".
+export type AdminUserActivityFilter =
+  | "login"
+  | "view"
+  | "save"
+  | "outreach"
+  | "nav"
+  | "search"
+  | "input";
+
+export type AdminUserActivityTargetType =
+  | "broker_dealer"
+  | "advisor"
+  | "institutional_investor";
+
+export type AdminUserActivityRow = {
+  event_type: AdminUserActivityEventType;
+  timestamp: string;
+  target_type: AdminUserActivityTargetType | null;
+  target_id: number | null;
+  target_name: string | null;
+  details: Record<string, unknown> | null;
+};
+
+export type AdminUserActivitiesResponse = {
+  items: AdminUserActivityRow[];
+  total: number;
+  limit: number;
+  offset: number;
+  user: AdminUserBrief;
 };
 
 // ── Investment Advisor (Form ADV / 13F filer) types ──
@@ -589,6 +895,10 @@ export type InvestmentAdvisorListItem = {
   last_enrich_attempt_at: string | null;
   created_at: string;
   updated_at: string;
+  // Clearing-agency / SRO membership labels (same shape as BD). Mostly empty
+  // for IAs — only dually-registered BD/IA firms match.
+  member_agencies: string[];
+  clearing_membership_checked_at: string | null;
 };
 
 export type InvestmentAdvisorDetail = InvestmentAdvisorListItem;
@@ -618,6 +928,8 @@ export type AdvisorContactItem = {
   discovery_source: string | null;
   discovery_confidence: number | null;
   enriched_at: string;
+  emails: EmailHit[];
+  phones: PhoneHit[];
 };
 
 export type AdvisorFilingItem = {
@@ -635,6 +947,9 @@ export type InvestmentAdvisorProfileResponse = {
   advisor: InvestmentAdvisorDetail;
   contacts: AdvisorContactItem[];
   filings: AdvisorFilingItem[];
+  // Full clearing-agency / SRO membership rows with provenance (active +
+  // needs_review). Mostly empty for IAs.
+  clearing_memberships: ClearingMembershipItem[];
   is_favorited: boolean;
 };
 
@@ -646,4 +961,154 @@ export type AdvisoryActivityCount = {
 export type ClientTypeCount = {
   type: string;
   count: number;
+};
+
+// ── Institutional Investor (13F filer) types ──
+//
+// Mirrors backend/app/schemas/institutional_investor.py. ``advisor_id``
+// is populated when the same CIK also appears as a registered RIA in
+// ``investment_advisors`` -- the FE renders a "View as Investment
+// Advisor ->" cross-link in that case.
+
+export type InstitutionalInvestorListItem = {
+  id: number;
+  cik: string | null;
+  advisor_id: number | null;
+  name: string;
+  legal_name: string | null;
+  city: string | null;
+  state: string | null;
+  status: string;
+  matched_source: string;
+  website: string | null;
+  website_source: string | null;
+  latest_13f_filing_date: string | null;
+  total_aum: number | null;
+  holdings_count: number | null;
+  filings_index_url: string | null;
+  last_enrich_attempt_at: string | null;
+  created_at: string;
+  updated_at: string;
+};
+
+export type InstitutionalInvestorDetail = InstitutionalInvestorListItem;
+
+export type InstitutionalInvestorListMeta = {
+  page: number;
+  limit: number;
+  total: number;
+  total_pages: number;
+  pipeline_refreshed_at: string | null;
+};
+
+export type InstitutionalInvestorListResponse = {
+  items: InstitutionalInvestorListItem[];
+  meta: InstitutionalInvestorListMeta;
+};
+
+export type InvestorContactItem = {
+  id: number;
+  investor_id: number;
+  name: string;
+  title: string;
+  email: string | null;
+  phone: string | null;
+  linkedin_url: string | null;
+  source: string;
+  discovery_source: string | null;
+  discovery_confidence: number | null;
+  enriched_at: string;
+  emails: EmailHit[];
+  phones: PhoneHit[];
+};
+
+export type InvestorFilingItem = {
+  id: number;
+  investor_id: number;
+  form_type: string;
+  priority: string;
+  filed_at: string;
+  summary: string;
+  source_filing_url: string | null;
+  is_read: boolean;
+};
+
+export type InstitutionalInvestorProfileResponse = {
+  investor: InstitutionalInvestorDetail;
+  contacts: InvestorContactItem[];
+  filings: InvestorFilingItem[];
+  is_favorited: boolean;
+};
+
+export type AdjacentResponse = {
+  prev_id: number | null;
+  next_id: number | null;
+};
+
+// ── Cross-entity contact search ──
+//
+// Mirrors backend/app/schemas/contact_search.py. Hits surface a
+// ``firm_type`` discriminator (or null when no firm context, e.g. a
+// raw discovered_email row not yet attributed to a firm) so the FE
+// can render a deep-link to the right detail page.
+
+export type ContactSearchSource =
+  | "executive_contact"
+  | "advisor_contact"
+  | "investor_contact"
+  | "discovered_email"
+  | "apollo";
+
+export type ContactSearchFirmType =
+  | "broker_dealer"
+  | "advisor"
+  | "institutional_investor";
+
+export type ContactSearchHit = {
+  source: ContactSearchSource;
+  firm_type: ContactSearchFirmType | null;
+  firm_id: number | null;
+  firm_name: string | null;
+  contact_id: number | null;
+  name: string | null;
+  title: string | null;
+  email: string | null;
+  phone: string | null;
+  linkedin_url: string | null;
+};
+
+export type ContactSearchResponse = {
+  hits: ContactSearchHit[];
+  count: number;
+};
+
+// ── Polymorphic outreach ──
+//
+// Advisor/investor draft + send requests. Same shape as the BD variants
+// but keyed on the right firm + contact IDs.
+
+export type OutreachAdvisorDraftRequest = {
+  advisor_id: number;
+  advisor_contact_id: number;
+  folder_id: number;
+};
+
+export type OutreachAdvisorSendRequest = OutreachAdvisorDraftRequest & {
+  subject: string;
+  body: string;
+  provider?: EmailProviderId;
+  sender_account_id?: string | null;
+};
+
+export type OutreachInvestorDraftRequest = {
+  institutional_investor_id: number;
+  investor_contact_id: number;
+  folder_id: number;
+};
+
+export type OutreachInvestorSendRequest = OutreachInvestorDraftRequest & {
+  subject: string;
+  body: string;
+  provider?: EmailProviderId;
+  sender_account_id?: string | null;
 };

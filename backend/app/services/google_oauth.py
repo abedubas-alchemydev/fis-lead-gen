@@ -48,26 +48,30 @@ class GoogleOAuthConfigurationError(RuntimeError):
 
 
 async def get_fresh_google_access_token(
-    db: AsyncSession, user_id: str
+    db: AsyncSession, account_id: str
 ) -> tuple[str, list[str]]:
-    """Return ``(access_token, scopes)`` for the user's Google account.
+    """Return ``(access_token, scopes)`` for the given Google account row.
 
-    Looks up the ``account`` row keyed by ``(user_id, provider_id='google')``.
+    Keyed by ``account.id`` (Better Auth's PK) so a user with multiple
+    linked Google accounts can dispatch sends to a specific one. The
+    caller is responsible for verifying the row belongs to the current
+    user before passing the id in.
+
     Refreshes via the Google token endpoint when ``access_token_expires_at``
-    is null, in the past, or within ``_EXPIRY_SKEW`` of now. Persists the
-    new token + expiry back to the row.
+    is null, in the past, or within ``_EXPIRY_SKEW`` of now. Persists
+    the new token + expiry back to the row.
 
-    Raises ``GoogleAccountNotLinked`` when there is no Google account on
-    file, or when the refresh attempt returns ``invalid_grant`` (Google's
-    canonical "the refresh token was revoked / expired" response).
+    Raises ``GoogleAccountNotLinked`` when the account row is gone, is
+    not a Google row, or when the refresh attempt returns ``invalid_grant``
+    (Google's canonical "the refresh token was revoked / expired" response).
     """
     stmt = select(Account).where(
-        Account.user_id == user_id, Account.provider_id == "google"
+        Account.id == account_id, Account.provider_id == "google"
     )
     account = (await db.execute(stmt)).scalar_one_or_none()
     if account is None:
         raise GoogleAccountNotLinked(
-            f"No Google account linked for user {user_id}."
+            f"No Google account row found for id {account_id}."
         )
 
     scopes = _parse_scopes(account.scope)
@@ -87,7 +91,7 @@ async def get_fresh_google_access_token(
         # response (it does that on silent re-auth without
         # prompt=consent). Force a re-link.
         raise GoogleAccountNotLinked(
-            f"User {user_id} has a Google account but no refresh token."
+            f"Google account {account_id} has no refresh token."
         )
 
     new_access_token, new_expires_at = await _refresh_access_token(

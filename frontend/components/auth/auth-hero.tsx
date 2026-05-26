@@ -2,9 +2,6 @@ import Image from "next/image";
 import type { LucideIcon } from "lucide-react";
 import { Activity, Layers, Lock, Network } from "lucide-react";
 
-const GRAIN_DATA_URI =
-  "url(\"data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' width='160' height='160'><filter id='n'><feTurbulence type='fractalNoise' baseFrequency='0.9' numOctaves='2' stitchTiles='stitch'/><feColorMatrix values='0 0 0 0 1  0 0 0 0 1  0 0 0 0 1  0 0 0 0.6 0'/></filter><rect width='100%' height='100%' filter='url(%23n)'/></svg>\")";
-
 type Kpi = {
   icon: LucideIcon;
   label: string;
@@ -35,29 +32,17 @@ const KPIS: Kpi[] = [
 
 export function AuthHero() {
   return (
-    <aside className="relative hidden overflow-hidden bg-gradient-to-br from-navy via-[#0f2d52] to-[#163768] text-white lg:flex lg:flex-col lg:justify-between lg:px-14 lg:py-12">
-      {/* Texture layers */}
-      <div className="pointer-events-none absolute -right-20 -top-20 h-72 w-72 rounded-full bg-blue/15 blur-3xl" aria-hidden />
-      <div className="pointer-events-none absolute -bottom-24 -left-16 h-56 w-56 rounded-full bg-gold/12 blur-3xl" aria-hidden />
-      <div
-        className="pointer-events-none absolute inset-0 mix-blend-overlay opacity-[0.18]"
-        style={{ backgroundImage: GRAIN_DATA_URI }}
-        aria-hidden
-      />
-
-      {/* Top row: logo + tag */}
-      <div className="relative flex items-center">
+    <aside className="hidden bg-[#162635] text-white lg:flex lg:flex-col lg:justify-between lg:px-14 lg:pb-6 lg:pt-2">
+      {/* Top row: centered logo */}
+      <div className="flex justify-center">
         <Image
-          src="/logo.png"
+          src="/dox-logo.png"
           alt="DOX"
-          width={120}
-          height={38}
+          width={384}
+          height={384}
           priority
-          className="h-9 w-auto"
+          className="h-72 w-72 object-contain lg:h-80 lg:w-80 xl:h-96 xl:w-96"
         />
-        <span className="ml-4 border-l border-white/15 pl-4 text-[10px] font-semibold uppercase tracking-[0.32em] text-white/55">
-          Institutional Intelligence
-        </span>
       </div>
 
       {/* Middle: headline + KPIs */}
@@ -70,7 +55,7 @@ export function AuthHero() {
           surfaced as one unified research layer.
         </p>
 
-        <div className="mt-10 space-y-3">
+        <div className="mt-10 space-y-2">
           {KPIS.map((kpi) => {
             const Icon = kpi.icon;
             return (

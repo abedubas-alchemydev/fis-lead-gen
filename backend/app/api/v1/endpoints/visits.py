@@ -3,20 +3,28 @@ from __future__ import annotations
 from fastapi import APIRouter, Depends, Query
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.core.feature_permissions import VISITED_FIRMS
 from app.db.session import get_db_session
 from app.schemas.auth import AuthenticatedUser
 from app.schemas.visits import VisitListResponse
-from app.services.auth import get_current_user
+from app.services.auth import ensure_feature, get_current_user
 from app.services.user_lists import list_visits
 
 router = APIRouter(prefix="/visits")
+
+
+def _require_visited_firms(
+    user: AuthenticatedUser = Depends(get_current_user),
+) -> AuthenticatedUser:
+    ensure_feature(user, VISITED_FIRMS)
+    return user
 
 
 @router.get("", response_model=VisitListResponse)
 async def get_visits(
     limit: int = Query(default=50, ge=1, le=100),
     offset: int = Query(default=0, ge=0),
-    current_user: AuthenticatedUser = Depends(get_current_user),
+    current_user: AuthenticatedUser = Depends(_require_visited_firms),
     db: AsyncSession = Depends(get_db_session),
 ) -> VisitListResponse:
     """Return the calling user's visit history, most-recent-first.

@@ -36,16 +36,46 @@ class OutreachSend(Base):
         nullable=False,
         index=True,
     )
-    broker_dealer_id: Mapped[int] = mapped_column(
+    # Polymorphic firm FKs: exactly one of broker_dealer_id, advisor_id,
+    # institutional_investor_id is non-null per row. Enforced at the DB
+    # via ``ck_outreach_sends_exactly_one_firm`` (migration 0046).
+    broker_dealer_id: Mapped[int | None] = mapped_column(
         Integer,
         ForeignKey("broker_dealers.id", ondelete="CASCADE"),
-        nullable=False,
+        nullable=True,
         index=True,
     )
-    contact_id: Mapped[int] = mapped_column(
+    advisor_id: Mapped[int | None] = mapped_column(
+        Integer,
+        ForeignKey("investment_advisors.id", ondelete="CASCADE"),
+        nullable=True,
+        index=True,
+    )
+    institutional_investor_id: Mapped[int | None] = mapped_column(
+        Integer,
+        ForeignKey("institutional_investors.id", ondelete="CASCADE"),
+        nullable=True,
+        index=True,
+    )
+    # Polymorphic contact FKs: exactly one of contact_id (executive),
+    # advisor_contact_id, investor_contact_id is non-null per row.
+    # Enforced via ``ck_outreach_sends_exactly_one_contact``.
+    contact_id: Mapped[int | None] = mapped_column(
         Integer,
         ForeignKey("executive_contacts.id", ondelete="CASCADE"),
-        nullable=False,
+        nullable=True,
+        index=True,
+    )
+    advisor_contact_id: Mapped[int | None] = mapped_column(
+        Integer,
+        ForeignKey("advisor_contacts.id", ondelete="CASCADE"),
+        nullable=True,
+        index=True,
+    )
+    investor_contact_id: Mapped[int | None] = mapped_column(
+        Integer,
+        ForeignKey("investor_contacts.id", ondelete="CASCADE"),
+        nullable=True,
         index=True,
     )
     # Folder is nullable so a later folder deletion doesn't lose the
@@ -58,6 +88,26 @@ class OutreachSend(Base):
     )
     subject: Mapped[str] = mapped_column(String(998), nullable=False)
     body: Mapped[str] = mapped_column(Text, nullable=False)
+    # Which transport actually ran the send: "google" (Gmail API),
+    # "microsoft" (MS Graph users.sendMail), or "yahoo" (SMTP+XOAUTH2
+    # via aiosmtplib). Backfilled to "google" on the migration 0049
+    # upgrade. New rows MUST set this explicitly.
+    provider: Mapped[str] = mapped_column(String(16), nullable=False)
+    # Soft reference to ``account.id`` (no FK; see migration 0057).
+    # NULL on legacy pre-multi-sender rows; new rows always populate.
+    sender_account_id: Mapped[str | None] = mapped_column(
+        String(255), nullable=True, index=True
+    )
+    # Point-in-time sender address. For legacy rows this was backfilled
+    # from ``user.email`` so admin sort/filter on sender still works.
+    sender_email: Mapped[str | None] = mapped_column(
+        String(320), nullable=True
+    )
+    # Provider-side message id. For Gmail this is the real
+    # users.messages.send response id; for Microsoft/Yahoo it's a
+    # synthetic "{provider}-{iso8601}" placeholder (those transports
+    # don't return a server-side id we can rely on). Column name is
+    # legacy from the Gmail-only era — cleanup can rename later.
     gmail_message_id: Mapped[str | None] = mapped_column(
         String(255), nullable=True
     )

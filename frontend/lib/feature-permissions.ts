@@ -1,0 +1,88 @@
+// Frontend mirror of `backend/app/core/feature_permissions.py`.
+// Keep names character-identical so cross-stack grep matches.
+
+export const MASTER_LIST = "master_list" as const;
+export const INVESTMENT_ADVISORS = "investment_advisors" as const;
+export const INVESTORS = "investors" as const;
+// Mirrors backend ``INSTITUTIONAL_INVESTORS`` -- gates
+// ``/institutional-investors/{id}`` detail page (PR 3) and the existing
+// list / favorite-lists endpoints on the BE. Deliberately not in
+// ``ENABLED_FEATURE_KEYS`` since the sidebar tab was dropped in #438; the
+// constant exists so the page can still gate via ``hasFeature``
+// (admins always pass; viewers need explicit grant).
+export const INSTITUTIONAL_INVESTORS = "institutional_investors" as const;
+export const ALERTS = "alerts" as const;
+export const EMAIL_EXTRACTOR = "email_extractor" as const;
+export const SENT_OUTREACH = "sent_outreach" as const;
+export const MY_FAVORITES = "my_favorites" as const;
+export const VISITED_FIRMS = "visited_firms" as const;
+export const DASHBOARD = "dashboard" as const;
+export const SETTINGS = "settings" as const;
+export const USERS = "users" as const;
+export const VAULT = "vault" as const;
+
+export const ALL_FEATURE_KEYS = [
+  MASTER_LIST,
+  INVESTMENT_ADVISORS,
+  INVESTORS,
+  INSTITUTIONAL_INVESTORS,
+  ALERTS,
+  EMAIL_EXTRACTOR,
+  SENT_OUTREACH,
+  MY_FAVORITES,
+  VISITED_FIRMS,
+  DASHBOARD,
+  SETTINGS,
+  USERS,
+  VAULT,
+] as const;
+
+export type FeatureKey = (typeof ALL_FEATURE_KEYS)[number];
+
+export const FEATURE_LABELS: Record<FeatureKey, string> = {
+  master_list: "Master List",
+  investment_advisors: "Investment Advisors",
+  investors: "Investors",
+  institutional_investors: "Institutional Investors",
+  alerts: "Alerts",
+  email_extractor: "Email Extractor",
+  sent_outreach: "Sent Outreach",
+  my_favorites: "My Favorites",
+  visited_firms: "Visited Firms",
+  dashboard: "Dashboard",
+  settings: "Settings",
+  users: "Users",
+  vault: "Vault",
+};
+
+export const ENABLED_FEATURE_KEYS: ReadonlySet<FeatureKey> = new Set([
+  MASTER_LIST,
+  INVESTMENT_ADVISORS,
+  INVESTORS,
+  ALERTS,
+  EMAIL_EXTRACTOR,
+  SENT_OUTREACH,
+  MY_FAVORITES,
+  VISITED_FIRMS,
+  DASHBOARD,
+  SETTINGS,
+  USERS,
+  VAULT,
+]);
+
+// Keys whose nav entry is admin-only at the sidebar level. The Feature
+// Access picker still lists them so the picker mirrors the sidebar 1:1,
+// but the row renders disabled with an "Admin only" caption since the
+// checkbox has no effect: viewers can't reach the surface regardless,
+// and admins bypass every feature gate.
+export const ADMIN_ONLY_FEATURE_KEYS: ReadonlySet<FeatureKey> = new Set([
+  USERS,
+]);
+
+export function hasFeature(
+  user: { role?: string | null; feature_permissions?: string[] | null },
+  feature: FeatureKey,
+): boolean {
+  if (user.role === "admin") return true;
+  return Array.isArray(user.feature_permissions) && user.feature_permissions.includes(feature);
+}

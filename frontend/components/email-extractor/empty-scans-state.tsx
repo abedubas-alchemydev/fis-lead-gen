@@ -5,9 +5,8 @@ import { MailSearch } from "lucide-react";
 // Empty state for the /email-extractor hub when the user has no
 // scans on record. Mirrors the medallion pattern shipped on
 // /alerts (EmptyAlertsState), /visited-firms (EmptyVisitedState),
-// /my-favorites (EmptyItemsState), /export (EmptyExportMatchesState),
-// and /dashboard (EmptyTopLeadsState) so the hub feels visually
-// consistent with the rest of the app.
+// /my-favorites (EmptyItemsState), and /dashboard (EmptyTopLeadsState)
+// so the hub feels visually consistent with the rest of the app.
 //
 // No CTA — the new-scan form lives directly above this panel.
 export function EmptyScansState() {

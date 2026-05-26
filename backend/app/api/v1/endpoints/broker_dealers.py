@@ -9,12 +9,13 @@ from datetime import date, datetime, time, timedelta, timezone
 from fastapi import APIRouter, BackgroundTasks, Body, Depends, HTTPException, Query, status
 from fastapi.responses import Response
 from pydantic import BaseModel, Field
-from sqlalchemy import exists, func, or_, select, update
+from sqlalchemy import exists, func, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.config import settings
-from app.db.session import SessionLocal, get_db_session
+from app.db.session import get_db_session
 from app.models.broker_dealer import BrokerDealer
+from app.models.executive_contact import ExecutiveContact
 from app.models.favorite_list import FavoriteList, FavoriteListItem
 from app.models.pipeline_run import PipelineRun
 from app.schemas.auth import AuthenticatedUser
@@ -25,7 +26,6 @@ from app.schemas.broker_dealer import (
     DeficiencyStatusSummary,
     ExecutiveContactItem,
     FocusCeoExtractionResponse,
-    IntroducingArrangementItem,
     FilingHistoryItem,
     FilingHistoryPage,
     FinancialMetricItem,
@@ -36,13 +36,15 @@ from app.schemas.broker_dealer import (
     RegistrationComplianceSummary,
     ResolveWebsiteResponse,
 )
+from app.schemas.clearing_membership import ClearingMembershipItem
 from app.schemas.favorite_list import FavoriteListWithMembership
 from app.schemas.favorites import FavoriteResponse
 from app.services.contacts import ExecutiveContactService
-from app.services.edgar import EdgarService
+from app.services.edgar import EdgarService, build_edgar_filing_url
 from app.schemas.pipeline import ClearingArrangementItem, ClearingArrangementsResponse
 from app.services.alerts import AlertRepository
-from app.services.auth import get_current_user
+from app.core.feature_permissions import MASTER_LIST
+from app.services.auth import ensure_feature, get_current_user
 from app.services.broker_dealers import BrokerDealerRepository
 from app.services.unknown_reasons import (
     clearing_trigger_fields,
@@ -59,9 +61,13 @@ from app.services.user_lists import (
     record_visit,
     remove_favorite,
 )
-from app.services.classification import apply_classification_to_all
 from app.services.contact_discovery.orchestrator import discover_contact
-from app.services.contacts import ContactEnrichmentUnavailableError, ExecutiveContactService
+from app.services.contacts import (
+    ApolloLookupError,
+    ContactEnrichmentUnavailableError,
+    ContactNotFoundError,
+    NoEmailForLookupError,
+)
 from app.services.finra import FinraService
 from app.services.finra_pdf_service import (
     FinraPdfFetchError,
@@ -82,12 +88,21 @@ from app.services.serpapi import SerpAPIClient
 from app.services.serper import SerperClient
 from app.services.service_models import FinraBrokerDealerRecord
 from app.services.firm_alias_enricher import ensure_resolver_aliases
+from app.services.pipeline_reaper import STALE_REFRESH_RUN_AGE
 from app.services.website_resolver import resolve_website
 
 logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/broker-dealers")
 repository = BrokerDealerRepository()
+
+
+def _require_master_list(
+    user: AuthenticatedUser = Depends(get_current_user),
+) -> AuthenticatedUser:
+    ensure_feature(user, MASTER_LIST)
+    return user
+
 alert_repository = AlertRepository()
 contact_service = ExecutiveContactService()
 finra_service = FinraService()
@@ -178,21 +193,6 @@ def _extract_accession_from_url(url: str | None) -> str | None:
     return None
 
 
-def _edgar_filing_url(cik: str | None, accession: str | None, primary_document: str | None) -> str | None:
-    """Build a deep link to an EDGAR filing's primary document. Falls back
-    to the accession folder index when ``primary_document`` is missing.
-    Returns ``None`` if we don't have enough to construct any URL.
-    """
-    if not cik or not accession:
-        return None
-    cik_no_pad = cik.lstrip("0") or "0"
-    accession_no_dash = accession.replace("-", "")
-    base = f"https://www.sec.gov/Archives/edgar/data/{cik_no_pad}/{accession_no_dash}"
-    if primary_document:
-        return f"{base}/{primary_document}"
-    return f"{base}/"
-
-
 @router.get("", response_model=BrokerDealerListResponse)
 async def list_broker_dealers(
     search: str | None = Query(default=None),
@@ -212,7 +212,7 @@ async def list_broker_dealers(
     sort_dir: str = Query(default="desc", pattern="^(asc|desc)$"),
     page: int = Query(default=1, ge=1),
     limit: int = Query(default=25, ge=1, le=100),
-    _: AuthenticatedUser = Depends(get_current_user),
+    _: AuthenticatedUser = Depends(_require_master_list),
     db: AsyncSession = Depends(get_db_session),
 ) -> BrokerDealerListResponse:
     if (
@@ -243,7 +243,12 @@ async def list_broker_dealers(
         lead_priorities=_parse_states(lead_priority_filter),
         clearing_partners=_parse_states(clearing_partner_filter),
         clearing_types=_parse_states(clearing_type_filter),
-        types_of_business=_parse_states(types_of_business_filter),
+        # NOT _parse_states: it comma-splits each value, but type-of-business
+        # labels legitimately contain commas (e.g. "...networking, kiosk or
+        # similar arrangment with a: bank, savings bank or association, or...").
+        # The FE sends each selection as its own repeated query param, so the
+        # list already arrives intact — just drop blanks, never split.
+        types_of_business=[t for t in (types_of_business_filter or []) if t.strip()],
         min_net_capital=min_net_capital,
         max_net_capital=max_net_capital,
         registered_after=registered_after,
@@ -258,7 +263,7 @@ async def list_broker_dealers(
 
 @router.get("/states", response_model=list[str])
 async def list_broker_dealer_states(
-    _: AuthenticatedUser = Depends(get_current_user),
+    _: AuthenticatedUser = Depends(_require_master_list),
     db: AsyncSession = Depends(get_db_session),
 ) -> list[str]:
     return await repository.list_states(db)
@@ -266,7 +271,7 @@ async def list_broker_dealer_states(
 
 @router.get("/clearing-partners", response_model=list[str])
 async def list_clearing_partners(
-    _: AuthenticatedUser = Depends(get_current_user),
+    _: AuthenticatedUser = Depends(_require_master_list),
     db: AsyncSession = Depends(get_db_session),
 ) -> list[str]:
     return await repository.list_clearing_partners(db)
@@ -274,7 +279,7 @@ async def list_clearing_partners(
 
 @router.get("/types-of-business", response_model=list[dict])
 async def list_types_of_business(
-    _: AuthenticatedUser = Depends(get_current_user),
+    _: AuthenticatedUser = Depends(_require_master_list),
     db: AsyncSession = Depends(get_db_session),
 ) -> list[dict]:
     """Distinct types-of-business across all firms with per-type counts.
@@ -287,7 +292,7 @@ async def list_types_of_business(
 @router.get("/{broker_dealer_id}/focus-report.pdf")
 async def download_focus_report_pdf(
     broker_dealer_id: int,
-    _: AuthenticatedUser = Depends(get_current_user),
+    _: AuthenticatedUser = Depends(_require_master_list),
     db: AsyncSession = Depends(get_db_session),
 ) -> Response:
     """Stream the firm's latest X-17A-5 (FOCUS) PDF.
@@ -339,7 +344,7 @@ async def download_focus_report_pdf(
 @router.get("/{broker_dealer_id}/brokercheck.pdf")
 async def download_brokercheck_pdf(
     broker_dealer_id: int,
-    _: AuthenticatedUser = Depends(get_current_user),
+    _: AuthenticatedUser = Depends(_require_master_list),
     db: AsyncSession = Depends(get_db_session),
 ) -> Response:
     """Stream the firm's FINRA BrokerCheck Detailed Report PDF.
@@ -388,7 +393,7 @@ async def download_brokercheck_pdf(
 @router.get("/{broker_dealer_id}", response_model=BrokerDealerDetail)
 async def get_broker_dealer(
     broker_dealer_id: int,
-    _: AuthenticatedUser = Depends(get_current_user),
+    _: AuthenticatedUser = Depends(_require_master_list),
     db: AsyncSession = Depends(get_db_session),
 ) -> BrokerDealerDetail:
     broker_dealer = await repository.get_broker_dealer(db, broker_dealer_id)
@@ -396,6 +401,8 @@ async def get_broker_dealer(
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Broker-dealer not found.")
 
     detail = BrokerDealerDetail.model_validate(broker_dealer)
+    memberships = await repository.list_clearing_memberships(db, broker_dealer_id)
+    detail.member_agencies = sorted({m.agency for m in memberships if m.status == "active"})
     arrangements = await repository.list_clearing_arrangements(db, broker_dealer_id)
     financials = await repository.get_financial_metrics(db, broker_dealer_id)
     detail.current_clearing_unknown_reason = to_unknown_reason(
@@ -420,7 +427,7 @@ async def get_broker_dealer(
 @router.get("/{broker_dealer_id}/financials", response_model=FinancialMetricsResponse)
 async def get_broker_dealer_financials(
     broker_dealer_id: int,
-    _: AuthenticatedUser = Depends(get_current_user),
+    _: AuthenticatedUser = Depends(_require_master_list),
     db: AsyncSession = Depends(get_db_session),
 ) -> FinancialMetricsResponse:
     broker_dealer = await repository.get_broker_dealer(db, broker_dealer_id)
@@ -439,7 +446,7 @@ async def get_broker_dealer_financials(
 @router.get("/{broker_dealer_id}/clearing-arrangements", response_model=ClearingArrangementsResponse)
 async def get_broker_dealer_clearing_arrangements(
     broker_dealer_id: int,
-    _: AuthenticatedUser = Depends(get_current_user),
+    _: AuthenticatedUser = Depends(_require_master_list),
     db: AsyncSession = Depends(get_db_session),
 ) -> ClearingArrangementsResponse:
     broker_dealer = await repository.get_broker_dealer(db, broker_dealer_id)
@@ -458,7 +465,7 @@ async def get_broker_dealer_clearing_arrangements(
 @router.get("/{broker_dealer_id}/adjacent")
 async def get_adjacent_broker_dealers(
     broker_dealer_id: int,
-    _: AuthenticatedUser = Depends(get_current_user),
+    _: AuthenticatedUser = Depends(_require_master_list),
     db: AsyncSession = Depends(get_db_session),
 ) -> dict[str, int | None]:
     """Return the previous and next broker-dealer IDs for navigation arrows.
@@ -518,7 +525,7 @@ class EnrichRequestBody(BaseModel):
 async def enrich_broker_dealer_contacts(
     broker_dealer_id: int,
     body: EnrichRequestBody | None = Body(default=None),
-    _: AuthenticatedUser = Depends(get_current_user),
+    _: AuthenticatedUser = Depends(_require_master_list),
     db: AsyncSession = Depends(get_db_session),
 ) -> list[ExecutiveContactItem]:
     """Enrich executive contacts for a firm.
@@ -562,6 +569,48 @@ async def enrich_broker_dealer_contacts(
             contacts = await contact_service.list_contacts(db, broker_dealer.id)
 
     return [ExecutiveContactItem.model_validate(item) for item in contacts]
+
+
+@router.post(
+    "/{broker_dealer_id}/contacts/{contact_id}/find-phone",
+    response_model=ExecutiveContactItem,
+)
+async def find_phone_for_contact(
+    broker_dealer_id: int,
+    contact_id: int,
+    _: AuthenticatedUser = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db_session),
+) -> ExecutiveContactItem:
+    """Per-person Apollo /people/match phone lookup.
+
+    Costs one Apollo credit per call. The frontend gates this behind an
+    explicit per-row button (the "Find phone" pill on the People panel) so
+    spend stays tied to user intent. Returns the updated contact; ``phone``
+    will be ``null`` if Apollo had no phone for this email — the UI uses
+    that to render a "tried, nothing found" state.
+    """
+    contact = await db.get(ExecutiveContact, contact_id)
+    if contact is None or contact.bd_id != broker_dealer_id:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Contact not found.")
+
+    try:
+        updated = await contact_service.find_phone_for_contact(db, contact_id)
+    except ContactNotFoundError as exc:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(exc)) from exc
+    except NoEmailForLookupError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail=str(exc)
+        ) from exc
+    except ContactEnrichmentUnavailableError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE, detail=str(exc)
+        ) from exc
+    except ApolloLookupError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_502_BAD_GATEWAY, detail=f"apollo: {exc}"
+        ) from exc
+
+    return ExecutiveContactItem.model_validate(updated)
 
 
 def _resolve_domain(broker_dealer: BrokerDealer) -> str | None:
@@ -631,7 +680,7 @@ def _normalise_name(name: str | None) -> str:
 @router.post("/{broker_dealer_id}/extract-focus-ceo", response_model=FocusCeoExtractionResponse)
 async def extract_focus_ceo(
     broker_dealer_id: int,
-    _: AuthenticatedUser = Depends(get_current_user),
+    _: AuthenticatedUser = Depends(_require_master_list),
     db: AsyncSession = Depends(get_db_session),
 ) -> FocusCeoExtractionResponse:
     """On-demand extraction of CEO contact info and net capital from the latest FOCUS Report PDF.
@@ -664,7 +713,7 @@ async def extract_focus_ceo(
 @router.post("/{broker_dealer_id}/favorite", response_model=FavoriteResponse)
 async def favorite_broker_dealer(
     broker_dealer_id: int,
-    current_user: AuthenticatedUser = Depends(get_current_user),
+    current_user: AuthenticatedUser = Depends(_require_master_list),
     db: AsyncSession = Depends(get_db_session),
 ) -> FavoriteResponse:
     """Favorite a broker-dealer for the calling user.
@@ -682,7 +731,7 @@ async def favorite_broker_dealer(
 @router.delete("/{broker_dealer_id}/favorite", status_code=status.HTTP_204_NO_CONTENT)
 async def unfavorite_broker_dealer(
     broker_dealer_id: int,
-    current_user: AuthenticatedUser = Depends(get_current_user),
+    current_user: AuthenticatedUser = Depends(_require_master_list),
     db: AsyncSession = Depends(get_db_session),
 ) -> None:
     """Remove a favorite. Idempotent: 204 even when the row wasn't there."""
@@ -699,7 +748,7 @@ async def unfavorite_broker_dealer(
 )
 async def get_firm_favorite_lists(
     firm_id: int,
-    current_user: AuthenticatedUser = Depends(get_current_user),
+    current_user: AuthenticatedUser = Depends(_require_master_list),
     db: AsyncSession = Depends(get_db_session),
 ) -> list[FavoriteListWithMembership]:
     """Return the calling user's lists with an ``is_member`` flag for ``firm_id``.
@@ -759,7 +808,7 @@ async def get_firm_favorite_lists(
 @router.post("/{broker_dealer_id}/visit", status_code=status.HTTP_204_NO_CONTENT)
 async def visit_broker_dealer(
     broker_dealer_id: int,
-    current_user: AuthenticatedUser = Depends(get_current_user),
+    current_user: AuthenticatedUser = Depends(_require_master_list),
     db: AsyncSession = Depends(get_db_session),
 ) -> None:
     """Record a detail-page visit.
@@ -779,7 +828,7 @@ async def visit_broker_dealer(
 @router.get("/{broker_dealer_id}/profile", response_model=BrokerDealerProfileResponse)
 async def get_broker_dealer_profile(
     broker_dealer_id: int,
-    current_user: AuthenticatedUser = Depends(get_current_user),
+    current_user: AuthenticatedUser = Depends(_require_master_list),
     db: AsyncSession = Depends(get_db_session),
 ) -> BrokerDealerProfileResponse:
     broker_dealer = await repository.get_broker_dealer(db, broker_dealer_id)
@@ -788,6 +837,7 @@ async def get_broker_dealer_profile(
 
     financials = await repository.get_financial_metrics(db, broker_dealer_id)
     clearing_arrangements = await repository.list_clearing_arrangements(db, broker_dealer_id)
+    membership_rows = await repository.list_clearing_memberships(db, broker_dealer_id)
     introducing_arrangements = await repository.list_introducing_arrangements(db, broker_dealer_id)
     industry_arrangements = await repository.list_industry_arrangements(db, broker_dealer_id)
     executive_contacts = await repository.get_executive_contacts(db, broker_dealer_id)
@@ -813,6 +863,7 @@ async def get_broker_dealer_profile(
     favorited, favorited_at = await is_favorited(db, current_user.id, broker_dealer_id)
 
     detail = BrokerDealerDetail.model_validate(broker_dealer)
+    detail.member_agencies = sorted({m.agency for m in membership_rows if m.status == "active"})
     detail.current_clearing_unknown_reason = to_unknown_reason(
         with_trigger_fields(
             derive_clearing_unknown_reason(
@@ -849,10 +900,13 @@ async def get_broker_dealer_profile(
         derive_executive_contact_unknown_reason(list(executive_contacts))
     )
 
+    membership_items = [ClearingMembershipItem.model_validate(m) for m in membership_rows]
+
     return BrokerDealerProfileResponse(
         broker_dealer=detail,
         financials=financial_items,
         clearing_arrangements=clearing_items,
+        clearing_memberships=membership_items,
         introducing_arrangements=introducing_arrangements,
         industry_arrangements=industry_arrangements,
         recent_alerts=recent_alerts,
@@ -887,7 +941,7 @@ async def get_filing_history(
     broker_dealer_id: int,
     page: int = Query(default=1, ge=1),
     limit: int = Query(default=10, ge=1, le=100),
-    _: AuthenticatedUser = Depends(get_current_user),
+    _: AuthenticatedUser = Depends(_require_master_list),
     db: AsyncSession = Depends(get_db_session),
 ) -> FilingHistoryPage:
     """Paginated filing history for the firm. Merges every SEC EDGAR filing
@@ -927,8 +981,8 @@ async def get_filing_history(
             primary_doc = filing.get("primary_document")
             primary_desc = filing.get("primary_doc_description")
             url = (
-                _edgar_filing_url(broker_dealer.cik, str(accession) if accession else None,
-                                  str(primary_doc) if primary_doc else None)
+                build_edgar_filing_url(broker_dealer.cik, str(accession) if accession else None,
+                                       str(primary_doc) if primary_doc else None)
                 or broker_dealer.filings_index_url
             )
             item = FilingHistoryItem(
@@ -971,7 +1025,7 @@ async def get_filing_history(
 @router.post("/{broker_dealer_id}/health-check")
 async def trigger_health_check(
     broker_dealer_id: int,
-    _: AuthenticatedUser = Depends(get_current_user),
+    _: AuthenticatedUser = Depends(_require_master_list),
     db: AsyncSession = Depends(get_db_session),
 ) -> dict[str, object]:
     """Triggered Enrichment / Health Check (Revision 2.2).
@@ -1054,7 +1108,7 @@ async def trigger_health_check(
 )
 async def resolve_broker_dealer_website(
     broker_dealer_id: int,
-    current_user: AuthenticatedUser = Depends(get_current_user),
+    current_user: AuthenticatedUser = Depends(_require_master_list),
     db: AsyncSession = Depends(get_db_session),
 ) -> ResolveWebsiteResponse:
     """On-demand firm-website resolver — Apollo -> Hunter chain.
@@ -1326,7 +1380,7 @@ async def schedule_auto_refresh_financials_batch(
 async def refresh_broker_dealer_financials(
     broker_dealer_id: int,
     background_tasks: BackgroundTasks,
-    current_user: AuthenticatedUser = Depends(get_current_user),
+    current_user: AuthenticatedUser = Depends(_require_master_list),
     db: AsyncSession = Depends(get_db_session),
 ) -> RefreshFinancialsResponse:
     """On-demand X-17A-5 → Gemini extraction for a single firm.
@@ -1401,6 +1455,21 @@ async def refresh_broker_dealer_financials(
 _REFRESH_ALL_COOLDOWN_SECONDS = 30
 
 
+def _is_recent_run(started_at: datetime | None) -> bool:
+    """True if a run started recently enough to still be considered alive.
+
+    Anything older than STALE_REFRESH_RUN_AGE is presumed orphaned (its
+    in-process BackgroundTask was killed by an instance swap) and must not be
+    treated as in-flight.
+    """
+
+    if started_at is None:
+        return False
+    if started_at.tzinfo is None:
+        started_at = started_at.replace(tzinfo=timezone.utc)
+    return started_at >= datetime.now(timezone.utc) - STALE_REFRESH_RUN_AGE
+
+
 async def _run_refresh_all_background(
     parent_run_id: int,
     bd_id: int,
@@ -1439,7 +1508,7 @@ async def refresh_broker_dealer_all(
     background_tasks: BackgroundTasks,
     response: Response,
     body: RefreshAllRequest = Body(default_factory=RefreshAllRequest),
-    current_user: AuthenticatedUser = Depends(get_current_user),
+    current_user: AuthenticatedUser = Depends(_require_master_list),
     db: AsyncSession = Depends(get_db_session),
 ) -> RefreshAllResponse:
     """One button per row → fan out to whatever sub-pipelines this firm
@@ -1496,7 +1565,18 @@ async def refresh_broker_dealer_all(
 
     bd_marker = f'"bd_id": {broker_dealer_id}'
 
-    # 409 — an in-flight refresh-all already exists for this firm.
+    # A genuinely in-flight refresh-all already exists for this firm. Rather
+    # than 409 (which the browser surfaces as a red console error even though
+    # the FE handles it cleanly), attach to the existing run and return 202
+    # with that run_id. The FE polls run_id identically whether the run was
+    # just queued or already in flight, so the behavior is unchanged.
+    #
+    # A run only counts as in-flight if it started within STALE_REFRESH_RUN_AGE.
+    # An older running/queued row is an orphan — its in-process BackgroundTask
+    # was killed by an instance swap and it will never finalize — so we ignore
+    # it and start a fresh run instead of trapping the page on a dead run. The
+    # startup reaper marks such orphans failed; this guard handles the window
+    # before the next restart.
     in_flight_stmt = (
         select(PipelineRun)
         .where(PipelineRun.pipeline_name == REFRESH_ALL_PIPELINE_NAME)
@@ -1506,15 +1586,13 @@ async def refresh_broker_dealer_all(
         .limit(1)
     )
     in_flight = (await db.execute(in_flight_stmt)).scalar_one_or_none()
-    if in_flight is not None:
-        raise HTTPException(
-            status_code=status.HTTP_409_CONFLICT,
-            detail={
-                "message": "A refresh-all run is already in flight for this firm.",
-                "run_id": in_flight.id,
-                "status": in_flight.status,
-                "broker_dealer_id": broker_dealer_id,
-            },
+    if in_flight is not None and _is_recent_run(in_flight.started_at):
+        response.status_code = status.HTTP_202_ACCEPTED
+        return RefreshAllResponse(
+            run_id=in_flight.id,
+            status="in_flight",
+            broker_dealer_id=broker_dealer_id,
+            reason="A refresh-all run is already in flight for this firm.",
         )
 
     # 429 — per-(user, BD) cooldown so rage-clicks don't burn provider

@@ -4,6 +4,7 @@ from datetime import datetime
 from decimal import Decimal
 
 from sqlalchemy import DateTime, ForeignKey, Numeric, String, Text, func
+from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.orm import Mapped, mapped_column
 
 from app.db.base import Base
@@ -36,6 +37,8 @@ class AdvisorContact(Base):
     source: Mapped[str] = mapped_column(String(64), nullable=False, default="provider")
     discovery_source: Mapped[str | None] = mapped_column(String(32), nullable=True)
     discovery_confidence: Mapped[Decimal | None] = mapped_column(Numeric(5, 2), nullable=True)
+    emails: Mapped[list | None] = mapped_column(JSONB, nullable=True)
+    phones: Mapped[list | None] = mapped_column(JSONB, nullable=True)
     enriched_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), nullable=False, server_default=func.now()
     )

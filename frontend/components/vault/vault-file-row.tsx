@@ -24,7 +24,7 @@ export function VaultFileRow({ folderId, file, onRetry, onDelete }: VaultFileRow
   const status = file.processing_status;
 
   return (
-    <article className="flex flex-wrap items-start justify-between gap-3 rounded-xl border border-slate-200 bg-white px-4 py-3">
+    <article className="flex flex-wrap items-start justify-between gap-3 rounded-xl border border-[var(--border,rgba(30,64,175,0.1))] bg-[var(--surface,#ffffff)] px-4 py-3">
       <div className="min-w-0 flex-1">
         <div className="flex items-center gap-2">
           <StatusChip status={status} />
@@ -32,13 +32,13 @@ export function VaultFileRow({ folderId, file, onRetry, onDelete }: VaultFileRow
             href={downloadPath}
             target="_blank"
             rel="noreferrer"
-            className="truncate text-sm font-medium text-navy underline-offset-4 hover:underline"
+            className="truncate text-sm font-medium text-[var(--text,#0f172a)] underline-offset-4 hover:underline"
             title={file.original_filename}
           >
             {file.original_filename}
           </a>
         </div>
-        <p className="mt-1 text-[11px] text-slate-400">
+        <p className="mt-1 text-[11px] text-[var(--text-muted,#94a3b8)]">
           {formatBytes(file.size_bytes)} · uploaded {formatRelative(file.created_at)}
         </p>
         {status === "failed" && file.processing_error ? (
@@ -53,7 +53,7 @@ export function VaultFileRow({ folderId, file, onRetry, onDelete }: VaultFileRow
           <button
             type="button"
             onClick={onRetry}
-            className="text-xs font-medium text-blue underline-offset-4 transition hover:underline"
+            className="text-xs font-medium text-[var(--accent,#6366f1)] underline-offset-4 transition hover:underline"
           >
             Retry
           </button>
@@ -63,7 +63,7 @@ export function VaultFileRow({ folderId, file, onRetry, onDelete }: VaultFileRow
             <button
               type="button"
               onClick={() => setConfirmingDelete(false)}
-              className="text-xs font-medium text-slate-500 underline-offset-4 hover:underline"
+              className="text-xs font-medium text-[var(--text-muted,#94a3b8)] underline-offset-4 hover:underline"
             >
               Cancel
             </button>
@@ -82,7 +82,7 @@ export function VaultFileRow({ folderId, file, onRetry, onDelete }: VaultFileRow
           <button
             type="button"
             onClick={() => setConfirmingDelete(true)}
-            className="text-xs font-medium text-slate-500 underline-offset-4 transition hover:text-danger hover:underline"
+            className="text-xs font-medium text-[var(--text-muted,#94a3b8)] underline-offset-4 transition hover:text-danger hover:underline"
           >
             Delete
           </button>
@@ -114,8 +114,8 @@ const STATUS_LABEL: Record<VaultFolderFileStatus, string> = {
 };
 
 const STATUS_PALETTE: Record<VaultFolderFileStatus, string> = {
-  extracting: "bg-slate-100 text-slate-600",
-  embedding: "bg-slate-100 text-slate-600",
+  extracting: "bg-[var(--surface-3,#dbeafe)] text-[var(--text-dim,#475569)]",
+  embedding: "bg-[var(--surface-3,#dbeafe)] text-[var(--text-dim,#475569)]",
   ready: "bg-emerald-100 text-emerald-700",
   failed: "bg-amber-100 text-amber-800"
 };

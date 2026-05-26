@@ -35,6 +35,7 @@ export function SuggestedMergesCard({ onAccepted }: { onAccepted?: () => void })
     [],
   );
   const [pendingCount, setPendingCount] = useState(0);
+  const [unmatchedCount, setUnmatchedCount] = useState(0);
   const [error, setError] = useState<string | null>(null);
   const [info, setInfo] = useState<string | null>(null);
   const [isLoading, setIsLoading] = useState(true);
@@ -47,6 +48,7 @@ export function SuggestedMergesCard({ onAccepted }: { onAccepted?: () => void })
       );
       setSuggestions(response.items);
       setPendingCount(response.pending_count);
+      setUnmatchedCount(response.unmatched_count);
       setError(null);
     } catch (loadError) {
       setError(
@@ -72,10 +74,16 @@ export function SuggestedMergesCard({ onAccepted }: { onAccepted?: () => void })
           "/api/v1/settings/clearing-partner-suggestions/run",
           { method: "POST" },
         );
+        const remaining = response.unmatched_count;
+        const remainingSuffix =
+          remaining > 0
+            ? ` ${remaining.toLocaleString()} raw string${remaining === 1 ? "" : "s"} still unmatched.`
+            : " Everything is clustered or already canonical.";
         setInfo(
-          response.new_pending_count === 0
+          (response.new_pending_count === 0
             ? "No new clusters found."
-            : `Found ${response.new_pending_count} new cluster${response.new_pending_count === 1 ? "" : "s"}.`,
+            : `Found ${response.new_pending_count} new cluster${response.new_pending_count === 1 ? "" : "s"}.`) +
+            remainingSuffix,
         );
         await loadSuggestions();
       } catch (actionError) {
@@ -146,6 +154,11 @@ export function SuggestedMergesCard({ onAccepted }: { onAccepted?: () => void })
             {pendingCount > 0 ? (
               <span className="ml-2 inline-flex items-center rounded-full bg-[rgba(99,102,241,0.12)] px-2 py-0.5 text-[11px] font-semibold text-[#4338ca]">
                 {pendingCount} pending
+              </span>
+            ) : null}
+            {unmatchedCount > 0 ? (
+              <span className="ml-2 inline-flex items-center rounded-full border border-[var(--border-2,rgba(30,64,175,0.16))] bg-[var(--surface-2,#f1f6fd)] px-2 py-0.5 text-[11px] font-semibold text-[var(--text-dim,#475569)]">
+                {unmatchedCount.toLocaleString()} unmatched
               </span>
             ) : null}
           </h2>

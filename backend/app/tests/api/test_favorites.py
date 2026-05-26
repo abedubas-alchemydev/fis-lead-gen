@@ -23,7 +23,7 @@ from app.db.session import SessionLocal
 from app.main import app
 from app.models.auth import AuthUser
 from app.models.broker_dealer import BrokerDealer
-from app.models.favorite_list import FavoriteList
+from app.models.favorite_list import FavoriteList, FavoriteListItem
 from app.models.user_visit import UserVisit
 from app.schemas.auth import AuthenticatedUser
 from app.services.auth import get_current_user
@@ -38,6 +38,7 @@ def _override_user(user_id: str) -> AuthenticatedUser:
         name="Test User",
         email=f"{user_id}@example.com",
         role="viewer",
+        feature_permissions=["master_list", "my_favorites"],
         session_expires_at=datetime(2099, 1, 1),
     )
 
@@ -90,6 +91,28 @@ async def test_get_favorites_401_without_session_cookie() -> None:
     async with _client() as client:
         response = await client.get("/api/v1/favorites")
     assert response.status_code == 401
+
+
+async def test_get_favorites_403_without_my_favorites_feature() -> None:
+    user_id = f"test-viewer-{secrets.token_hex(6)}"
+
+    def _ungated() -> AuthenticatedUser:
+        return AuthenticatedUser(
+            id=user_id,
+            name="Ungated Viewer",
+            email=f"{user_id}@example.com",
+            role="viewer",
+            feature_permissions=["master_list"],
+            session_expires_at=datetime(2099, 1, 1),
+        )
+
+    app.dependency_overrides[get_current_user] = _ungated
+    try:
+        async with _client() as client:
+            response = await client.get("/api/v1/favorites")
+        assert response.status_code == 403
+    finally:
+        app.dependency_overrides.clear()
 
 
 async def test_post_favorite_404_when_bd_missing() -> None:
@@ -245,3 +268,36 @@ async def test_profile_reflects_is_favorited_per_user() -> None:
     finally:
         app.dependency_overrides.clear()
         await _cleanup([user_a, user_b], [bd_id])
+
+
+async def test_profile_is_favorited_true_for_custom_list_only() -> None:
+    """Profile reports is_favorited=True when the BD lives on a non-default list.
+
+    Regression for the heart-icon bug: users who add via the picker's
+    "+ New list" path never touch the default list, but the heart still has
+    to read as "favorited".
+    """
+    user_id = await _seed_user()
+    bd_id = await _seed_bd()
+
+    async with SessionLocal() as session:
+        custom = FavoriteList(
+            user_id=user_id, name="Test Adviso List", is_default=False
+        )
+        session.add(custom)
+        await session.flush()
+        session.add(FavoriteListItem(list_id=custom.id, broker_dealer_id=bd_id))
+        await session.commit()
+
+    app.dependency_overrides[get_current_user] = lambda: _override_user(user_id)
+    try:
+        async with _client() as client:
+            profile = await client.get(f"/api/v1/broker-dealers/{bd_id}/profile")
+
+        assert profile.status_code == 200
+        body = profile.json()
+        assert body["is_favorited"] is True
+        assert body["favorited_at"] is not None
+    finally:
+        app.dependency_overrides.clear()
+        await _cleanup([user_id], [bd_id])

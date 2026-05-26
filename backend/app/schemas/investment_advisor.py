@@ -1,8 +1,12 @@
 from __future__ import annotations
 
 from datetime import date, datetime
+from typing import Literal, Self
 
-from pydantic import BaseModel, ConfigDict
+from pydantic import BaseModel, ConfigDict, field_validator, model_validator
+
+from app.schemas.clearing_membership import ClearingMembershipItem
+from app.schemas.contact_hits import EmailHit, PhoneHit, synthesize_contact_arrays
 
 
 class InvestmentAdvisorListItem(BaseModel):
@@ -55,6 +59,13 @@ class InvestmentAdvisorListItem(BaseModel):
     last_enrich_attempt_at: datetime | None = None
     created_at: datetime
     updated_at: datetime
+    # Clearing-agency / SRO membership labels (same shape as BD). Most IAs
+    # are correctly non-members; only dually-registered BD/IA firms match.
+    # ``member_agencies`` is attached per page with one batched query (no
+    # N+1); ``clearing_membership_checked_at`` is the evaluated-vs-unknown
+    # sentinel.
+    member_agencies: list[str] = []
+    clearing_membership_checked_at: datetime | None = None
 
 
 class InvestmentAdvisorDetail(InvestmentAdvisorListItem):
@@ -99,6 +110,18 @@ class AdvisorContactItem(BaseModel):
     discovery_source: str | None = None
     discovery_confidence: float | None = None
     enriched_at: datetime
+    emails: list[EmailHit] = []
+    phones: list[PhoneHit] = []
+
+    @field_validator("emails", "phones", mode="before")
+    @classmethod
+    def _coerce_null_to_empty(cls, v: object) -> object:
+        return v if v is not None else []
+
+    @model_validator(mode="after")
+    def _synthesize_arrays(self) -> Self:
+        self.emails, self.phones = synthesize_contact_arrays(self)
+        return self
 
 
 class AdvisorFilingItem(BaseModel):
@@ -147,4 +170,48 @@ class InvestmentAdvisorProfileResponse(BaseModel):
     advisor: InvestmentAdvisorDetail
     contacts: list[AdvisorContactItem] = []
     filings: list[AdvisorFilingItem] = []
+    # Full clearing-agency / SRO membership rows with provenance (active +
+    # needs_review). Mostly empty for IAs — only dually-registered firms match.
+    clearing_memberships: list[ClearingMembershipItem] = []
     is_favorited: bool = False
+
+
+# ─── Per-advisor refresh-all (IA analog of RefreshAllRequest/Response) ───────
+# Mirrors backend/app/schemas/broker_dealer.py:346-379 so the FE can reuse the
+# same polling + 409-conflict + 429-cooldown handling pattern. See plan in
+# C:/Users/DSWDSRV-CARAGA/.claude/plans/hos-is-the-new-gleaming-toast.md.
+
+class RefreshAdvisorRequest(BaseModel):
+    """Request body for ``POST /investment-advisors/{id}/refresh-all``.
+
+    ``scope="all"`` is the only initial scope. List-only scope can be added
+    later if the IA grid grows refresh-relevant columns; today the grid
+    surfaces only the always-populated AUM/filing fields, so list_only
+    would have nothing to skip.
+    """
+
+    scope: Literal["all"] = "all"
+
+
+class RefreshAdvisorResponse(BaseModel):
+    """Response shape for ``POST /investment-advisors/{id}/refresh-all``.
+
+    Two terminal shapes mirroring the BD endpoint:
+
+    - ``run_id=int, status="queued"`` — at least one sub-pipeline's gate
+      passed; FE polls ``GET /pipeline/run/{run_id}`` for the parent run's
+      terminal state and ``notes.summary`` toast string.
+    - ``run_id=None, status="skipped", reason="Already complete."`` — every
+      gate failed. No PipelineRun row, no provider calls, no cost.
+
+    When a parent run is already in flight for this advisor, the handler
+    returns 202 + ``status="in_flight"`` carrying that run's id (rather
+    than a 409) so the FE attaches to it without the browser logging a
+    cosmetic console error. The FE polls ``run_id`` identically in the
+    queued and in-flight cases.
+    """
+
+    run_id: int | None = None
+    status: str
+    advisor_id: int
+    reason: str | None = None

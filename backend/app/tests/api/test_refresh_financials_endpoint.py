@@ -44,12 +44,14 @@ from app.services.auth import get_current_user
 
 def _viewer_user() -> AuthenticatedUser:
     """Authenticated non-admin user — the endpoint accepts any signed-in
-    role, so this is the canonical fixture for happy-path tests."""
+    role with master_list access, which is the canonical happy-path
+    setup once feature_permissions gating ships."""
     return AuthenticatedUser(
         id="viewer-1",
         name="Viewer User",
         email="viewer@example.com",
         role="viewer",
+        feature_permissions=["master_list"],
         session_expires_at=datetime(2099, 1, 1, tzinfo=timezone.utc),
     )
 

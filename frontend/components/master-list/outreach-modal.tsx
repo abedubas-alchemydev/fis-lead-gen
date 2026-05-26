@@ -1,16 +1,30 @@
 "use client";
 
 import Link from "next/link";
+import type { Route } from "next";
 import { useEffect, useMemo, useRef, useState } from "react";
 
 import {
   ApiError,
+  generateAdvisorOutreachDraft,
+  generateInvestorOutreachDraft,
   generateOutreachDraft,
+  getLinkedProviders,
   listVaultFolders,
+  sendAdvisorOutreach,
+  sendInvestorOutreach,
   sendOutreachEmail
 } from "@/lib/api";
 import { authClient } from "@/lib/auth-client";
-import type { ExecutiveContactItem, VaultFolder } from "@/lib/types";
+import type {
+  OutreachContact,
+  OutreachEntityKind
+} from "@/components/master-list/outreach-button";
+import type {
+  EmailProviderId,
+  LinkedProviderItem,
+  VaultFolder
+} from "@/lib/types";
 
 // Modal that powers the per-contact "Outreach" button on the firm-detail
 // panel. Loads the caller's vault folders, lets them pick a service,
@@ -22,9 +36,16 @@ import type { ExecutiveContactItem, VaultFolder } from "@/lib/types";
 // the gmail.send scope.
 
 interface OutreachModalProps {
-  brokerDealerId: number;
-  brokerDealerName: string;
-  contact: ExecutiveContactItem;
+  // Discriminator: picks the (draft, send) endpoint pair invoked when
+  // the user clicks Generate / Send. BD callers pass "broker_dealer"
+  // (legacy default for the master-list contact rows); the IA
+  // advisor-detail surface passes "advisor". Investor isn't wired into
+  // any UI surface yet but the case is handled so future callers can
+  // pass it without touching this file.
+  entityKind: OutreachEntityKind;
+  entityId: number;
+  entityName: string;
+  contact: OutreachContact;
   onClose: () => void;
 }
 
@@ -37,18 +58,100 @@ type Stage =
   | "sent"
   | "error";
 
-const GMAIL_SEND_SCOPE = "https://www.googleapis.com/auth/gmail.send";
+// Per-provider send scopes the backend expects in account.scope after
+// the user's first Send click. Mirrors
+// backend/app/services/email_providers/<provider>.py:SEND_SCOPE (or
+// GMAIL_SEND_SCOPE for Google) so the FE incremental-consent flow asks
+// for exactly the scope the BE checks for.
+const SEND_SCOPE_BY_PROVIDER: Record<EmailProviderId, string> = {
+  google: "https://www.googleapis.com/auth/gmail.send",
+  microsoft: "Mail.Send",
+  yahoo: "mail-w"
+};
 
-// Backend 412 detail codes — kept here as constants so the recovery
-// flow doesn't typo a string compare.
-const LINK_RECOVERABLE_CODES = new Set([
+const PROVIDER_LABEL: Record<EmailProviderId, string> = {
+  google: "Gmail",
+  microsoft: "Outlook",
+  yahoo: "Yahoo Mail"
+};
+
+// "Open Sent folder" URLs per provider. Best-effort -- Yahoo's deep
+// link is brittle so we just point at the inbox root; users can find
+// Sent from there.
+const SENT_FOLDER_URL: Record<EmailProviderId, string> = {
+  google: "https://mail.google.com/mail/u/0/#sent",
+  microsoft: "https://outlook.office.com/mail/sentitems",
+  yahoo: "https://mail.yahoo.com/d/folders/2"
+};
+
+// Three-tier fallback so the picker has a predictable default for any
+// (folder, linkedProviders) combination. Mirrors the BE resolver in
+// outreach.py (``_resolve_sender_account``): folder default first,
+// then the first send-scoped account, then the first linked account,
+// then null when nothing is linked.
+function resolveDefaultSenderAccountId(
+  folder: VaultFolder | null,
+  linkedProviders: LinkedProviderItem[]
+): string | null {
+  if (linkedProviders.length === 0) return null;
+  if (folder?.default_sender_account_id) {
+    const folderDefault = linkedProviders.find(
+      (p) => p.account_id === folder.default_sender_account_id
+    );
+    if (folderDefault) return folderDefault.account_id;
+  }
+  const withScope = linkedProviders.find((p) => p.has_send_scope);
+  return (withScope ?? linkedProviders[0]).account_id;
+}
+
+// Backend 412 detail codes per provider. The Gmail path keeps its
+// legacy codes ("google_account_not_linked" / "gmail_scope_required")
+// for back-compat; Microsoft + Yahoo use the provider-prefixed
+// variants. ``decodeLinkAction`` parses these to drive linkSocial
+// with the right provider + scope when a 412 lands.
+const LINK_RECOVERABLE_CODES = new Set<string>([
   "google_account_not_linked",
-  "gmail_scope_required"
+  "gmail_scope_required",
+  "microsoft_account_not_linked",
+  "microsoft_scope_required",
+  "yahoo_account_not_linked",
+  "yahoo_scope_required"
 ]);
 
+function decodeLinkAction(
+  detail: string,
+  fallback: EmailProviderId
+): { provider: EmailProviderId; needsSendScope: boolean } | null {
+  if (detail === "google_account_not_linked") {
+    return { provider: "google", needsSendScope: false };
+  }
+  if (detail === "gmail_scope_required") {
+    return { provider: "google", needsSendScope: true };
+  }
+  if (detail === "microsoft_account_not_linked") {
+    return { provider: "microsoft", needsSendScope: false };
+  }
+  if (detail === "microsoft_scope_required") {
+    return { provider: "microsoft", needsSendScope: true };
+  }
+  if (detail === "yahoo_account_not_linked") {
+    return { provider: "yahoo", needsSendScope: false };
+  }
+  if (detail === "yahoo_scope_required") {
+    return { provider: "yahoo", needsSendScope: true };
+  }
+  // Future-proof: any other LINK_RECOVERABLE_CODES entry defaults to
+  // the currently selected provider with send scope.
+  if (LINK_RECOVERABLE_CODES.has(detail)) {
+    return { provider: fallback, needsSendScope: true };
+  }
+  return null;
+}
+
 export function OutreachModal({
-  brokerDealerId,
-  brokerDealerName,
+  entityKind,
+  entityId,
+  entityName,
   contact,
   onClose
 }: OutreachModalProps) {
@@ -59,12 +162,30 @@ export function OutreachModal({
   const [body, setBody] = useState("");
   const [error, setError] = useState<string | null>(null);
   const [copyState, setCopyState] = useState<"idle" | "subject" | "body">("idle");
-  // Toggled when the BE returns 412 google_account_not_linked /
-  // gmail_scope_required so the error block renders a "Grant Gmail
-  // access" CTA alongside the message.
+  // Toggled when the BE returns 412 <provider>_account_not_linked /
+  // <provider>_scope_required so the error block renders a
+  // "Grant <provider> access" CTA. ``linkActionProvider`` carries the
+  // provider the action targets (may differ from the currently selected
+  // provider on the rare case where the BE flips it).
   const [linkActionNeeded, setLinkActionNeeded] = useState(false);
+  const [linkActionProvider, setLinkActionProvider] =
+    useState<EmailProviderId | null>(null);
+  // Linked-account state — drives the "Send from:" email-address
+  // dropdown and the "Connect <provider>" empty state. Multi-sender
+  // outreach (see plans/multi-sender-outreach): one entry per linked
+  // OAuth account, not per provider type.
+  const [linkedProviders, setLinkedProviders] = useState<LinkedProviderItem[]>(
+    []
+  );
+  // PK of the currently selected ``account`` row. Resolved via the
+  // three-tier fallback in resolveDefaultSenderAccountId. Null only
+  // before linked-providers has loaded or when zero accounts are
+  // linked (empty state).
+  const [senderAccountId, setSenderAccountId] = useState<string | null>(null);
+  // True when the user has explicitly picked a sender in this modal
+  // session -- prevents folder changes from clobbering their choice.
+  const userOverrodeSenderRef = useRef(false);
   const session = authClient.useSession();
-  const senderEmail = session.data?.user?.email ?? null;
 
   const isMountedRef = useRef(true);
   useEffect(() => {
@@ -108,21 +229,83 @@ export function OutreachModal({
     };
   }, []);
 
+  // Linked-providers fetch — runs in parallel with the folders fetch so
+  // the dropdown is ready by the time the user clicks Generate.
+  // Failures here are non-fatal: if the call 500s we leave the picker
+  // empty and the BE's 412 path catches the no-account case.
+  useEffect(() => {
+    let cancelled = false;
+    (async () => {
+      try {
+        const result = await getLinkedProviders();
+        if (cancelled || !isMountedRef.current) return;
+        setLinkedProviders(result.items);
+      } catch {
+        // Swallow — empty picker, BE's 412 will guide the user.
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+
   const selectedFolder = useMemo(
     () => folders.find((f) => f.id === folderId) ?? null,
     [folders, folderId]
   );
+
+  // Apply the three-tier default any time the folder or linkedProviders
+  // change -- unless the user has already overridden the picker in
+  // this session. Clears ``senderAccountId`` cleanly when zero accounts
+  // are linked (empty state). The ref-guard means folder switches DO
+  // bring the folder's default back if the user hasn't picked yet, but
+  // folder switches AFTER a manual pick are honoured (the user's pick
+  // sticks even if they navigate folders).
+  useEffect(() => {
+    if (userOverrodeSenderRef.current) return;
+    const next = resolveDefaultSenderAccountId(selectedFolder, linkedProviders);
+    setSenderAccountId(next);
+  }, [selectedFolder, linkedProviders]);
+
+  const selectedAccount = useMemo<LinkedProviderItem | null>(
+    () =>
+      linkedProviders.find((p) => p.account_id === senderAccountId) ?? null,
+    [linkedProviders, senderAccountId]
+  );
+  const providerId: EmailProviderId = selectedAccount?.provider ?? "google";
+  const senderEmail =
+    selectedAccount?.email_address ??
+    (session.data?.user?.email ?? null);
 
   async function handleGenerate() {
     if (folderId === null) return;
     setStage("generating");
     setError(null);
     try {
-      const draft = await generateOutreachDraft({
-        broker_dealer_id: brokerDealerId,
-        contact_id: contact.id,
-        folder_id: folderId
-      });
+      // Branch on entityKind so the right /outreach/{kind}-draft endpoint
+      // runs. The wire payloads differ only in their id field names
+      // (broker_dealer_id vs advisor_id vs institutional_investor_id),
+      // wrapped by the per-kind helpers in api.ts.
+      let draft;
+      if (entityKind === "broker_dealer") {
+        draft = await generateOutreachDraft({
+          broker_dealer_id: entityId,
+          contact_id: contact.id,
+          folder_id: folderId
+        });
+      } else if (entityKind === "advisor") {
+        draft = await generateAdvisorOutreachDraft({
+          advisor_id: entityId,
+          advisor_contact_id: contact.id,
+          folder_id: folderId
+        });
+      } else {
+        draft = await generateInvestorOutreachDraft({
+          institutional_investor_id: entityId,
+          investor_contact_id: contact.id,
+          folder_id: folderId
+        });
+      }
       if (!isMountedRef.current) return;
       setSubject(draft.subject);
       setBody(draft.body);
@@ -139,47 +322,110 @@ export function OutreachModal({
     setStage("sending");
     setError(null);
     setLinkActionNeeded(false);
+    setLinkActionProvider(null);
     try {
-      await sendOutreachEmail({
-        broker_dealer_id: brokerDealerId,
-        contact_id: contact.id,
-        folder_id: folderId ?? 0,
-        subject,
-        body
-      });
+      // Same entityKind branch as handleGenerate -- POSTs to the
+      // matching /outreach/{kind}-send endpoint. provider +
+      // sender_account_id are entity-agnostic so the body shape only
+      // diverges on the id columns.
+      if (entityKind === "broker_dealer") {
+        await sendOutreachEmail({
+          broker_dealer_id: entityId,
+          contact_id: contact.id,
+          folder_id: folderId ?? 0,
+          subject,
+          body,
+          // Server derives provider from the resolved account; we still
+          // pass ``provider`` for back-compat with older deploys.
+          provider: providerId,
+          sender_account_id: senderAccountId
+        });
+      } else if (entityKind === "advisor") {
+        await sendAdvisorOutreach({
+          advisor_id: entityId,
+          advisor_contact_id: contact.id,
+          folder_id: folderId ?? 0,
+          subject,
+          body,
+          provider: providerId,
+          sender_account_id: senderAccountId
+        });
+      } else {
+        await sendInvestorOutreach({
+          institutional_investor_id: entityId,
+          investor_contact_id: contact.id,
+          folder_id: folderId ?? 0,
+          subject,
+          body,
+          provider: providerId,
+          sender_account_id: senderAccountId
+        });
+      }
       if (!isMountedRef.current) return;
       setStage("sent");
     } catch (err) {
       if (!isMountedRef.current) return;
-      const message = buildSendErrorMessage(err);
-      const recoverable =
-        err instanceof ApiError &&
-        err.status === 412 &&
-        LINK_RECOVERABLE_CODES.has(err.detail);
+      const message = buildSendErrorMessage(err, providerId);
+      const action =
+        err instanceof ApiError && err.status === 412
+          ? decodeLinkAction(err.detail, providerId)
+          : null;
       setError(message);
-      setLinkActionNeeded(recoverable);
+      setLinkActionNeeded(action !== null);
+      setLinkActionProvider(action?.provider ?? null);
       // Roll back to draft so the user can edit + retry; the error
       // block above the action row carries the explanation.
       setStage("draft");
     }
   }
 
-  async function handleLinkGmail() {
-    // Triggers Google's incremental-consent flow for the gmail.send
+  async function handleLinkProvider(target: EmailProviderId) {
+    // Triggers the provider's incremental-consent flow for its send
     // scope. Better Auth merges the new scope onto the existing
     // ``account`` row server-side, then redirects back to callbackURL.
     // The page reloads, so any unsaved edits to subject/body are lost
     // — flagged in the inline message above so the user knows to
-    // copy-out first if needed.
+    // copy-out first if needed. Microsoft uses the same linkSocial
+    // helper as Google; Yahoo (genericOAuth) uses linkOAuth2.
+    const sendScope = SEND_SCOPE_BY_PROVIDER[target];
     try {
+      if (target === "yahoo") {
+        // Better Auth 1.3.6 generic-OAuth client plugin: linkOAuth2 if
+        // available, else fall back to signIn.oauth2 which Better Auth
+        // treats as a link when the user is already signed in.
+        const maybeLink = (authClient as unknown as {
+          linkOAuth2?: (args: {
+            providerId: string;
+            scopes?: string[];
+            callbackURL?: string;
+          }) => Promise<unknown>;
+        }).linkOAuth2;
+        if (maybeLink) {
+          await maybeLink({
+            providerId: "yahoo",
+            scopes: [sendScope],
+            callbackURL: window.location.href
+          });
+        } else {
+          await authClient.signIn.oauth2({
+            providerId: "yahoo",
+            callbackURL: window.location.href
+          });
+        }
+        return;
+      }
       await authClient.linkSocial({
-        provider: "google",
-        scopes: [GMAIL_SEND_SCOPE],
+        provider: target,
+        scopes: [sendScope],
         callbackURL: window.location.href
       });
     } catch (err) {
       if (!isMountedRef.current) return;
-      setError(err instanceof Error ? err.message : "Failed to open Google.");
+      setError(
+        err instanceof Error
+          ? err.message
+          : `Failed to open ${PROVIDER_LABEL[target]}.`
+      );
     }
   }
 
@@ -211,29 +457,29 @@ export function OutreachModal({
         }}
         className="absolute inset-0 bg-[rgba(15,23,42,0.55)] backdrop-blur-sm"
       />
-      <div className="relative w-full max-w-[640px] rounded-2xl border border-slate-200 bg-white p-6 shadow-[0_24px_48px_-16px_rgba(15,23,42,0.45)]">
+      <div className="relative w-full max-w-[640px] rounded-2xl border border-[var(--border,rgba(30,64,175,0.1))] bg-[var(--surface,#ffffff)] p-6 shadow-[0_24px_48px_-16px_rgba(15,23,42,0.45)]">
         <div className="flex items-start justify-between gap-4">
           <div>
-            <p className="text-[11px] uppercase tracking-[0.18em] text-slate-500">
+            <p className="text-[11px] uppercase tracking-[0.18em] text-[var(--text-muted,#94a3b8)]">
               Compose outreach
             </p>
             <h2
               id="outreach-modal-title"
-              className="mt-1 text-lg font-semibold tracking-tight text-navy"
+              className="mt-1 text-lg font-semibold tracking-tight text-[var(--text,#0f172a)]"
             >
               {contact.name}{" "}
-              <span className="text-sm font-medium text-slate-500">
+              <span className="text-sm font-medium text-[var(--text-muted,#94a3b8)]">
                 - {contact.title}
               </span>
             </h2>
-            <p className="mt-1 text-xs text-slate-500">
-              At <span className="font-medium text-slate-700">{brokerDealerName}</span>
+            <p className="mt-1 text-xs text-[var(--text-muted,#94a3b8)]">
+              At <span className="font-medium text-[var(--text-dim,#475569)]">{entityName}</span>
               {contact.email ? (
                 <>
                   {" "}-{" "}
                   <a
                     href={`mailto:${contact.email}`}
-                    className="text-blue underline-offset-4 hover:underline"
+                    className="text-[var(--accent,#6366f1)] underline-offset-4 hover:underline"
                   >
                     {contact.email}
                   </a>
@@ -241,8 +487,12 @@ export function OutreachModal({
               ) : null}
             </p>
             {senderEmail && (stage === "draft" || stage === "sending") ? (
-              <p className="mt-1 text-[11px] text-slate-400">
-                Sending as <span className="text-slate-600">{senderEmail}</span>
+              <p className="mt-1 text-[11px] text-[var(--text-muted,#94a3b8)]">
+                Sending as <span className="text-[var(--text-dim,#475569)]">{senderEmail}</span>{" "}
+                via{" "}
+                <span className="text-[var(--text-dim,#475569)]">
+                  {PROVIDER_LABEL[providerId]}
+                </span>
               </p>
             ) : null}
           </div>
@@ -250,7 +500,7 @@ export function OutreachModal({
             type="button"
             onClick={onClose}
             disabled={stage === "generating" || stage === "sending"}
-            className="rounded-full p-1 text-slate-400 transition hover:bg-slate-100 hover:text-slate-600 disabled:cursor-not-allowed"
+            className="rounded-full p-1 text-[var(--text-muted,#94a3b8)] transition hover:bg-[var(--surface-2,#f1f6fd)] hover:text-[var(--text-dim,#475569)] disabled:cursor-not-allowed"
             aria-label="Close outreach modal"
           >
             <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden>
@@ -260,19 +510,19 @@ export function OutreachModal({
         </div>
 
         {stage === "loading_folders" ? (
-          <p className="mt-6 text-sm text-slate-500">Loading your services...</p>
+          <p className="mt-6 text-sm text-[var(--text-muted,#94a3b8)]">Loading your services...</p>
         ) : null}
 
         {(stage === "ready" || stage === "generating") && folders.length === 0 ? (
-          <div className="mt-5 rounded-xl border border-amber-200 bg-amber-50/70 px-4 py-4 text-sm text-slate-700">
-            <p className="font-medium text-navy">No services in your Vault yet.</p>
-            <p className="mt-1 text-xs leading-5 text-slate-600">
+          <div className="mt-5 rounded-xl border border-amber-200 bg-amber-50/70 px-4 py-4 text-sm text-[var(--text-dim,#475569)]">
+            <p className="font-medium text-[var(--text,#0f172a)]">No services in your Vault yet.</p>
+            <p className="mt-1 text-xs leading-5 text-[var(--text-dim,#475569)]">
               Add a service (e.g. &ldquo;Custody&rdquo;, &ldquo;Stock Loan&rdquo;) with a
               short description before generating drafts.
             </p>
             <Link
               href="/vault"
-              className="mt-3 inline-flex h-9 items-center rounded-xl bg-navy px-3 text-xs font-semibold text-white transition hover:bg-[#112b54]"
+              className="mt-3 inline-flex h-9 items-center rounded-xl bg-[var(--accent,#6366f1)] px-3 text-xs font-semibold text-white transition hover:bg-[var(--accent-2,#8b5cf6)]"
             >
               Open the Vault
             </Link>
@@ -281,13 +531,19 @@ export function OutreachModal({
 
         {(stage === "ready" || stage === "generating") && folders.length > 0 ? (
           <div className="mt-5 space-y-3">
-            <label className="block text-xs font-medium uppercase tracking-[0.18em] text-slate-500">
+            <label className="block text-xs font-medium uppercase tracking-[0.18em] text-[var(--text-muted,#94a3b8)]">
               Service to pitch
               <select
                 value={folderId ?? ""}
-                onChange={(event) => setFolderId(Number(event.target.value))}
+                onChange={(event) => {
+                  // Folder switch implies new service -> re-apply the
+                  // new folder's default sender. The override flag is
+                  // session-scoped per-folder, not global to the modal.
+                  userOverrodeSenderRef.current = false;
+                  setFolderId(Number(event.target.value));
+                }}
                 disabled={stage === "generating"}
-                className="mt-2 block w-full rounded-xl border border-slate-200 bg-white px-3 py-2 text-sm text-navy outline-none transition focus:border-blue focus:ring-2 focus:ring-blue/20 disabled:cursor-not-allowed disabled:opacity-60"
+                className="mt-2 block w-full rounded-xl border border-[var(--border,rgba(30,64,175,0.1))] bg-[var(--surface,#ffffff)] px-3 py-2 text-sm text-[var(--text,#0f172a)] outline-none transition focus:border-[var(--accent,#6366f1)] focus:ring-2 focus:ring-[var(--accent,#6366f1)]/20 disabled:cursor-not-allowed disabled:opacity-60"
               >
                 {folders.map((folder) => (
                   <option key={folder.id} value={folder.id}>
@@ -297,14 +553,68 @@ export function OutreachModal({
               </select>
             </label>
             {selectedFolder?.description ? (
-              <p className="rounded-xl bg-slate-50 px-3 py-2 text-xs leading-5 text-slate-600">
+              <p className="rounded-xl bg-[var(--surface-2,#f1f6fd)] px-3 py-2 text-xs leading-5 text-[var(--text-dim,#475569)]">
                 {selectedFolder.description}
               </p>
             ) : (
-              <p className="text-xs text-slate-400">
+              <p className="text-xs text-[var(--text-muted,#94a3b8)]">
                 This service has no description - drafts will be more generic.
               </p>
             )}
+            {linkedProviders.length >= 2 ? (
+              <label className="block text-xs font-medium uppercase tracking-[0.18em] text-[var(--text-muted,#94a3b8)]">
+                Send from
+                <select
+                  value={senderAccountId ?? ""}
+                  onChange={(event) => {
+                    userOverrodeSenderRef.current = true;
+                    setSenderAccountId(event.target.value || null);
+                  }}
+                  disabled={stage === "generating"}
+                  className="mt-2 block w-full rounded-xl border border-[var(--border,rgba(30,64,175,0.1))] bg-[var(--surface,#ffffff)] px-3 py-2 text-sm text-[var(--text,#0f172a)] outline-none transition focus:border-[var(--accent,#6366f1)] focus:ring-2 focus:ring-[var(--accent,#6366f1)]/20 disabled:cursor-not-allowed disabled:opacity-60"
+                >
+                  {linkedProviders.map((p) => {
+                    const label =
+                      p.email_address ?? `${PROVIDER_LABEL[p.provider]} account`;
+                    const suffix = p.has_send_scope
+                      ? ` (${PROVIDER_LABEL[p.provider]})`
+                      : ` (${PROVIDER_LABEL[p.provider]} — will request send access)`;
+                    return (
+                      <option key={p.account_id} value={p.account_id}>
+                        {label}
+                        {suffix}
+                      </option>
+                    );
+                  })}
+                </select>
+              </label>
+            ) : null}
+            {linkedProviders.length === 0 ? (
+              <div className="rounded-xl border border-amber-200 bg-amber-50/70 px-3 py-3 text-xs leading-5 text-[var(--text-dim,#475569)]">
+                <p className="font-medium text-[var(--text,#0f172a)]">
+                  No email accounts connected yet.
+                </p>
+                <p className="mt-1">
+                  Connect a provider so Send can transmit through your own
+                  mailbox. You can also click Generate now and connect at the
+                  Send step.
+                </p>
+                <div className="mt-2 flex flex-wrap items-center gap-2">
+                  {(
+                    ["google", "microsoft", "yahoo"] as const satisfies readonly EmailProviderId[]
+                  ).map((p) => (
+                    <button
+                      key={p}
+                      type="button"
+                      onClick={() => void handleLinkProvider(p)}
+                      className="inline-flex h-8 items-center rounded-xl border border-amber-300 bg-white px-3 text-[11px] font-semibold text-amber-800 transition hover:bg-amber-50"
+                    >
+                      Connect {PROVIDER_LABEL[p]}
+                    </button>
+                  ))}
+                </div>
+              </div>
+            ) : null}
           </div>
         ) : null}
 
@@ -312,13 +622,13 @@ export function OutreachModal({
           <div className="mt-5 space-y-4">
             <div>
               <div className="flex items-center justify-between">
-                <label className="text-xs font-medium uppercase tracking-[0.18em] text-slate-500">
+                <label className="text-xs font-medium uppercase tracking-[0.18em] text-[var(--text-muted,#94a3b8)]">
                   Subject
                 </label>
                 <button
                   type="button"
                   onClick={() => void handleCopy("subject")}
-                  className="text-xs font-medium text-blue underline-offset-4 transition hover:underline"
+                  className="text-xs font-medium text-[var(--accent,#6366f1)] underline-offset-4 transition hover:underline"
                 >
                   {copyState === "subject" ? "Copied" : "Copy"}
                 </button>
@@ -328,18 +638,19 @@ export function OutreachModal({
                 value={subject}
                 onChange={(event) => setSubject(event.target.value)}
                 disabled={stage === "sending"}
-                className="mt-1 block w-full rounded-xl border border-slate-200 bg-white px-3 py-2 text-sm text-navy outline-none transition focus:border-blue focus:ring-2 focus:ring-blue/20 disabled:cursor-not-allowed disabled:opacity-60"
+                data-allow-copy
+                className="mt-1 block w-full rounded-xl border border-[var(--border,rgba(30,64,175,0.1))] bg-[var(--surface,#ffffff)] px-3 py-2 text-sm text-[var(--text,#0f172a)] outline-none transition focus:border-[var(--accent,#6366f1)] focus:ring-2 focus:ring-[var(--accent,#6366f1)]/20 disabled:cursor-not-allowed disabled:opacity-60"
               />
             </div>
             <div>
               <div className="flex items-center justify-between">
-                <label className="text-xs font-medium uppercase tracking-[0.18em] text-slate-500">
+                <label className="text-xs font-medium uppercase tracking-[0.18em] text-[var(--text-muted,#94a3b8)]">
                   Body
                 </label>
                 <button
                   type="button"
                   onClick={() => void handleCopy("body")}
-                  className="text-xs font-medium text-blue underline-offset-4 transition hover:underline"
+                  className="text-xs font-medium text-[var(--accent,#6366f1)] underline-offset-4 transition hover:underline"
                 >
                   {copyState === "body" ? "Copied" : "Copy"}
                 </button>
@@ -349,36 +660,45 @@ export function OutreachModal({
                 onChange={(event) => setBody(event.target.value)}
                 disabled={stage === "sending"}
                 rows={10}
-                className="mt-1 block w-full rounded-xl border border-slate-200 bg-white px-3 py-2 text-sm leading-6 text-navy outline-none transition focus:border-blue focus:ring-2 focus:ring-blue/20 disabled:cursor-not-allowed disabled:opacity-60"
+                data-allow-copy
+                className="mt-1 block w-full rounded-xl border border-[var(--border,rgba(30,64,175,0.1))] bg-[var(--surface,#ffffff)] px-3 py-2 text-sm leading-6 text-[var(--text,#0f172a)] outline-none transition focus:border-[var(--accent,#6366f1)] focus:ring-2 focus:ring-[var(--accent,#6366f1)]/20 disabled:cursor-not-allowed disabled:opacity-60"
               />
             </div>
           </div>
         ) : null}
 
         {stage === "sent" ? (
-          <div className="mt-6 rounded-xl border border-emerald-200 bg-emerald-50/70 px-4 py-5 text-sm text-slate-700">
+          <div className="mt-6 rounded-xl border border-emerald-200 bg-emerald-50/70 px-4 py-5 text-sm text-[var(--text-dim,#475569)]">
             <p className="font-semibold text-emerald-700">Email sent.</p>
-            <p className="mt-1 text-xs leading-5 text-slate-600">
+            <p className="mt-1 text-xs leading-5 text-[var(--text-dim,#475569)]">
               Delivered to{" "}
-              <span className="font-medium text-slate-700">{contact.email}</span>
+              <span className="font-medium text-[var(--text-dim,#475569)]">{contact.email}</span>
               {senderEmail ? (
                 <>
                   {" "}from{" "}
-                  <span className="font-medium text-slate-700">
+                  <span className="font-medium text-[var(--text-dim,#475569)]">
                     {senderEmail}
                   </span>
                 </>
               ) : null}
-              . A copy is in your Gmail Sent folder.
+              . A copy is in your {PROVIDER_LABEL[providerId]} Sent folder.
             </p>
-            <a
-              href="https://mail.google.com/mail/u/0/#sent"
-              target="_blank"
-              rel="noopener noreferrer"
-              className="mt-3 inline-flex h-9 items-center rounded-xl border border-emerald-300 bg-white px-3 text-xs font-semibold text-emerald-700 transition hover:bg-emerald-50"
-            >
-              Open Gmail Sent folder
-            </a>
+            <div className="mt-3 flex flex-wrap items-center gap-2">
+              <a
+                href={SENT_FOLDER_URL[providerId]}
+                target="_blank"
+                rel="noopener noreferrer"
+                className="inline-flex h-9 items-center rounded-xl border border-emerald-300 bg-white px-3 text-xs font-semibold text-emerald-700 transition hover:bg-emerald-50"
+              >
+                Open {PROVIDER_LABEL[providerId]} Sent folder
+              </a>
+              <Link
+                href={"/outreach/sent" as Route}
+                className="inline-flex h-9 items-center rounded-xl border border-emerald-300 bg-white px-3 text-xs font-semibold text-emerald-700 transition hover:bg-emerald-50"
+              >
+                View all sent outreach
+              </Link>
+            </div>
           </div>
         ) : null}
 
@@ -388,10 +708,12 @@ export function OutreachModal({
             {linkActionNeeded ? (
               <button
                 type="button"
-                onClick={() => void handleLinkGmail()}
+                onClick={() =>
+                  void handleLinkProvider(linkActionProvider ?? providerId)
+                }
                 className="mt-2 inline-flex h-8 items-center rounded-xl bg-danger px-3 text-xs font-semibold text-white transition hover:bg-red-700"
               >
-                Grant Gmail access
+                Grant {PROVIDER_LABEL[linkActionProvider ?? providerId]} access
               </button>
             ) : null}
           </div>
@@ -408,7 +730,7 @@ export function OutreachModal({
                 setLinkActionNeeded(false);
                 setStage("ready");
               }}
-              className="inline-flex h-10 items-center rounded-xl border border-slate-200 bg-white px-4 text-sm font-medium text-slate-700 transition hover:border-slate-300 hover:bg-slate-50"
+              className="inline-flex h-10 items-center rounded-xl border border-[var(--border,rgba(30,64,175,0.1))] bg-[var(--surface,#ffffff)] px-4 text-sm font-medium text-[var(--text-dim,#475569)] transition hover:border-[var(--border-2,rgba(30,64,175,0.16))] hover:bg-[var(--surface-2,#f1f6fd)]"
             >
               Regenerate
             </button>
@@ -417,7 +739,7 @@ export function OutreachModal({
             type="button"
             onClick={onClose}
             disabled={stage === "generating" || stage === "sending"}
-            className="inline-flex h-10 items-center rounded-xl border border-slate-200 bg-white px-4 text-sm font-medium text-slate-700 transition hover:border-slate-300 hover:bg-slate-50 disabled:cursor-not-allowed disabled:opacity-60"
+            className="inline-flex h-10 items-center rounded-xl border border-[var(--border,rgba(30,64,175,0.1))] bg-[var(--surface,#ffffff)] px-4 text-sm font-medium text-[var(--text-dim,#475569)] transition hover:border-[var(--border-2,rgba(30,64,175,0.16))] hover:bg-[var(--surface-2,#f1f6fd)] disabled:cursor-not-allowed disabled:opacity-60"
           >
             {stage === "draft" || stage === "sent" ? "Done" : "Cancel"}
           </button>
@@ -430,7 +752,7 @@ export function OutreachModal({
                 folders.length === 0 ||
                 folderId === null
               }
-              className="inline-flex h-10 items-center rounded-xl bg-navy px-4 text-sm font-semibold text-white shadow-lg shadow-navy/15 transition hover:bg-[#112b54] disabled:cursor-not-allowed disabled:opacity-60"
+              className="inline-flex h-10 items-center rounded-xl bg-[var(--accent,#6366f1)] px-4 text-sm font-semibold text-white shadow-lg shadow-[var(--accent,#6366f1)]/20 transition hover:bg-[var(--accent-2,#8b5cf6)] disabled:cursor-not-allowed disabled:opacity-60"
             >
               {stage === "generating" ? "Generating..." : "Generate draft"}
             </button>
@@ -442,7 +764,7 @@ export function OutreachModal({
               disabled={
                 stage === "sending" || !subject.trim() || !body.trim()
               }
-              className="inline-flex h-10 items-center rounded-xl bg-navy px-4 text-sm font-semibold text-white shadow-lg shadow-navy/15 transition hover:bg-[#112b54] disabled:cursor-not-allowed disabled:opacity-60"
+              className="inline-flex h-10 items-center rounded-xl bg-[var(--accent,#6366f1)] px-4 text-sm font-semibold text-white shadow-lg shadow-[var(--accent,#6366f1)]/20 transition hover:bg-[var(--accent-2,#8b5cf6)] disabled:cursor-not-allowed disabled:opacity-60"
             >
               {stage === "sending" ? "Sending..." : "Send"}
             </button>
@@ -472,23 +794,39 @@ function buildGenerateErrorMessage(error: unknown): string {
   return errorMessage(error);
 }
 
-function buildSendErrorMessage(error: unknown): string {
+function buildSendErrorMessage(
+  error: unknown,
+  providerId: EmailProviderId
+): string {
   if (error instanceof ApiError && error.status === 412) {
-    if (error.detail === "google_account_not_linked") {
-      return "Connect your Google account to send outreach from your Gmail.";
+    if (
+      error.detail === "google_account_not_linked" ||
+      error.detail === "microsoft_account_not_linked" ||
+      error.detail === "yahoo_account_not_linked"
+    ) {
+      const target = error.detail.startsWith("google")
+        ? "Google"
+        : error.detail.startsWith("microsoft")
+          ? "Microsoft"
+          : "Yahoo";
+      return `Connect your ${target} account to send outreach from ${PROVIDER_LABEL[providerId]}.`;
     }
-    if (error.detail === "gmail_scope_required") {
-      return "We need permission to send email on your behalf. Grant access below to continue.";
+    if (
+      error.detail === "gmail_scope_required" ||
+      error.detail === "microsoft_scope_required" ||
+      error.detail === "yahoo_scope_required"
+    ) {
+      return `We need permission to send email on your behalf via ${PROVIDER_LABEL[providerId]}. Grant access below to continue.`;
     }
   }
   if (error instanceof ApiError && error.status === 400 && error.detail === "recipient_no_email") {
     return "This contact has no email on file.";
   }
   if (error instanceof ApiError && error.status === 502) {
-    return "Gmail rejected the message. Try again in a moment.";
+    return `${PROVIDER_LABEL[providerId]} rejected the message. Try again in a moment.`;
   }
   if (error instanceof ApiError && error.status === 503) {
-    return "Outreach sending is not configured. Contact an administrator.";
+    return `${PROVIDER_LABEL[providerId]} sending is not configured. Contact an administrator.`;
   }
   if (error instanceof ApiError && error.status === 404) {
     return "We couldn't find the firm, contact, or service for this send.";

@@ -219,7 +219,7 @@ export function MyFavoritesClient() {
             <span className="absolute inset-0 animate-ping rounded-full bg-[var(--green,#10b981)] opacity-60" />
             <span className="relative h-2 w-2 rounded-full bg-[var(--green,#10b981)]" />
           </span>
-          {totalSaved.toLocaleString()} firm{totalSaved === 1 ? "" : "s"} across{" "}
+          {totalSaved.toLocaleString()} item{totalSaved === 1 ? "" : "s"} across{" "}
           {lists.length.toLocaleString()} list
           {lists.length === 1 ? "" : "s"}
         </span>

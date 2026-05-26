@@ -5,7 +5,7 @@ import { auth } from "@/lib/auth";
 
 export async function getOptionalSession() {
   return auth.api.getSession({
-    headers: headers()
+    headers: await headers()
   });
 }
 

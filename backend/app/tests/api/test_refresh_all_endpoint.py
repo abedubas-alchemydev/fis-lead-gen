@@ -17,7 +17,8 @@ Coverage:
   - 401 unauthenticated.
   - 404 firm not found.
   - 503 when a required provider key is missing.
-  - 409 when an in-flight refresh-all already exists for this firm.
+  - 202 attach-to-existing when an in-flight refresh-all already exists
+    for this firm (status="in_flight"; no new row, no background work).
   - 429 when the per-(user, BD) cooldown is hit.
   - Background-task wrapper delegates to the orchestrator and swallows
     exceptions.
@@ -49,6 +50,7 @@ def _viewer_user() -> AuthenticatedUser:
         name="Viewer User",
         email="viewer@example.com",
         role="viewer",
+        feature_permissions=["master_list"],
         session_expires_at=datetime(2099, 1, 1, tzinfo=timezone.utc),
     )
 
@@ -406,11 +408,15 @@ async def test_provider_key_missing_returns_503(
     assert stub_background == []
 
 
-async def test_in_flight_run_returns_409_with_existing_run_id(
+async def test_in_flight_run_returns_202_with_existing_run_id(
     monkeypatch: pytest.MonkeyPatch,
     override_db: _FakeAsyncSession,
     stub_background: list[dict[str, Any]],
 ) -> None:
+    # A RECENT in-flight run attaches the caller to that run via 202 +
+    # status="in_flight" instead of 409. The FE polls run_id identically
+    # in the queued and in-flight cases, and the browser no longer logs a
+    # cosmetic console error for the refresh-on-visit POST.
     bd = _bd()
     in_flight = PipelineRun(
         id=8888,
@@ -422,6 +428,8 @@ async def test_in_flight_run_returns_409_with_existing_run_id(
         success_count=1,
         failure_count=0,
         notes='{"bd_id": 11, "stage": "running"}',
+        # Started just now → within STALE_REFRESH_RUN_AGE → counts as alive.
+        started_at=datetime.now(timezone.utc),
     )
 
     async def _fake_get(_db: Any, _firm_id: int) -> BrokerDealer | None:
@@ -441,13 +449,69 @@ async def test_in_flight_run_returns_409_with_existing_run_id(
     finally:
         app.dependency_overrides.pop(get_current_user, None)
 
-    assert response.status_code == 409
-    detail = response.json()["detail"]
-    assert detail["run_id"] == 8888
-    assert detail["status"] == "running"
-    assert detail["broker_dealer_id"] == bd.id
+    assert response.status_code == 202
+    body = response.json()
+    assert body["run_id"] == 8888
+    assert body["status"] == "in_flight"
+    assert body["broker_dealer_id"] == bd.id
+    # No new run is created and no background work is scheduled — we just
+    # attach to the existing in-flight run.
     assert override_db.added == []
     assert stub_background == []
+
+
+async def test_stale_running_run_is_not_in_flight_starts_fresh_run(
+    monkeypatch: pytest.MonkeyPatch,
+    override_db: _FakeAsyncSession,
+    stub_background: list[dict[str, Any]],
+) -> None:
+    # A running/queued row older than STALE_REFRESH_RUN_AGE is an orphan: its
+    # in-process BackgroundTask was killed by a Cloud Run instance swap and it
+    # will never finalize. The endpoint must NOT attach to it (which would
+    # trap the page polling a dead run forever) — it starts a fresh run.
+    bd = _bd()
+    stale = PipelineRun(
+        id=7777,
+        pipeline_name="broker_dealer_refresh_all",
+        trigger_source="manual_single:viewer@example.com",
+        status="running",
+        total_items=2,
+        processed_items=0,
+        success_count=0,
+        failure_count=0,
+        notes='{"bd_id": 11, "stage": "running"}',
+        # Started well past the staleness threshold → presumed dead.
+        started_at=datetime.now(timezone.utc) - timedelta(minutes=45),
+    )
+
+    async def _fake_get(_db: Any, _firm_id: int) -> BrokerDealer | None:
+        return bd
+
+    # has_executive_contacts → None, in-flight → the stale (ignored) run,
+    # cooldown → None. The endpoint should fall through and queue a new run.
+    override_db.queue_scalar(None)
+    override_db.queue_scalar(stale)
+    override_db.queue_scalar(None)
+
+    monkeypatch.setattr(bd_endpoint.repository, "get_broker_dealer", _fake_get)
+    _enable_all_provider_keys(monkeypatch)
+
+    app.dependency_overrides[get_current_user] = _viewer_user
+    try:
+        async with _client() as client:
+            response = await client.post(f"/api/v1/broker-dealers/{bd.id}/refresh-all")
+    finally:
+        app.dependency_overrides.pop(get_current_user, None)
+
+    assert response.status_code == 202
+    body = response.json()
+    # A brand-new run, NOT the stale 7777.
+    assert body["status"] == "queued"
+    assert body["run_id"] >= 9500
+    assert body["run_id"] != 7777
+    # A fresh PipelineRun was created and a background task scheduled.
+    assert len(override_db.added) == 1
+    assert len(stub_background) == 1
 
 
 async def test_cooldown_active_returns_429_with_retry_after(

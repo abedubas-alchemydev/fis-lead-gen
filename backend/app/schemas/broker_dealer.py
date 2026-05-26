@@ -1,11 +1,13 @@
 from __future__ import annotations
 
 from datetime import date, datetime
-from typing import Literal
+from typing import Literal, Self
 
-from pydantic import BaseModel, ConfigDict
+from pydantic import BaseModel, ConfigDict, field_validator, model_validator
 
 from app.schemas.alerts import AlertListItem
+from app.schemas.clearing_membership import ClearingMembershipItem
+from app.schemas.contact_hits import EmailHit, PhoneHit, synthesize_contact_arrays
 from app.schemas.pipeline import ClearingArrangementItem
 from app.schemas.unknown_reason import UnknownReason
 
@@ -74,6 +76,15 @@ class BrokerDealerListItem(BaseModel):
     # follow-up FE PR can use it to gate the detail-page enrich call.
     last_enrich_attempt_at: datetime | None = None
     created_at: datetime
+    # Clearing-agency / SRO membership labels. ``member_agencies`` is the
+    # sorted set of agency codes (OCC/DTC/NSCC/FICC-GOV/FICC-MBS) the firm is
+    # an active member of — attached per page by the list service with one
+    # batched query (no N+1), so it defaults to [] when not populated.
+    # ``clearing_membership_checked_at`` is the sentinel: NULL ⇒ never
+    # evaluated by the directory importer (FE renders nothing); non-NULL with
+    # empty ``member_agencies`` ⇒ "not a member".
+    member_agencies: list[str] = []
+    clearing_membership_checked_at: datetime | None = None
     # Populated when any field in the clearing cluster
     # (``current_clearing_partner``, ``current_clearing_type``) is None —
     # derived from the latest ``ClearingArrangement`` row's extraction_status
@@ -181,6 +192,18 @@ class ExecutiveContactItem(BaseModel):
     # the same shape. The list-level "no contacts at all" reason ships as
     # ``BrokerDealerProfileResponse.executive_contacts_unknown_reason``.
     unknown_reason: UnknownReason | None = None
+    emails: list[EmailHit] = []
+    phones: list[PhoneHit] = []
+
+    @field_validator("emails", "phones", mode="before")
+    @classmethod
+    def _coerce_null_to_empty(cls, v: object) -> object:
+        return v if v is not None else []
+
+    @model_validator(mode="after")
+    def _synthesize_arrays(self) -> Self:
+        self.emails, self.phones = synthesize_contact_arrays(self)
+        return self
 
 
 class RegistrationComplianceSummary(BaseModel):
@@ -274,6 +297,9 @@ class BrokerDealerProfileResponse(BaseModel):
     broker_dealer: BrokerDealerDetail
     financials: list[FinancialMetricItem]
     clearing_arrangements: list[ClearingArrangementItem]
+    # Full clearing-agency / SRO membership rows with provenance (member
+    # number, source directory, match method). Active + needs_review only.
+    clearing_memberships: list[ClearingMembershipItem] = []
     introducing_arrangements: list[IntroducingArrangementItem]
     industry_arrangements: list[IndustryArrangementItem] = []
     recent_alerts: list[AlertListItem]
@@ -355,9 +381,11 @@ class RefreshAllResponse(BaseModel):
       every gate failed. No PipelineRun row, no provider calls, no
       cost. FE shows the success toast and refreshes the firm.
 
-    On 409 conflict (a parent run is already in flight for this firm),
-    the FE will read ``detail.run_id`` from the error envelope and
-    start polling that run instead.
+    When a parent run is already in flight for this firm, the handler
+    returns 202 + ``status="in_flight"`` carrying that run's id (rather
+    than a 409) so the FE attaches to it without the browser logging a
+    cosmetic console error. The FE polls ``run_id`` identically in the
+    queued and in-flight cases.
     """
 
     run_id: int | None = None

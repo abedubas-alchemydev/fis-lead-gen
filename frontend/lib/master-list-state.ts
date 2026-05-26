@@ -91,16 +91,17 @@ type SearchParamsLike = {
   getAll(name: string): string[];
 };
 
-// Splits CSV values inside a single param entry too (`?k=a,b`) so a
-// link copy-pasted from a hand-edited URL behaves the same as the
-// repeat-key form (`?k=a&k=b`). Mirrors the existing helper in
-// app/(app)/master-list/page.tsx so the two parsers don't diverge.
+// Reads a repeat-key multi param (`?k=a&k=b`). We deliberately do NOT split
+// entries on commas: real filter values contain commas — FINRA "types of
+// business" especially (e.g. "...networking, kiosk...with a: bank, savings
+// bank...") — and splitting shatters the value so its chip/checkbox and the
+// BE filter no longer match. `toSearchParams` always writes one entry per
+// value, so the repeat-key form is the only shape we emit.
 function parseMultiParam(sp: SearchParamsLike, key: string): string[] {
   return sp
     .getAll(key)
-    .flatMap((entry) => entry.split(","))
-    .map((part) => part.trim())
-    .filter((part) => part.length > 0);
+    .map((entry) => entry.trim())
+    .filter((entry) => entry.length > 0);
 }
 
 function parseIntInRange(
@@ -144,7 +145,13 @@ export function fromSearchParams(sp: SearchParamsLike): MasterListQueryState {
     clearingType:
       sp.get("clearing_type") ?? MASTER_LIST_STATE_DEFAULTS.clearingType,
     typesOfBusiness: parseMultiParam(sp, "types_of_business"),
-    minNetCapital: parseNonNegativeFloat(sp.get("min_net_capital")),
+    // `min_net_capital=0` is a no-op for non-negative net-capital values, so
+    // collapse it to null at parse time. Keeps legacy share-links from
+    // surfacing a "Net capital ≥ $0" chip after we normalize on commit.
+    minNetCapital: (() => {
+      const raw = parseNonNegativeFloat(sp.get("min_net_capital"));
+      return raw === 0 ? null : raw;
+    })(),
     maxNetCapital: parseNonNegativeFloat(sp.get("max_net_capital")),
     registeredAfter: sp.get("registered_after") || null,
     registeredBefore: sp.get("registered_before") || null,

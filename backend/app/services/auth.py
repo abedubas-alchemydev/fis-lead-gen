@@ -67,13 +67,34 @@ async def get_current_user(
     if auth_session is None:
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Session is invalid or expired.")
 
+    # Bump last_activity_at for the online-status check on the admin users
+    # list. 60-second skew gate so read-heavy bursts don't write on every
+    # request; the bump only fires when the cached value is stale enough
+    # to matter to the "active in last 5 minutes" UI.
+    now = datetime.now(timezone.utc)
+    last_seen = auth_session.last_activity_at
+    if last_seen is None or (now - last_seen).total_seconds() > 60:
+        auth_session.last_activity_at = now
+        await db.commit()
+
     return AuthenticatedUser(
         id=auth_session.user.id,
         name=auth_session.user.name,
         email=auth_session.user.email,
         role=auth_session.user.role,
+        feature_permissions=list(auth_session.user.feature_permissions or []),
         session_expires_at=auth_session.expires_at,
     )
+
+
+def ensure_feature(user: AuthenticatedUser, feature_key: str) -> None:
+    if user.role == "admin":
+        return
+    if feature_key not in user.feature_permissions:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Feature access not granted.",
+        )
 
 
 async def get_current_user_optional(

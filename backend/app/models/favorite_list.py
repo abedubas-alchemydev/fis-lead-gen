@@ -67,12 +67,20 @@ class FavoriteList(Base):
 
 
 class FavoriteListItem(Base):
-    """A broker-dealer or investment-advisor pinned to a favorite_list.
+    """A firm-level entity pinned to a favorite_list.
 
-    Polymorphic via ``broker_dealer_id`` XOR ``advisor_id``: each row
-    points at exactly one of the two — never both, never neither. The
-    DB-side guard is the ``ck_favorite_list_item_exactly_one_target``
-    CHECK constraint added in migration 0031.
+    Polymorphic across four entity types: broker_dealer, investment
+    advisor, institutional investor, and Form 4 reporting owner
+    (insider). Each row sets exactly one of ``broker_dealer_id``,
+    ``advisor_id``, ``institutional_investor_id``, ``reporting_owner_id``
+    -- never two, never none. DB-side guard is the
+    ``ck_favorite_list_item_exactly_one_target`` 4-way XOR check
+    (extended in migration 0055; 3-way in 0045, 2-way in 0031).
+
+    Sub-firm entity favorites (executive_contact, advisor_contact,
+    investor_contact, office) are intentionally not yet supported here
+    -- a follow-up migration extends the constraint further when those
+    targets land.
     """
 
     __tablename__ = "favorite_list_item"
@@ -98,6 +106,18 @@ class FavoriteListItem(Base):
     advisor_id: Mapped[int | None] = mapped_column(
         Integer,
         ForeignKey("investment_advisors.id", ondelete="CASCADE"),
+        nullable=True,
+        index=True,
+    )
+    institutional_investor_id: Mapped[int | None] = mapped_column(
+        Integer,
+        ForeignKey("institutional_investors.id", ondelete="CASCADE"),
+        nullable=True,
+        index=True,
+    )
+    reporting_owner_id: Mapped[int | None] = mapped_column(
+        Integer,
+        ForeignKey("reporting_owners.id", ondelete="CASCADE"),
         nullable=True,
         index=True,
     )

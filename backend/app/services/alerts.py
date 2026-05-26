@@ -103,6 +103,8 @@ class AlertRepository:
             filters.append(FilingAlert.form_type == "Form BD")
         elif category == "deficiency":
             filters.append(FilingAlert.form_type == "Form 17a-11")
+        elif category == "audited_financials":
+            filters.append(FilingAlert.form_type == "Form X-17A-5")
 
         count_stmt = select(func.count(FilingAlert.id))
         if filters:

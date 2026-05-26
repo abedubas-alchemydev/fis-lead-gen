@@ -18,9 +18,16 @@ export type SortDir = "asc" | "desc";
 // gain advisor support in PR 4.
 export type AdvisorDetailSource = "advisor-list" | "favorites" | "visited";
 
+export type AdvisorStatusFilter = "All" | "active" | "withdrawn";
+export type AdvisorScopeFilter = "13F" | "all";
+
 export interface AdvisorListQueryState {
   search: string;
   state: string;
+  status: AdvisorStatusFilter;
+  // "13F" keeps today's hard-coded files_13f=true scope; "all" broadens
+  // the universe by sending files_13f=false to the BE.
+  filesThirteenF: AdvisorScopeFilter;
   advisoryActivities: string[];
   clientTypes: string[];
   // Dollars (not cents). null when the filter is unset — keeps `0`
@@ -43,6 +50,8 @@ export interface AdvisorListQueryState {
 export const ADVISOR_LIST_STATE_DEFAULTS: AdvisorListQueryState = {
   search: "",
   state: "",
+  status: "All",
+  filesThirteenF: "13F",
   advisoryActivities: [],
   clientTypes: [],
   minRegulatoryAum: null,
@@ -58,6 +67,12 @@ export const ADVISOR_LIST_STATE_DEFAULTS: AdvisorListQueryState = {
 
 const SORT_DIRS: ReadonlyArray<SortDir> = ["asc", "desc"];
 const ALLOWED_LIMITS: ReadonlyArray<number> = [25, 50, 100];
+const STATUS_VALUES: ReadonlyArray<AdvisorStatusFilter> = [
+  "All",
+  "active",
+  "withdrawn",
+];
+const SCOPE_VALUES: ReadonlyArray<AdvisorScopeFilter> = ["13F", "all"];
 const DETAIL_SOURCES: ReadonlyArray<AdvisorDetailSource> = [
   "advisor-list",
   "favorites",
@@ -69,12 +84,15 @@ type SearchParamsLike = {
   getAll(name: string): string[];
 };
 
+// Repeat-key multi param (`?k=a&k=b`). Deliberately NOT comma-split: Form ADV
+// advisory-activity / client-type labels can contain commas, and splitting
+// would shatter a value so its chip/checkbox and the BE filter stop matching.
+// `toSearchParams` only ever writes one entry per value.
 function parseMultiParam(sp: SearchParamsLike, key: string): string[] {
   return sp
     .getAll(key)
-    .flatMap((entry) => entry.split(","))
-    .map((part) => part.trim())
-    .filter((part) => part.length > 0);
+    .map((entry) => entry.trim())
+    .filter((entry) => entry.length > 0);
 }
 
 function parseIntInRange(
@@ -98,6 +116,8 @@ function parseNonNegativeFloat(raw: string | null): number | null {
 export function fromSearchParams(sp: SearchParamsLike): AdvisorListQueryState {
   const sortDir = sp.get("sort_dir");
   const source = sp.get("source");
+  const statusRaw = sp.get("status");
+  const scopeRaw = sp.get("files_13f");
   const limit = parseIntInRange(
     sp.get("limit"),
     ADVISOR_LIST_STATE_DEFAULTS.limit,
@@ -107,6 +127,14 @@ export function fromSearchParams(sp: SearchParamsLike): AdvisorListQueryState {
   return {
     search: sp.get("q") ?? ADVISOR_LIST_STATE_DEFAULTS.search,
     state: sp.get("state") ?? ADVISOR_LIST_STATE_DEFAULTS.state,
+    status:
+      statusRaw && (STATUS_VALUES as ReadonlyArray<string>).includes(statusRaw)
+        ? (statusRaw as AdvisorStatusFilter)
+        : ADVISOR_LIST_STATE_DEFAULTS.status,
+    filesThirteenF:
+      scopeRaw && (SCOPE_VALUES as ReadonlyArray<string>).includes(scopeRaw)
+        ? (scopeRaw as AdvisorScopeFilter)
+        : ADVISOR_LIST_STATE_DEFAULTS.filesThirteenF,
     advisoryActivities: parseMultiParam(sp, "advisory_activities"),
     clientTypes: parseMultiParam(sp, "client_types"),
     minRegulatoryAum: parseNonNegativeFloat(sp.get("min_regulatory_aum")),
@@ -140,6 +168,12 @@ export function toSearchParams(state: AdvisorListQueryState): URLSearchParams {
   }
   if (state.state !== ADVISOR_LIST_STATE_DEFAULTS.state) {
     sp.set("state", state.state);
+  }
+  if (state.status !== ADVISOR_LIST_STATE_DEFAULTS.status) {
+    sp.set("status", state.status);
+  }
+  if (state.filesThirteenF !== ADVISOR_LIST_STATE_DEFAULTS.filesThirteenF) {
+    sp.set("files_13f", state.filesThirteenF);
   }
   if (state.advisoryActivities.length > 0) {
     state.advisoryActivities.forEach((entry) =>
@@ -229,6 +263,8 @@ export function hasActiveFilters(state: AdvisorListQueryState): boolean {
   return (
     state.search !== ADVISOR_LIST_STATE_DEFAULTS.search ||
     state.state !== ADVISOR_LIST_STATE_DEFAULTS.state ||
+    state.status !== ADVISOR_LIST_STATE_DEFAULTS.status ||
+    state.filesThirteenF !== ADVISOR_LIST_STATE_DEFAULTS.filesThirteenF ||
     state.advisoryActivities.length > 0 ||
     state.clientTypes.length > 0 ||
     state.minRegulatoryAum !== null ||
@@ -245,6 +281,8 @@ export function clearAllFilters(
     ...state,
     search: ADVISOR_LIST_STATE_DEFAULTS.search,
     state: ADVISOR_LIST_STATE_DEFAULTS.state,
+    status: ADVISOR_LIST_STATE_DEFAULTS.status,
+    filesThirteenF: ADVISOR_LIST_STATE_DEFAULTS.filesThirteenF,
     advisoryActivities: [],
     clientTypes: [],
     minRegulatoryAum: null,

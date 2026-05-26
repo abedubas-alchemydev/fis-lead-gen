@@ -182,6 +182,43 @@ class GeminiFocusCeoExtraction(BaseModel):
     evidence_excerpt: str | None = Field(default=None, max_length=1200)
 
 
+class GeminiAdvisorPerson(BaseModel):
+    """One owner or officer extracted from a Form ADV / BrokerCheck PDF."""
+    model_config = ConfigDict(extra="forbid")
+
+    name: str = Field(max_length=255)
+    title: str | None = Field(default=None, max_length=255)
+    ownership: str | None = Field(
+        default=None,
+        max_length=64,
+        description="Ownership band when present, e.g. '25% but less than 50%'.",
+    )
+
+
+class GeminiAdvisorProfileExtraction(BaseModel):
+    """Structured extraction of the investment-advisor profile fields from a
+    Form ADV (IAPD) or BrokerCheck PDF. One call fills the People panel
+    (officers + owners), Item 5.D client types, the registration / formation
+    dates, and a short firm-operations summary."""
+    model_config = ConfigDict(extra="forbid")
+
+    executive_officers: list[GeminiAdvisorPerson] = Field(default_factory=list)
+    direct_owners: list[GeminiAdvisorPerson] = Field(default_factory=list)
+    indirect_owners: list[GeminiAdvisorPerson] = Field(default_factory=list)
+    client_types: list[str] = Field(
+        default_factory=list,
+        description="Form ADV Item 5.D client categories, e.g. 'Investment companies'.",
+    )
+    registration_date: str | None = Field(default=None, description="ISO date YYYY-MM-DD")
+    formation_date: str | None = Field(default=None, description="ISO date YYYY-MM-DD")
+    # No max_length: firm_operations_text is free prose and Gemini occasionally
+    # exceeds a tight cap; we truncate at the DB-write site instead of failing
+    # the whole extraction on a length overflow.
+    firm_operations_text: str | None = None
+    confidence_score: float = Field(ge=0.0, le=1.0)
+    rationale: str = Field(min_length=1, max_length=1000)
+
+
 class GeminiResponsesClient:
     def __init__(self) -> None:
         self.base_url = settings.gemini_api_base.rstrip("/")
@@ -494,6 +531,77 @@ class GeminiResponsesClient:
             raise GeminiExtractionError("Gemini returned invalid JSON for FOCUS CEO extraction.") from exc
 
         return GeminiFocusCeoExtraction.model_validate(self._normalize_text_fields(parsed))
+
+    @staticmethod
+    def _advisor_person_schema() -> dict[str, object]:
+        return {
+            "type": "OBJECT",
+            "properties": {
+                "name": {"type": "STRING"},
+                "title": {"type": ["STRING", "NULL"]},
+                "ownership": {"type": ["STRING", "NULL"]},
+            },
+            "required": ["name"],
+            "propertyOrdering": ["name", "title", "ownership"],
+        }
+
+    async def extract_advisor_profile(
+        self, *, pdf_bytes_base64: str, prompt: str
+    ) -> GeminiAdvisorProfileExtraction:
+        """Extract IA profile fields (officers, owners, client types, dates,
+        firm-operations summary) from a Form ADV / BrokerCheck PDF.
+
+        Routes through ``_dispatch_pdf_extract`` so large ADV PDFs (Vanguard's
+        is ~8 MB) go via the Files API automatically — the relevant data is
+        scattered across the document, so we send the whole PDF rather than a
+        page-image subset.
+        """
+        if not settings.gemini_api_key:
+            raise GeminiConfigurationError("GEMINI_API_KEY is not configured.")
+
+        person = self._advisor_person_schema()
+        schema = {
+            "type": "OBJECT",
+            "properties": {
+                "executive_officers": {"type": "ARRAY", "items": person},
+                "direct_owners": {"type": "ARRAY", "items": person},
+                "indirect_owners": {"type": "ARRAY", "items": person},
+                "client_types": {"type": "ARRAY", "items": {"type": "STRING"}},
+                "registration_date": {"type": ["STRING", "NULL"]},
+                "formation_date": {"type": ["STRING", "NULL"]},
+                "firm_operations_text": {"type": ["STRING", "NULL"]},
+                "confidence_score": {"type": "NUMBER"},
+                "rationale": {"type": "STRING"},
+            },
+            "required": ["confidence_score", "rationale"],
+            "propertyOrdering": [
+                "executive_officers",
+                "direct_owners",
+                "indirect_owners",
+                "client_types",
+                "registration_date",
+                "formation_date",
+                "firm_operations_text",
+                "confidence_score",
+                "rationale",
+            ],
+        }
+
+        response_payload = await self._dispatch_pdf_extract(
+            pdf_bytes_base64=pdf_bytes_base64,
+            prompt=prompt,
+            schema=schema,
+        )
+        response_text = self._extract_response_text(response_payload)
+
+        try:
+            parsed = json.loads(response_text)
+        except json.JSONDecodeError as exc:
+            raise GeminiExtractionError(
+                "Gemini returned invalid JSON for advisor-profile extraction."
+            ) from exc
+
+        return GeminiAdvisorProfileExtraction.model_validate(parsed)
 
     async def extract_multi_year_financial_data(
         self, *, pdf_bytes_base64: str, prompt: str,

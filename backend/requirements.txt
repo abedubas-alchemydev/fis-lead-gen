@@ -70,3 +70,10 @@ striprtf>=0.0.27
 # route registration — which breaks every test that touches app.main, even
 # ones unrelated to file uploads.
 python-multipart>=0.0.20
+# aiosmtplib powers the Yahoo Mail outreach transport
+# (app.services.email_providers.yahoo). Yahoo has no REST sendmail API,
+# so the OAuth send path is SMTP STARTTLS + XOAUTH2 SASL — synchronous
+# smtplib would block the asyncio loop for the round-trip, so we use
+# the async client. Other providers (Gmail, Microsoft Graph) use HTTP
+# and don't need this.
+aiosmtplib>=3.0

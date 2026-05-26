@@ -13,7 +13,7 @@ no-op so the test stays fast and deterministic).
 from __future__ import annotations
 
 import secrets
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import Any
 from unittest.mock import AsyncMock
 
@@ -39,6 +39,7 @@ def _override_user() -> AuthenticatedUser:
         name="Test User",
         email="enrich-all-test@example.com",
         role="viewer",
+        feature_permissions=["email_extractor"],
         session_expires_at=datetime(2099, 1, 1),
     )
 
@@ -172,6 +173,41 @@ async def test_enrich_all_202_when_no_unenriched_remaining(
         assert body["candidates_total"] == 4
         assert body["candidates_skipped_already_enriched"] == 4
         assert body["candidates_queued"] == 0
+    finally:
+        app.dependency_overrides.clear()
+        await _cleanup_scan(scan_id)
+
+
+async def test_enrich_all_clears_prior_cancel_timestamp(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Starting a new enrich-all must clear any leftover ``enrich_cancelled_at``
+    so the bulk loop's per-row cancel check doesn't short-circuit immediately.
+    """
+    monkeypatch.setattr(settings, "apollo_api_key", "test-key", raising=False)
+    monkeypatch.setattr(endpoint_module, "run_bulk_enrichment", AsyncMock())
+
+    app.dependency_overrides[get_current_user] = _override_user
+    scan_id = await _seed_scan_with_emails(unenriched=2, already_enriched=0)
+
+    # Pre-stamp a cancellation, mimicking a stopped prior run.
+    async with SessionLocal() as session:
+        scan = await session.get(ExtractionRun, scan_id)
+        assert scan is not None
+        scan.enrich_cancelled_at = datetime(2025, 1, 1, tzinfo=timezone.utc)
+        await session.commit()
+
+    try:
+        async with _client() as client:
+            response = await client.post(
+                f"/api/v1/email-extractor/scans/{scan_id}/enrich-all"
+            )
+        assert response.status_code == 202
+
+        async with SessionLocal() as session:
+            refreshed = await session.get(ExtractionRun, scan_id)
+            assert refreshed is not None
+            assert refreshed.enrich_cancelled_at is None
     finally:
         app.dependency_overrides.clear()
         await _cleanup_scan(scan_id)

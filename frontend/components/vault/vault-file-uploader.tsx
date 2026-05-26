@@ -117,10 +117,10 @@ export function VaultFileUploader({
         className={[
           "flex min-h-[120px] cursor-pointer flex-col items-center justify-center rounded-2xl border-2 border-dashed px-4 py-6 text-center transition",
           disabled
-            ? "cursor-not-allowed border-slate-200 bg-slate-50 text-slate-400"
+            ? "cursor-not-allowed border-[var(--border,rgba(30,64,175,0.1))] bg-[var(--surface-2,#f1f6fd)] text-[var(--text-muted,#94a3b8)]"
             : over
-              ? "border-blue bg-blue/5 text-navy"
-              : "border-slate-300 bg-white text-slate-600 hover:border-slate-400 hover:bg-slate-50"
+              ? "border-[var(--accent,#6366f1)] bg-[var(--accent,#6366f1)]/10 text-[var(--text,#0f172a)]"
+              : "border-[var(--border-2,rgba(30,64,175,0.16))] bg-[var(--surface,#ffffff)] text-[var(--text-dim,#475569)] hover:border-[var(--accent,#6366f1)] hover:bg-[var(--surface-2,#f1f6fd)]"
         ].join(" ")}
       >
         <p className="text-sm font-medium">
@@ -130,7 +130,7 @@ export function VaultFileUploader({
               ? "Folder is at the 20-file limit"
               : "Drop files here or click to browse"}
         </p>
-        <p className="mt-1 text-[11px] text-slate-400">
+        <p className="mt-1 text-[11px] text-[var(--text-muted,#94a3b8)]">
           PDF, DOCX, PPTX, XLSX, TXT, MD, RTF, CSV, HTML, JSON · up to 10 MB each
         </p>
       </div>

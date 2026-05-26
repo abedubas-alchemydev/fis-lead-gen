@@ -40,6 +40,7 @@ class DiscoveredEmailResponse(BaseModel):
     enriched_title: str | None = None
     enriched_linkedin_url: str | None = None
     enriched_company: str | None = None
+    enriched_phone: str | None = None
     enriched_at: datetime | None = None
     enrichment_status: str = "not_enriched"
     created_at: datetime
@@ -64,6 +65,7 @@ class ScanResponse(BaseModel):
     created_at: datetime
     started_at: datetime | None
     completed_at: datetime | None
+    enrich_cancelled_at: datetime | None = None
     discovered_emails: list[DiscoveredEmailResponse] = Field(default_factory=list)
 
     model_config = ConfigDict(from_attributes=True)

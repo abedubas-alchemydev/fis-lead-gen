@@ -39,9 +39,16 @@ import {
 import { SectionPanel } from "@/components/ui/section-panel";
 import { ListPicker } from "@/components/list-picker/list-picker";
 import { Pill } from "@/components/ui/pill";
-import { SourceBadge } from "@/components/master-list/source-badge";
+import { agencyLabel } from "@/components/master-list/detail/clearing-membership-helpers";
 import { UnknownCell } from "@/components/master-list/unknown-cell";
-import { apiRequest, buildApiPath } from "@/lib/api";
+import {
+  apiRequest,
+  buildApiPath,
+  getPipelineRunStatus,
+  refreshFirm,
+} from "@/lib/api";
+import { PageSpinner } from "@/components/ui/spinner";
+import { joinPipelineLabels } from "@/lib/refresh-pipeline-labels";
 import { parseArrangementBlob } from "@/lib/arrangements";
 import { listScansForBrokerDealer } from "@/lib/email-extractor";
 import {
@@ -179,6 +186,18 @@ export function BrokerDealerDetailClient({ brokerDealerId }: { brokerDealerId: s
   const [filingTotal, setFilingTotal] = useState(0);
   const [filingTotalPages, setFilingTotalPages] = useState(0);
   const [filingLoading, setFilingLoading] = useState(false);
+
+  // Refresh-on-visit gating. We POST /refresh-all on mount so the BE's
+  // per-pipeline gates can fill any missing column before we render.
+  // The /profile fetch below is gated on `refreshState.phase === "ready"`
+  // so the user sees the loading screen until the orchestrator's child
+  // pipelines finish (or short-circuit). Errors fall through to "ready"
+  // — refresh is best-effort, never blocks the page indefinitely.
+  type RefreshPhase =
+    | { phase: "queuing" }
+    | { phase: "polling"; runId: number; pipelinesRunning: string[] }
+    | { phase: "ready" };
+  const [refreshState, setRefreshState] = useState<RefreshPhase>({ phase: "queuing" });
 
   // Resolve adjacent firm IDs.
   //
@@ -325,6 +344,98 @@ export function BrokerDealerDetailClient({ brokerDealerId }: { brokerDealerId: s
     });
   }, [brokerDealerId]);
 
+  // Refresh-on-visit: POST /refresh-all and poll the parent PipelineRun
+  // until terminal. Three short-circuit paths short of "ready":
+  //   - 200 status="skipped" -> no work needed, flip to ready immediately
+  //   - 202 status="queued" -> poll the new run_id
+  //   - 409 (normalized in lib/api refreshFirm) -> attach to in-flight run
+  // 429 cooldown and any unexpected ApiError fall through to ready so
+  // the user still sees the page with whatever data the DB has. The
+  // 180-second polling deadline is the same as
+  // scripts/standalone_refresh_all_loop.py used in PR #477.
+  useEffect(() => {
+    const numericId = Number(brokerDealerId);
+    if (!Number.isFinite(numericId)) {
+      setRefreshState({ phase: "ready" });
+      return;
+    }
+    let active = true;
+    let pollTimer: ReturnType<typeof setTimeout> | null = null;
+
+    function parsePipelinesRunning(notes: string | null): string[] {
+      if (!notes) return [];
+      try {
+        const parsed = JSON.parse(notes) as { ran?: unknown };
+        if (Array.isArray(parsed.ran)) {
+          return parsed.ran.filter((x): x is string => typeof x === "string");
+        }
+      } catch {
+        /* notes isn't structured JSON yet (early in lifecycle) */
+      }
+      return [];
+    }
+
+    async function pollUntilTerminal(runId: number) {
+      const deadline = Date.now() + 180_000;
+      const TERMINAL = new Set(["completed", "completed_with_errors", "failed"]);
+      while (active && Date.now() < deadline) {
+        try {
+          const detail = await getPipelineRunStatus(runId);
+          if (!active) return;
+          if (TERMINAL.has(detail.status)) {
+            setRefreshState({ phase: "ready" });
+            return;
+          }
+          // Still queued / running — update visible progress and wait.
+          setRefreshState({
+            phase: "polling",
+            runId,
+            pipelinesRunning: parsePipelinesRunning(detail.notes),
+          });
+        } catch {
+          // Transient poll error — wait and try again. If it persists,
+          // the deadline below catches us out.
+        }
+        await new Promise<void>((resolve) => {
+          pollTimer = setTimeout(resolve, 2000);
+        });
+      }
+      // Deadline elapsed — fall through and render with whatever the DB
+      // has now. The orchestrator may still be running server-side; a
+      // future visit will pick up the fresh data.
+      if (active) setRefreshState({ phase: "ready" });
+    }
+
+    async function run() {
+      try {
+        const result = await refreshFirm(numericId, "all");
+        if (!active) return;
+        if (result.status === "skipped" || result.run_id === null) {
+          // Backend short-circuited — every per-pipeline gate was closed.
+          // No PipelineRun row created, nothing to poll.
+          setRefreshState({ phase: "ready" });
+          return;
+        }
+        setRefreshState({
+          phase: "polling",
+          runId: result.run_id,
+          pipelinesRunning: [],
+        });
+        await pollUntilTerminal(result.run_id);
+      } catch {
+        // 429 cooldown, 503 missing provider, network blip, etc. — fall
+        // through so the page renders with the existing data.
+        if (active) setRefreshState({ phase: "ready" });
+      }
+    }
+    void run();
+
+    return () => {
+      active = false;
+      if (pollTimer !== null) clearTimeout(pollTimer);
+    };
+  }, [brokerDealerId]);
+
   const reloadProfile = useCallback(async () => {
     const response = await apiRequest<BrokerDealerProfileResponse>(
       `/api/v1/broker-dealers/${brokerDealerId}/profile`,
@@ -333,6 +444,11 @@ export function BrokerDealerDetailClient({ brokerDealerId }: { brokerDealerId: s
   }, [brokerDealerId]);
 
   useEffect(() => {
+    // Wait for refresh-on-visit to finish before fetching /profile so
+    // the page renders with the freshest data the orchestrator can
+    // produce. While refreshState.phase is "queuing" or "polling" the
+    // loading-screen branches below intercept the render anyway.
+    if (refreshState.phase !== "ready") return;
     let active = true;
     async function loadProfile() {
       try {
@@ -352,7 +468,7 @@ export function BrokerDealerDetailClient({ brokerDealerId }: { brokerDealerId: s
     return () => {
       active = false;
     };
-  }, [brokerDealerId]);
+  }, [brokerDealerId, refreshState.phase]);
 
   // Hydrate the inline "Discovered Emails" section. Two sources, in
   // precedence order:
@@ -513,6 +629,21 @@ export function BrokerDealerDetailClient({ brokerDealerId }: { brokerDealerId: s
     }
   }
 
+  // Per-contact updates from the Find-phone button. Replaces the single
+  // row in place so the UI reflects the new phone without a full refetch.
+  const handleContactUpdated = useCallback((updated: ExecutiveContactItem) => {
+    setProfile((c) =>
+      c
+        ? {
+            ...c,
+            executive_contacts: c.executive_contacts.map((row) =>
+              row.id === updated.id ? updated : row,
+            ),
+          }
+        : c,
+    );
+  }, []);
+
   const chartPoints = useMemo(() => {
     if (!profile) return [] as Array<{ label: string; value: number }>;
     return profile.financials
@@ -523,6 +654,28 @@ export function BrokerDealerDetailClient({ brokerDealerId }: { brokerDealerId: s
         value: item.net_capital,
       }));
   }, [profile]);
+
+  // Refresh-on-visit gate. Show the loading screen while the BE
+  // orchestrator is queuing or running. Once it goes "ready" the
+  // /profile fetch below populates and the existing render path runs.
+  if (refreshState.phase === "queuing") {
+    return (
+      <div className="px-7 pb-12 pt-7 lg:px-9">
+        <PageSpinner label="Preparing fresh data for this firm…" />
+      </div>
+    );
+  }
+  if (refreshState.phase === "polling") {
+    const label =
+      refreshState.pipelinesRunning.length > 0
+        ? `Refreshing ${joinPipelineLabels(refreshState.pipelinesRunning)}…`
+        : "Refreshing firm data…";
+    return (
+      <div className="px-7 pb-12 pt-7 lg:px-9">
+        <PageSpinner label={label} />
+      </div>
+    );
+  }
 
   if (error) {
     return (
@@ -602,7 +755,7 @@ export function BrokerDealerDetailClient({ brokerDealerId }: { brokerDealerId: s
             <ListPicker
               firmId={bd.id}
               variant="detail"
-              initialDefaultMember={profile.is_favorited}
+              initialFavorited={profile.is_favorited}
             />
           </div>
           <FirmWebsiteLink firmId={bd.id} firmName={bd.name} website={bd.website} />
@@ -665,6 +818,11 @@ export function BrokerDealerDetailClient({ brokerDealerId }: { brokerDealerId: s
             {bd.lead_score !== null ? ` · ${bd.lead_score.toFixed(0)}` : ""}
           </Pill>
         ) : null}
+        {bd.member_agencies.map((code) => (
+          <Pill key={code} variant="member">
+            {agencyLabel(code)} member
+          </Pill>
+        ))}
         {healthCheckResult ? (
           <span className="text-[12px] text-[var(--text-muted,#94a3b8)]">{healthCheckResult}</span>
         ) : null}
@@ -929,6 +1087,7 @@ export function BrokerDealerDetailClient({ brokerDealerId }: { brokerDealerId: s
                   contact={matchForFinra(owner.name)}
                   brokerDealerId={bd.id}
                   brokerDealerName={bd.name}
+                  onContactUpdated={handleContactUpdated}
                 />
               ))}
             </PeopleSubGroup>
@@ -944,6 +1103,7 @@ export function BrokerDealerDetailClient({ brokerDealerId }: { brokerDealerId: s
                   contact={matchForFinra(officer.name)}
                   brokerDealerId={bd.id}
                   brokerDealerName={bd.name}
+                  onContactUpdated={handleContactUpdated}
                 />
               ))}
             </PeopleSubGroup>
@@ -957,9 +1117,9 @@ export function BrokerDealerDetailClient({ brokerDealerId }: { brokerDealerId: s
                   name={contact.name}
                   title={contact.title}
                   contact={contact}
-                  source={`${contact.source} · ${formatDate(contact.enriched_at)}`}
                   brokerDealerId={bd.id}
                   brokerDealerName={bd.name}
+                  onContactUpdated={handleContactUpdated}
                 />
               ))}
             </PeopleSubGroup>
@@ -1314,6 +1474,7 @@ function PersonCard({
   source,
   brokerDealerId,
   brokerDealerName,
+  onContactUpdated,
 }: {
   name: string;
   title: string;
@@ -1322,20 +1483,20 @@ function PersonCard({
   source?: string;
   brokerDealerId: number;
   brokerDealerName: string;
+  onContactUpdated?: (updated: ExecutiveContactItem) => void;
 }) {
   return (
     <div className="rounded-2xl bg-[var(--surface-2,#f1f6fd)] px-4 py-3 text-sm text-[var(--text-dim,#475569)]">
-      <p className="flex flex-wrap items-center font-semibold text-[var(--text,#0f172a)]">
-        <span>{name}</span>
-        {contact ? <SourceBadge source={contact.source} /> : null}
-      </p>
+      <p className="font-semibold text-[var(--text,#0f172a)]">{name}</p>
       {title ? <p className="mt-1">{title}</p> : null}
       {extra ? <p className="mt-1 text-xs text-[var(--text-muted,#94a3b8)]">{extra}</p> : null}
       {contact ? (
         <ContactRow
-          brokerDealerId={brokerDealerId}
-          brokerDealerName={brokerDealerName}
+          entityKind="broker-dealer"
+          entityId={brokerDealerId}
+          entityName={brokerDealerName}
           contact={contact}
+          onContactUpdated={onContactUpdated}
         />
       ) : null}
       {source ? (

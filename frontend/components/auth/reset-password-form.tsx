@@ -98,7 +98,7 @@ function ResetPasswordFormInner() {
 
 export function ResetPasswordForm() {
   return (
-    <Suspense fallback={<div className="h-40 animate-pulse rounded-2xl bg-slate-100" />}>
+    <Suspense fallback={<div className="h-40 animate-pulse rounded-2xl bg-[var(--surface-2,#f1f6fd)]" />}>
       <ResetPasswordFormInner />
     </Suspense>
   );

@@ -32,6 +32,7 @@ export interface DiscoveredEmailResponse {
   enriched_title: string | null;
   enriched_linkedin_url: string | null;
   enriched_company: string | null;
+  enriched_phone: string | null;
   enriched_at: string | null;
   enrichment_status: EnrichmentStatus;
   created_at: string;
@@ -52,6 +53,7 @@ export interface ScanResponse {
   created_at: string;
   started_at: string | null;
   completed_at: string | null;
+  enrich_cancelled_at: string | null;
   discovered_emails: DiscoveredEmailResponse[];
 }
 
@@ -140,6 +142,13 @@ export async function enrichEmail(
 export async function enrichAll(scanId: number): Promise<EnrichAllResponse> {
   return apiRequest<EnrichAllResponse>(
     `/api/v1/email-extractor/scans/${scanId}/enrich-all`,
+    { method: "POST" }
+  );
+}
+
+export async function cancelEnrichAll(scanId: number): Promise<ScanResponse> {
+  return apiRequest<ScanResponse>(
+    `/api/v1/email-extractor/scans/${scanId}/enrich-all/cancel`,
     { method: "POST" }
   );
 }

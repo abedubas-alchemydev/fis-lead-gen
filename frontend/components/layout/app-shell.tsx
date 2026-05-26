@@ -3,7 +3,7 @@
 import Link from "next/link";
 import type { Route } from "next";
 import type { ReactNode } from "react";
-import { useEffect, useMemo, useState } from "react";
+import { Fragment, useEffect, useMemo, useState } from "react";
 import { usePathname, useRouter, useSearchParams } from "next/navigation";
 
 import { apiRequest } from "@/lib/api";
@@ -78,21 +78,23 @@ function AlertsIcon(props: IconProps) {
   );
 }
 
+// Trending-up + dollar mark — distinguishes the Investors tab (SEC
+// Form 4 insider transaction feed) from the BD-scoped Alerts bell at a
+// glance. Two ascending bars + a dollar sign overlay.
+function InvestorsIcon(props: IconProps) {
+  return (
+    <IconBase {...props}>
+      <path d="M3 17l6-6 4 4 7-7" />
+      <path d="M14 8h7v7" />
+    </IconBase>
+  );
+}
+
 function EmailExtractorIcon(props: IconProps) {
   return (
     <IconBase {...props}>
       <path d="M4 4h16v16H4z" />
       <path d="M4 8l8 5 8-5" />
-    </IconBase>
-  );
-}
-
-function ExportIcon(props: IconProps) {
-  return (
-    <IconBase {...props}>
-      <path d="M21 15v4a2 2 0 01-2 2H5a2 2 0 01-2-2v-4" />
-      <path d="M7 10l5 5 5-5" />
-      <path d="M12 15V3" />
     </IconBase>
   );
 }
@@ -143,10 +145,67 @@ function UsersIcon(props: IconProps) {
   );
 }
 
+// Paper-plane glyph for the per-user "sent outreach" history view.
+function SentOutreachIcon(props: IconProps) {
+  return (
+    <IconBase {...props}>
+      <path d="M22 2L11 13" />
+      <path d="M22 2l-7 20-4-9-9-4 20-7z" />
+    </IconBase>
+  );
+}
+
+// Shield-with-check glyph for the clearing-membership review queue.
+function ShieldCheckIcon(props: IconProps) {
+  return (
+    <IconBase {...props}>
+      <path d="M12 3l8 3v6c0 4.5-3.5 8-8 9-4.5-1-8-4.5-8-9V6l8-3z" />
+      <path d="M9 12l2 2 4-4" />
+    </IconBase>
+  );
+}
+
+// Envelope @-sign glyph for the multi-sender settings page.
+function MailAtIcon(props: IconProps) {
+  return (
+    <IconBase {...props}>
+      <rect x="3" y="5" width="18" height="14" rx="2" />
+      <path d="M3 7l9 6 9-6" />
+      <circle cx="12" cy="13" r="2" />
+    </IconBase>
+  );
+}
+
+// Key glyph for the My Account / change-password page.
+function KeyIcon(props: IconProps) {
+  return (
+    <IconBase {...props}>
+      <circle cx="8" cy="15" r="4" />
+      <path d="M10.85 12.15L21 2" />
+      <path d="M18 5l3 3" />
+      <path d="M15 8l3 3" />
+    </IconBase>
+  );
+}
+
+// Double-chevron used by the sidebar collapse toggle. Rotated 180° when
+// the sidebar is collapsed so a single icon serves both states.
+function ChevronsLeftIcon(props: IconProps) {
+  return (
+    <IconBase {...props}>
+      <polyline points="11 17 6 12 11 7" />
+      <polyline points="18 17 13 12 18 7" />
+    </IconBase>
+  );
+}
+
+const SIDEBAR_COLLAPSED_STORAGE_KEY = "dox-sidebar-collapsed";
+
 type SessionUser = {
   name?: string | null;
   email?: string | null;
   role?: string | null;
+  feature_permissions?: string[] | null;
 };
 
 type StatsLite = {
@@ -164,27 +223,60 @@ type NavEntry = {
   icon: NavIconComponent;
   badgeKey: BadgeKey;
   adminOnly?: boolean;
+  permissionKey?: string;
 };
 
-const workspaceNav: ReadonlyArray<NavEntry> = [
-  { href: "/dashboard", label: "Dashboard", icon: DashboardIcon, badgeKey: null },
-  { href: "/master-list", label: "Master List", icon: MasterListIcon, badgeKey: "total" },
-  // ``as Route`` cast: Next's typed-routes type-gen runs on `next build`/`next
-  // dev`, so a fresh route added in a tsc-only check (no Next pipeline run)
-  // isn't yet known to the Route union. Removing once a build regenerates
-  // .next/types is fine but cheap to leave for new sibling routes.
-  { href: "/advisor-list" as Route, label: "Investment Advisors", icon: AdvisorListIcon, badgeKey: null },
-  { href: "/alerts", label: "Alerts", icon: AlertsIcon, badgeKey: "alerts" },
-  { href: "/email-extractor", label: "Email Extractor", icon: EmailExtractorIcon, badgeKey: null },
-  { href: "/export", label: "Export", icon: ExportIcon, badgeKey: null },
-  { href: "/my-favorites", label: "My Favorites", icon: FavoritesIcon, badgeKey: null },
-  { href: "/visited-firms", label: "Visited Firms", icon: VisitedFirmsIcon, badgeKey: null }
-];
+type NavSection = {
+  label: string;
+  items: ReadonlyArray<NavEntry>;
+};
 
-const accountNav: ReadonlyArray<NavEntry> = [
-  { href: "/settings", label: "Settings", icon: SettingsIcon, badgeKey: null },
-  { href: "/settings/users" as Route, label: "Users", icon: UsersIcon, badgeKey: null, adminOnly: true },
-  { href: "/vault", label: "Vault", icon: VaultIcon, badgeKey: null }
+// ``as Route`` casts on /advisor-list, /investors, /outreach/sent, and
+// /settings/users: Next's typed-routes type-gen runs on `next build`/`next
+// dev`, so a fresh route added in a tsc-only check (no Next pipeline run)
+// isn't yet known to the Route union. Removing once a build regenerates
+// .next/types is fine but cheap to leave for new sibling routes.
+const navSections: ReadonlyArray<NavSection> = [
+  {
+    label: "Overview",
+    items: [
+      { href: "/dashboard", label: "Dashboard", icon: DashboardIcon, badgeKey: null, permissionKey: "dashboard" },
+      { href: "/alerts", label: "Alerts", icon: AlertsIcon, badgeKey: "alerts", permissionKey: "alerts" }
+    ]
+  },
+  {
+    label: "Lists",
+    items: [
+      { href: "/master-list", label: "Master List", icon: MasterListIcon, badgeKey: "total", permissionKey: "master_list" },
+      { href: "/advisor-list" as Route, label: "Investment Advisors", icon: AdvisorListIcon, badgeKey: null, permissionKey: "investment_advisors" },
+      { href: "/investors" as Route, label: "Investors", icon: InvestorsIcon, badgeKey: null, permissionKey: "investors" }
+    ]
+  },
+  {
+    label: "Outreach",
+    items: [
+      { href: "/email-extractor", label: "Email Extractor", icon: EmailExtractorIcon, badgeKey: null, permissionKey: "email_extractor" },
+      { href: "/outreach/sent" as Route, label: "Sent Outreach", icon: SentOutreachIcon, badgeKey: null, permissionKey: "sent_outreach" }
+    ]
+  },
+  {
+    label: "Personal",
+    items: [
+      { href: "/my-favorites", label: "My Favorites", icon: FavoritesIcon, badgeKey: null, permissionKey: "my_favorites" },
+      { href: "/visited-firms", label: "Visited Firms", icon: VisitedFirmsIcon, badgeKey: null, permissionKey: "visited_firms" }
+    ]
+  },
+  {
+    label: "Account",
+    items: [
+      { href: "/settings", label: "Settings", icon: SettingsIcon, badgeKey: null, permissionKey: "settings" },
+      { href: "/settings/account" as Route, label: "My Account", icon: KeyIcon, badgeKey: null },
+      { href: "/settings/email-accounts" as Route, label: "Email Accounts", icon: MailAtIcon, badgeKey: null },
+      { href: "/settings/users" as Route, label: "Users", icon: UsersIcon, badgeKey: null, adminOnly: true, permissionKey: "users" },
+      { href: "/settings/clearing-memberships" as Route, label: "Memberships", icon: ShieldCheckIcon, badgeKey: null, adminOnly: true },
+      { href: "/vault", label: "Vault", icon: VaultIcon, badgeKey: null, permissionKey: "vault" }
+    ]
+  }
 ];
 
 function initialsFromName(name: string | null | undefined): string {
@@ -220,6 +312,27 @@ export function AppShell({
   }, [pathname, searchParams]);
   const [stats, setStats] = useState<StatsLite | null>(null);
   const [signingOut, setSigningOut] = useState(false);
+  // Sidebar collapsed (icon-rail) state. Persisted to localStorage so the
+  // preference survives navigation/reload. We init `false` on the server
+  // and sync from storage in an effect to avoid a hydration mismatch — a
+  // brief expanded flash on first paint is preferable to mismatched SSR.
+  const [collapsed, setCollapsed] = useState(false);
+  useEffect(() => {
+    try {
+      if (window.localStorage.getItem(SIDEBAR_COLLAPSED_STORAGE_KEY) === "1") {
+        setCollapsed(true);
+      }
+    } catch {
+      /* storage unavailable — keep default */
+    }
+  }, []);
+  useEffect(() => {
+    try {
+      window.localStorage.setItem(SIDEBAR_COLLAPSED_STORAGE_KEY, collapsed ? "1" : "0");
+    } catch {
+      /* swallow — non-fatal */
+    }
+  }, [collapsed]);
 
   async function handleSignOut() {
     if (signingOut) return;
@@ -263,16 +376,24 @@ export function AppShell({
   const displayRole = role.charAt(0).toUpperCase() + role.slice(1);
   const isAdmin = role === "admin";
 
-  const visibleWorkspaceNav = workspaceNav.filter((e) => !e.adminOnly || isAdmin);
-  const visibleAccountNav = accountNav.filter((e) => !e.adminOnly || isAdmin);
+  const userPerms = session.user.feature_permissions ?? [];
+  const allowed = (e: NavEntry) =>
+    (!e.adminOnly || isAdmin) &&
+    (!e.permissionKey || isAdmin || userPerms.includes(e.permissionKey));
+  // Filter each section's items by permission, then drop any section that
+  // ends up with zero visible items (e.g. Lists for a non-admin with none of
+  // the master_list / investment_advisors / investors flags).
+  const visibleSections = navSections
+    .map((s) => ({ ...s, items: s.items.filter(allowed) }))
+    .filter((s) => s.items.length > 0);
+  const allVisibleEntries = visibleSections.flatMap((s) => s.items);
 
   function isActivePath(href: string) {
     if (pathname === href) return true;
     if (!pathname.startsWith(`${href}/`)) return false;
     // If a sibling nav entry has a longer matching href, defer to it. Stops
     // /settings from staying highlighted while on /settings/users.
-    const all = [...visibleWorkspaceNav, ...visibleAccountNav];
-    return !all.some(
+    return !allVisibleEntries.some(
       (e) =>
         e.href !== href &&
         e.href.length > href.length &&
@@ -287,11 +408,19 @@ export function AppShell({
             Colors use var(--token, fallback) so non-dashboard routes (no
             .dashboard-theme on html) keep their existing light-only look via
             fallbacks, while the dashboard route gets themed values. */}
-        <aside className="hidden h-full w-[260px] shrink-0 flex-col border-r border-[var(--border,rgba(30,64,175,0.1))] bg-gradient-to-b from-[var(--sidebar-a,#ffffff)] to-[var(--sidebar-b,#ffffff)] px-4 py-6 backdrop-blur-[10px] lg:flex">
-          {/* Brand */}
-          <div className="mb-5 flex items-center gap-3 border-b border-[var(--border,rgba(30,64,175,0.1))] px-2.5 pb-6 pt-2">
+        <aside
+          className={`hidden h-full shrink-0 flex-col border-r border-[var(--border,rgba(30,64,175,0.1))] bg-gradient-to-b from-[var(--sidebar-a,#ffffff)] to-[var(--sidebar-b,#ffffff)] py-6 backdrop-blur-[10px] transition-[width] duration-200 ease-out lg:flex ${
+            collapsed ? "w-[72px] px-2" : "w-[260px] px-4"
+          }`}
+        >
+          {/* Brand. Collapsed: just the [d] mark, centered. */}
+          <div
+            className={`mb-3 flex items-center border-b border-[var(--border,rgba(30,64,175,0.1))] pb-5 pt-2 ${
+              collapsed ? "justify-center" : "gap-3 px-2.5"
+            }`}
+          >
             <div
-              className="grid h-9 w-9 place-items-center rounded-[10px] text-[18px] font-extrabold text-white shadow-[0_6px_20px_rgba(10,31,63,0.35)]"
+              className="grid h-9 w-9 shrink-0 place-items-center rounded-[10px] text-[18px] font-extrabold text-white shadow-[0_6px_20px_rgba(10,31,63,0.35)]"
               style={{
                 background: "linear-gradient(135deg, #0A1F3F, #1B5E9E)",
                 fontFamily: "system-ui, -apple-system, BlinkMacSystemFont, 'Segoe UI', Inter, sans-serif",
@@ -302,66 +431,105 @@ export function AppShell({
             >
               d
             </div>
-            <div className="min-w-0">
-              <div className="truncate text-[15px] font-bold tracking-[-0.01em] text-[var(--text,#0f172a)]">
-                DOX
+            {!collapsed ? (
+              <div className="min-w-0">
+                <div className="truncate text-[15px] font-bold tracking-[-0.01em] text-[var(--text,#0f172a)]">
+                  DOX
+                </div>
+                <div className="truncate text-[11px] uppercase tracking-[0.04em] text-[var(--text-muted,#94a3b8)]">
+                  Institutional Finance Intelligence
+                </div>
               </div>
-              <div className="truncate text-[11px] uppercase tracking-[0.04em] text-[var(--text-muted,#94a3b8)]">
-                Institutional Finance Intelligence
-              </div>
-            </div>
+            ) : null}
           </div>
 
-          {/* Workspace section */}
-          <SidebarSectionLabel>Workspace</SidebarSectionLabel>
-          <nav className="flex flex-col" aria-label="Workspace">
-            {visibleWorkspaceNav.map((entry) => {
-              const live =
-                entry.href === "/master-list"
-                  ? { ...entry, href: masterListHref }
-                  : entry;
-              return (
-                <SidebarNavLink
-                  key={entry.href}
-                  entry={live}
-                  active={isActivePath(entry.href)}
-                  badge={entry.badgeKey ? badges[entry.badgeKey] : null}
-                />
-              );
-            })}
-          </nav>
-
-          {/* Account section */}
-          <SidebarSectionLabel>Account</SidebarSectionLabel>
-          <nav className="flex flex-col" aria-label="Account">
-            {visibleAccountNav.map((entry) => (
-              <SidebarNavLink
-                key={entry.href}
-                entry={entry}
-                active={isActivePath(entry.href)}
-                badge={null}
+          {/* Collapse / expand toggle. Single icon, rotated 180° when
+              collapsed. Right-aligned when expanded; centered when collapsed. */}
+          <div className={`mb-1 flex ${collapsed ? "justify-center" : "justify-end"}`}>
+            <button
+              type="button"
+              onClick={() => setCollapsed((c) => !c)}
+              aria-label={collapsed ? "Expand sidebar" : "Collapse sidebar"}
+              aria-expanded={!collapsed}
+              title={collapsed ? "Expand sidebar" : "Collapse sidebar"}
+              className="grid h-8 w-8 place-items-center rounded-[8px] text-[var(--text-muted,#94a3b8)] transition hover:bg-[var(--nav-hover,rgba(15,23,42,0.04))] hover:text-[var(--text,#0f172a)]"
+            >
+              <ChevronsLeftIcon
+                className={`h-4 w-4 transition-transform duration-200 ${collapsed ? "rotate-180" : ""}`}
+                strokeWidth={2}
               />
+            </button>
+          </div>
+
+          {/* Nav sections — grouped by function (Overview, Lists, Outreach,
+              Personal, Account). Each renders its label + a <nav> with its
+              filtered items. Empty sections are dropped upstream. When
+              collapsed, the text label is replaced by a thin divider between
+              groups (no divider above the first section). Wrapped in a
+              flex-1 + min-h-0 + overflow-y-auto container so the middle
+              scrolls when nav exceeds viewport height while the brand
+              block (above) and user card (below) stay pinned. */}
+          <div className="flex min-h-0 flex-1 flex-col overflow-y-auto">
+            {visibleSections.map((section, idx) => (
+              <Fragment key={section.label}>
+                {collapsed ? (
+                  idx > 0 ? (
+                    <div
+                      className="mx-2 my-1.5 h-px bg-[var(--border,rgba(30,64,175,0.1))]"
+                      aria-hidden
+                    />
+                  ) : null
+                ) : (
+                  <SidebarSectionLabel>{section.label}</SidebarSectionLabel>
+                )}
+                <nav className="flex flex-col" aria-label={section.label}>
+                  {section.items.map((entry) => {
+                    const live =
+                      entry.href === "/master-list"
+                        ? { ...entry, href: masterListHref }
+                        : entry;
+                    return (
+                      <SidebarNavLink
+                        key={entry.href}
+                        entry={live}
+                        active={isActivePath(entry.href)}
+                        badge={entry.badgeKey ? badges[entry.badgeKey] : null}
+                        collapsed={collapsed}
+                      />
+                    );
+                  })}
+                </nav>
+              </Fragment>
             ))}
-          </nav>
+          </div>
 
           {/* User card — pinned to bottom of sidebar. Matches mockup
               .user-card exactly: avatar + user-name + user-role, plus a
-              sign-out icon button on the right (added 2026-05-04). */}
-          <div className="mt-auto flex items-center gap-3 rounded-[14px] border border-[var(--border,rgba(30,64,175,0.1))] bg-[var(--surface-2,#f1f6fd)] p-3.5">
+              sign-out icon button on the right (added 2026-05-04). When
+              collapsed, name/role hide and the avatar + sign-out stack
+              vertically. Pinning is now done by the flex-1 middle wrapper
+              above absorbing leftover space (no mt-auto needed). */}
+          <div
+            className={`flex rounded-[14px] border border-[var(--border,rgba(30,64,175,0.1))] bg-[var(--surface-2,#f1f6fd)] ${
+              collapsed ? "flex-col items-center gap-2 p-2" : "items-center gap-3 p-3.5"
+            }`}
+          >
             <div
               className="grid h-[38px] w-[38px] shrink-0 place-items-center rounded-full text-[14px] font-bold text-white"
               style={{ background: "linear-gradient(135deg, #10b981, #06b6d4)" }}
             >
               {initials}
             </div>
-            <div className="min-w-0 flex-1">
-              <div className="truncate text-[13px] font-semibold text-[var(--text,#0f172a)]">
-                {session.user.name ?? "Authenticated User"}
+            {!collapsed ? (
+              <div className="min-w-0 flex-1">
+                <div className="truncate text-[13px] font-semibold text-[var(--text,#0f172a)]">
+                  {session.user.name ?? "Authenticated User"}
+                </div>
+                <div className="truncate text-[11px] text-[var(--text-muted,#94a3b8)]">
+                  {displayRole} · DOX Clearing
+                </div>
               </div>
-              <div className="truncate text-[11px] text-[var(--text-muted,#94a3b8)]">
-                {displayRole} · DOX Clearing
-              </div>
-            </div>
+            ) : null}
             <button
               type="button"
               onClick={handleSignOut}
@@ -396,10 +564,10 @@ export function AppShell({
         <div className="canvas-surface flex h-full min-w-0 flex-1 flex-col">
           {/* Mobile pill nav (visible below lg) — desktop has the sidebar instead. */}
           <nav
-            className="flex shrink-0 gap-2 overflow-x-auto border-b border-slate-200/70 bg-white/80 px-4 py-3 lg:hidden"
+            className="flex shrink-0 gap-2 overflow-x-auto border-b border-[var(--border,rgba(30,64,175,0.1))] bg-[var(--surface,#ffffff)]/80 px-4 py-3 lg:hidden"
             aria-label="Primary mobile"
           >
-            {[...visibleWorkspaceNav, ...visibleAccountNav].map(({ href, label }) => {
+            {allVisibleEntries.map(({ href, label }) => {
               const active = isActivePath(href);
               const liveHref = href === "/master-list" ? masterListHref : href;
               return (
@@ -407,7 +575,7 @@ export function AppShell({
                   key={href}
                   href={liveHref}
                   className={`whitespace-nowrap rounded-full px-4 py-2 text-sm ${
-                    active ? "bg-indigo-500/15 text-indigo-600" : "bg-slate-100 text-slate-700"
+                    active ? "bg-[var(--accent,#6366f1)]/15 text-[var(--accent,#6366f1)]" : "bg-[var(--surface-3,#dbeafe)] text-[var(--text-dim,#475569)]"
                   }`}
                 >
                   {label}
@@ -437,11 +605,13 @@ function SidebarSectionLabel({ children }: { children: ReactNode }) {
 function SidebarNavLink({
   entry,
   active,
-  badge
+  badge,
+  collapsed
 }: {
   entry: NavEntry;
   active: boolean;
   badge: string | null;
+  collapsed: boolean;
 }) {
   const Icon = entry.icon;
 
@@ -449,30 +619,52 @@ function SidebarNavLink({
     <Link
       href={entry.href}
       aria-current={active ? "page" : undefined}
+      title={collapsed ? entry.label : undefined}
+      data-nav-label={entry.label}
       style={active ? { background: "var(--nav-active-bg, rgba(37,99,235,0.12))" } : undefined}
-      className={`relative flex items-center gap-3 rounded-[10px] px-3 py-2.5 text-[13.5px] font-medium transition ${
+      className={`relative flex items-center rounded-[10px] py-2.5 text-[13.5px] font-medium transition ${
+        collapsed ? "justify-center px-0" : "gap-3 px-3"
+      } ${
         active
           ? "text-[var(--nav-active-text,#312e81)] shadow-[inset_0_0_0_1px_rgba(99,102,241,0.3)]"
           : "text-[var(--text-dim,#475569)] hover:bg-[var(--nav-hover,rgba(15,23,42,0.04))] hover:text-[var(--text,#0f172a)]"
       }`}
     >
-      {active ? (
+      {/* Active rail — only when expanded; the bg tint alone reads as
+          "active" in icon-rail mode and the -left-4 offset stops lining up
+          with the narrower px-2 sidebar padding. */}
+      {active && !collapsed ? (
         <span
           aria-hidden
           className="absolute -left-4 bottom-2 top-2 w-[3px] rounded-r-[3px]"
           style={{ background: "linear-gradient(180deg, #6366f1, #8b5cf6)" }}
         />
       ) : null}
-      <Icon className="h-[18px] w-[18px] opacity-90" strokeWidth={2} />
-      <span className="flex-1 truncate">{entry.label}</span>
-      {badge ? (
-        // .badge spec: padding 2px 8px, 11px, font-weight 600, 1px border,
-        // rounded 999px. Mockup uses the red-emphasis variant for both
-        // Master List and Alerts badges; `var(--pill-red-text)` swaps to
-        // #fca5a5 in dark mode automatically.
-        <span className="rounded-full border border-red-500/30 bg-red-500/15 px-2 py-0.5 text-[11px] font-semibold text-[var(--pill-red-text,#b91c1c)]">
-          {badge}
-        </span>
+      <span className="relative">
+        <Icon className="h-[18px] w-[18px] opacity-90" strokeWidth={2} />
+        {/* Collapsed mode swaps the text badge for a small red dot in the
+            icon's top-right corner, so unread/total counts still register
+            without taking width. */}
+        {collapsed && badge ? (
+          <span
+            aria-hidden
+            className="absolute -right-1 -top-1 h-2 w-2 rounded-full bg-red-500 ring-2 ring-[var(--sidebar-a,#ffffff)]"
+          />
+        ) : null}
+      </span>
+      {!collapsed ? (
+        <>
+          <span className="flex-1 truncate">{entry.label}</span>
+          {badge ? (
+            // .badge spec: padding 2px 8px, 11px, font-weight 600, 1px border,
+            // rounded 999px. Mockup uses the red-emphasis variant for both
+            // Master List and Alerts badges; `var(--pill-red-text)` swaps to
+            // #fca5a5 in dark mode automatically.
+            <span className="rounded-full border border-red-500/30 bg-red-500/15 px-2 py-0.5 text-[11px] font-semibold text-[var(--pill-red-text,#b91c1c)]">
+              {badge}
+            </span>
+          ) : null}
+        </>
       ) : null}
     </Link>
   );
