@@ -65,3 +65,12 @@ class ChatbotNewConversationResponse(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     conversation_id: int
+
+
+class ChatbotEmbeddingBackfillResponse(BaseModel):
+    """Counts returned by POST /chatbot/embeddings/backfill."""
+    model_config = ConfigDict(extra="forbid")
+
+    embedded: int
+    skipped: int
+    failed: int

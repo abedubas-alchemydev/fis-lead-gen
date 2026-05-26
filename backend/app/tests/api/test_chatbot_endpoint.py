@@ -34,6 +34,7 @@ ENDPOINT_POST = "/api/v1/chatbot/messages"
 ENDPOINT_STREAM = "/api/v1/chatbot/messages/stream"
 ENDPOINT_GET = "/api/v1/chatbot/messages"
 ENDPOINT_NEW = "/api/v1/chatbot/conversations/new"
+ENDPOINT_BACKFILL = "/api/v1/chatbot/embeddings/backfill"
 
 
 def _override_user() -> AuthenticatedUser:
@@ -595,6 +596,77 @@ async def test_stream_error_event_does_not_persist_assistant_turn(
     assert [a["role"] for a in appends] == ["user"]
 
 
+# ── POST /embeddings/backfill ───────────────────────────────────────────
+
+
+@dataclass
+class _StubSemanticService:
+    embedded: int = 0
+    skipped: int = 0
+    failed: int = 0
+    calls: list[dict[str, object]] = field(default_factory=list)
+
+    async def backfill_broker_dealers(self, db: Any) -> Any:
+        self.calls.append({"method": "backfill_broker_dealers", "db": db})
+        from app.services.chatbot_semantic import BackfillResult
+
+        return BackfillResult(
+            embedded=self.embedded, skipped=self.skipped, failed=self.failed
+        )
+
+
+def _install_semantic_stub(
+    monkeypatch: pytest.MonkeyPatch, stub: _StubSemanticService
+) -> _StubSemanticService:
+    monkeypatch.setattr(endpoint_module, "chatbot_semantic_service", stub)
+    return stub
+
+
+def _override_admin_user() -> AuthenticatedUser:
+    return AuthenticatedUser(
+        id=f"chatbot-admin-test-{secrets.token_hex(4)}",
+        name="Admin Tester",
+        email="admin-test@example.com",
+        role="admin",
+        feature_permissions=[],
+        session_expires_at=datetime(2099, 1, 1),
+    )
+
+
+async def _post_backfill() -> httpx.Response:
+    transport = httpx.ASGITransport(app=app)
+    async with httpx.AsyncClient(transport=transport, base_url="http://testserver") as client:
+        return await client.post(ENDPOINT_BACKFILL)
+
+
+async def test_backfill_admin_returns_counts(monkeypatch: pytest.MonkeyPatch) -> None:
+    app.dependency_overrides[get_current_user] = _override_admin_user
+    try:
+        stub = _install_semantic_stub(
+            monkeypatch,
+            _StubSemanticService(embedded=12, skipped=3, failed=1),
+        )
+        response = await _post_backfill()
+        assert response.status_code == 200
+        assert response.json() == {"embedded": 12, "skipped": 3, "failed": 1}
+        assert any(
+            c["method"] == "backfill_broker_dealers" for c in stub.calls
+        )
+    finally:
+        # Restore the viewer override so subsequent tests see the
+        # autouse fixture's expected state.
+        app.dependency_overrides[get_current_user] = _override_user
+
+
+async def test_backfill_non_admin_403(monkeypatch: pytest.MonkeyPatch) -> None:
+    # Viewer is the autouse default — no admin override here.
+    stub = _install_semantic_stub(monkeypatch, _StubSemanticService())
+    response = await _post_backfill()
+    assert response.status_code == 403
+    # Service must NOT be called when the auth gate rejects.
+    assert stub.calls == []
+
+
 # ── Auth gate ───────────────────────────────────────────────────────────
 
 
@@ -607,6 +679,7 @@ async def test_requires_authenticated_session() -> None:
             _post_stream({"messages": [{"role": "user", "content": "hi"}]}),
             _get_history(),
             _post_new_conversation(),
+            _post_backfill(),
         ):
             response = await fetch
             assert response.status_code == 401
