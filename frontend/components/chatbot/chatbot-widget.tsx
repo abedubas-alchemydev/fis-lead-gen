@@ -1,7 +1,10 @@
 "use client";
 
 import { X } from "lucide-react";
+import { usePathname } from "next/navigation";
 import { useCallback, useEffect, useRef, useState } from "react";
+
+import { ApiError, sendDoxieMessage, type DoxieChatMessage } from "@/lib/api";
 
 import { ChatbotPanel, type ChatbotPanelHandle } from "./chatbot-panel";
 import type { ChatMessage } from "./chatbot-message";
@@ -9,10 +12,26 @@ import type { ChatMessage } from "./chatbot-message";
 const WELCOME_MESSAGE: ChatMessage = {
   id: 0,
   role: "assistant",
-  content: "Hi there! I'm Doxie 👋 I'm not quite ready to chat yet, but I'll be here soon.",
+  content: "Hi! I'm Doxie 👋 Ask me anything about the app or the data you're looking at."
 };
 
-const STUB_REPLY = "Thanks! I can't reply for real yet, but I'll be here when chat goes live.";
+function errorMessageFor(error: unknown): string {
+  if (error instanceof ApiError) {
+    if (error.status === 503) {
+      return "Doxie is offline right now — the chat service isn't configured on this environment.";
+    }
+    if (error.status === 502) {
+      return "Doxie couldn't get a reply from the AI just now. Mind trying again?";
+    }
+    if (error.status === 413) {
+      return "This conversation is too long — start a new chat and try again.";
+    }
+    if (error.status === 401) {
+      return "Your session expired. Refresh the page to sign back in.";
+    }
+  }
+  return "Something went wrong reaching Doxie. Please try again.";
+}
 
 function DoxieIcon({ size = 24, strokeWidth = 2 }: { size?: number; strokeWidth?: number }) {
   return (
@@ -48,10 +67,16 @@ export function ChatbotWidget() {
   const [isOpen, setIsOpen] = useState(false);
   const [messages, setMessages] = useState<ReadonlyArray<ChatMessage>>([WELCOME_MESSAGE]);
   const [input, setInput] = useState("");
+  const [isSending, setIsSending] = useState(false);
 
   const fabRef = useRef<HTMLButtonElement>(null);
   const panelRef = useRef<ChatbotPanelHandle>(null);
   const nextIdRef = useRef(1);
+
+  // Page context for Doxie. ``usePathname`` is reactive across route
+  // changes; document.title is read at send-time so a freshly-rendered
+  // page reflects in the next prompt without a re-render of the widget.
+  const pathname = usePathname();
 
   const closePanel = useCallback(() => {
     setIsOpen(false);
@@ -77,16 +102,62 @@ export function ChatbotWidget() {
     if (isOpen) panelRef.current?.focusInput();
   }, [isOpen]);
 
-  const handleSend = useCallback(() => {
+  const handleSend = useCallback(async () => {
     const trimmed = input.trim();
-    if (trimmed.length === 0) return;
-    setMessages((prev) => [
-      ...prev,
-      { id: nextIdRef.current++, role: "user", content: trimmed },
-      { id: nextIdRef.current++, role: "assistant", content: STUB_REPLY },
-    ]);
+    if (trimmed.length === 0 || isSending) return;
+
+    const userMessageId = nextIdRef.current++;
+    const pendingId = nextIdRef.current++;
+    const userMessage: ChatMessage = { id: userMessageId, role: "user", content: trimmed };
+    const pendingMessage: ChatMessage = {
+      id: pendingId,
+      role: "assistant",
+      content: "",
+      pending: true
+    };
+
+    // Capture the history sent to the BE BEFORE we render the pending
+    // placeholder — the placeholder must not go into the wire payload.
+    const historyForApi: DoxieChatMessage[] = [
+      ...messages
+        .filter((m) => m.id !== WELCOME_MESSAGE.id && !m.error && !m.pending)
+        .map((m) => ({ role: m.role, content: m.content })),
+      { role: "user", content: trimmed }
+    ];
+
+    setMessages((prev) => [...prev, userMessage, pendingMessage]);
     setInput("");
-  }, [input]);
+    setIsSending(true);
+
+    try {
+      const reply = await sendDoxieMessage(historyForApi, {
+        path: pathname ?? undefined,
+        title: typeof document !== "undefined" ? document.title : undefined
+      });
+      setMessages((prev) =>
+        prev.map((m) =>
+          m.id === pendingId
+            ? { id: pendingId, role: "assistant", content: reply }
+            : m
+        )
+      );
+    } catch (error) {
+      setMessages((prev) =>
+        prev.map((m) =>
+          m.id === pendingId
+            ? {
+                id: pendingId,
+                role: "assistant",
+                content: errorMessageFor(error),
+                error: true
+              }
+            : m
+        )
+      );
+    } finally {
+      setIsSending(false);
+    }
+  }, [input, isSending, messages, pathname]);
 
   return (
     <>
@@ -110,6 +181,7 @@ export function ChatbotWidget() {
           onInputChange={setInput}
           onSend={handleSend}
           onClose={closePanel}
+          isSending={isSending}
         />
       ) : null}
     </>

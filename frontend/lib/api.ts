@@ -1118,3 +1118,41 @@ export async function rejectClearingMembership(
     { method: "POST" }
   );
 }
+
+// ── Doxie chatbot (in-app Gemini-backed assistant) ────────────────────────
+// Backs the ChatbotWidget. The endpoint expects a non-empty conversation
+// history terminated by a user message; the BE folds the optional
+// page-context into the system prompt so Doxie can reason about where
+// the user is in the app without per-route summary fetches.
+
+export type DoxieChatRole = "user" | "assistant";
+
+export interface DoxieChatMessage {
+  role: DoxieChatRole;
+  content: string;
+}
+
+export interface DoxiePageContext {
+  path?: string;
+  title?: string;
+}
+
+export async function sendDoxieMessage(
+  messages: DoxieChatMessage[],
+  pageContext?: DoxiePageContext
+): Promise<string> {
+  const body: { messages: DoxieChatMessage[]; page_context?: DoxiePageContext } = {
+    messages
+  };
+  if (pageContext && (pageContext.path || pageContext.title)) {
+    body.page_context = pageContext;
+  }
+  const response = await apiRequest<{ reply: string }>(
+    "/api/v1/chatbot/messages",
+    {
+      method: "POST",
+      body: JSON.stringify(body)
+    }
+  );
+  return response.reply;
+}
