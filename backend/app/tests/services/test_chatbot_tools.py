@@ -30,6 +30,7 @@ from app.core.feature_permissions import (
     INVESTMENT_ADVISORS,
     INVESTORS,
     MASTER_LIST,
+    VAULT,
 )
 from app.schemas.auth import AuthenticatedUser
 from app.schemas.broker_dealer import BrokerDealerListItem
@@ -75,6 +76,11 @@ def investors_user() -> AuthenticatedUser:
 @pytest.fixture
 def alerts_user() -> AuthenticatedUser:
     return _make_user(features=[ALERTS])
+
+
+@pytest.fixture
+def vault_user() -> AuthenticatedUser:
+    return _make_user(features=[VAULT])
 
 
 @pytest.fixture
@@ -983,7 +989,44 @@ def test_tool_registry_has_expected_names() -> None:
         "search_form4_filings",
         "list_filings_for_firm",
         "get_recent_alerts",
+        # Part C additions (PDF summarisation + Vault RAG).
+        "summarize_broker_dealer_filing",
+        "summarize_brokercheck_pdf",
+        "summarize_investment_advisor_filing",
+        "summarize_institutional_investor_filing",
+        "summarize_form4_filing",
+        "ask_vault",
     }
+
+
+def test_pdf_tools_opt_out_of_cache_and_extend_timeout() -> None:
+    """PDF-summarisation tools share two non-default Tool fields:
+
+    - ``timeout_s = PDF_TOOL_TIMEOUT_S`` — the 5s default would chop most
+      PDF round-trips off mid-Gemini-call.
+    - ``cacheable = False`` — prose summaries are too long + too
+      per-question to be worth keeping in the per-process LRU.
+
+    This test guards against a copy-paste mistake where a future PDF
+    tool forgets one of those fields. ``ask_vault`` is intentionally
+    excluded — Vault retrieval is fast (one embedding + one pg query)
+    and re-uses of the same query inside a chat ARE worth caching.
+    """
+    pdf_tool_names = {
+        "summarize_broker_dealer_filing",
+        "summarize_brokercheck_pdf",
+        "summarize_investment_advisor_filing",
+        "summarize_institutional_investor_filing",
+        "summarize_form4_filing",
+    }
+    for name in pdf_tool_names:
+        tool = chatbot_tools.TOOL_REGISTRY[name]
+        assert tool.timeout_s == chatbot_tools.PDF_TOOL_TIMEOUT_S, (
+            f"tool {name!r} should opt into the PDF timeout"
+        )
+        assert tool.cacheable is False, (
+            f"tool {name!r} should opt out of the LRU cache"
+        )
 
 
 def test_ii_projection_keys_exist_on_schema() -> None:
@@ -1658,3 +1701,360 @@ class TestGetRecentAlerts:
         )
         assert captured["form_types"] == ["Form X-17A-5"]
         assert captured["is_read"] is False
+
+
+# ── summarize_broker_dealer_filing ────────────────────────────────────────
+
+
+class _Pdf:
+    """SimpleNamespace shim for ``DownloadedPdfRecord``.
+
+    The real dataclass has ~15 fields; only a few matter to the BD
+    summariser projection so we keep the shim small.
+    """
+
+    def __init__(
+        self,
+        *,
+        bytes_base64: str = "",
+        local_document_path: str = "",
+        source_filing_url: str | None = "https://www.sec.gov/Archives/edgar/data/42/0001234567.pdf",
+        filing_year: int | None = 2025,
+        report_date: Any = date(2025, 12, 31),
+    ) -> None:
+        self.bytes_base64 = bytes_base64
+        self.local_document_path = local_document_path
+        self.source_filing_url = source_filing_url
+        self.filing_year = filing_year
+        self.report_date = report_date
+        # Fields the dataclass also exposes but nothing in the projection
+        # currently reads. Listed for fidelity in case a future
+        # assertion grows.
+        self.bd_id = 42
+        self.source_pdf_url = None
+
+
+class TestSummarizeBrokerDealerFiling:
+    async def test_happy_path_returns_summary_and_link(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        bd_user: AuthenticatedUser,
+        db_stub: object,
+    ) -> None:
+        orm = _make_bd_orm(name="Apex Clearing Corporation")
+        monkeypatch.setattr(
+            chatbot_tools._bd_repo,
+            "get_broker_dealer",
+            AsyncMock(return_value=orm),
+        )
+        # The real downloader uses ``with pdf_tempdir() as dest_dir`` —
+        # we don't need to fake that because the mock replaces the
+        # downloader's method, not the contextmanager.
+        monkeypatch.setattr(
+            chatbot_tools._pdf_downloader,
+            "download_latest_x17a5_pdf",
+            AsyncMock(return_value=_Pdf(bytes_base64="UERG")),  # b"PDF" b64
+        )
+        captured: dict[str, Any] = {}
+
+        async def fake_summarize(*, pdf_bytes_base64: str, prompt: str, **_: Any) -> str:
+            captured["pdf_bytes_base64"] = pdf_bytes_base64
+            captured["prompt"] = prompt
+            return "Apex Clearing posted net capital of $1.5M, up 12% YoY..."
+
+        monkeypatch.setattr(
+            chatbot_tools._gemini_client, "summarize_pdf", fake_summarize
+        )
+
+        tool = chatbot_tools.TOOL_REGISTRY["summarize_broker_dealer_filing"]
+        result = await tool.execute(
+            bd_user, db_stub, {"broker_dealer_id": 42, "question": "What's the trend?"}
+        )
+
+        assert "net capital" in result["summary"]
+        assert result["link"] == "/master-list/42"
+        assert result["firm_name"] == "Apex Clearing Corporation"
+        # The question was woven into the prompt so the model has it.
+        assert "What's the trend?" in captured["prompt"]
+        # The bytes passed through unmodified.
+        assert captured["pdf_bytes_base64"] == "UERG"
+
+    async def test_no_pdf_available_returns_not_found(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        bd_user: AuthenticatedUser,
+        db_stub: object,
+    ) -> None:
+        monkeypatch.setattr(
+            chatbot_tools._bd_repo,
+            "get_broker_dealer",
+            AsyncMock(return_value=_make_bd_orm()),
+        )
+        # The downloader returns None when EDGAR has nothing for this BD.
+        monkeypatch.setattr(
+            chatbot_tools._pdf_downloader,
+            "download_latest_x17a5_pdf",
+            AsyncMock(return_value=None),
+        )
+        tool = chatbot_tools.TOOL_REGISTRY["summarize_broker_dealer_filing"]
+        result = await tool.execute(bd_user, db_stub, {"broker_dealer_id": 42})
+        assert result["error"] == "not_found"
+        assert "X-17A-5" in result["message"]
+
+    async def test_unparseable_pdf_returns_friendly_error(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        bd_user: AuthenticatedUser,
+        db_stub: object,
+    ) -> None:
+        """summarize_pdf returns None for zero-page docs — surface as a
+        clean 'unparseable' error rather than empty prose."""
+        monkeypatch.setattr(
+            chatbot_tools._bd_repo,
+            "get_broker_dealer",
+            AsyncMock(return_value=_make_bd_orm()),
+        )
+        monkeypatch.setattr(
+            chatbot_tools._pdf_downloader,
+            "download_latest_x17a5_pdf",
+            AsyncMock(return_value=_Pdf(bytes_base64="UERG")),
+        )
+        monkeypatch.setattr(
+            chatbot_tools._gemini_client,
+            "summarize_pdf",
+            AsyncMock(return_value=None),
+        )
+        tool = chatbot_tools.TOOL_REGISTRY["summarize_broker_dealer_filing"]
+        result = await tool.execute(bd_user, db_stub, {"broker_dealer_id": 42})
+        assert result["error"] == "unparseable"
+        assert result["source_filing_url"]
+
+    async def test_not_found_when_bd_missing(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        bd_user: AuthenticatedUser,
+        db_stub: object,
+    ) -> None:
+        monkeypatch.setattr(
+            chatbot_tools._bd_repo,
+            "get_broker_dealer",
+            AsyncMock(return_value=None),
+        )
+        tool = chatbot_tools.TOOL_REGISTRY["summarize_broker_dealer_filing"]
+        result = await tool.execute(bd_user, db_stub, {"broker_dealer_id": 9999})
+        assert result["error"] == "not_found"
+
+    async def test_403_returns_no_access(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        no_access_user: AuthenticatedUser,
+        db_stub: object,
+    ) -> None:
+        called = AsyncMock()
+        monkeypatch.setattr(chatbot_tools._bd_repo, "get_broker_dealer", called)
+        tool = chatbot_tools.TOOL_REGISTRY["summarize_broker_dealer_filing"]
+        result = await tool.execute(
+            no_access_user, db_stub, {"broker_dealer_id": 42}
+        )
+        assert result["error"] == "no_access"
+        called.assert_not_called()
+
+
+# ── summarize_brokercheck_pdf ────────────────────────────────────────────
+
+
+class TestSummarizeBrokerCheckPdf:
+    async def test_happy_path(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        bd_user: AuthenticatedUser,
+        db_stub: object,
+    ) -> None:
+        monkeypatch.setattr(
+            chatbot_tools._bd_repo,
+            "get_broker_dealer",
+            AsyncMock(return_value=_make_bd_orm(crd_number="12345")),
+        )
+        monkeypatch.setattr(
+            chatbot_tools,
+            "fetch_brokercheck_pdf",
+            AsyncMock(return_value=b"%PDF-1.4 ..."),
+        )
+        monkeypatch.setattr(
+            chatbot_tools._gemini_client,
+            "summarize_pdf",
+            AsyncMock(return_value="No regulatory actions in the past 5 years."),
+        )
+
+        tool = chatbot_tools.TOOL_REGISTRY["summarize_brokercheck_pdf"]
+        result = await tool.execute(bd_user, db_stub, {"broker_dealer_id": 42})
+        assert "regulatory actions" in result["summary"]
+        assert result["crd_number"] == "12345"
+        assert result["link"] == "/master-list/42"
+        # Source URL points at the BrokerCheck firm-summary page (the
+        # PDF is at a different URL but firm-summary is what users
+        # actually click through to).
+        assert "brokercheck.finra.org" in result["source_filing_url"]
+
+    async def test_finra_404_returns_clean_not_found(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        bd_user: AuthenticatedUser,
+        db_stub: object,
+    ) -> None:
+        from app.services.finra_pdf_service import FinraPdfNotFound
+
+        monkeypatch.setattr(
+            chatbot_tools._bd_repo,
+            "get_broker_dealer",
+            AsyncMock(return_value=_make_bd_orm(crd_number="12345")),
+        )
+
+        async def boom(*_args: Any, **_kwargs: Any) -> bytes:
+            raise FinraPdfNotFound("no PDF for CRD 12345")
+
+        monkeypatch.setattr(chatbot_tools, "fetch_brokercheck_pdf", boom)
+        tool = chatbot_tools.TOOL_REGISTRY["summarize_brokercheck_pdf"]
+        result = await tool.execute(bd_user, db_stub, {"broker_dealer_id": 42})
+        assert result["error"] == "not_found"
+        # Still links the user to the firm detail page as a fallback.
+        assert result["link"] == "/master-list/42"
+
+    async def test_bd_without_crd_returns_not_found(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        bd_user: AuthenticatedUser,
+        db_stub: object,
+    ) -> None:
+        monkeypatch.setattr(
+            chatbot_tools._bd_repo,
+            "get_broker_dealer",
+            AsyncMock(return_value=_make_bd_orm(crd_number=None)),
+        )
+        tool = chatbot_tools.TOOL_REGISTRY["summarize_brokercheck_pdf"]
+        result = await tool.execute(bd_user, db_stub, {"broker_dealer_id": 42})
+        assert result["error"] == "not_found"
+        assert "CRD" in result["message"]
+
+
+# ── ask_vault ────────────────────────────────────────────────────────────
+
+
+class TestAskVault:
+    async def test_happy_path_owner_match(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        vault_user: AuthenticatedUser,
+        db_stub: object,
+    ) -> None:
+        # Mock the DB owner check + the retrieve_chunks call. The owner
+        # query is a raw select(VaultFolder.user_id); we shim
+        # db.execute to return the calling user's id.
+        from unittest.mock import MagicMock
+
+        owner_result = MagicMock()
+        owner_result.scalar_one_or_none.return_value = vault_user.id
+
+        db_mock = MagicMock()
+        db_mock.execute = AsyncMock(return_value=owner_result)
+
+        from app.services.vault_retrieval import RetrievedChunk
+
+        async def fake_retrieve(
+            *, folder_id: int, query: str, db: Any, top_k: int
+        ) -> list[Any]:
+            assert folder_id == 7
+            assert "playbook" in query
+            return [
+                RetrievedChunk(
+                    chunk_id=1,
+                    file_id=10,
+                    chunk_index=0,
+                    text="Step 1: confirm clearing partner before outreach.",
+                    original_filename="compliance_playbook.pdf",
+                    similarity=0.87,
+                ),
+            ]
+
+        monkeypatch.setattr(chatbot_tools, "retrieve_chunks", fake_retrieve)
+
+        tool = chatbot_tools.TOOL_REGISTRY["ask_vault"]
+        result = await tool.execute(
+            vault_user,
+            db_mock,
+            {"query": "what's our outreach playbook?", "folder_id": 7},
+        )
+        assert result["total_matched"] == 1
+        item = result["items"][0]
+        assert item["original_filename"] == "compliance_playbook.pdf"
+        assert item["similarity"] == 0.87
+        # Vault link is the bare /vault page (no per-folder route yet).
+        assert result["link"] == "/vault"
+
+    async def test_non_owner_returns_opaque_not_found(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        vault_user: AuthenticatedUser,
+        db_stub: object,
+    ) -> None:
+        """Cross-tenant attempt looks identical to 'folder doesn't exist'
+        — never reveal the existence of someone else's folder."""
+        from unittest.mock import MagicMock
+
+        owner_result = MagicMock()
+        owner_result.scalar_one_or_none.return_value = "some-other-user"
+
+        db_mock = MagicMock()
+        db_mock.execute = AsyncMock(return_value=owner_result)
+
+        called = AsyncMock()
+        monkeypatch.setattr(chatbot_tools, "retrieve_chunks", called)
+
+        tool = chatbot_tools.TOOL_REGISTRY["ask_vault"]
+        result = await tool.execute(
+            vault_user, db_mock, {"query": "x", "folder_id": 7}
+        )
+        assert result["error"] == "not_found"
+        called.assert_not_called()
+
+    async def test_missing_folder_returns_not_found(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        vault_user: AuthenticatedUser,
+        db_stub: object,
+    ) -> None:
+        from unittest.mock import MagicMock
+
+        owner_result = MagicMock()
+        owner_result.scalar_one_or_none.return_value = None
+
+        db_mock = MagicMock()
+        db_mock.execute = AsyncMock(return_value=owner_result)
+
+        tool = chatbot_tools.TOOL_REGISTRY["ask_vault"]
+        result = await tool.execute(
+            vault_user, db_mock, {"query": "x", "folder_id": 9999}
+        )
+        assert result["error"] == "not_found"
+
+    async def test_empty_query_returns_invalid_args(
+        self,
+        vault_user: AuthenticatedUser,
+        db_stub: object,
+    ) -> None:
+        tool = chatbot_tools.TOOL_REGISTRY["ask_vault"]
+        result = await tool.execute(
+            vault_user, db_stub, {"query": "  ", "folder_id": 7}
+        )
+        assert result["error"] == "invalid_args"
+
+    async def test_403_returns_no_access(
+        self,
+        no_access_user: AuthenticatedUser,
+        db_stub: object,
+    ) -> None:
+        tool = chatbot_tools.TOOL_REGISTRY["ask_vault"]
+        result = await tool.execute(
+            no_access_user, db_stub, {"query": "x", "folder_id": 7}
+        )
+        assert result["error"] == "no_access"

@@ -101,6 +101,27 @@ class GeminiExtractionError(RuntimeError):
     pass
 
 
+# Substrings Gemini returns in the 400 body when the PDF is unparseable —
+# most often the SEC EDGAR zero-page X-17A-5 artifacts (see [[gemini-no-
+# pages-error]] memory). Used by summarize_pdf to convert these to None
+# rather than raising into a 502 — Doxie can then say "this filing
+# appears to be empty" in plain language. Lowercased comparison so
+# upstream casing changes don't slip past.
+_UNPARSEABLE_PDF_MARKERS: tuple[str, ...] = (
+    "the document has no pages",
+    "could not process the document",
+    "unable to process",
+    "no content to summarize",
+)
+
+
+def _is_unparseable_pdf_error(exc: GeminiExtractionError) -> bool:
+    """True iff the error message matches one of the known "PDF can't be
+    read" cases. Keeps the matcher in one place so callers stay tidy."""
+    text = str(exc).lower()
+    return any(marker in text for marker in _UNPARSEABLE_PDF_MARKERS)
+
+
 class GeminiClearingExtraction(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
@@ -652,6 +673,153 @@ class GeminiResponsesClient:
             if isinstance(item, dict):
                 results.append(GeminiFinancialExtraction.model_validate(self._normalize_text_fields(item)))
         return results
+
+    async def summarize_pdf(
+        self,
+        *,
+        pdf_bytes_base64: str,
+        prompt: str,
+        temperature: float = 0.2,
+    ) -> str | None:
+        """Free-form prose summarization of a PDF.
+
+        Distinct from the ``extract_*`` methods on this client — those
+        return JSON-schema-constrained Pydantic shapes for the structured
+        clearing / financial / advisor pipelines. ``summarize_pdf`` skips
+        the schema and returns plain text so Doxie's chat tools can run a
+        narrative summary in response to a user question.
+
+        Returns ``None`` when Gemini rejects the input as unparseable —
+        most commonly the SEC EDGAR zero-page X-17A-5 artifacts that
+        surface as "The document has no pages." 400s. Callers should
+        treat ``None`` as "this filing can't be summarised" and surface
+        a friendly message rather than raising.
+
+        Uses the same Files-API-vs-inline router as the structured
+        extractors so a 20+ MB PDF flows through the same memory-efficient
+        upload path; uses the existing ``gemini_inline_pdf_max_size_mb``
+        size ceiling. The optional ``temperature`` arg lets a caller bias
+        toward more deterministic phrasing (lower) or more natural
+        narrative (higher); default 0.2 matches the structured-extract
+        style.
+        """
+        if not settings.gemini_api_key:
+            raise GeminiConfigurationError("GEMINI_API_KEY is not configured.")
+
+        threshold_bytes = settings.gemini_files_api_threshold_mb * 1024 * 1024
+        max_bytes = settings.gemini_inline_pdf_max_size_mb * 1024 * 1024
+        pdf_size_bytes = self._pdf_byte_size_from_b64(pdf_bytes_base64)
+
+        if pdf_size_bytes > max_bytes:
+            raise GeminiExtractionError(
+                f"PDF size {pdf_size_bytes} bytes exceeds "
+                f"gemini_inline_pdf_max_size_mb={settings.gemini_inline_pdf_max_size_mb} MB."
+            )
+
+        if pdf_size_bytes <= threshold_bytes:
+            payload = self._build_prose_payload(
+                pdf_bytes_base64=pdf_bytes_base64,
+                prompt=prompt,
+                temperature=temperature,
+            )
+        else:
+            # Files API path for larger PDFs. Decode once, upload, run
+            # the call referencing the file URI, then clean up — matches
+            # the schema-less variant of the existing _dispatch_pdf_extract.
+            pdf_bytes = base64.b64decode(pdf_bytes_base64)
+            file_name, file_uri = await self._upload_pdf_to_files_api(pdf_bytes)
+            try:
+                payload = self._build_files_api_prose_payload(
+                    file_uri=file_uri,
+                    prompt=prompt,
+                    temperature=temperature,
+                )
+                try:
+                    response = await self._post_with_retries(payload)
+                except GeminiExtractionError as exc:
+                    if _is_unparseable_pdf_error(exc):
+                        return None
+                    raise
+                return self._extract_response_text(response).strip() or None
+            finally:
+                await self._delete_files_api_file(file_name)
+
+        try:
+            response = await self._post_with_retries(payload)
+        except GeminiExtractionError as exc:
+            # See [[gemini-no-pages-error]] in memory — zero-page PDFs
+            # from SEC EDGAR raise "The document has no pages." (400).
+            # Treat as "unsummarisable" so Doxie returns a friendly
+            # "this filing appears to be empty" instead of 502'ing.
+            if _is_unparseable_pdf_error(exc):
+                return None
+            raise
+
+        text = self._extract_response_text(response).strip()
+        return text or None
+
+    def _build_prose_payload(
+        self,
+        *,
+        pdf_bytes_base64: str,
+        prompt: str,
+        temperature: float,
+    ) -> dict[str, object]:
+        """Inline-base64 payload for prose summarisation (no JSON schema)."""
+        return {
+            "contents": [
+                {
+                    "role": "user",
+                    "parts": [
+                        {"text": prompt},
+                        {
+                            "inline_data": {
+                                "mime_type": "application/pdf",
+                                "data": pdf_bytes_base64,
+                            }
+                        },
+                    ],
+                }
+            ],
+            "generationConfig": {
+                # Cap output so a runaway response doesn't blow the chat
+                # budget. 2048 tokens ≈ 1500 words, plenty for any
+                # filing summary the chat would surface inline.
+                "maxOutputTokens": 2048,
+                "temperature": temperature,
+                "topP": 0.95,
+            },
+        }
+
+    def _build_files_api_prose_payload(
+        self,
+        *,
+        file_uri: str,
+        prompt: str,
+        temperature: float,
+    ) -> dict[str, object]:
+        """Files-API equivalent of ``_build_prose_payload`` for larger PDFs."""
+        return {
+            "contents": [
+                {
+                    "role": "user",
+                    "parts": [
+                        {"text": prompt},
+                        {
+                            "file_data": {
+                                "mime_type": "application/pdf",
+                                "file_uri": file_uri,
+                            }
+                        },
+                    ],
+                }
+            ],
+            "generationConfig": {
+                "maxOutputTokens": 2048,
+                "temperature": temperature,
+                "topP": 0.95,
+            },
+        }
 
     def _build_payload(self, *, pdf_bytes_base64: str, prompt: str, schema: dict[str, object]) -> dict[str, object]:
 

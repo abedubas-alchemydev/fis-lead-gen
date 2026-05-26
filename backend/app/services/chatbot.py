@@ -393,10 +393,15 @@ class ChatbotService:
             )
             return cached
 
+        # Per-tool timeout override (PDF-summarisation tools need ~30s vs.
+        # the 5s default for repo-only lookups). Tools opt in via
+        # ``timeout_s`` on the dataclass; ``None`` falls back to the
+        # global ``TOOL_EXECUTION_TIMEOUT_S``.
+        effective_timeout = tool.timeout_s if tool.timeout_s is not None else TOOL_EXECUTION_TIMEOUT_S
         try:
             result = await asyncio.wait_for(
                 tool.execute(user, db, call.args),
-                timeout=TOOL_EXECUTION_TIMEOUT_S,
+                timeout=effective_timeout,
             )
         except asyncio.TimeoutError:
             logger.warning(
@@ -423,7 +428,11 @@ class ChatbotService:
                 ),
             }
 
-        await _tool_cache_put(call.name, call.args, user.id, result)
+        # Skip the LRU for tools that opt out (typically PDF summaries —
+        # long per-question text with a poor hit-rate would otherwise
+        # bloat the cache's memory footprint).
+        if tool.cacheable:
+            await _tool_cache_put(call.name, call.args, user.id, result)
         return result
 
     async def chat_stream(
