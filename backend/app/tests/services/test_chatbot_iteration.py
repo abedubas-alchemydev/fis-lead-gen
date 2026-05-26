@@ -52,6 +52,15 @@ def no_backoff_sleep(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr("app.services.chatbot.asyncio.sleep", _instant)
 
 
+@pytest.fixture(autouse=True)
+def _clear_tool_cache() -> object:
+    """Ensure every test starts with an empty tool cache so they don't leak
+    state into each other (the cache is a module-level OrderedDict)."""
+    chatbot_module._tool_cache_clear_for_tests()
+    yield
+    chatbot_module._tool_cache_clear_for_tests()
+
+
 @pytest.fixture
 def user() -> AuthenticatedUser:
     return AuthenticatedUser(
@@ -616,3 +625,198 @@ async def test_tool_usage_prompt_absent_when_no_tools(
     system_text = body["systemInstruction"]["parts"][0]["text"]
     assert "never invent ids" not in system_text.lower()
     assert "tools" not in body
+
+
+# ── Tool result cache ───────────────────────────────────────────────────
+
+
+def _make_counting_tool(
+    name: str,
+    *,
+    result: dict[str, Any] | None = None,
+    error_result: dict[str, Any] | None = None,
+) -> tuple[Tool, list[dict[str, Any]]]:
+    """Tool that records every ``execute`` call into the returned list.
+
+    Lets caching tests assert how many real executions happened across
+    multiple iterations, distinguishing a cache hit (no append) from a
+    miss (one append per call).
+    """
+    calls: list[dict[str, Any]] = []
+
+    async def execute(_user: Any, _db: Any, args: dict[str, Any]) -> dict[str, Any]:
+        calls.append(dict(args))
+        if error_result is not None:
+            return error_result
+        return result or {"ok": True}
+
+    tool = Tool(
+        name=name,
+        description=f"Counting stub {name}",
+        parameters_schema={"type": "object", "properties": {}, "required": []},
+        feature_key="master_list",
+        execute=execute,
+    )
+    return tool, calls
+
+
+@respx.mock
+@pytest.mark.asyncio
+async def test_same_args_and_user_dedupes_repeated_tool_call(
+    patch_gemini: None,
+    no_backoff_sleep: None,
+    user: AuthenticatedUser,
+    db_stub: object,
+) -> None:
+    """Gemini sometimes calls the same tool twice with identical args within
+    one chat (especially after being prompted to verify a lookup). The cache
+    should short-circuit the second dispatch so the DB isn't hit twice."""
+    respx.post(_GEMINI_CHAT_URL).mock(
+        side_effect=[
+            # Iteration 0: tool call.
+            httpx.Response(200, json=_function_call_response(("lookup", {"id": 1}))),
+            # Iteration 1: SAME tool call — should land on the cache.
+            httpx.Response(200, json=_function_call_response(("lookup", {"id": 1}))),
+            # Iteration 2: final answer.
+            httpx.Response(200, json=_text_response("Acme has $1.5M net capital.")),
+        ]
+    )
+    tool, calls = _make_counting_tool("lookup", result={"name": "Acme"})
+
+    reply = await ChatbotService().chat(
+        messages=[ChatbotMessage(role="user", content="Tell me about firm 1")],
+        user=user,
+        db=db_stub,
+        tools={"lookup": tool},
+    )
+    assert reply == "Acme has $1.5M net capital."
+    # Only one real execute call despite two Gemini-side functionCalls.
+    assert len(calls) == 1
+
+
+@respx.mock
+@pytest.mark.asyncio
+async def test_different_args_misses_cache(
+    patch_gemini: None,
+    no_backoff_sleep: None,
+    user: AuthenticatedUser,
+    db_stub: object,
+) -> None:
+    respx.post(_GEMINI_CHAT_URL).mock(
+        side_effect=[
+            httpx.Response(200, json=_function_call_response(("lookup", {"id": 1}))),
+            httpx.Response(200, json=_function_call_response(("lookup", {"id": 2}))),
+            httpx.Response(200, json=_text_response("done")),
+        ]
+    )
+    tool, calls = _make_counting_tool("lookup")
+    await ChatbotService().chat(
+        messages=[ChatbotMessage(role="user", content="Look up two firms")],
+        user=user,
+        db=db_stub,
+        tools={"lookup": tool},
+    )
+    assert len(calls) == 2
+    assert calls == [{"id": 1}, {"id": 2}]
+
+
+@pytest.mark.asyncio
+async def test_cache_key_is_per_user(user: AuthenticatedUser) -> None:
+    """Two users with the same args should each populate their own slot
+    (their permission gates may yield different results)."""
+    await chatbot_module._tool_cache_put("lookup", {"id": 1}, "user-a", {"name": "Acme"})
+    a = await chatbot_module._tool_cache_get("lookup", {"id": 1}, "user-a")
+    b = await chatbot_module._tool_cache_get("lookup", {"id": 1}, "user-b")
+    assert a == {"name": "Acme"}
+    assert b is None
+
+
+@pytest.mark.asyncio
+async def test_cache_expires_after_ttl(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A cached entry stops being returned once its TTL elapses."""
+    base = [1_000.0]
+
+    def fake_monotonic() -> float:
+        return base[0]
+
+    monkeypatch.setattr(chatbot_module, "monotonic", fake_monotonic)
+
+    await chatbot_module._tool_cache_put("lookup", {"id": 1}, "user-a", {"name": "Acme"})
+    # Within TTL: hit.
+    assert await chatbot_module._tool_cache_get("lookup", {"id": 1}, "user-a") == {"name": "Acme"}
+    # Jump past the TTL: miss.
+    base[0] = 1_000.0 + chatbot_module.TOOL_CACHE_TTL_S + 1
+    assert await chatbot_module._tool_cache_get("lookup", {"id": 1}, "user-a") is None
+
+
+@pytest.mark.asyncio
+async def test_cache_skips_error_results() -> None:
+    """A transient ``tool_error`` shouldn't get stuck in the cache for 60s —
+    the next attempt must re-execute so the user can self-heal by retrying."""
+    await chatbot_module._tool_cache_put(
+        "lookup",
+        {"id": 1},
+        "user-a",
+        {"error": "tool_error", "message": "boom"},
+    )
+    assert await chatbot_module._tool_cache_get("lookup", {"id": 1}, "user-a") is None
+
+
+@respx.mock
+@pytest.mark.asyncio
+async def test_dispatch_does_not_cache_error_dicts(
+    patch_gemini: None,
+    no_backoff_sleep: None,
+    user: AuthenticatedUser,
+    db_stub: object,
+) -> None:
+    """End-to-end: if a tool returns an error dict, a repeat call goes back
+    to the tool rather than serving the error from cache."""
+    respx.post(_GEMINI_CHAT_URL).mock(
+        side_effect=[
+            httpx.Response(200, json=_function_call_response(("lookup", {"id": 1}))),
+            httpx.Response(200, json=_function_call_response(("lookup", {"id": 1}))),
+            httpx.Response(200, json=_text_response("done")),
+        ]
+    )
+    tool, calls = _make_counting_tool(
+        "lookup", error_result={"error": "tool_error", "message": "boom"}
+    )
+    await ChatbotService().chat(
+        messages=[ChatbotMessage(role="user", content="hi")],
+        user=user,
+        db=db_stub,
+        tools={"lookup": tool},
+    )
+    # Each call re-executes since the previous result was an error.
+    assert len(calls) == 2
+
+
+@pytest.mark.asyncio
+async def test_cache_evicts_oldest_when_at_capacity(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Inserts above the capacity drop the LRU entry."""
+    monkeypatch.setattr(chatbot_module, "TOOL_CACHE_MAX_ENTRIES", 3)
+    for i in range(4):
+        await chatbot_module._tool_cache_put(
+            "lookup", {"id": i}, "user-a", {"i": i}
+        )
+    # First insert should have been evicted.
+    assert await chatbot_module._tool_cache_get("lookup", {"id": 0}, "user-a") is None
+    # The other three remain.
+    for i in (1, 2, 3):
+        assert await chatbot_module._tool_cache_get("lookup", {"id": i}, "user-a") == {"i": i}
+
+
+@pytest.mark.asyncio
+async def test_cache_key_order_independent(user: AuthenticatedUser) -> None:
+    """args dict key ordering must not affect the cache key."""
+    await chatbot_module._tool_cache_put(
+        "lookup", {"a": 1, "b": 2}, "user-a", {"hit": True}
+    )
+    # Same args inserted in opposite key order → same cache slot.
+    assert (
+        await chatbot_module._tool_cache_get("lookup", {"b": 2, "a": 1}, "user-a")
+        == {"hit": True}
+    )
