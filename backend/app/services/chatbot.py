@@ -28,7 +28,9 @@ Safety brakes (all module constants below):
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
+from collections import OrderedDict
 from dataclasses import dataclass
 from time import monotonic
 from typing import Any, Mapping, Sequence
@@ -75,6 +77,89 @@ DOXIE_TOOL_USAGE_PROMPT = (
 MAX_TOOL_ITERATIONS = 5
 TOOL_EXECUTION_TIMEOUT_S = 5.0
 CHAT_WALL_CLOCK_BUDGET_S = 60.0
+
+
+# ─── Tool result cache ────────────────────────────────────────────────────
+#
+# Per-process LRU keyed by ``(tool_name, args_json, user_id)`` with a short
+# TTL. The point isn't multi-request caching (Cloud Run revisions cycle
+# faster than the TTL on most days) — it's deduplicating the redundant
+# calls Gemini sometimes makes within a single chat (e.g. asking for
+# ``search_broker_dealers(query="Apex")`` twice in two iterations after
+# being prompted to verify the same firm), and shielding the DB from
+# obvious within-conversation thrash.
+#
+# Why the user_id is in the key: ``ensure_feature`` runs inside each tool's
+# ``execute``, so two users with different permissions calling the same
+# tool with the same args could see different outcomes (real data vs.
+# ``no_access`` refusal). Keying on user.id keeps that distinction safe
+# without lifting the permission check out of the tool layer.
+#
+# Why error results are skipped: a transient ``tool_error`` (DB hiccup,
+# upstream timeout) shouldn't poison the cache for 60 seconds. The
+# ``no_access`` refusal is technically deterministic per (user, feature)
+# but treating all errors uniformly keeps the cache rule simple — re-runs
+# are cheap once the tool actually succeeds.
+TOOL_CACHE_TTL_S = 60.0
+TOOL_CACHE_MAX_ENTRIES = 256
+
+_TOOL_CACHE: "OrderedDict[tuple[str, str, str], tuple[dict[str, Any], float]]" = (
+    OrderedDict()
+)
+_TOOL_CACHE_LOCK = asyncio.Lock()
+
+
+def _tool_cache_key(
+    tool_name: str, args: Mapping[str, Any], user_id: str
+) -> tuple[str, str, str]:
+    """Stable cache key — JSON-encodes args with sorted keys for determinism."""
+    try:
+        args_json = json.dumps(args, sort_keys=True, default=str)
+    except TypeError:
+        # If args contain something exotic that doesn't JSON-encode, skip
+        # the cache by returning a unique key that will never hit.
+        args_json = f"__unhashable__:{id(args)}"
+    return (tool_name, args_json, user_id)
+
+
+async def _tool_cache_get(
+    tool_name: str, args: Mapping[str, Any], user_id: str
+) -> dict[str, Any] | None:
+    """Return the cached result if present and unexpired."""
+    key = _tool_cache_key(tool_name, args, user_id)
+    async with _TOOL_CACHE_LOCK:
+        hit = _TOOL_CACHE.get(key)
+        if hit is None:
+            return None
+        result, expires_at = hit
+        if monotonic() >= expires_at:
+            _TOOL_CACHE.pop(key, None)
+            return None
+        _TOOL_CACHE.move_to_end(key)
+        # Return a shallow copy so a downstream consumer mutating the dict
+        # can't poison the cached entry for the next caller.
+        return dict(result)
+
+
+async def _tool_cache_put(
+    tool_name: str, args: Mapping[str, Any], user_id: str, result: dict[str, Any]
+) -> None:
+    """Insert/refresh a cache entry. Errors are not cached."""
+    if "error" in result:
+        return
+    key = _tool_cache_key(tool_name, args, user_id)
+    expires_at = monotonic() + TOOL_CACHE_TTL_S
+    async with _TOOL_CACHE_LOCK:
+        _TOOL_CACHE[key] = (dict(result), expires_at)
+        _TOOL_CACHE.move_to_end(key)
+        while len(_TOOL_CACHE) > TOOL_CACHE_MAX_ENTRIES:
+            _TOOL_CACHE.popitem(last=False)
+
+
+def _tool_cache_clear_for_tests() -> None:
+    """Test-only helper. Sync because most tests run inside event loops and
+    don't need lock acquisition for setup/teardown isolation."""
+    _TOOL_CACHE.clear()
 
 
 @dataclass(frozen=True)
@@ -268,7 +353,12 @@ class ChatbotService:
         user: AuthenticatedUser,
         db: AsyncSession,
     ) -> dict[str, Any]:
-        """Execute one tool with the per-call timeout + total-failure guard.
+        """Execute one tool with cache check + per-call timeout + failure guard.
+
+        Cache lookup is keyed on ``(tool_name, args, user_id)`` so a viewer
+        with feature X gets their own slot in the cache; a different user
+        with the same args might see different output (auth gate). Errors
+        are never cached so transient failures self-heal on the next call.
 
         Tools that raise unexpected exceptions are caught here so the
         iteration loop can carry on and the model can apologize gracefully.
@@ -284,8 +374,18 @@ class ChatbotService:
                     f"this name again."
                 ),
             }
+
+        cached = await _tool_cache_get(call.name, call.args, user.id)
+        if cached is not None:
+            logger.info(
+                "doxie tool cache hit user_id=%s tool=%s",
+                user.id,
+                call.name,
+            )
+            return cached
+
         try:
-            return await asyncio.wait_for(
+            result = await asyncio.wait_for(
                 tool.execute(user, db, call.args),
                 timeout=TOOL_EXECUTION_TIMEOUT_S,
             )
@@ -313,6 +413,9 @@ class ChatbotService:
                     "and ask the user to try again."
                 ),
             }
+
+        await _tool_cache_put(call.name, call.args, user.id, result)
+        return result
 
     async def _post_with_retries(self, payload: dict[str, Any]) -> dict[str, Any]:
         url = (
