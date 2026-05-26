@@ -32,7 +32,7 @@ const KPIS: Kpi[] = [
 
 export function AuthHero() {
   return (
-    <aside className="hidden bg-[#162635] text-white lg:flex lg:flex-col lg:justify-between lg:px-14 lg:pb-12 lg:pt-4">
+    <aside className="hidden bg-[#162635] text-white lg:flex lg:flex-col lg:justify-between lg:px-14 lg:pb-6 lg:pt-2">
       {/* Top row: centered logo */}
       <div className="flex justify-center">
         <Image
@@ -41,7 +41,7 @@ export function AuthHero() {
           width={384}
           height={384}
           priority
-          className="h-80 w-80 object-contain lg:h-96 lg:w-96"
+          className="h-72 w-72 object-contain lg:h-80 lg:w-80 xl:h-96 xl:w-96"
         />
       </div>
 
@@ -55,7 +55,7 @@ export function AuthHero() {
           surfaced as one unified research layer.
         </p>
 
-        <div className="mt-10 space-y-3">
+        <div className="mt-10 space-y-2">
           {KPIS.map((kpi) => {
             const Icon = kpi.icon;
             return (
