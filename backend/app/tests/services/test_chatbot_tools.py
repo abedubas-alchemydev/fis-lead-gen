@@ -24,9 +24,14 @@ from unittest.mock import AsyncMock
 
 import pytest
 
-from app.core.feature_permissions import INVESTMENT_ADVISORS, MASTER_LIST
+from app.core.feature_permissions import (
+    INSTITUTIONAL_INVESTORS,
+    INVESTMENT_ADVISORS,
+    MASTER_LIST,
+)
 from app.schemas.auth import AuthenticatedUser
 from app.schemas.broker_dealer import BrokerDealerListItem
+from app.schemas.institutional_investor import InstitutionalInvestorListItem
 from app.schemas.investment_advisor import InvestmentAdvisorListItem
 from app.services import chatbot_tools
 
@@ -53,6 +58,11 @@ def bd_user() -> AuthenticatedUser:
 @pytest.fixture
 def ia_user() -> AuthenticatedUser:
     return _make_user(features=[INVESTMENT_ADVISORS])
+
+
+@pytest.fixture
+def ii_user() -> AuthenticatedUser:
+    return _make_user(features=[INSTITUTIONAL_INVESTORS])
 
 
 @pytest.fixture
@@ -139,6 +149,38 @@ def _make_bd_orm(**overrides: Any) -> Any:
         "clearing_membership_checked_at": None,
         "current_clearing_unknown_reason": None,
         "financial_unknown_reason": None,
+    }
+    defaults.update(overrides)
+
+    class _Obj:
+        pass
+
+    obj = _Obj()
+    for k, v in defaults.items():
+        setattr(obj, k, v)
+    return obj
+
+
+def _make_ii_orm(**overrides: Any) -> Any:
+    defaults: dict[str, Any] = {
+        "id": 88,
+        "cik": "0001112223",
+        "advisor_id": None,
+        "name": "Gamma Capital Management",
+        "legal_name": "Gamma Capital Management LP",
+        "city": "Greenwich",
+        "state": "CT",
+        "status": "active",
+        "matched_source": "edgar",
+        "website": "gamma.example.com",
+        "website_source": "finra",
+        "latest_13f_filing_date": date(2026, 2, 15),
+        "total_aum": Decimal("12000000000"),
+        "holdings_count": 250,
+        "filings_index_url": "https://example.com/edgar/gamma",
+        "last_enrich_attempt_at": None,
+        "created_at": datetime(2024, 1, 1),
+        "updated_at": datetime(2024, 6, 1),
     }
     defaults.update(overrides)
 
@@ -595,6 +637,16 @@ async def test_admin_bypasses_feature_gate_on_every_tool(
         "get_investment_advisor",
         AsyncMock(return_value=None),
     )
+    monkeypatch.setattr(
+        chatbot_tools._ii_repo,
+        "list_institutional_investors",
+        AsyncMock(return_value=_ListResponseStub(items=[], meta=_ListMetaStub(total=0))),
+    )
+    monkeypatch.setattr(
+        chatbot_tools._ii_repo,
+        "get_institutional_investor",
+        AsyncMock(return_value=None),
+    )
 
     # Each call should reach a non-403 outcome.
     r1 = await chatbot_tools.TOOL_REGISTRY["search_broker_dealers"].execute(
@@ -609,7 +661,19 @@ async def test_admin_bypasses_feature_gate_on_every_tool(
     r4 = await chatbot_tools.TOOL_REGISTRY["get_investment_advisor_profile"].execute(
         admin, db_stub, {"advisor_id": 1}
     )
-    for r in (r1, r2, r3, r4):
+    r5 = await chatbot_tools.TOOL_REGISTRY["search_institutional_investors"].execute(
+        admin, db_stub, {"query": "x"}
+    )
+    r6 = await chatbot_tools.TOOL_REGISTRY[
+        "get_institutional_investor_profile"
+    ].execute(admin, db_stub, {"investor_id": 1})
+    r7 = await chatbot_tools.TOOL_REGISTRY["list_broker_dealers_by_filter"].execute(
+        admin, db_stub, {"state": "NY"}
+    )
+    r8 = await chatbot_tools.TOOL_REGISTRY[
+        "list_investment_advisors_by_filter"
+    ].execute(admin, db_stub, {"state": "NY"})
+    for r in (r1, r2, r3, r4, r5, r6, r7, r8):
         assert r.get("error") != "no_access"
 
 
@@ -640,4 +704,303 @@ def test_tool_registry_has_expected_names() -> None:
         "get_broker_dealer_profile",
         "search_investment_advisors",
         "get_investment_advisor_profile",
+        "search_institutional_investors",
+        "get_institutional_investor_profile",
+        "list_broker_dealers_by_filter",
+        "list_investment_advisors_by_filter",
     }
+
+
+def test_ii_projection_keys_exist_on_schema() -> None:
+    fields = set(InstitutionalInvestorListItem.model_fields.keys())
+    for key in (*chatbot_tools._II_SUMMARY_KEYS, *chatbot_tools._II_PROFILE_EXTRA_KEYS):
+        assert key in fields, (
+            f"II projection key {key!r} missing from InstitutionalInvestorListItem"
+        )
+
+
+# ── search_institutional_investors ──────────────────────────────────────
+
+
+class TestSearchInstitutionalInvestors:
+    async def test_happy_path_returns_summary_keys(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        ii_user: AuthenticatedUser,
+        db_stub: object,
+    ) -> None:
+        item = InstitutionalInvestorListItem.model_validate(_make_ii_orm())
+        monkeypatch.setattr(
+            chatbot_tools._ii_repo,
+            "list_institutional_investors",
+            AsyncMock(return_value=_ListResponseStub(items=[item], meta=_ListMetaStub(total=1))),
+        )
+
+        tool = chatbot_tools.TOOL_REGISTRY["search_institutional_investors"]
+        result = await tool.execute(ii_user, db_stub, {"query": "Gamma"})
+
+        assert result["total_matched"] == 1
+        assert set(result["items"][0].keys()) == set(chatbot_tools._II_SUMMARY_KEYS)
+        # total_aum (Decimal) coerced to float by _jsonable.
+        assert isinstance(result["items"][0]["total_aum"], float)
+
+    async def test_403_returns_no_access(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        no_access_user: AuthenticatedUser,
+        db_stub: object,
+    ) -> None:
+        called = AsyncMock()
+        monkeypatch.setattr(chatbot_tools._ii_repo, "list_institutional_investors", called)
+        tool = chatbot_tools.TOOL_REGISTRY["search_institutional_investors"]
+        result = await tool.execute(no_access_user, db_stub, {"query": "Gamma"})
+        assert result["error"] == "no_access"
+        called.assert_not_called()
+
+    async def test_empty_query_returns_invalid_args(
+        self,
+        ii_user: AuthenticatedUser,
+        db_stub: object,
+    ) -> None:
+        tool = chatbot_tools.TOOL_REGISTRY["search_institutional_investors"]
+        result = await tool.execute(ii_user, db_stub, {"query": ""})
+        assert result["error"] == "invalid_args"
+
+    async def test_repo_exception_returns_tool_error(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        ii_user: AuthenticatedUser,
+        db_stub: object,
+    ) -> None:
+        async def boom(_db: Any, **_kwargs: Any) -> Any:
+            raise RuntimeError("boom")
+
+        monkeypatch.setattr(chatbot_tools._ii_repo, "list_institutional_investors", boom)
+        tool = chatbot_tools.TOOL_REGISTRY["search_institutional_investors"]
+        result = await tool.execute(ii_user, db_stub, {"query": "Gamma"})
+        assert result["error"] == "tool_error"
+
+
+# ── get_institutional_investor_profile ──────────────────────────────────
+
+
+class TestGetInstitutionalInvestorProfile:
+    async def test_happy_path_includes_profile_extras(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        ii_user: AuthenticatedUser,
+        db_stub: object,
+    ) -> None:
+        monkeypatch.setattr(
+            chatbot_tools._ii_repo,
+            "get_institutional_investor",
+            AsyncMock(return_value=_make_ii_orm()),
+        )
+        tool = chatbot_tools.TOOL_REGISTRY["get_institutional_investor_profile"]
+        result = await tool.execute(ii_user, db_stub, {"investor_id": 88})
+
+        for k in (*chatbot_tools._II_SUMMARY_KEYS, *chatbot_tools._II_PROFILE_EXTRA_KEYS):
+            assert k in result
+        # latest_13f_filing_date (date) coerced to isoformat string.
+        assert isinstance(result["latest_13f_filing_date"], str)
+
+    async def test_not_found_returns_structured_dict(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        ii_user: AuthenticatedUser,
+        db_stub: object,
+    ) -> None:
+        monkeypatch.setattr(
+            chatbot_tools._ii_repo,
+            "get_institutional_investor",
+            AsyncMock(return_value=None),
+        )
+        tool = chatbot_tools.TOOL_REGISTRY["get_institutional_investor_profile"]
+        result = await tool.execute(ii_user, db_stub, {"investor_id": 9999})
+        assert result["error"] == "not_found"
+
+    async def test_invalid_id_returns_invalid_args(
+        self,
+        ii_user: AuthenticatedUser,
+        db_stub: object,
+    ) -> None:
+        tool = chatbot_tools.TOOL_REGISTRY["get_institutional_investor_profile"]
+        result = await tool.execute(ii_user, db_stub, {"investor_id": "abc"})
+        assert result["error"] == "invalid_args"
+
+    async def test_403_returns_no_access(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        no_access_user: AuthenticatedUser,
+        db_stub: object,
+    ) -> None:
+        called = AsyncMock()
+        monkeypatch.setattr(chatbot_tools._ii_repo, "get_institutional_investor", called)
+        tool = chatbot_tools.TOOL_REGISTRY["get_institutional_investor_profile"]
+        result = await tool.execute(no_access_user, db_stub, {"investor_id": 88})
+        assert result["error"] == "no_access"
+        called.assert_not_called()
+
+
+# ── list_broker_dealers_by_filter ───────────────────────────────────────
+
+
+class TestListBrokerDealersByFilter:
+    async def test_at_least_one_filter_required(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        bd_user: AuthenticatedUser,
+        db_stub: object,
+    ) -> None:
+        called = AsyncMock()
+        monkeypatch.setattr(chatbot_tools._bd_repo, "list_broker_dealers", called)
+        tool = chatbot_tools.TOOL_REGISTRY["list_broker_dealers_by_filter"]
+        result = await tool.execute(bd_user, db_stub, {})
+        assert result["error"] == "invalid_args"
+        called.assert_not_called()
+
+    async def test_state_filter_threads_through(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        bd_user: AuthenticatedUser,
+        db_stub: object,
+    ) -> None:
+        captured: dict[str, Any] = {}
+
+        async def fake_list(_db: Any, **kwargs: Any) -> Any:
+            captured.update(kwargs)
+            return _ListResponseStub(items=[], meta=_ListMetaStub(total=0))
+
+        monkeypatch.setattr(chatbot_tools._bd_repo, "list_broker_dealers", fake_list)
+        tool = chatbot_tools.TOOL_REGISTRY["list_broker_dealers_by_filter"]
+        await tool.execute(bd_user, db_stub, {"state": "NY"})
+        assert captured["states"] == ["NY"]
+        assert captured["search"] is None
+        assert captured["list_mode"] == "all"
+
+    async def test_net_capital_band_and_clearing_partner(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        bd_user: AuthenticatedUser,
+        db_stub: object,
+    ) -> None:
+        captured: dict[str, Any] = {}
+
+        async def fake_list(_db: Any, **kwargs: Any) -> Any:
+            captured.update(kwargs)
+            return _ListResponseStub(items=[], meta=_ListMetaStub(total=0))
+
+        monkeypatch.setattr(chatbot_tools._bd_repo, "list_broker_dealers", fake_list)
+        tool = chatbot_tools.TOOL_REGISTRY["list_broker_dealers_by_filter"]
+        await tool.execute(
+            bd_user,
+            db_stub,
+            {
+                "min_net_capital": 5_000_000,
+                "max_net_capital": 100_000_000,
+                "clearing_partner": "Pershing",
+            },
+        )
+        assert captured["min_net_capital"] == 5_000_000.0
+        assert captured["max_net_capital"] == 100_000_000.0
+        assert captured["clearing_partners"] == ["Pershing"]
+
+    async def test_limit_clamped_to_filter_max(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        bd_user: AuthenticatedUser,
+        db_stub: object,
+    ) -> None:
+        captured: dict[str, Any] = {}
+
+        async def fake_list(_db: Any, **kwargs: Any) -> Any:
+            captured.update(kwargs)
+            return _ListResponseStub(items=[], meta=_ListMetaStub(total=0))
+
+        monkeypatch.setattr(chatbot_tools._bd_repo, "list_broker_dealers", fake_list)
+        tool = chatbot_tools.TOOL_REGISTRY["list_broker_dealers_by_filter"]
+        await tool.execute(bd_user, db_stub, {"state": "CA", "limit": 9999})
+        assert captured["limit"] == chatbot_tools.LIST_FILTER_LIMIT_MAX
+
+    async def test_403_returns_no_access(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        no_access_user: AuthenticatedUser,
+        db_stub: object,
+    ) -> None:
+        called = AsyncMock()
+        monkeypatch.setattr(chatbot_tools._bd_repo, "list_broker_dealers", called)
+        tool = chatbot_tools.TOOL_REGISTRY["list_broker_dealers_by_filter"]
+        result = await tool.execute(no_access_user, db_stub, {"state": "NY"})
+        assert result["error"] == "no_access"
+        called.assert_not_called()
+
+
+# ── list_investment_advisors_by_filter ──────────────────────────────────
+
+
+class TestListInvestmentAdvisorsByFilter:
+    async def test_at_least_one_filter_required(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        ia_user: AuthenticatedUser,
+        db_stub: object,
+    ) -> None:
+        called = AsyncMock()
+        monkeypatch.setattr(chatbot_tools._ia_repo, "list_investment_advisors", called)
+        tool = chatbot_tools.TOOL_REGISTRY["list_investment_advisors_by_filter"]
+        result = await tool.execute(ia_user, db_stub, {})
+        assert result["error"] == "invalid_args"
+        called.assert_not_called()
+
+    async def test_files_13f_bool_threads_through(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        ia_user: AuthenticatedUser,
+        db_stub: object,
+    ) -> None:
+        captured: dict[str, Any] = {}
+
+        async def fake_list(_db: Any, **kwargs: Any) -> Any:
+            captured.update(kwargs)
+            return _ListResponseStub(items=[], meta=_ListMetaStub(total=0))
+
+        monkeypatch.setattr(chatbot_tools._ia_repo, "list_investment_advisors", fake_list)
+        tool = chatbot_tools.TOOL_REGISTRY["list_investment_advisors_by_filter"]
+        await tool.execute(ia_user, db_stub, {"files_13f": True})
+        assert captured["files_13f"] is True
+
+    async def test_aum_band_and_state(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        ia_user: AuthenticatedUser,
+        db_stub: object,
+    ) -> None:
+        captured: dict[str, Any] = {}
+
+        async def fake_list(_db: Any, **kwargs: Any) -> Any:
+            captured.update(kwargs)
+            return _ListResponseStub(items=[], meta=_ListMetaStub(total=0))
+
+        monkeypatch.setattr(chatbot_tools._ia_repo, "list_investment_advisors", fake_list)
+        tool = chatbot_tools.TOOL_REGISTRY["list_investment_advisors_by_filter"]
+        await tool.execute(
+            ia_user,
+            db_stub,
+            {"state": "NY", "min_regulatory_aum": 1_000_000_000},
+        )
+        assert captured["states"] == ["NY"]
+        assert captured["min_regulatory_aum"] == 1_000_000_000.0
+
+    async def test_403_returns_no_access(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        no_access_user: AuthenticatedUser,
+        db_stub: object,
+    ) -> None:
+        called = AsyncMock()
+        monkeypatch.setattr(chatbot_tools._ia_repo, "list_investment_advisors", called)
+        tool = chatbot_tools.TOOL_REGISTRY["list_investment_advisors_by_filter"]
+        result = await tool.execute(no_access_user, db_stub, {"state": "NY"})
+        assert result["error"] == "no_access"
+        called.assert_not_called()

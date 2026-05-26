@@ -1,4 +1,4 @@
-"""Doxie chatbot tool registry — read-only lookups against the BD + IA repos.
+"""Doxie chatbot tool registry — read-only lookups against BD / IA / II repos.
 
 Each tool is a thin wrapper around an existing repository method, gated on
 the matching per-user feature permission. Tools are dispatched by
@@ -33,16 +33,22 @@ from typing import Any, Awaitable, Callable, Mapping
 from fastapi import HTTPException
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.core.feature_permissions import INVESTMENT_ADVISORS, MASTER_LIST
+from app.core.feature_permissions import (
+    INSTITUTIONAL_INVESTORS,
+    INVESTMENT_ADVISORS,
+    MASTER_LIST,
+)
 from app.schemas.auth import AuthenticatedUser
 from app.schemas.broker_dealer import (
     BrokerDealerListItem,
     FinancialMetricItem,
 )
+from app.schemas.institutional_investor import InstitutionalInvestorListItem
 from app.schemas.investment_advisor import InvestmentAdvisorListItem
 from app.schemas.pipeline import ClearingArrangementItem
 from app.services.auth import ensure_feature
 from app.services.broker_dealers import BrokerDealerRepository
+from app.services.institutional_investors import InstitutionalInvestorRepository
 from app.services.investment_advisors import InvestmentAdvisorRepository
 
 logger = logging.getLogger(__name__)
@@ -55,6 +61,11 @@ SEARCH_RESULT_LIMIT_MAX = 10
 SEARCH_RESULT_LIMIT_DEFAULT = 5
 ADVISORY_LIST_CAP = 10
 CLIENT_TYPE_LIST_CAP = 10
+# list-by-filter tools get a slightly higher ceiling than the search tools
+# because filters narrow the result space; returning 25 firms in CA matters
+# more than returning 25 fuzzy name matches.
+LIST_FILTER_LIMIT_DEFAULT = 10
+LIST_FILTER_LIMIT_MAX = 25
 
 
 @dataclass(frozen=True)
@@ -124,6 +135,49 @@ def _clamp_limit(raw: Any) -> int:
     except (TypeError, ValueError):
         n = SEARCH_RESULT_LIMIT_DEFAULT
     return max(1, min(n, SEARCH_RESULT_LIMIT_MAX))
+
+
+def _clamp_filter_limit(raw: Any) -> int:
+    """Clamp helper for the list-by-filter tools (larger ceiling than search)."""
+    try:
+        n = int(raw) if raw is not None else LIST_FILTER_LIMIT_DEFAULT
+    except (TypeError, ValueError):
+        n = LIST_FILTER_LIMIT_DEFAULT
+    return max(1, min(n, LIST_FILTER_LIMIT_MAX))
+
+
+def _opt_str(args: Mapping[str, Any], key: str) -> str | None:
+    """Return a trimmed string arg or None for missing / empty values."""
+    raw = args.get(key)
+    if raw is None:
+        return None
+    s = str(raw).strip()
+    return s or None
+
+
+def _opt_float(args: Mapping[str, Any], key: str) -> float | None:
+    raw = args.get(key)
+    if raw is None:
+        return None
+    try:
+        return float(raw)
+    except (TypeError, ValueError):
+        return None
+
+
+def _opt_bool(args: Mapping[str, Any], key: str) -> bool | None:
+    raw = args.get(key)
+    if raw is None:
+        return None
+    if isinstance(raw, bool):
+        return raw
+    if isinstance(raw, str):
+        lowered = raw.strip().lower()
+        if lowered in ("true", "yes", "y", "1"):
+            return True
+        if lowered in ("false", "no", "n", "0"):
+            return False
+    return None
 
 
 def _require_query(args: Mapping[str, Any]) -> str | dict[str, Any]:
@@ -197,6 +251,27 @@ _IA_PROFILE_EXTRA_KEYS = (
 )
 
 
+_II_SUMMARY_KEYS = (
+    "id",
+    "name",
+    "cik",
+    "city",
+    "state",
+    "status",
+    "total_aum",
+    "holdings_count",
+    "latest_13f_filing_date",
+    "advisor_id",
+)
+
+
+_II_PROFILE_EXTRA_KEYS = (
+    "legal_name",
+    "website",
+    "filings_index_url",
+)
+
+
 def _project_bd_summary(item: BrokerDealerListItem) -> dict[str, Any]:
     return _jsonable({k: getattr(item, k, None) for k in _BD_SUMMARY_KEYS})
 
@@ -248,11 +323,23 @@ def _project_ia_profile(item: InvestmentAdvisorListItem) -> dict[str, Any]:
     return _jsonable(out)
 
 
+def _project_ii_summary(item: InstitutionalInvestorListItem) -> dict[str, Any]:
+    return _jsonable({k: getattr(item, k, None) for k in _II_SUMMARY_KEYS})
+
+
+def _project_ii_profile(item: InstitutionalInvestorListItem) -> dict[str, Any]:
+    out: dict[str, Any] = {k: getattr(item, k, None) for k in _II_SUMMARY_KEYS}
+    for k in _II_PROFILE_EXTRA_KEYS:
+        out[k] = getattr(item, k, None)
+    return _jsonable(out)
+
+
 # ── Tool execute functions ───────────────────────────────────────────────
 
 
 _bd_repo = BrokerDealerRepository()
 _ia_repo = InvestmentAdvisorRepository()
+_ii_repo = InstitutionalInvestorRepository()
 
 
 async def _execute_search_broker_dealers(
@@ -419,6 +506,229 @@ async def _execute_get_investment_advisor_profile(
     return _project_ia_profile(item)
 
 
+async def _execute_search_institutional_investors(
+    user: AuthenticatedUser,
+    db: AsyncSession,
+    args: Mapping[str, Any],
+) -> dict[str, Any]:
+    denial = _check_feature(user, INSTITUTIONAL_INVESTORS)
+    if denial is not None:
+        return denial
+    query_or_error = _require_query(args)
+    if isinstance(query_or_error, dict):
+        return query_or_error
+    limit = _clamp_limit(args.get("limit"))
+    try:
+        response = await _ii_repo.list_institutional_investors(
+            db,
+            search=query_or_error,
+            states=[],
+            statuses=[],
+            min_total_aum=None,
+            max_total_aum=None,
+            filed_13f_after=None,
+            filed_13f_before=None,
+            only_with_advisor_link=None,
+            sort_by="name",
+            sort_dir="asc",
+            page=1,
+            limit=limit,
+        )
+    except Exception:
+        logger.exception(
+            "doxie tool failed", extra={"tool": "search_institutional_investors"}
+        )
+        return {
+            "error": "tool_error",
+            "message": "Lookup failed; ask the user to try again.",
+        }
+    return {
+        "items": [_project_ii_summary(item) for item in response.items],
+        "total_matched": response.meta.total,
+    }
+
+
+async def _execute_get_institutional_investor_profile(
+    user: AuthenticatedUser,
+    db: AsyncSession,
+    args: Mapping[str, Any],
+) -> dict[str, Any]:
+    denial = _check_feature(user, INSTITUTIONAL_INVESTORS)
+    if denial is not None:
+        return denial
+    try:
+        investor_id = int(args.get("investor_id"))
+    except (TypeError, ValueError):
+        return {
+            "error": "invalid_args",
+            "message": "Argument 'investor_id' must be an integer.",
+        }
+    try:
+        investor = await _ii_repo.get_institutional_investor(db, investor_id)
+    except Exception:
+        logger.exception(
+            "doxie tool failed",
+            extra={"tool": "get_institutional_investor_profile"},
+        )
+        return {
+            "error": "tool_error",
+            "message": "Lookup failed; ask the user to try again.",
+        }
+    if investor is None:
+        return {
+            "error": "not_found",
+            "message": f"No institutional investor with id={investor_id}.",
+        }
+    item = InstitutionalInvestorListItem.model_validate(investor)
+    return _project_ii_profile(item)
+
+
+async def _execute_list_broker_dealers_by_filter(
+    user: AuthenticatedUser,
+    db: AsyncSession,
+    args: Mapping[str, Any],
+) -> dict[str, Any]:
+    """Criteria-style BD list (state, status, clearing partner, etc.).
+
+    Distinct from ``search_broker_dealers`` (which is fuzzy-name-match):
+    this tool takes structured filters and returns the firms that satisfy
+    *all* of them. At least one filter must be set — an unfiltered query
+    is just a name-less search, and Gemini should call the search tool
+    for that.
+    """
+    denial = _check_feature(user, MASTER_LIST)
+    if denial is not None:
+        return denial
+
+    state = _opt_str(args, "state")
+    status = _opt_str(args, "status")
+    clearing_partner = _opt_str(args, "clearing_partner")
+    lead_priority = _opt_str(args, "lead_priority")
+    min_net_capital = _opt_float(args, "min_net_capital")
+    max_net_capital = _opt_float(args, "max_net_capital")
+
+    any_filter_set = any(
+        v is not None
+        for v in (
+            state,
+            status,
+            clearing_partner,
+            lead_priority,
+            min_net_capital,
+            max_net_capital,
+        )
+    )
+    if not any_filter_set:
+        return {
+            "error": "invalid_args",
+            "message": (
+                "At least one filter is required. Use search_broker_dealers "
+                "for fuzzy name lookups instead."
+            ),
+        }
+
+    limit = _clamp_filter_limit(args.get("limit"))
+    try:
+        response = await _bd_repo.list_broker_dealers(
+            db,
+            search=None,
+            states=[state] if state else [],
+            statuses=[status] if status else [],
+            health_statuses=[],
+            lead_priorities=[lead_priority] if lead_priority else [],
+            clearing_partners=[clearing_partner] if clearing_partner else [],
+            clearing_types=[],
+            types_of_business=[],
+            list_mode="all",
+            sort_by="latest_net_capital",
+            sort_dir="desc",
+            page=1,
+            limit=limit,
+            min_net_capital=min_net_capital,
+            max_net_capital=max_net_capital,
+        )
+    except Exception:
+        logger.exception(
+            "doxie tool failed",
+            extra={"tool": "list_broker_dealers_by_filter"},
+        )
+        return {
+            "error": "tool_error",
+            "message": "Lookup failed; ask the user to try again.",
+        }
+    return {
+        "items": [_project_bd_summary(item) for item in response.items],
+        "total_matched": response.meta.total,
+    }
+
+
+async def _execute_list_investment_advisors_by_filter(
+    user: AuthenticatedUser,
+    db: AsyncSession,
+    args: Mapping[str, Any],
+) -> dict[str, Any]:
+    """Criteria-style IA list (state, status, AUM band, 13F flag).
+
+    Distinct from ``search_investment_advisors``. Requires at least one
+    filter so Gemini doesn't burn tokens enumerating a whole table.
+    """
+    denial = _check_feature(user, INVESTMENT_ADVISORS)
+    if denial is not None:
+        return denial
+
+    state = _opt_str(args, "state")
+    status = _opt_str(args, "status")
+    min_regulatory_aum = _opt_float(args, "min_regulatory_aum")
+    max_regulatory_aum = _opt_float(args, "max_regulatory_aum")
+    files_13f = _opt_bool(args, "files_13f")
+
+    any_filter_set = any(
+        v is not None
+        for v in (state, status, min_regulatory_aum, max_regulatory_aum, files_13f)
+    )
+    if not any_filter_set:
+        return {
+            "error": "invalid_args",
+            "message": (
+                "At least one filter is required. Use search_investment_advisors "
+                "for fuzzy name lookups instead."
+            ),
+        }
+
+    limit = _clamp_filter_limit(args.get("limit"))
+    try:
+        response = await _ia_repo.list_investment_advisors(
+            db,
+            search=None,
+            states=[state] if state else [],
+            statuses=[status] if status else [],
+            advisory_activities=[],
+            client_types=[],
+            files_13f=files_13f,
+            min_regulatory_aum=min_regulatory_aum,
+            max_regulatory_aum=max_regulatory_aum,
+            registered_after=None,
+            registered_before=None,
+            sort_by="regulatory_aum",
+            sort_dir="desc",
+            page=1,
+            limit=limit,
+        )
+    except Exception:
+        logger.exception(
+            "doxie tool failed",
+            extra={"tool": "list_investment_advisors_by_filter"},
+        )
+        return {
+            "error": "tool_error",
+            "message": "Lookup failed; ask the user to try again.",
+        }
+    return {
+        "items": [_project_ia_summary(item) for item in response.items],
+        "total_matched": response.meta.total,
+    }
+
+
 # ── Tool declarations ────────────────────────────────────────────────────
 
 _SEARCH_PARAMETERS_SCHEMA: dict[str, Any] = {
@@ -474,6 +784,102 @@ _IA_PROFILE_PARAMETERS_SCHEMA: dict[str, Any] = {
 }
 
 
+_II_PROFILE_PARAMETERS_SCHEMA: dict[str, Any] = {
+    "type": "object",
+    "properties": {
+        "investor_id": {
+            "type": "integer",
+            "minimum": 1,
+            "description": (
+                "Internal numeric id returned by search_institutional_investors."
+            ),
+        },
+    },
+    "required": ["investor_id"],
+}
+
+
+_BD_LIST_FILTER_PARAMETERS_SCHEMA: dict[str, Any] = {
+    "type": "object",
+    "properties": {
+        "state": {
+            "type": "string",
+            "description": "Two-letter US state code (e.g. 'NY', 'CA').",
+        },
+        "status": {
+            "type": "string",
+            "description": "FINRA registration status. Common values: 'active', 'inactive'.",
+        },
+        "clearing_partner": {
+            "type": "string",
+            "description": (
+                "Canonical clearing-partner short name (e.g. 'Pershing', "
+                "'Apex', 'BNY Mellon')."
+            ),
+        },
+        "lead_priority": {
+            "type": "string",
+            "description": "Lead-scoring band: 'hot', 'warm', or 'cold'.",
+        },
+        "min_net_capital": {
+            "type": "number",
+            "description": "Minimum latest_net_capital in dollars.",
+        },
+        "max_net_capital": {
+            "type": "number",
+            "description": "Maximum latest_net_capital in dollars.",
+        },
+        "limit": {
+            "type": "integer",
+            "minimum": 1,
+            "maximum": LIST_FILTER_LIMIT_MAX,
+            "description": (
+                f"Max rows to return. Defaults to {LIST_FILTER_LIMIT_DEFAULT}, "
+                f"capped at {LIST_FILTER_LIMIT_MAX}."
+            ),
+        },
+    },
+    "required": [],
+}
+
+
+_IA_LIST_FILTER_PARAMETERS_SCHEMA: dict[str, Any] = {
+    "type": "object",
+    "properties": {
+        "state": {
+            "type": "string",
+            "description": "Two-letter US state code (e.g. 'NY', 'CA').",
+        },
+        "status": {
+            "type": "string",
+            "description": "SEC registration status. Common values: 'active', 'inactive'.",
+        },
+        "min_regulatory_aum": {
+            "type": "number",
+            "description": "Minimum regulatory_aum in dollars.",
+        },
+        "max_regulatory_aum": {
+            "type": "number",
+            "description": "Maximum regulatory_aum in dollars.",
+        },
+        "files_13f": {
+            "type": "boolean",
+            "description": "If true, restrict to advisors that file Form 13F-HR.",
+        },
+        "limit": {
+            "type": "integer",
+            "minimum": 1,
+            "maximum": LIST_FILTER_LIMIT_MAX,
+            "description": (
+                f"Max rows to return. Defaults to {LIST_FILTER_LIMIT_DEFAULT}, "
+                f"capped at {LIST_FILTER_LIMIT_MAX}."
+            ),
+        },
+    },
+    "required": [],
+}
+
+
 TOOL_REGISTRY: dict[str, Tool] = {
     "search_broker_dealers": Tool(
         name="search_broker_dealers",
@@ -521,5 +927,55 @@ TOOL_REGISTRY: dict[str, Tool] = {
         parameters_schema=_IA_PROFILE_PARAMETERS_SCHEMA,
         feature_key=INVESTMENT_ADVISORS,
         execute=_execute_get_investment_advisor_profile,
+    ),
+    "search_institutional_investors": Tool(
+        name="search_institutional_investors",
+        description=(
+            "Search SEC Form 13F filers (institutional investors / asset "
+            "managers) by name, legal name, or CIK. Returns total_aum, "
+            "holdings_count, and basic profile fields. Use for any "
+            "'who holds X' or 'who's the asset manager called Y' question."
+        ),
+        parameters_schema=_SEARCH_PARAMETERS_SCHEMA,
+        feature_key=INSTITUTIONAL_INVESTORS,
+        execute=_execute_search_institutional_investors,
+    ),
+    "get_institutional_investor_profile": Tool(
+        name="get_institutional_investor_profile",
+        description=(
+            "Fetch one institutional investor's full profile by numeric ID. "
+            "Returns total AUM, holdings count, latest 13F filing date, and "
+            "the linked investment-advisor id when the investor is also "
+            "registered as an IA."
+        ),
+        parameters_schema=_II_PROFILE_PARAMETERS_SCHEMA,
+        feature_key=INSTITUTIONAL_INVESTORS,
+        execute=_execute_get_institutional_investor_profile,
+    ),
+    "list_broker_dealers_by_filter": Tool(
+        name="list_broker_dealers_by_filter",
+        description=(
+            "List broker-dealers matching criteria (state / status / "
+            "clearing partner / lead priority / net capital band). At least "
+            "one filter is required. Use for 'who clears through Pershing in "
+            "California' or 'show me hot leads with net capital above $5M' "
+            "style queries. Use search_broker_dealers (not this tool) when "
+            "the user names a specific firm."
+        ),
+        parameters_schema=_BD_LIST_FILTER_PARAMETERS_SCHEMA,
+        feature_key=MASTER_LIST,
+        execute=_execute_list_broker_dealers_by_filter,
+    ),
+    "list_investment_advisors_by_filter": Tool(
+        name="list_investment_advisors_by_filter",
+        description=(
+            "List investment advisors matching criteria (state / status / "
+            "AUM band / files_13f flag). At least one filter is required. "
+            "Use search_investment_advisors instead when the user names a "
+            "specific firm."
+        ),
+        parameters_schema=_IA_LIST_FILTER_PARAMETERS_SCHEMA,
+        feature_key=INVESTMENT_ADVISORS,
+        execute=_execute_list_investment_advisors_by_filter,
     ),
 }
