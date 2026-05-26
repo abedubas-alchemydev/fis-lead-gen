@@ -32,7 +32,7 @@ const KPIS: Kpi[] = [
 
 export function AuthHero() {
   return (
-    <aside className="hidden bg-[#162635] text-white lg:flex lg:flex-col lg:justify-between lg:px-14 lg:py-12">
+    <aside className="hidden bg-[#162635] text-white lg:flex lg:flex-col lg:justify-between lg:px-14 lg:pb-12 lg:pt-4">
       {/* Top row: centered logo */}
       <div className="flex justify-center">
         <Image
