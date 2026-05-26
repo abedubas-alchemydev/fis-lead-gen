@@ -609,6 +609,181 @@ class TestGetInvestmentAdvisorProfile:
 # ── Admin bypass ────────────────────────────────────────────────────────
 
 
+# ── semantic_firm_search ────────────────────────────────────────────────
+
+
+class TestSemanticFirmSearch:
+    async def test_happy_path_returns_hits_with_similarity_and_snippet(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        bd_user: AuthenticatedUser,
+        db_stub: object,
+    ) -> None:
+        from app.services.chatbot_semantic import (
+            ENTITY_TYPE_BROKER_DEALER,
+            SemanticSearchHit,
+        )
+
+        async def fake_search(
+            _db: Any,
+            *,
+            query: str,
+            entity_types: Any,
+            limit: int,
+        ) -> list[Any]:
+            assert query == "small introducing brokers"
+            assert list(entity_types) == [ENTITY_TYPE_BROKER_DEALER]
+            return [
+                SemanticSearchHit(
+                    entity_type=ENTITY_TYPE_BROKER_DEALER,
+                    entity_id=42,
+                    content="Firm: Acme Securities LLC\nLocation: NYC, NY",
+                    similarity=0.91,
+                )
+            ]
+
+        monkeypatch.setattr(chatbot_tools._semantic_service, "search", fake_search)
+        monkeypatch.setattr(
+            chatbot_tools._bd_repo,
+            "get_broker_dealer",
+            AsyncMock(return_value=_make_bd_orm(id=42, name="Acme Securities LLC")),
+        )
+
+        tool = chatbot_tools.TOOL_REGISTRY["semantic_firm_search"]
+        result = await tool.execute(
+            bd_user, db_stub, {"query": "small introducing brokers"}
+        )
+
+        assert result["total_matched"] == 1
+        item = result["items"][0]
+        assert item["id"] == 42
+        assert item["name"] == "Acme Securities LLC"
+        assert item["similarity"] == 0.91
+        assert "Acme Securities LLC" in item["match_snippet"]
+
+    async def test_empty_hits_returns_helpful_note(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        bd_user: AuthenticatedUser,
+        db_stub: object,
+    ) -> None:
+        async def fake_search(_db: Any, **_kwargs: Any) -> list[Any]:
+            return []
+
+        monkeypatch.setattr(chatbot_tools._semantic_service, "search", fake_search)
+        tool = chatbot_tools.TOOL_REGISTRY["semantic_firm_search"]
+        result = await tool.execute(bd_user, db_stub, {"query": "something niche"})
+        assert result["items"] == []
+        assert result["total_matched"] == 0
+        # Surfaces an explanation so Doxie doesn't just say "nothing
+        # found" when the real issue is that the index isn't populated.
+        assert "index" in result["note"].lower()
+
+    async def test_stale_hit_pointing_at_missing_bd_skipped(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        bd_user: AuthenticatedUser,
+        db_stub: object,
+    ) -> None:
+        """An embedding row pointing at a deleted BD shouldn't crash the
+        tool — it just drops the stale hit and returns the remaining
+        ones."""
+        from app.services.chatbot_semantic import (
+            ENTITY_TYPE_BROKER_DEALER,
+            SemanticSearchHit,
+        )
+
+        async def fake_search(_db: Any, **_kwargs: Any) -> list[Any]:
+            return [
+                SemanticSearchHit(
+                    entity_type=ENTITY_TYPE_BROKER_DEALER,
+                    entity_id=999,
+                    content="stale",
+                    similarity=0.5,
+                ),
+                SemanticSearchHit(
+                    entity_type=ENTITY_TYPE_BROKER_DEALER,
+                    entity_id=42,
+                    content="ok",
+                    similarity=0.4,
+                ),
+            ]
+
+        async def fake_get_bd(_db: Any, bd_id: int) -> Any:
+            if bd_id == 999:
+                return None
+            return _make_bd_orm(id=42)
+
+        monkeypatch.setattr(chatbot_tools._semantic_service, "search", fake_search)
+        monkeypatch.setattr(
+            chatbot_tools._bd_repo, "get_broker_dealer", fake_get_bd
+        )
+
+        tool = chatbot_tools.TOOL_REGISTRY["semantic_firm_search"]
+        result = await tool.execute(bd_user, db_stub, {"query": "anything"})
+        # Only the live BD makes it into items, but the stale hit still
+        # counts toward candidates_considered so Doxie can mention
+        # truncation.
+        assert [it["id"] for it in result["items"]] == [42]
+        assert result["candidates_considered"] == 2
+
+    async def test_empty_query_returns_invalid_args(
+        self,
+        bd_user: AuthenticatedUser,
+        db_stub: object,
+    ) -> None:
+        tool = chatbot_tools.TOOL_REGISTRY["semantic_firm_search"]
+        result = await tool.execute(bd_user, db_stub, {"query": ""})
+        assert result["error"] == "invalid_args"
+
+    async def test_403_returns_no_access_does_not_call_service(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        no_access_user: AuthenticatedUser,
+        db_stub: object,
+    ) -> None:
+        sentinel = AsyncMock()
+        monkeypatch.setattr(chatbot_tools._semantic_service, "search", sentinel)
+        tool = chatbot_tools.TOOL_REGISTRY["semantic_firm_search"]
+        result = await tool.execute(no_access_user, db_stub, {"query": "x"})
+        assert result["error"] == "no_access"
+        sentinel.assert_not_called()
+
+    async def test_service_exception_returns_tool_error(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        bd_user: AuthenticatedUser,
+        db_stub: object,
+    ) -> None:
+        async def boom(_db: Any, **_kwargs: Any) -> Any:
+            raise RuntimeError("index unhealthy")
+
+        monkeypatch.setattr(chatbot_tools._semantic_service, "search", boom)
+        tool = chatbot_tools.TOOL_REGISTRY["semantic_firm_search"]
+        result = await tool.execute(bd_user, db_stub, {"query": "x"})
+        assert result["error"] == "tool_error"
+        # Surfaces the "may not be populated yet" hint so Doxie
+        # can fall back to a name-based search.
+        assert "populated" in result["message"].lower()
+
+    async def test_limit_clamped_to_semantic_max(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        bd_user: AuthenticatedUser,
+        db_stub: object,
+    ) -> None:
+        captured: dict[str, Any] = {}
+
+        async def fake_search(_db: Any, **kwargs: Any) -> list[Any]:
+            captured.update(kwargs)
+            return []
+
+        monkeypatch.setattr(chatbot_tools._semantic_service, "search", fake_search)
+        tool = chatbot_tools.TOOL_REGISTRY["semantic_firm_search"]
+        await tool.execute(bd_user, db_stub, {"query": "x", "limit": 9999})
+        assert captured["limit"] == chatbot_tools.SEMANTIC_RESULT_LIMIT_MAX
+
+
 async def test_admin_bypasses_feature_gate_on_every_tool(
     monkeypatch: pytest.MonkeyPatch,
     db_stub: object,
@@ -648,6 +823,11 @@ async def test_admin_bypasses_feature_gate_on_every_tool(
         AsyncMock(return_value=None),
     )
 
+    async def fake_search(_db: Any, **_kwargs: Any) -> list[Any]:
+        return []
+
+    monkeypatch.setattr(chatbot_tools._semantic_service, "search", fake_search)
+
     # Each call should reach a non-403 outcome.
     r1 = await chatbot_tools.TOOL_REGISTRY["search_broker_dealers"].execute(
         admin, db_stub, {"query": "x"}
@@ -673,7 +853,10 @@ async def test_admin_bypasses_feature_gate_on_every_tool(
     r8 = await chatbot_tools.TOOL_REGISTRY[
         "list_investment_advisors_by_filter"
     ].execute(admin, db_stub, {"state": "NY"})
-    for r in (r1, r2, r3, r4, r5, r6, r7, r8):
+    r9 = await chatbot_tools.TOOL_REGISTRY["semantic_firm_search"].execute(
+        admin, db_stub, {"query": "firms like Acme"}
+    )
+    for r in (r1, r2, r3, r4, r5, r6, r7, r8, r9):
         assert r.get("error") != "no_access"
 
 
@@ -708,6 +891,7 @@ def test_tool_registry_has_expected_names() -> None:
         "get_institutional_investor_profile",
         "list_broker_dealers_by_filter",
         "list_investment_advisors_by_filter",
+        "semantic_firm_search",
     }
 
 

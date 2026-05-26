@@ -48,6 +48,10 @@ from app.schemas.investment_advisor import InvestmentAdvisorListItem
 from app.schemas.pipeline import ClearingArrangementItem
 from app.services.auth import ensure_feature
 from app.services.broker_dealers import BrokerDealerRepository
+from app.services.chatbot_semantic import (
+    ChatbotSemanticService,
+    ENTITY_TYPE_BROKER_DEALER,
+)
 from app.services.institutional_investors import InstitutionalInvestorRepository
 from app.services.investment_advisors import InvestmentAdvisorRepository
 
@@ -340,6 +344,14 @@ def _project_ii_profile(item: InstitutionalInvestorListItem) -> dict[str, Any]:
 _bd_repo = BrokerDealerRepository()
 _ia_repo = InvestmentAdvisorRepository()
 _ii_repo = InstitutionalInvestorRepository()
+_semantic_service = ChatbotSemanticService()
+
+
+# Semantic search returns at most this many hits regardless of what
+# Gemini asks for. Higher caps balloon the prompt budget; lower caps
+# make Doxie miss good matches that ranked just outside the window.
+SEMANTIC_RESULT_LIMIT_MAX = 8
+SEMANTIC_RESULT_LIMIT_DEFAULT = 5
 
 
 async def _execute_search_broker_dealers(
@@ -662,6 +674,95 @@ async def _execute_list_broker_dealers_by_filter(
     }
 
 
+async def _execute_semantic_firm_search(
+    user: AuthenticatedUser,
+    db: AsyncSession,
+    args: Mapping[str, Any],
+) -> dict[str, Any]:
+    """Conceptual / semantic firm lookup via the RAG embedding index.
+
+    Distinct from ``search_broker_dealers`` (substring on name/CRD/CIK).
+    Use when the user's query is descriptive — "broker-dealers
+    specializing in retail HNW clients", "firms similar to Acme" —
+    rather than a specific identifier or name fragment.
+    """
+    denial = _check_feature(user, MASTER_LIST)
+    if denial is not None:
+        return denial
+    query_or_error = _require_query(args)
+    if isinstance(query_or_error, dict):
+        return query_or_error
+    try:
+        raw_limit = int(args["limit"]) if args.get("limit") is not None else SEMANTIC_RESULT_LIMIT_DEFAULT
+    except (TypeError, ValueError):
+        raw_limit = SEMANTIC_RESULT_LIMIT_DEFAULT
+    limit = max(1, min(raw_limit, SEMANTIC_RESULT_LIMIT_MAX))
+
+    try:
+        hits = await _semantic_service.search(
+            db,
+            query=query_or_error,
+            entity_types=[ENTITY_TYPE_BROKER_DEALER],
+            limit=limit,
+        )
+    except Exception:
+        logger.exception(
+            "doxie tool failed", extra={"tool": "semantic_firm_search"}
+        )
+        return {
+            "error": "tool_error",
+            "message": (
+                "Semantic search failed; the index may not be populated yet. "
+                "Ask the user to try a name-based search instead."
+            ),
+        }
+
+    if not hits:
+        return {
+            "items": [],
+            "total_matched": 0,
+            "note": (
+                "No semantic matches found. The embedding index may not be "
+                "populated; an admin can backfill it from settings."
+            ),
+        }
+
+    # Fetch the BD rows for each hit so Doxie has names + identifiers to
+    # cite. The hit's ``content`` snippet is what the embedding actually
+    # matched — surfacing it lets Doxie quote the relevant phrase.
+    bd_ids = [h.entity_id for h in hits if h.entity_type == ENTITY_TYPE_BROKER_DEALER]
+    items: list[dict[str, Any]] = []
+    for hit in hits:
+        if hit.entity_type != ENTITY_TYPE_BROKER_DEALER:
+            continue
+        try:
+            bd = await _bd_repo.get_broker_dealer(db, hit.entity_id)
+        except Exception:
+            logger.exception(
+                "doxie tool failed loading bd id=%s tool=semantic_firm_search",
+                hit.entity_id,
+            )
+            continue
+        if bd is None:
+            # Embedding row points at a deleted BD — stale index entry.
+            # Skip silently; a re-backfill will clean it up.
+            continue
+        bd_item = BrokerDealerListItem.model_validate(bd)
+        summary = _project_bd_summary(bd_item)
+        summary["similarity"] = round(hit.similarity, 4)
+        summary["match_snippet"] = hit.content[:200]
+        items.append(summary)
+
+    return {
+        "items": items,
+        "total_matched": len(items),
+        # The total we *would have* returned if not capped by feature
+        # gates or stale-row filtering. Helpful for Doxie to mention
+        # when the result set is truncated.
+        "candidates_considered": len(bd_ids),
+    }
+
+
 async def _execute_list_investment_advisors_by_filter(
     user: AuthenticatedUser,
     db: AsyncSession,
@@ -843,6 +944,34 @@ _BD_LIST_FILTER_PARAMETERS_SCHEMA: dict[str, Any] = {
 }
 
 
+_SEMANTIC_SEARCH_PARAMETERS_SCHEMA: dict[str, Any] = {
+    "type": "object",
+    "properties": {
+        "query": {
+            "type": "string",
+            "description": (
+                "Free-form descriptive query — e.g. 'firms similar to "
+                "Acme Securities', 'broker-dealers focused on high-net-"
+                "worth retail clients'. Use only when the query is "
+                "conceptual; for exact name/CRD lookups call "
+                "search_broker_dealers instead."
+            ),
+        },
+        "limit": {
+            "type": "integer",
+            "minimum": 1,
+            "maximum": SEMANTIC_RESULT_LIMIT_MAX,
+            "description": (
+                f"Max hits to return. Defaults to "
+                f"{SEMANTIC_RESULT_LIMIT_DEFAULT}, capped at "
+                f"{SEMANTIC_RESULT_LIMIT_MAX}."
+            ),
+        },
+    },
+    "required": ["query"],
+}
+
+
 _IA_LIST_FILTER_PARAMETERS_SCHEMA: dict[str, Any] = {
     "type": "object",
     "properties": {
@@ -977,5 +1106,20 @@ TOOL_REGISTRY: dict[str, Tool] = {
         parameters_schema=_IA_LIST_FILTER_PARAMETERS_SCHEMA,
         feature_key=INVESTMENT_ADVISORS,
         execute=_execute_list_investment_advisors_by_filter,
+    ),
+    "semantic_firm_search": Tool(
+        name="semantic_firm_search",
+        description=(
+            "Conceptual / semantic search over broker-dealer firms via "
+            "vector embeddings. Use when the user's query is descriptive "
+            "rather than naming a specific firm — examples: 'firms similar "
+            "to Acme Securities', 'broker-dealers focused on retail HNW', "
+            "'small BDs that clear self'. For exact name / CRD lookups, "
+            "call search_broker_dealers instead. Returns hits with a "
+            "similarity score and a snippet of the matched summary."
+        ),
+        parameters_schema=_SEMANTIC_SEARCH_PARAMETERS_SCHEMA,
+        feature_key=MASTER_LIST,
+        execute=_execute_semantic_firm_search,
     ),
 }

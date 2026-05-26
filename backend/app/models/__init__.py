@@ -4,6 +4,7 @@ from app.models.audit_log import AuditLog
 from app.models.auth import Account, AuthSession, AuthUser, Verification
 from app.models.broker_dealer import BrokerDealer
 from app.models.chatbot_conversation import ChatbotConversation
+from app.models.chatbot_firm_embedding import ChatbotFirmEmbedding
 from app.models.chatbot_message import ChatbotMessage
 from app.models.clearing_agency_membership import ClearingAgencyMembership
 from app.models.clearing_arrangement import ClearingArrangement
@@ -43,6 +44,7 @@ __all__ = [
     "AuthUser",
     "BrokerDealer",
     "ChatbotConversation",
+    "ChatbotFirmEmbedding",
     "ChatbotMessage",
     "ClearingAgencyMembership",
     "ClearingArrangement",

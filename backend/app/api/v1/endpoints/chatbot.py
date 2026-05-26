@@ -11,6 +11,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.db.session import get_db_session
 from app.schemas.auth import AuthenticatedUser
 from app.schemas.chatbot import (
+    ChatbotEmbeddingBackfillResponse,
     ChatbotHistoryMessage,
     ChatbotHistoryResponse,
     ChatbotNewConversationResponse,
@@ -20,6 +21,7 @@ from app.schemas.chatbot import (
 from app.services.auth import get_current_user
 from app.services.chatbot import ChatbotService
 from app.services.chatbot_history import ChatbotHistoryService
+from app.services.chatbot_semantic import ChatbotSemanticService
 from app.services.gemini_responses import (
     GeminiConfigurationError,
     GeminiExtractionError,
@@ -30,6 +32,7 @@ logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/chatbot")
 chatbot_service = ChatbotService()
 chatbot_history_service = ChatbotHistoryService()
+chatbot_semantic_service = ChatbotSemanticService()
 
 # Cap the cumulative size of all message bodies in one call. Per-message
 # size is already capped at 8000 chars in the schema; this is a second
@@ -266,6 +269,37 @@ async def post_chatbot_message_stream(
             "Cache-Control": "no-cache",
             "X-Accel-Buffering": "no",
         },
+    )
+
+
+@router.post(
+    "/embeddings/backfill",
+    response_model=ChatbotEmbeddingBackfillResponse,
+)
+async def post_chatbot_embeddings_backfill(
+    current_user: AuthenticatedUser = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db_session),
+) -> ChatbotEmbeddingBackfillResponse:
+    """Admin-only: (re)populate the BD embedding index for semantic search.
+
+    Synchronous — the BD table is small enough that batch-of-50 embedding
+    against Gemini's API completes inside the Cloud Run request budget
+    (a few minutes at worst). Re-runs are cheap because the service
+    skips rows whose content hash didn't change.
+
+    Non-admins get 403; admins always pass.
+    """
+    if current_user.role != "admin":
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Admin access required.",
+        )
+
+    result = await chatbot_semantic_service.backfill_broker_dealers(db)
+    return ChatbotEmbeddingBackfillResponse(
+        embedded=result.embedded,
+        skipped=result.skipped,
+        failed=result.failed,
     )
 
 
