@@ -35,7 +35,7 @@ const KPIS: Kpi[] = [
 
 export function AuthHero() {
   return (
-    <aside className="relative hidden overflow-hidden bg-gradient-to-br from-navy via-[#0f2d52] to-[#163768] text-white lg:flex lg:flex-col lg:justify-between lg:px-14 lg:py-12">
+    <aside className="relative hidden overflow-hidden bg-[#162635] text-white lg:flex lg:flex-col lg:justify-between lg:px-14 lg:py-12">
       {/* Texture layers */}
       <div className="pointer-events-none absolute -right-20 -top-20 h-72 w-72 rounded-full bg-blue/15 blur-3xl" aria-hidden />
       <div className="pointer-events-none absolute -bottom-24 -left-16 h-56 w-56 rounded-full bg-gold/12 blur-3xl" aria-hidden />
