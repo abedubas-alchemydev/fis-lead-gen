@@ -1,6 +1,6 @@
 "use client";
 
-import { Send, X } from "lucide-react";
+import { PlusCircle, Send, X } from "lucide-react";
 import {
   forwardRef,
   useEffect,
@@ -18,7 +18,9 @@ export interface ChatbotPanelProps {
   onInputChange: (value: string) => void;
   onSend: () => void;
   onClose: () => void;
+  onNewChat?: () => void;
   isSending?: boolean;
+  isLoadingHistory?: boolean;
 }
 
 export interface ChatbotPanelHandle {
@@ -26,7 +28,16 @@ export interface ChatbotPanelHandle {
 }
 
 export const ChatbotPanel = forwardRef<ChatbotPanelHandle, ChatbotPanelProps>(function ChatbotPanel(
-  { messages, input, onInputChange, onSend, onClose, isSending = false },
+  {
+    messages,
+    input,
+    onInputChange,
+    onSend,
+    onClose,
+    onNewChat,
+    isSending = false,
+    isLoadingHistory = false,
+  },
   ref,
 ) {
   const inputRef = useRef<HTMLTextAreaElement>(null);
@@ -69,26 +80,46 @@ export const ChatbotPanel = forwardRef<ChatbotPanelHandle, ChatbotPanelProps>(fu
           </h2>
           <p className="text-xs text-[var(--text-muted,#94a3b8)]">Your in-app AI assistant</p>
         </div>
-        <button
-          type="button"
-          onClick={onClose}
-          aria-label="Close chat with Doxie"
-          className="grid h-9 w-9 place-items-center rounded-lg text-[var(--text-dim,#475569)] transition hover:bg-[var(--surface-2,#f1f6fd)] hover:text-[var(--text,#0f172a)] focus:outline-none focus:ring-2 focus:ring-[var(--doxie,#6366f1)]/40"
-        >
-          <X size={18} strokeWidth={2} />
-        </button>
+        <div className="flex items-center gap-1">
+          {onNewChat ? (
+            <button
+              type="button"
+              onClick={onNewChat}
+              aria-label="Start a new chat"
+              title="Start a new chat"
+              disabled={isSending}
+              className="grid h-9 w-9 place-items-center rounded-lg text-[var(--text-dim,#475569)] transition hover:bg-[var(--surface-2,#f1f6fd)] hover:text-[var(--text,#0f172a)] disabled:cursor-not-allowed disabled:opacity-50 focus:outline-none focus:ring-2 focus:ring-[var(--doxie,#6366f1)]/40"
+            >
+              <PlusCircle size={18} strokeWidth={2} />
+            </button>
+          ) : null}
+          <button
+            type="button"
+            onClick={onClose}
+            aria-label="Close chat with Doxie"
+            className="grid h-9 w-9 place-items-center rounded-lg text-[var(--text-dim,#475569)] transition hover:bg-[var(--surface-2,#f1f6fd)] hover:text-[var(--text,#0f172a)] focus:outline-none focus:ring-2 focus:ring-[var(--doxie,#6366f1)]/40"
+          >
+            <X size={18} strokeWidth={2} />
+          </button>
+        </div>
       </header>
 
       <div className="flex-1 space-y-3 overflow-y-auto px-4 py-4">
-        {messages.map((message) => (
-          <ChatbotMessage
-            key={message.id}
-            role={message.role}
-            content={message.content}
-            pending={message.pending}
-            error={message.error}
-          />
-        ))}
+        {isLoadingHistory ? (
+          <p className="text-center text-xs text-[var(--text-muted,#94a3b8)]">
+            Loading your conversation…
+          </p>
+        ) : (
+          messages.map((message) => (
+            <ChatbotMessage
+              key={message.id}
+              role={message.role}
+              content={message.content}
+              pending={message.pending}
+              error={message.error}
+            />
+          ))
+        )}
         <div ref={endRef} />
       </div>
 
