@@ -42,7 +42,7 @@ export function ChatbotMessage({
         className={clsx(
           "max-w-[80%] whitespace-pre-wrap break-words px-3 py-2 text-sm shadow-sm",
           isUser
-            ? "rounded-2xl rounded-tr-md bg-[var(--accent,#6366f1)] text-white"
+            ? "rounded-2xl rounded-tr-md bg-[var(--doxie,#6366f1)] text-white"
             : error
               ? "rounded-2xl rounded-tl-md bg-[var(--surface-2,#f1f6fd)] text-[var(--danger,#dc2626)]"
               : "rounded-2xl rounded-tl-md bg-[var(--surface-2,#f1f6fd)] text-[var(--text,#0f172a)]"

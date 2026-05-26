@@ -144,6 +144,10 @@ body {
   --nav-active-text: #312e81;
   --accent: #6366f1;
   --accent-2: #8b5cf6;
+  /* Doxie chatbot accent — distinct token so the bot keeps its own
+     identity even if --accent shifts. Light: indigo-500 / violet-500. */
+  --doxie: #6366f1;
+  --doxie-2: #8b5cf6;
   --green: #10b981;
   --amber: #f59e0b;
   --red: #ef4444;
@@ -178,6 +182,10 @@ body {
   --text-dim: #9aa3bf;
   --text-muted: #6b7494;
   --grid: rgba(255, 255, 255, 0.04);
+  /* Doxie chatbot accent — lifted to indigo-400 / violet-400 so the
+     button + user bubble + focus rings stay legible on dark surfaces. */
+  --doxie: #818cf8;
+  --doxie-2: #a78bfa;
   --sidebar-a: rgba(18, 26, 46, 0.95);
   --sidebar-b: rgba(11, 15, 26, 0.95);
   --body-glow-a: rgba(99, 102, 241, 0.12);
