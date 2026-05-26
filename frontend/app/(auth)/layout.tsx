@@ -12,7 +12,7 @@ export default function AuthLayout({ children }: { children: ReactNode }) {
 
         {/* ── Form column (always visible, right) ──────────────── */}
         <section className="flex min-h-screen flex-col bg-[var(--bg,#eaf3ff)]">
-          <div className="flex flex-1 items-center justify-center overflow-y-auto px-8 sm:px-14">
+          <div className="flex flex-1 items-center justify-center px-8 sm:px-14">
             <div className="w-full max-w-[420px] py-12">{children}</div>
           </div>
 
