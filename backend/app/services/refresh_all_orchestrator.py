@@ -341,12 +341,26 @@ def required_provider_keys(pipelines: Iterable[str]) -> list[str]:
 
 
 async def has_executive_contacts(db: AsyncSession, bd_id: int) -> bool:
-    """Cheap "any row?" check against ``executive_contacts``.
+    """Cheap "any real person row?" check against ``executive_contacts``.
+
+    Excludes the synthetic "Company (Organization Profile)" rows that the
+    Apollo /organizations/enrich fallback emits when per-officer matching
+    yields nothing. Those rows are useful for the UI (HQ phone, company
+    LinkedIn) but they should NOT permanently close the enrich gate —
+    otherwise a BD that first enriched before /people/match per-officer
+    fan-out existed would never get upgraded to real per-person contacts.
 
     Using ``select(1).limit(1)`` so Postgres short-circuits on first hit
     instead of counting all rows.
     """
-    stmt = select(ExecutiveContact.id).where(ExecutiveContact.bd_id == bd_id).limit(1)
+    stmt = (
+        select(ExecutiveContact.id)
+        .where(
+            ExecutiveContact.bd_id == bd_id,
+            ExecutiveContact.title != "Company (Organization Profile)",
+        )
+        .limit(1)
+    )
     return (await db.execute(stmt)).scalar_one_or_none() is not None
 
 

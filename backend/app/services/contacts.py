@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import logging
 from dataclasses import asdict
 from datetime import datetime, timedelta, timezone
@@ -36,12 +37,43 @@ class ApolloLookupError(RuntimeError):
 
 
 class ExecutiveContactService:
-    # Apollo People Enrichment API endpoint.  The search endpoints
-    # (/mixed_people/search and /people/search) require paid plans.
-    # The /mixed_people/search endpoint is tried first (works on paid);
-    # if 403, fall back to /people/match (single-person enrichment on free tier).
-    _APOLLO_SEARCH_URL = "https://api.apollo.io/api/v1/mixed_people/search"
+    # Apollo /people/match — single-person enrichment, returns verified email +
+    # LinkedIn on Basic/Pro plans. This is the canonical enrichment path.
+    #
+    # The previous bulk search endpoint /mixed_people/search was deprecated by
+    # Apollo (returns 422 → "use the new mixed_people/api_search endpoint"),
+    # and the new search endpoint masks names/emails on our tier — so the only
+    # path that returns usable per-officer PII is /people/match called once per
+    # officer. Officers come from FINRA Form BD (direct_owners +
+    # executive_officers JSONB on the BD row).
     _APOLLO_MATCH_URL = "https://api.apollo.io/v1/people/match"
+    _APOLLO_ORG_ENRICH_URL = "https://api.apollo.io/api/v1/organizations/enrich"
+
+    # Caps the per-BD fan-out cost. FINRA's executive_officers list can list
+    # 20+ rows for large firms; we focus on the senior names so a single
+    # detail-page visit doesn't burn 25 Apollo credits.
+    _MAX_OFFICER_FANOUT = 10
+    _APOLLO_FANOUT_CONCURRENCY = 5
+    _APOLLO_PER_OFFICER_TIMEOUT_S = 20.0
+
+    # Tokens that mark a FINRA owner row as an entity rather than a person —
+    # we skip these when building the /people/match fan-out list because
+    # Apollo's people endpoints don't enrich organizations. Reused by
+    # _firm_tokens to normalise firm names before the org-match guard.
+    _ORG_NAME_TOKENS = re.compile(
+        r"(?<!\w)(LLC|L\.L\.C\.|LLP|L\.L\.P\.|INC\.?|INCORPORATED|"
+        r"CORP\.?|CORPORATION|L\.P\.|LP|LTD\.?|LIMITED|HOLDINGS|"
+        r"GROUP|MANAGEMENT|PARTNERS|PLC|TRUST|FUND|COMPANY|CO\.)(?!\w)",
+        re.IGNORECASE,
+    )
+
+    # English filler words stripped when comparing firm names. Keeping the
+    # set tight ("of", "and", "the") so legitimate token-overlap matches
+    # aren't lost. Single letters and "&" / "+" are filtered separately by
+    # the length>=2 rule in _firm_tokens.
+    _FIRM_NAME_STOPWORDS = frozenset(
+        {"the", "a", "an", "of", "and", "for", "in", "to"}
+    )
 
     async def list_contacts(self, db: AsyncSession, broker_dealer_id: int) -> list[ExecutiveContact]:
         stmt = (
@@ -120,21 +152,29 @@ class ExecutiveContactService:
     async def _enrich_via_apollo(
         self, broker_dealer: BrokerDealer
     ) -> tuple[list[ExecutiveContact], bool]:
-        """Enrich contacts via Apollo.io.
+        """Enrich contacts via Apollo.io using per-officer /people/match fan-out.
 
         Returns ``(contacts, apollo_errored)``. ``apollo_errored`` is True
         when at least one Apollo HTTP attempt failed transiently (network
-        timeout, 5xx, 429) AND no strategy produced any people. The caller
-        uses this flag to decide whether to engage the cooldown timestamp:
-        we only want to lock out future calls when Apollo "owned" the
-        outcome (success or genuine no-result), never when a 502 made us
-        give up early.
+        timeout, 5xx, 429) AND we ended up with zero contacts to write. The
+        caller uses this flag to decide whether to engage the cooldown
+        timestamp: we only want to lock out future calls when Apollo "owned"
+        the outcome (success or genuine no-result), never when a 502 made
+        us give up early.
 
         Strategy cascade:
-        1. People search (/mixed_people/search) — requires paid plan.
-        2. Organization enrich (/organizations/enrich) — works on free tier.
-           Returns company domain, phone, LinkedIn.  From the domain we can
-           derive an org-level contact record.
+
+        1. Per-officer /people/match — for each FINRA-listed person owner /
+           executive officer, call Apollo's enrichment endpoint with first +
+           last name + organization. This is the only Apollo path that
+           returns verified emails and LinkedIn URLs on our plan; the bulk
+           /mixed_people/search endpoint is deprecated and the replacement
+           masks PII for callers on Basic/Pro tiers.
+        2. /organizations/enrich fallback — used only when FINRA has no
+           person officers OR every per-officer match returned nothing.
+           Yields a single synthetic "Company (Organization Profile)" row
+           carrying the firm's HQ phone and LinkedIn, so we still surface
+           something for firms whose officers Apollo doesn't know.
         """
         company_name = broker_dealer.name.strip()
         if not company_name:
@@ -146,72 +186,352 @@ class ExecutiveContactService:
             "X-Api-Key": settings.apollo_api_key or "",
         }
 
-        people: list[dict] = []
+        officers = self._extract_person_officers(broker_dealer)
+        contacts: list[ExecutiveContact] = []
         apollo_errored = False
 
-        # ── Strategy 1: People search (paid plans) ──────────
-        try:
-            async with httpx.AsyncClient(timeout=30) as client:
-                response = await client.post(
-                    self._APOLLO_SEARCH_URL,
-                    headers=headers,
-                    json={
-                        "q_organization_name": company_name,
-                        "page": 1,
-                        "per_page": 10,
-                        "person_titles": [
-                            "CEO", "Chief Executive Officer",
-                            "CFO", "Chief Financial Officer",
-                            "COO", "Chief Operating Officer",
-                            "President", "Managing Director",
-                        ],
-                    },
-                )
-                if response.status_code == 200:
-                    people = response.json().get("people") or []
-                elif response.status_code == 429 or 500 <= response.status_code < 600:
-                    apollo_errored = True
-                    logger.warning("Apollo search returned %d for '%s'", response.status_code, company_name)
-                elif response.status_code != 403:
-                    logger.warning("Apollo search returned %d for '%s'", response.status_code, company_name)
-        except httpx.HTTPError as exc:
-            apollo_errored = True
-            logger.warning("Apollo search network error for '%s': %s", company_name, exc)
+        if officers:
+            contacts, apollo_errored = await self._match_officers_via_apollo(
+                broker_dealer, officers, headers
+            )
 
-        # ── Strategy 2: Org enrich -> domain-based contacts (free tier) ──
-        if not people:
-            people, org_errored = await self._enrich_via_org_lookup(headers, company_name, broker_dealer)
+        # Fall back to org-level enrichment when the per-officer path produced
+        # zero contacts. That covers two cases:
+        #   - FINRA listed only entities (e.g. CARLYLE INVESTMENT MANAGEMENT,
+        #     L.L.C.) as the owner so there were no person officers to match.
+        #   - Every /people/match call returned no person (Apollo doesn't
+        #     know the FINRA-listed humans for this firm).
+        # In both cases the org row gives the UI something to show. The
+        # tightened gate (see refresh_all_orchestrator.has_executive_contacts)
+        # ensures this synthetic row does NOT permanently close the enrich
+        # gate, so a future visit can still upgrade to per-officer data.
+        if not contacts:
+            org_people, org_errored = await self._enrich_via_org_lookup(
+                headers, company_name, broker_dealer
+            )
             apollo_errored = apollo_errored or org_errored
+            contacts = self._build_contacts_from_org_payload(
+                broker_dealer, org_people
+            )
 
-        if not people or not isinstance(people, list):
-            if not apollo_errored:
-                logger.info("Apollo returned 0 contacts for '%s'.", company_name)
-            return [], apollo_errored
+        if not contacts:
+            logger.info("Apollo returned 0 contacts for '%s'.", company_name)
+
+        return contacts, apollo_errored
+
+    def _extract_person_officers(
+        self, broker_dealer: BrokerDealer
+    ) -> list[dict[str, str]]:
+        """Pull (first, last, title) tuples from FINRA officer JSONB columns.
+
+        Skips org-shaped rows (CARLYLE INVESTMENT MANAGEMENT, L.L.C., etc.),
+        dedupes on lowercased (first, last), and caps to ``_MAX_OFFICER_FANOUT``
+        to bound the per-BD Apollo spend. Order: direct_owners first
+        (typically smaller / higher-confidence list), then executive_officers.
+        """
+        out: list[dict[str, str]] = []
+        seen: set[tuple[str, str]] = set()
+        source_rows = list(broker_dealer.direct_owners or []) + list(
+            broker_dealer.executive_officers or []
+        )
+        for row in source_rows:
+            if not isinstance(row, dict):
+                continue
+            name = str(row.get("name") or "").strip()
+            parsed = self._parse_finra_person_name(name)
+            if not parsed:
+                continue
+            first, last = parsed
+            key = (first.lower(), last.lower())
+            if key in seen:
+                continue
+            seen.add(key)
+            title = str(row.get("title") or "Executive").strip() or "Executive"
+            out.append({"first": first, "last": last, "title": title})
+            if len(out) >= self._MAX_OFFICER_FANOUT:
+                break
+        return out
+
+    @classmethod
+    def _parse_finra_person_name(cls, raw: str) -> tuple[str, str] | None:
+        """Parse FINRA's ``LAST, FIRST M.`` format into ``(first, last)``.
+
+        Returns ``None`` for org-shaped rows so the caller can skip them.
+        Detection rule: if the string contains an org-suffix token (LLC,
+        INC, L.P., HOLDINGS, etc.) we treat it as an entity. Otherwise we
+        split on the first comma and take the first whitespace-token after
+        it as the given name. Title-cases both halves so the resulting
+        display name matches the frontend's nameMatches() parsing path
+        (``parseApolloName`` vs ``parseFinraName``).
+        """
+        if not raw or "," not in raw:
+            return None
+        if cls._ORG_NAME_TOKENS.search(raw):
+            return None
+        last_raw, rest = raw.split(",", 1)
+        last_raw = last_raw.strip()
+        rest = rest.strip()
+        if not last_raw or not rest:
+            return None
+        first_token = rest.split()[0] if rest.split() else ""
+        # Strip a trailing period from initials like "J." so "Charles J." parses
+        # the same way as "Charles".
+        first_token = first_token.rstrip(".")
+        if not first_token or not first_token.isalpha():
+            return None
+        return first_token.title(), last_raw.title()
+
+    async def _match_officers_via_apollo(
+        self,
+        broker_dealer: BrokerDealer,
+        officers: list[dict[str, str]],
+        headers: dict[str, str],
+    ) -> tuple[list[ExecutiveContact], bool]:
+        """Fan out /people/match per officer in parallel.
+
+        Returns ``(contacts, apollo_errored)``. ``apollo_errored`` is True
+        only when AT LEAST ONE call hit a transient failure AND zero matches
+        succeeded — that's the signal the orchestrator uses to skip stamping
+        the cooldown so the next visit retries.
+        """
+        domain = self._website_domain(broker_dealer.website)
+        sem = asyncio.Semaphore(self._APOLLO_FANOUT_CONCURRENCY)
+
+        async def match_one(o: dict[str, str]) -> tuple[dict[str, str], dict | None, bool]:
+            async with sem:
+                person, errored = await self._apollo_people_match(
+                    headers,
+                    first_name=o["first"],
+                    last_name=o["last"],
+                    org_name=broker_dealer.name.strip(),
+                    domain=domain,
+                )
+                return o, person, errored
+
+        results = await asyncio.gather(
+            *[match_one(o) for o in officers],
+            return_exceptions=False,
+        )
 
         now = datetime.now(timezone.utc)
         contacts: list[ExecutiveContact] = []
-        seen_names: set[str] = set()
+        any_errored = False
 
-        for person in people[:5]:
+        for officer, person, errored in results:
+            if errored:
+                any_errored = True
+            if not isinstance(person, dict):
+                continue
+            # Reject cross-firm pollution. Apollo's /people/match can
+            # return a same-name person at a different company when it
+            # has no real match at the target firm. Probe found a Morgan
+            # Stanley "Patricia Fletcher" matched to a Catholic charity
+            # — without this guard her email + LinkedIn would land on
+            # the Morgan Stanley card.
+            apollo_org = person.get("organization")
+            apollo_org_name = (
+                apollo_org.get("name") if isinstance(apollo_org, dict) else None
+            )
+            if not self._firm_name_matches(
+                apollo_org_name, broker_dealer.name
+            ):
+                logger.info(
+                    "Apollo match for %s %s rejected: org %r != %r",
+                    officer["first"],
+                    officer["last"],
+                    apollo_org_name,
+                    broker_dealer.name,
+                )
+                continue
+            email = person.get("email")
+            email_clean = str(email).strip() if email else None
+            linkedin_url = person.get("linkedin_url")
+            linkedin_clean = (
+                str(linkedin_url).strip() if linkedin_url else None
+            )
+            phone = self._first_phone_value(person.get("phone_numbers"))
+            # Apollo /people/match can return an "I think this is the person"
+            # match with no email/linkedin/phone (just name + title). Skip
+            # those — they would just be empty rows that fail the
+            # ContactRow render guard (no contact channel = no row shown).
+            if not email_clean and not linkedin_clean and not phone:
+                continue
+            display_name = f"{officer['first']} {officer['last']}"
+            contacts.append(
+                ExecutiveContact(
+                    bd_id=broker_dealer.id,
+                    name=display_name,
+                    title=officer["title"][:255],
+                    email=email_clean,
+                    phone=phone,
+                    linkedin_url=linkedin_clean,
+                    source="apollo",
+                    enriched_at=now,
+                )
+            )
+
+        # Only treat the call as "errored" when we have nothing to write.
+        # Partial transient failures with at least one good match should
+        # still stamp the cooldown so we don't burn credits hammering the
+        # same firm every visit.
+        return contacts, (any_errored and not contacts)
+
+    async def _apollo_people_match(
+        self,
+        headers: dict[str, str],
+        *,
+        first_name: str,
+        last_name: str,
+        org_name: str,
+        domain: str | None,
+    ) -> tuple[dict | None, bool]:
+        """Single /people/match call.
+
+        Returns ``(person_dict_or_None, errored)``. ``errored`` is True for
+        transient failures (5xx / 429 / network) so the caller can decide
+        whether to stamp the cooldown. A 404 / 200-with-no-person is NOT an
+        error — it's a clean "Apollo doesn't know this person".
+        """
+        payload: dict[str, object] = {
+            "first_name": first_name,
+            "last_name": last_name,
+            "organization_name": org_name,
+        }
+        if domain:
+            payload["domain"] = domain
+        try:
+            async with httpx.AsyncClient(
+                timeout=self._APOLLO_PER_OFFICER_TIMEOUT_S
+            ) as client:
+                response = await client.post(
+                    self._APOLLO_MATCH_URL, headers=headers, json=payload
+                )
+        except httpx.HTTPError as exc:
+            logger.warning(
+                "Apollo /people/match network error for %s %s: %s",
+                first_name,
+                last_name,
+                exc,
+            )
+            return None, True
+
+        if response.status_code == 200:
+            try:
+                body = response.json()
+            except ValueError:
+                return None, False
+            person = body.get("person") if isinstance(body, dict) else None
+            return (person if isinstance(person, dict) else None), False
+
+        if response.status_code == 429 or 500 <= response.status_code < 600:
+            logger.warning(
+                "Apollo /people/match transient %d for %s %s",
+                response.status_code,
+                first_name,
+                last_name,
+            )
+            return None, True
+
+        # 4xx other than 429 (404, 422, etc.) — treat as clean no-match.
+        logger.info(
+            "Apollo /people/match returned %d for %s %s",
+            response.status_code,
+            first_name,
+            last_name,
+        )
+        return None, False
+
+    @classmethod
+    def _firm_tokens(cls, name: str) -> frozenset[str]:
+        """Tokenize a firm name for comparison: lowercase, strip org-suffix
+        words (LLC/INC/L.P./HOLDINGS/etc), drop stopwords, keep distinctive
+        word tokens of length >= 2."""
+        if not name:
+            return frozenset()
+        cleaned = cls._ORG_NAME_TOKENS.sub(" ", name.lower())
+        tokens = re.findall(r"[a-z0-9]+", cleaned)
+        return frozenset(
+            t for t in tokens if t not in cls._FIRM_NAME_STOPWORDS and len(t) >= 2
+        )
+
+    @classmethod
+    def _firm_name_matches(cls, apollo_name: str | None, bd_name: str) -> bool:
+        """True when Apollo's organization.name is plausibly the same firm
+        as the broker-dealer we're enriching.
+
+        Guards against cross-firm pollution: Apollo's /people/match can
+        return a person with the same first+last name working at a
+        completely different company (probe found a Morgan Stanley
+        "Patricia Fletcher" matched to "Franciscan Friars of the
+        Atonement"). Without this check, that stranger's email + LinkedIn
+        would land on the BD's officer card as if they belonged to it.
+
+        Strategy: tokenize both names (lowercased, org-suffix-stripped,
+        stopwords removed). Match when at least 50% of the SHORTER name's
+        tokens are present in the longer name. This tolerates natural
+        verbosity differences (FINRA "MORGAN STANLEY" vs Apollo
+        "Morgan Stanley & Co.") while rejecting unrelated firms. Returns
+        False when either side has no usable tokens — we'd rather drop a
+        possibly-correct match than write a wrong one onto a real BD.
+        """
+        bd_tokens = cls._firm_tokens(bd_name)
+        apollo_tokens = cls._firm_tokens(apollo_name or "")
+        if not bd_tokens or not apollo_tokens:
+            return False
+        shared = bd_tokens & apollo_tokens
+        smaller = min(len(bd_tokens), len(apollo_tokens))
+        return len(shared) / smaller >= 0.5
+
+    @staticmethod
+    def _website_domain(website: str | None) -> str | None:
+        """Strip ``https://``, trailing slash, and path off a BD website to
+        get the bare domain Apollo expects. Returns None for empty inputs."""
+        if not website:
+            return None
+        cleaned = website.strip().lower()
+        cleaned = re.sub(r"^https?://", "", cleaned)
+        cleaned = cleaned.split("/", 1)[0]
+        cleaned = cleaned.rstrip(".")
+        return cleaned or None
+
+    @staticmethod
+    def _first_phone_value(phone_obj: object) -> str | None:
+        """Pull the first usable phone number out of Apollo's phone_numbers
+        list. Handles both dict shape ({sanitized_number, raw_number}) and
+        bare strings."""
+        if not isinstance(phone_obj, list) or not phone_obj:
+            return None
+        first = phone_obj[0]
+        if isinstance(first, dict):
+            value = first.get("sanitized_number") or first.get("raw_number")
+            return str(value).strip() if value else None
+        if isinstance(first, str):
+            return first.strip() or None
+        return None
+
+    def _build_contacts_from_org_payload(
+        self,
+        broker_dealer: BrokerDealer,
+        org_people: list[dict],
+    ) -> list[ExecutiveContact]:
+        """Convert the synthetic org-level dict from _enrich_via_org_lookup
+        into ExecutiveContact rows. Mirrors the per-person construction
+        above so both paths produce identical row shapes (source='apollo',
+        title='Company (Organization Profile)' for the synthetic case)."""
+        if not org_people:
+            return []
+        now = datetime.now(timezone.utc)
+        contacts: list[ExecutiveContact] = []
+        for person in org_people:
             if not isinstance(person, dict):
                 continue
             name = str(person.get("name") or "").strip()
-            if not name or name.lower() in seen_names:
+            if not name:
                 continue
-            seen_names.add(name.lower())
-
-            title = str(person.get("title") or person.get("headline") or "Executive").strip()
+            title = str(person.get("title") or "Executive").strip()
             email = person.get("email")
-            phone_obj = person.get("phone_numbers")
-            phone = None
-            if isinstance(phone_obj, list) and phone_obj:
-                first_phone = phone_obj[0]
-                if isinstance(first_phone, dict):
-                    phone = str(first_phone.get("sanitized_number") or first_phone.get("raw_number") or "").strip() or None
-                elif isinstance(first_phone, str):
-                    phone = first_phone.strip() or None
+            phone = self._first_phone_value(person.get("phone_numbers"))
             linkedin_url = person.get("linkedin_url")
-
             contacts.append(
                 ExecutiveContact(
                     bd_id=broker_dealer.id,
@@ -224,11 +544,7 @@ class ExecutiveContactService:
                     enriched_at=now,
                 )
             )
-
-        if not contacts:
-            logger.info("Apollo returned 0 contacts for '%s'.", company_name)
-
-        return contacts, False
+        return contacts
 
     async def _enrich_via_org_lookup(
         self,
