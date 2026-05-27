@@ -7,7 +7,7 @@ export const INVESTORS = "investors" as const;
 // Mirrors backend ``INSTITUTIONAL_INVESTORS`` -- gates
 // ``/institutional-investors/{id}`` detail page (PR 3) and the existing
 // list / favorite-lists endpoints on the BE. Deliberately not in
-// ``ENABLED_FEATURE_KEYS`` since the sidebar tab was dropped in #438; the
+// ``ENABLED_FEATURE_KEYS`` since the sidebar tab was dropped in #433; the
 // constant exists so the page can still gate via ``hasFeature``
 // (admins always pass; viewers need explicit grant).
 export const INSTITUTIONAL_INVESTORS = "institutional_investors" as const;
