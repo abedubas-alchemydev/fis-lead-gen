@@ -9,7 +9,19 @@ which runs the same work per-firm via the `run_refresh_all` orchestrator
 |---|---|---|
 | `backfill_master_list_top.py` | Refresh-all over the top-N master-list rows (filled grid columns minus contacts). | `gap_fill_broker_dealers.py` runs the same orchestrator over **every** broker-dealer in priority order, with cooldown + auto-rescore. |
 | `load_financials.py` | Standalone wrapper around `FocusReportService.load_financial_metrics_for_broker_dealer`. | `gap_fill_broker_dealers.py` → `SUB_REFRESH_FINANCIALS` sub-pipeline calls the same service per-firm. |
-| `run_focus_ceo_extraction.py` | Batch FOCUS Report + CEO extraction (X-17A-5 → Gemini). | `gap_fill_broker_dealers.py` → `SUB_REFRESH_FINANCIALS` covers the FOCUS extraction; `SUB_ENRICH` (Apollo) covers contact discovery. |
+
+Note: `run_focus_ceo_extraction.py` was previously archived here under the
+assumption that `gap_fill_broker_dealers.py` would cover the FOCUS Filing
+Contact extraction via its `SUB_REFRESH_FINANCIALS` sub-pipeline. That
+turned out to be wrong — the financial sub-pipeline parses the same
+X-17A-5 PDF but only extracts financial fields (net capital, etc.), not
+the "PERSON TO CONTACT" section. A prod audit on 2026-05-27 revealed only
+27 of 2,581 BDs with parsed FOCUS PDFs had a Filing Contact row, while
+the batch script that would have closed that gap was sitting unused in
+this archive. The script has been moved back to
+`scripts/run_focus_ceo_extraction.py` as the proven path for batch-
+extracting Filing Contacts (74% historical hit rate on phones, single
+proven source of person-attached phones in our user base).
 
 If you need to re-run any of these (e.g., the orchestrator-based path
 fails on a specific batch and you want the legacy code path as a
