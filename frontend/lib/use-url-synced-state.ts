@@ -8,6 +8,13 @@ import {
   useSearchParams,
 } from "next/navigation";
 
+// A frozen empty URLSearchParams typed as ReadonlyURLSearchParams so the
+// hydration-safe initial parse() runs against the same shape useSearchParams
+// returns. ReadonlyURLSearchParams is a structural subset of URLSearchParams
+// (read-only methods only), so the cast is sound at runtime — only readonly
+// methods are called by callers' parsers.
+const EMPTY_SEARCH_PARAMS = new URLSearchParams() as unknown as ReadonlyURLSearchParams;
+
 // URL-backed filter state with a synchronous local mirror.
 //
 // The page URL is the canonical store (share-links + Back/Forward), but
@@ -37,10 +44,28 @@ export function useUrlSyncedState<T extends object>(
   const urlState = useMemo(() => parse(searchParams), [searchParams, parse]);
   const urlString = useMemo(() => build(urlState), [urlState, build]);
 
-  const [state, setState] = useState<T>(urlState);
+  // Seed state with `parse(empty params)` so the server-rendered HTML
+  // and the client's first render agree regardless of the URL the page
+  // was loaded with. Hydrating with URL-derived state directly used to
+  // throw React #418 ("text content does not match server-rendered
+  // HTML") on workspace pages opened via share-links / Back-nav,
+  // because subtle render-timing differences between the SSR pass and
+  // the hydration pass (PPR / route cache reuse / streaming) could
+  // produce divergent text for the filter-derived UI (active count
+  // chips, pre-filled inputs, selected segmented values). The mount
+  // effect below upgrades state to the real `urlState` immediately on
+  // the next client render — same pattern the watermark overlay uses
+  // in components/security/watermark-overlay.tsx.
+  const emptyState = useMemo<T>(
+    () => parse(EMPTY_SEARCH_PARAMS),
+    [parse],
+  );
+  const [state, setState] = useState<T>(emptyState);
 
-  // External navigation (Back/Forward, share-link) → adopt the URL. Our own
-  // commits serialize back to `urlString`, so this no-ops for them.
+  // First mount: upgrade defaults → real URL state.
+  // Subsequent runs: adopt the URL on external navigation (Back/Forward,
+  // share-link click). Our own commits serialize back to `urlString`, so
+  // this no-ops for them.
   useEffect(() => {
     setState((prev) => (build(prev) === urlString ? prev : urlState));
   }, [urlString, urlState, build]);
