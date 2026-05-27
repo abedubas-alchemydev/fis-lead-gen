@@ -31,6 +31,7 @@ from app.services.contacts import ExecutiveContactService
 
 APOLLO_MATCH_URL = ExecutiveContactService._APOLLO_MATCH_URL
 APOLLO_ORG_URL = "https://api.apollo.io/api/v1/organizations/enrich"
+PDL_PERSON_ENRICH_URL = "https://api.peopledatalabs.com/v5/person/enrich"
 
 
 # ──────────────────────────── Fixtures ────────────────────────────
@@ -42,10 +43,17 @@ def patch_settings(monkeypatch: pytest.MonkeyPatch) -> None:
 
     The default cooldown is 24h; tests that want a different window can
     override this fixture's value with another ``monkeypatch.setattr``.
+    PDL auto-phone resolution is pinned OFF by default (via empty pdl key)
+    so the legacy Apollo-only tests don't have to mock the PDL endpoint;
+    the dedicated PDL tests override pdl_api_key to flip it on.
     """
     monkeypatch.setattr(settings, "contact_enrichment_provider", "apollo")
     monkeypatch.setattr(settings, "apollo_api_key", "test-apollo-key")
     monkeypatch.setattr(settings, "apollo_enrich_cooldown_hours", 24)
+    monkeypatch.setattr(settings, "pdl_api_key", None)
+    monkeypatch.setattr(settings, "contact_enrich_auto_pdl_phones", True)
+    monkeypatch.setattr(settings, "pdl_min_likelihood", 6)
+    monkeypatch.setattr(settings, "contact_discovery_timeout", 2.0)
 
 
 def _make_bd(
@@ -540,3 +548,292 @@ def test_website_domain_strips_scheme_and_path() -> None:
     assert ExecutiveContactService._website_domain("HTTP://Acme.com/") == "acme.com"
     assert ExecutiveContactService._website_domain(None) is None
     assert ExecutiveContactService._website_domain("") is None
+
+
+# ───────────────────── Auto-PDL phone resolution ─────────────────────
+
+
+@pytest.fixture
+def patch_settings_with_pdl(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Enable the auto-PDL step with a fake API key so respx mocks the URL.
+
+    Same shape as ``patch_settings`` but pdl_api_key is set so the
+    /people/match → PDL bridge in enrich_contacts actually fires.
+    """
+    monkeypatch.setattr(settings, "contact_enrichment_provider", "apollo")
+    monkeypatch.setattr(settings, "apollo_api_key", "test-apollo-key")
+    monkeypatch.setattr(settings, "apollo_enrich_cooldown_hours", 24)
+    monkeypatch.setattr(settings, "pdl_api_key", "test-pdl-key")
+    monkeypatch.setattr(settings, "contact_enrich_auto_pdl_phones", True)
+    monkeypatch.setattr(settings, "pdl_min_likelihood", 6)
+    monkeypatch.setattr(settings, "contact_discovery_timeout", 2.0)
+
+
+def _pdl_hit(*, mobile: str | None = None, work: str | None = None) -> dict:
+    """Build a PDL /v5/person/enrich-shaped success response."""
+    data: dict = {"emails": []}
+    if mobile:
+        data["mobile_phone"] = mobile
+    if work:
+        data["phone_numbers"] = [work]
+    return {"likelihood": 9, "data": data}
+
+
+@pytest.mark.asyncio
+@respx.mock
+async def test_pdl_fills_phone_for_apollo_match(
+    patch_settings_with_pdl: None,
+) -> None:
+    """The headline outcome: Apollo returns email + linkedin (no phone), PDL
+    re-anchors on the email and fills both the scalar ``phone`` and the
+    multi-value ``phones[]`` JSONB array so the FE renders mobile + work
+    chips."""
+    bd = _make_bd(
+        last_attempt=None,
+        executive_officers=[{"name": "DOE, ALICE", "title": "CEO"}],
+    )
+    session = _FakeSession()
+
+    respx.post(APOLLO_MATCH_URL).mock(
+        return_value=httpx.Response(
+            200,
+            json={
+                "person": {
+                    "email": "alice@example.com",
+                    "email_status": "verified",
+                    "linkedin_url": "https://linkedin.com/in/alice",
+                    "phone_numbers": None,
+                }
+            },
+        )
+    )
+    pdl_route = respx.post(PDL_PERSON_ENRICH_URL).mock(
+        return_value=httpx.Response(
+            200, json=_pdl_hit(mobile="+15550111", work="+15550222")
+        )
+    )
+
+    service = ExecutiveContactService()
+    await service.enrich_contacts(session, bd)
+
+    assert pdl_route.called, "Apollo email + no phone → PDL must be hit"
+    assert len(session.added) == 1
+    contact = session.added[0]
+    assert contact.phone == "+15550111", (
+        "Scalar phone gets PDL's best single (mobile preferred)"
+    )
+    assert isinstance(contact.phones, list) and len(contact.phones) == 2
+    assert {p["value"] for p in contact.phones} == {"+15550111", "+15550222"}
+    # Apollo data is preserved untouched.
+    assert contact.email == "alice@example.com"
+    assert contact.linkedin_url == "https://linkedin.com/in/alice"
+
+
+@pytest.mark.asyncio
+@respx.mock
+async def test_pdl_no_match_leaves_contact_alone(
+    patch_settings_with_pdl: None,
+) -> None:
+    """PDL returns 404 (no confident match). Contact is still written with
+    Apollo's email + linkedin, just without a phone — exactly what the page
+    used to look like before this feature."""
+    bd = _make_bd(
+        last_attempt=None,
+        executive_officers=[{"name": "DOE, ALICE", "title": "CEO"}],
+    )
+    session = _FakeSession()
+
+    respx.post(APOLLO_MATCH_URL).mock(
+        return_value=httpx.Response(
+            200,
+            json={
+                "person": {
+                    "email": "alice@example.com",
+                    "email_status": "verified",
+                    "linkedin_url": "https://linkedin.com/in/alice",
+                    "phone_numbers": None,
+                }
+            },
+        )
+    )
+    pdl_route = respx.post(PDL_PERSON_ENRICH_URL).mock(
+        return_value=httpx.Response(404, json={"status": 404})
+    )
+
+    service = ExecutiveContactService()
+    await service.enrich_contacts(session, bd)
+
+    assert pdl_route.called
+    assert len(session.added) == 1
+    contact = session.added[0]
+    assert contact.phone is None
+    # phones JSONB stays unset (None) — pydantic synthesizer in the API
+    # response will then render from the scalar (None) and produce []
+    assert contact.phones is None
+    assert contact.email == "alice@example.com"
+    assert contact.linkedin_url == "https://linkedin.com/in/alice"
+
+
+@pytest.mark.asyncio
+@respx.mock
+async def test_pdl_error_silenced_apollo_data_still_writes(
+    patch_settings_with_pdl: None,
+) -> None:
+    """PDL 500 must NOT block the Apollo write. The phone stays empty but
+    the contact (with email + linkedin) lands in the DB and the cooldown is
+    stamped — exactly the policy for an optional best-effort step."""
+    bd = _make_bd(
+        last_attempt=None,
+        executive_officers=[{"name": "DOE, ALICE", "title": "CEO"}],
+    )
+    session = _FakeSession()
+
+    respx.post(APOLLO_MATCH_URL).mock(
+        return_value=httpx.Response(
+            200,
+            json={
+                "person": {
+                    "email": "alice@example.com",
+                    "email_status": "verified",
+                    "linkedin_url": "https://linkedin.com/in/alice",
+                    "phone_numbers": None,
+                }
+            },
+        )
+    )
+    respx.post(PDL_PERSON_ENRICH_URL).mock(
+        return_value=httpx.Response(500, text="boom")
+    )
+
+    service = ExecutiveContactService()
+    await service.enrich_contacts(session, bd)
+
+    assert len(session.added) == 1, "Apollo commit must not depend on PDL"
+    assert session.added[0].phone is None
+    assert bd.last_enrich_attempt_at is not None, (
+        "PDL is best-effort — its failure should NOT block the cooldown stamp"
+    )
+
+
+@pytest.mark.asyncio
+@respx.mock
+async def test_pdl_skipped_when_setting_disabled(
+    patch_settings_with_pdl: None,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The setting flag turns the step off entirely (escape hatch in case
+    PDL spend becomes a concern)."""
+    monkeypatch.setattr(settings, "contact_enrich_auto_pdl_phones", False)
+    bd = _make_bd(
+        last_attempt=None,
+        executive_officers=[{"name": "DOE, ALICE", "title": "CEO"}],
+    )
+    session = _FakeSession()
+
+    respx.post(APOLLO_MATCH_URL).mock(
+        return_value=httpx.Response(
+            200,
+            json={
+                "person": {
+                    "email": "alice@example.com",
+                    "email_status": "verified",
+                    "linkedin_url": "https://linkedin.com/in/alice",
+                    "phone_numbers": None,
+                }
+            },
+        )
+    )
+    pdl_route = respx.post(PDL_PERSON_ENRICH_URL).mock(
+        return_value=httpx.Response(200, json=_pdl_hit(mobile="+15550111"))
+    )
+
+    service = ExecutiveContactService()
+    await service.enrich_contacts(session, bd)
+
+    assert not pdl_route.called, "Setting disabled → PDL not called"
+    assert len(session.added) == 1
+    assert session.added[0].phone is None
+
+
+@pytest.mark.asyncio
+@respx.mock
+async def test_pdl_skipped_when_no_email(patch_settings_with_pdl: None) -> None:
+    """Apollo returned a person object with linkedin but no email — there's
+    nothing for PDL to anchor on, so we skip the call rather than waste a
+    credit on a guaranteed miss."""
+    bd = _make_bd(
+        last_attempt=None,
+        executive_officers=[{"name": "DOE, ALICE", "title": "CEO"}],
+    )
+    session = _FakeSession()
+
+    respx.post(APOLLO_MATCH_URL).mock(
+        return_value=httpx.Response(
+            200,
+            json={
+                "person": {
+                    "email": None,
+                    "linkedin_url": "https://linkedin.com/in/alice",
+                    "phone_numbers": None,
+                }
+            },
+        )
+    )
+    pdl_route = respx.post(PDL_PERSON_ENRICH_URL).mock(
+        return_value=httpx.Response(200, json=_pdl_hit(mobile="+15550111"))
+    )
+
+    service = ExecutiveContactService()
+    await service.enrich_contacts(session, bd)
+
+    assert not pdl_route.called, "No email → no PDL anchor → skip the call"
+    assert len(session.added) == 1
+    assert session.added[0].email is None
+
+
+@pytest.mark.asyncio
+@respx.mock
+async def test_pdl_skipped_when_synthetic_company_row_already_has_phone(
+    patch_settings_with_pdl: None,
+) -> None:
+    """The org-enrich fallback already carries the company HQ phone on the
+    synthetic Company row. PDL has no email to anchor on for that row
+    anyway, but the explicit phone-present guard means we don't bother
+    trying — protecting against future regressions where someone changes
+    the fallback to include a contact@-style email."""
+    bd = _make_bd(
+        last_attempt=None,
+        name="ACME LLC",
+        # No person officers → fall back to org enrich.
+        direct_owners=[{"name": "PARENT HOLDINGS L.P.", "title": "MEMBER"}],
+    )
+    session = _FakeSession()
+
+    respx.post(APOLLO_MATCH_URL).mock(
+        return_value=httpx.Response(200, json={"person": None})
+    )
+    respx.post(APOLLO_ORG_URL).mock(
+        return_value=httpx.Response(
+            200,
+            json={
+                "organization": {
+                    "name": "Acme LLC",
+                    "linkedin_url": "https://linkedin.com/company/acme",
+                    "primary_phone": {"sanitized_number": "+12120001000"},
+                }
+            },
+        )
+    )
+    pdl_route = respx.post(PDL_PERSON_ENRICH_URL).mock(
+        return_value=httpx.Response(200, json=_pdl_hit(mobile="+15550111"))
+    )
+
+    service = ExecutiveContactService()
+    await service.enrich_contacts(session, bd)
+
+    assert not pdl_route.called, (
+        "Org row already has a phone — no PDL anchor needed"
+    )
+    assert len(session.added) == 1
+    # Original HQ phone from Apollo /organizations/enrich is preserved.
+    assert session.added[0].phone == "+12120001000"

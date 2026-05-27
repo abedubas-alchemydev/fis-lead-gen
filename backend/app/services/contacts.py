@@ -124,6 +124,21 @@ class ExecutiveContactService:
         if apollo_errored:
             return existing
 
+        # Per-officer phone resolution via PDL. Apollo's /people/match
+        # returns phone_numbers=[] on our plan (PR #419 audit), so after the
+        # Apollo pass writes verified email + LinkedIn we re-anchor PDL on
+        # each new contact's email to fill phone + phones[]. Best-effort:
+        # PDL errors are silenced and never block the Apollo commit. Costs
+        # ~1 PDL credit per officer per BD per cooldown window, gated by
+        # CONTACT_ENRICH_AUTO_PDL_PHONES so it can be disabled if PDL spend
+        # becomes a concern.
+        if (
+            contacts
+            and settings.contact_enrich_auto_pdl_phones
+            and settings.pdl_api_key
+        ):
+            await self._resolve_phones_via_pdl(contacts)
+
         # Apollo-owned outcome (success or no-result). Wipe stale non-FOCUS
         # rows, add any new contacts, stamp the cooldown timestamp, and
         # commit atomically. FOCUS-extracted CEO data is preserved so the
@@ -345,6 +360,52 @@ class ExecutiveContactService:
         # still stamp the cooldown so we don't burn credits hammering the
         # same firm every visit.
         return contacts, (any_errored and not contacts)
+
+    async def _resolve_phones_via_pdl(
+        self, contacts: list[ExecutiveContact]
+    ) -> None:
+        """Fill phone + phones[] on Apollo-discovered contacts via PDL.
+
+        Apollo's /people/match returns ``phone_numbers=[]`` on Basic/Pro
+        plans (Phone Numbers is a separate add-on). PDL returns multi-value
+        phones (mobile + work) for any contact whose email we already have,
+        which the manual Find-Phone button has been using. This step does
+        the same lookup but in batch, in parallel, in-place on the in-memory
+        contacts list before the caller commits.
+
+        Best-effort by design: PDL errors / missing keys / 404s are
+        swallowed. The Apollo data (email, LinkedIn, name) is always
+        preserved; we only ever ADD a phone, never overwrite name / email
+        / linkedin / title with PDL's values, and we skip contacts that
+        already carry a non-null phone (the synthetic Company row from
+        the org-enrich fallback, or any pre-existing FOCUS-extracted row).
+        """
+        sem = asyncio.Semaphore(self._APOLLO_FANOUT_CONCURRENCY)
+
+        async def resolve_one(contact: ExecutiveContact) -> None:
+            if not contact.email or contact.phone:
+                return
+            async with sem:
+                try:
+                    result = await pdl.enrich_by_email(contact.email)
+                except Exception as exc:  # noqa: BLE001 -- best-effort, any error = miss
+                    logger.warning(
+                        "PDL enrich_by_email failed for %s: %s",
+                        contact.email,
+                        exc,
+                    )
+                    return
+            if result is None or not result.phones:
+                return
+            # Persist all PDL phones into the JSONB array so the FE's
+            # ContactRow can render the mobile + work pair with type chips,
+            # and set the scalar ``phone`` to PDL's best single (mobile if
+            # present, else first work).
+            contact.phones = [asdict(hit) for hit in result.phones]
+            if result.phone:
+                contact.phone = result.phone
+
+        await asyncio.gather(*(resolve_one(c) for c in contacts))
 
     async def _apollo_people_match(
         self,
