@@ -500,7 +500,25 @@ class FocusCeoExtractionService:
         # Step 2: Try pdfplumber first (FREE, ~500ms, no API call)
         if pdf_record.local_document_path:
             text_result = await asyncio.to_thread(extract_from_pdf, pdf_record.local_document_path)
-            if text_result.success:
+            # Same garbage guard as _run_extract — when pdfplumber's text
+            # is scrambled (font /ToUnicode CMap broken) we fall through
+            # to Gemini vision so the page is read from images instead
+            # of the broken glyph stream. This branch is the batch path
+            # (run_batch → _extract_without_db), separate from the
+            # single-BD detail-page path which has its own copy of this
+            # check. PR #559 only patched the latter; this fixes the gap.
+            pdf_text_is_garbage = _looks_like_pdfplumber_garbage(
+                text_result.contact_name,
+                text_result.contact_email,
+                text_result.contact_phone,
+            )
+            if pdf_text_is_garbage:
+                logger.info(
+                    "pdfplumber returned scrambled text for BD %d (batch path); "
+                    "falling through to Gemini vision.",
+                    bd_id,
+                )
+            if text_result.success and not pdf_text_is_garbage:
                 # Got data from text extraction — no Gemini needed
                 confidence = 0.95 if (text_result.contact_name and text_result.net_capital) else 0.80
                 return FocusCeoExtractionResult(
