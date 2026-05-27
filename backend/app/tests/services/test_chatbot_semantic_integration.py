@@ -10,6 +10,7 @@ Marked ``integration`` so it only runs under ``pytest -m integration``
 
 from __future__ import annotations
 
+import hashlib
 import secrets
 from datetime import date, datetime
 from typing import Any
@@ -29,15 +30,24 @@ from app.services.chatbot_semantic import ChatbotSemanticService
 pytestmark = pytest.mark.integration
 
 
-# Deterministic 768-dim fake vectors. Each test row gets a vector tied
-# to its id so we can assert which row was returned by search.
-def _fake_vector(seed: int) -> list[float]:
-    # Pad a tiny signature into the leading dims, zero the rest. Cosine
-    # similarity between two such vectors is dominated by the leading
-    # dims so we can engineer near/far relationships predictably.
+# Deterministic, collision-proof 768-dim fake vector keyed on the text.
+#
+# Earlier revision used ``abs(hash(text)) % 1000`` for the seed — fast but
+# pathologically collision-prone once the integration DB accumulated rows
+# from earlier test runs. Two unrelated firms would occasionally hash to
+# the same bucket and produce identical vectors, causing
+# ``test_search_returns_top_k_with_similarity`` to flake whenever a prior
+# test's row landed first in the cosine ranking. SHA-256 of the text
+# spread across 32 leading dims gives collision-free vectors for any
+# realistic test input.
+def _fake_vector(text: str) -> list[float]:
+    digest = hashlib.sha256(text.encode("utf-8")).digest()
     vec = [0.0] * 768
-    vec[0] = 1.0
-    vec[1] = float(seed) / 100.0
+    for i in range(32):
+        # Map each byte to a float in [-1, 1]. Concentrating the signature
+        # in the leading dims keeps cosine similarity dominated by the
+        # content hash rather than tail noise.
+        vec[i] = (digest[i] - 128) / 128.0
     return vec
 
 
@@ -71,13 +81,14 @@ def patch_embedding_api(monkeypatch: pytest.MonkeyPatch) -> dict[str, list[Any]]
 
     async def fake_embed_chunks(texts: list[str]) -> list[list[float]]:
         record["chunks_calls"].append(list(texts))
-        # Stable per-text vector keyed on hash so identical content
-        # produces identical vectors across calls.
-        return [_fake_vector(abs(hash(t)) % 1000) for t in texts]
+        # Stable per-text vector — identical content produces identical
+        # vectors across calls (so the search test can match a stored
+        # embedding by re-embedding its source content).
+        return [_fake_vector(t) for t in texts]
 
     async def fake_embed_query(text: str) -> list[float]:
         record["query_calls"].append(text)
-        return _fake_vector(abs(hash(text)) % 1000)
+        return _fake_vector(text)
 
     monkeypatch.setattr(chatbot_semantic, "embed_chunks", fake_embed_chunks)
     monkeypatch.setattr(chatbot_semantic, "embed_query", fake_embed_query)
