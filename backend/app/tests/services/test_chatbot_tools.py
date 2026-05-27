@@ -25,8 +25,10 @@ from unittest.mock import AsyncMock
 import pytest
 
 from app.core.feature_permissions import (
+    ALERTS,
     INSTITUTIONAL_INVESTORS,
     INVESTMENT_ADVISORS,
+    INVESTORS,
     MASTER_LIST,
 )
 from app.schemas.auth import AuthenticatedUser
@@ -63,6 +65,16 @@ def ia_user() -> AuthenticatedUser:
 @pytest.fixture
 def ii_user() -> AuthenticatedUser:
     return _make_user(features=[INSTITUTIONAL_INVESTORS])
+
+
+@pytest.fixture
+def investors_user() -> AuthenticatedUser:
+    return _make_user(features=[INVESTORS])
+
+
+@pytest.fixture
+def alerts_user() -> AuthenticatedUser:
+    return _make_user(features=[ALERTS])
 
 
 @pytest.fixture
@@ -849,6 +861,51 @@ async def test_admin_bypasses_feature_gate_on_every_tool(
 
     monkeypatch.setattr(chatbot_tools._semantic_service, "search", fake_search)
 
+    # Stubs for the Part B additions (Form 4 / filings / alerts). Each
+    # returns a benign empty result so the admin-bypass path reaches
+    # the projection rather than crashing on a missing repo.
+    async def fake_form4_list(
+        _db: Any, **_kwargs: Any
+    ) -> tuple[list[Any], int]:
+        return [], 0
+
+    monkeypatch.setattr(
+        chatbot_tools._form4_repo, "list_consolidated_persons", fake_form4_list
+    )
+    monkeypatch.setattr(
+        chatbot_tools._alerts_repo,
+        "get_filing_history",
+        AsyncMock(return_value=[]),
+    )
+    monkeypatch.setattr(
+        chatbot_tools._ia_repo,
+        "list_advisor_filings",
+        AsyncMock(return_value=[]),
+    )
+    monkeypatch.setattr(
+        chatbot_tools._ii_repo,
+        "list_investor_filings",
+        AsyncMock(return_value=[]),
+    )
+    # AlertRepository.list_alerts returns an AlertListResponse; for the
+    # admin smoke we don't care about the shape, just that no_access
+    # isn't returned.
+    class _AlertsMetaStub:
+        page = 1
+        limit = 6
+        total = 0
+        total_pages = 1
+
+    class _AlertsRespStub:
+        items: list[Any] = []
+        meta = _AlertsMetaStub()
+
+    monkeypatch.setattr(
+        chatbot_tools._alerts_repo,
+        "list_alerts",
+        AsyncMock(return_value=_AlertsRespStub()),
+    )
+
     # Each call should reach a non-403 outcome.
     r1 = await chatbot_tools.TOOL_REGISTRY["search_broker_dealers"].execute(
         admin, db_stub, {"query": "x"}
@@ -877,7 +934,16 @@ async def test_admin_bypasses_feature_gate_on_every_tool(
     r9 = await chatbot_tools.TOOL_REGISTRY["semantic_firm_search"].execute(
         admin, db_stub, {"query": "firms like Acme"}
     )
-    for r in (r1, r2, r3, r4, r5, r6, r7, r8, r9):
+    r10 = await chatbot_tools.TOOL_REGISTRY["search_form4_filings"].execute(
+        admin, db_stub, {"query": "John Smith"}
+    )
+    r11 = await chatbot_tools.TOOL_REGISTRY["list_filings_for_firm"].execute(
+        admin, db_stub, {"firm_type": "bd", "firm_id": 1}
+    )
+    r12 = await chatbot_tools.TOOL_REGISTRY["get_recent_alerts"].execute(
+        admin, db_stub, {}
+    )
+    for r in (r1, r2, r3, r4, r5, r6, r7, r8, r9, r10, r11, r12):
         assert r.get("error") != "no_access"
 
 
@@ -913,6 +979,10 @@ def test_tool_registry_has_expected_names() -> None:
         "list_broker_dealers_by_filter",
         "list_investment_advisors_by_filter",
         "semantic_firm_search",
+        # Part B additions (DB-coverage expansion).
+        "search_form4_filings",
+        "list_filings_for_firm",
+        "get_recent_alerts",
     }
 
 
@@ -1223,3 +1293,368 @@ class TestListInvestmentAdvisorsByFilter:
         result = await tool.execute(no_access_user, db_stub, {"state": "NY"})
         assert result["error"] == "no_access"
         called.assert_not_called()
+
+
+# ── search_form4_filings ─────────────────────────────────────────────────
+
+
+def _make_form4_row(**overrides: Any) -> Any:
+    """SimpleNamespace-style shim mimicking a ConsolidatedPersonRow.
+
+    The real dataclass has 27 fields; only the projection-relevant ones
+    matter here. Defaults model a typical insider buy (ad_code='A') with
+    aggregate shares + value populated.
+    """
+    defaults: dict[str, Any] = {
+        "id": 1,
+        "reporting_owner_name": "JOHN A. SMITH",
+        "reporting_owner_cik": "0001234567",
+        "reporting_owner_title": "Chief Executive Officer",
+        "reporting_owner_state": "CA",
+        "reporting_owner_is_director": True,
+        "reporting_owner_is_officer": True,
+        "reporting_owner_is_ten_pct": False,
+        "issuer_name": "Acme Corp.",
+        "issuer_ticker": "ACME",
+        "ad_code": "A",
+        "security_title": "Common Stock",
+        "transaction_date": date(2026, 5, 10),
+        "shares": 10000.0,
+        "transaction_value": 250000.0,
+        "txn_count": 2,
+        "filed_at": datetime(2026, 5, 12),
+        "source_filing_url": "https://www.sec.gov/Archives/...",
+    }
+    defaults.update(overrides)
+
+    class _Obj:
+        pass
+
+    obj = _Obj()
+    for k, v in defaults.items():
+        setattr(obj, k, v)
+    return obj
+
+
+class TestSearchForm4Filings:
+    async def test_happy_path_projects_with_link_and_list_link(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        investors_user: AuthenticatedUser,
+        db_stub: object,
+    ) -> None:
+        async def fake_list(_db: Any, **_kwargs: Any) -> tuple[list[Any], int]:
+            return [_make_form4_row()], 1
+
+        monkeypatch.setattr(
+            chatbot_tools._form4_repo, "list_consolidated_persons", fake_list
+        )
+
+        tool = chatbot_tools.TOOL_REGISTRY["search_form4_filings"]
+        result = await tool.execute(
+            investors_user, db_stub, {"query": "John Smith"}
+        )
+
+        assert result["total_matched"] == 1
+        item = result["items"][0]
+        # Friendly transaction_kind label (so Doxie doesn't need to
+        # remember the A/D convention).
+        assert item["transaction_kind"] == "acquired"
+        # Ticker-scoped deep-link. ``tab=buyers`` is the FE default so
+        # it gets stripped (landing on a bare ?ticker= URL is what the
+        # workspace itself emits when only the ticker is filtered).
+        assert item["link"] == "/investors?ticker=ACME"
+        # The list_link mirrors the query so the user lands on the
+        # same view. ``tab=buyers`` is also stripped here (default).
+        assert "q=John+Smith" in result["list_link"]
+        assert result["list_link"].startswith("/investors?")
+
+    async def test_ad_code_d_maps_to_sellers(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        investors_user: AuthenticatedUser,
+        db_stub: object,
+    ) -> None:
+        captured: dict[str, Any] = {}
+
+        async def fake_list(_db: Any, **kwargs: Any) -> tuple[list[Any], int]:
+            captured.update(kwargs)
+            return [], 0
+
+        monkeypatch.setattr(
+            chatbot_tools._form4_repo, "list_consolidated_persons", fake_list
+        )
+        tool = chatbot_tools.TOOL_REGISTRY["search_form4_filings"]
+        result = await tool.execute(
+            investors_user, db_stub, {"ad_code": "D", "ticker": "AAPL"}
+        )
+
+        assert captured["ad_code"] == "D"
+        assert captured["ticker"] == "AAPL"
+        assert "tab=sellers" in result["list_link"]
+        assert "ticker=AAPL" in result["list_link"]
+
+    async def test_invalid_ad_code_returns_invalid_args(
+        self,
+        investors_user: AuthenticatedUser,
+        db_stub: object,
+    ) -> None:
+        tool = chatbot_tools.TOOL_REGISTRY["search_form4_filings"]
+        result = await tool.execute(
+            investors_user, db_stub, {"query": "x", "ad_code": "X"}
+        )
+        assert result["error"] == "invalid_args"
+
+    async def test_no_filters_returns_invalid_args(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        investors_user: AuthenticatedUser,
+        db_stub: object,
+    ) -> None:
+        # Repo must NOT be called — an unfiltered query would dump the
+        # whole table. Guard mirrors the existing list_*_by_filter rule.
+        called = AsyncMock()
+        monkeypatch.setattr(
+            chatbot_tools._form4_repo, "list_consolidated_persons", called
+        )
+        tool = chatbot_tools.TOOL_REGISTRY["search_form4_filings"]
+        result = await tool.execute(investors_user, db_stub, {})
+        assert result["error"] == "invalid_args"
+        called.assert_not_called()
+
+    async def test_403_returns_no_access(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        no_access_user: AuthenticatedUser,
+        db_stub: object,
+    ) -> None:
+        called = AsyncMock()
+        monkeypatch.setattr(
+            chatbot_tools._form4_repo, "list_consolidated_persons", called
+        )
+        tool = chatbot_tools.TOOL_REGISTRY["search_form4_filings"]
+        result = await tool.execute(no_access_user, db_stub, {"query": "x"})
+        assert result["error"] == "no_access"
+        called.assert_not_called()
+
+
+# ── list_filings_for_firm ────────────────────────────────────────────────
+
+
+def _make_filing(**overrides: Any) -> Any:
+    defaults: dict[str, Any] = {
+        "id": 99,
+        "form_type": "Form X-17A-5",
+        "priority": "medium",
+        "filed_at": datetime(2026, 4, 15),
+        "summary": "Annual audited financial statements filed.",
+        "source_filing_url": "https://www.sec.gov/Archives/edgar/...",
+        "is_read": False,
+    }
+    defaults.update(overrides)
+
+    class _Obj:
+        pass
+
+    obj = _Obj()
+    for k, v in defaults.items():
+        setattr(obj, k, v)
+    return obj
+
+
+class TestListFilingsForFirm:
+    async def test_bd_dispatches_to_alerts_repo(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        bd_user: AuthenticatedUser,
+        db_stub: object,
+    ) -> None:
+        monkeypatch.setattr(
+            chatbot_tools._alerts_repo,
+            "get_filing_history",
+            AsyncMock(return_value=[_make_filing(), _make_filing(id=100)]),
+        )
+
+        tool = chatbot_tools.TOOL_REGISTRY["list_filings_for_firm"]
+        result = await tool.execute(
+            bd_user, db_stub, {"firm_type": "bd", "firm_id": 42}
+        )
+
+        assert result["total_matched"] == 2
+        # filing_id is the handle Part C's PDF tool will accept.
+        assert result["items"][0]["filing_id"] == 99
+        # Deep-link is to the firm detail page, not the filing itself.
+        assert result["items"][0]["link"] == "/master-list/42"
+
+    async def test_ia_dispatches_to_advisor_repo(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        ia_user: AuthenticatedUser,
+        db_stub: object,
+    ) -> None:
+        monkeypatch.setattr(
+            chatbot_tools._ia_repo,
+            "list_advisor_filings",
+            AsyncMock(return_value=[_make_filing(form_type="Form ADV")]),
+        )
+
+        tool = chatbot_tools.TOOL_REGISTRY["list_filings_for_firm"]
+        result = await tool.execute(
+            ia_user, db_stub, {"firm_type": "ia", "firm_id": 77}
+        )
+        assert result["items"][0]["form_type"] == "Form ADV"
+        assert result["items"][0]["link"] == "/advisor-list/77"
+
+    async def test_form_type_filter_applied_client_side(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        bd_user: AuthenticatedUser,
+        db_stub: object,
+    ) -> None:
+        monkeypatch.setattr(
+            chatbot_tools._alerts_repo,
+            "get_filing_history",
+            AsyncMock(
+                return_value=[
+                    _make_filing(form_type="Form X-17A-5"),
+                    _make_filing(form_type="Form BD"),
+                    _make_filing(form_type="Form X-17A-5"),
+                ]
+            ),
+        )
+        tool = chatbot_tools.TOOL_REGISTRY["list_filings_for_firm"]
+        result = await tool.execute(
+            bd_user,
+            db_stub,
+            {"firm_type": "bd", "firm_id": 42, "form_type": "Form X-17A-5"},
+        )
+        assert result["total_matched"] == 2
+        assert all(it["form_type"] == "Form X-17A-5" for it in result["items"])
+
+    async def test_invalid_firm_type_returns_invalid_args(
+        self,
+        bd_user: AuthenticatedUser,
+        db_stub: object,
+    ) -> None:
+        tool = chatbot_tools.TOOL_REGISTRY["list_filings_for_firm"]
+        result = await tool.execute(
+            bd_user, db_stub, {"firm_type": "potato", "firm_id": 42}
+        )
+        assert result["error"] == "invalid_args"
+
+    async def test_403_when_bd_user_lacks_master_list(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        no_access_user: AuthenticatedUser,
+        db_stub: object,
+    ) -> None:
+        # Each firm_type gates on a different feature key — confirm
+        # the bd path returns no_access for a user without MASTER_LIST.
+        called = AsyncMock()
+        monkeypatch.setattr(chatbot_tools._alerts_repo, "get_filing_history", called)
+        tool = chatbot_tools.TOOL_REGISTRY["list_filings_for_firm"]
+        result = await tool.execute(
+            no_access_user, db_stub, {"firm_type": "bd", "firm_id": 42}
+        )
+        assert result["error"] == "no_access"
+        called.assert_not_called()
+
+
+# ── get_recent_alerts ────────────────────────────────────────────────────
+
+
+def _make_alert_list_item(**overrides: Any) -> Any:
+    defaults: dict[str, Any] = {
+        "id": 11,
+        "bd_id": 42,
+        "firm_name": "Acme Securities LLC",
+        "form_type": "Form X-17A-5",
+        "priority": "medium",
+        "filed_at": datetime(2026, 5, 20),
+        "summary": "Annual filing accepted.",
+        "source_filing_url": None,
+        "is_read": False,
+    }
+    defaults.update(overrides)
+
+    class _Obj:
+        pass
+
+    obj = _Obj()
+    for k, v in defaults.items():
+        setattr(obj, k, v)
+    return obj
+
+
+class TestGetRecentAlerts:
+    async def test_happy_path_projects_with_firm_link(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        alerts_user: AuthenticatedUser,
+        db_stub: object,
+    ) -> None:
+        class _Resp:
+            items = [_make_alert_list_item()]
+
+            class meta:  # noqa: D401, N801
+                total = 1
+
+        monkeypatch.setattr(
+            chatbot_tools._alerts_repo,
+            "list_alerts",
+            AsyncMock(return_value=_Resp()),
+        )
+
+        tool = chatbot_tools.TOOL_REGISTRY["get_recent_alerts"]
+        result = await tool.execute(alerts_user, db_stub, {})
+
+        assert result["total_matched"] == 1
+        item = result["items"][0]
+        assert item["firm_name"] == "Acme Securities LLC"
+        # Deep-link to the firm whose filing triggered the alert.
+        assert item["link"] == "/master-list/42"
+        # The /alerts page has no URL-state for filters today, so the
+        # list_link is the bare /alerts URL.
+        assert result["list_link"] == "/alerts"
+
+    async def test_403_returns_no_access(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        no_access_user: AuthenticatedUser,
+        db_stub: object,
+    ) -> None:
+        called = AsyncMock()
+        monkeypatch.setattr(chatbot_tools._alerts_repo, "list_alerts", called)
+        tool = chatbot_tools.TOOL_REGISTRY["get_recent_alerts"]
+        result = await tool.execute(no_access_user, db_stub, {})
+        assert result["error"] == "no_access"
+        called.assert_not_called()
+
+    async def test_filter_threads_through(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        alerts_user: AuthenticatedUser,
+        db_stub: object,
+    ) -> None:
+        captured: dict[str, Any] = {}
+
+        async def fake_list(_db: Any, **kwargs: Any) -> Any:
+            captured.update(kwargs)
+
+            class _Resp:
+                items: list[Any] = []
+
+                class meta:  # noqa: D401, N801
+                    total = 0
+
+            return _Resp()
+
+        monkeypatch.setattr(chatbot_tools._alerts_repo, "list_alerts", fake_list)
+        tool = chatbot_tools.TOOL_REGISTRY["get_recent_alerts"]
+        await tool.execute(
+            alerts_user,
+            db_stub,
+            {"form_type": "Form X-17A-5", "is_read": False},
+        )
+        assert captured["form_types"] == ["Form X-17A-5"]
+        assert captured["is_read"] is False
