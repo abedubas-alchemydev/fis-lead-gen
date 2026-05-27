@@ -806,6 +806,100 @@ class TestScorePdfCandidate:
         ranked = sorted(names, key=lambda n: _score_pdf_candidate(n, primary))
         assert ranked[0] == "filing.pdf"
 
+    def test_backcompat_alias_matches_explicit_x17_form_type(self) -> None:
+        """The underscore-prefixed back-compat alias must produce the same
+        ranking as ``score_pdf_candidate(..., form_type='X-17A-5')`` — the
+        Phase 3.1 refactor keeps the financial-extraction cron's selection
+        byte-for-byte stable."""
+        from app.services.pdf_downloader import score_pdf_candidate
+
+        primary = "Cover.pdf"
+        names = ["Cover.pdf", "MSSOFC.pdf", "MSSOCOMP.pdf"]
+        ranked_old = sorted(names, key=lambda n: _score_pdf_candidate(n, primary))
+        ranked_new = sorted(
+            names,
+            key=lambda n: score_pdf_candidate(n, primary, form_type="X-17A-5"),
+        )
+        assert ranked_old == ranked_new
+
+
+class TestScorePdfCandidateAdvProfile:
+    """ADV scoring profile added in Phase 3.1.
+
+    Form ADV packages typically contain a Part 1 XML (the structured
+    registration form) plus a Part 2A brochure PDF (the customer-facing
+    narrative document). When Doxie summarises an ADV filing, the Part
+    2A brochure is the document the user actually wants to read.
+    """
+
+    def test_brochure_beats_part1_when_primary_is_part1(self) -> None:
+        from app.services.pdf_downloader import score_pdf_candidate
+
+        primary = "0001234567_adv_part1_2026.pdf"
+        names = [
+            "0001234567_adv_part1_2026.pdf",
+            "0001234567_adv_part2a_brochure_2026.pdf",
+        ]
+        ranked = sorted(names, key=lambda n: score_pdf_candidate(n, primary, form_type="ADV"))
+        assert ranked[0] == "0001234567_adv_part2a_brochure_2026.pdf"
+
+    def test_brochure_keyword_matches(self) -> None:
+        """Many filers use the literal 'brochure' filename without a 'part2a'
+        marker. The scorer should still pick it."""
+        from app.services.pdf_downloader import score_pdf_candidate
+
+        primary = "form_adv.pdf"
+        names = ["form_adv.pdf", "client_brochure.pdf"]
+        ranked = sorted(names, key=lambda n: score_pdf_candidate(n, primary, form_type="ADV"))
+        assert ranked[0] == "client_brochure.pdf"
+
+    def test_advw_demoted(self) -> None:
+        """ADV-W is the withdrawal form — never narrative, always
+        compliance-only. Demote it if a brochure exists in the package."""
+        from app.services.pdf_downloader import score_pdf_candidate
+
+        primary = "adv-w-amendment.pdf"
+        names = ["adv-w-amendment.pdf", "part2a-brochure-2026.pdf"]
+        ranked = sorted(names, key=lambda n: score_pdf_candidate(n, primary, form_type="ADV"))
+        assert ranked[0] == "part2a-brochure-2026.pdf"
+
+    def test_form_type_adv_w_uses_adv_profile(self) -> None:
+        """``form_type='ADV-W'`` should still get the ADV scoring
+        (startswith match), so brochure preference applies if one is
+        present (rare but possible in amendment packages)."""
+        from app.services.pdf_downloader import score_pdf_candidate
+
+        primary = "withdrawal.pdf"
+        names = ["withdrawal.pdf", "explanatory_brochure.pdf"]
+        ranked = sorted(names, key=lambda n: score_pdf_candidate(n, primary, form_type="ADV-W"))
+        assert ranked[0] == "explanatory_brochure.pdf"
+
+
+class TestScorePdfCandidateGenericProfile:
+    """Unknown / unspecified form_type — falls back to a minimal
+    'primary_document wins, then shortest filename' ranking. No
+    semantic filename heuristic applies."""
+
+    def test_primary_document_wins_for_unknown_form(self) -> None:
+        from app.services.pdf_downloader import score_pdf_candidate
+
+        primary = "primary.pdf"
+        names = ["primary.pdf", "exhibit_a.pdf", "exhibit_b.pdf"]
+        ranked = sorted(names, key=lambda n: score_pdf_candidate(n, primary, form_type="13F-HR"))
+        assert ranked[0] == "primary.pdf"
+
+    def test_shortest_filename_wins_when_no_primary_match(self) -> None:
+        from app.services.pdf_downloader import score_pdf_candidate
+
+        primary = "not_in_list.pdf"
+        names = [
+            "schedule_13d_amendment_2026_05.pdf",
+            "13d.pdf",
+            "exhibits_to_schedule_13d_2026.pdf",
+        ]
+        ranked = sorted(names, key=lambda n: score_pdf_candidate(n, primary, form_type=None))
+        assert ranked[0] == "13d.pdf"
+
 
 class TestResolvePdfUrlMultiDoc:
     """End-to-end resolver test against mocked SEC index.json payloads.
