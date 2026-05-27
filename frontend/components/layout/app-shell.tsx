@@ -78,6 +78,19 @@ function AlertsIcon(props: IconProps) {
   );
 }
 
+// Classic-temple columns — instantly reads as "institution" and
+// distinguishes the 13F-filer list from the Form-4 "Investors" tab
+// (which uses an ascending trend glyph).
+function InstitutionalInvestorsIcon(props: IconProps) {
+  return (
+    <IconBase {...props}>
+      <path d="M3 8L12 3l9 5" />
+      <path d="M3 21h18" />
+      <path d="M6 21V10M12 21V10M18 21V10" />
+    </IconBase>
+  );
+}
+
 // Trending-up + dollar mark — distinguishes the Investors tab (SEC
 // Form 4 insider transaction feed) from the BD-scoped Alerts bell at a
 // glance. Two ascending bars + a dollar sign overlay.
@@ -249,6 +262,7 @@ const navSections: ReadonlyArray<NavSection> = [
     items: [
       { href: "/master-list", label: "Master List", icon: MasterListIcon, badgeKey: "total", permissionKey: "master_list" },
       { href: "/advisor-list" as Route, label: "Investment Advisors", icon: AdvisorListIcon, badgeKey: null, permissionKey: "investment_advisors" },
+      { href: "/institutional-investors" as Route, label: "Institutional Investors", icon: InstitutionalInvestorsIcon, badgeKey: null, permissionKey: "institutional_investors" },
       { href: "/investors" as Route, label: "Investors", icon: InvestorsIcon, badgeKey: null, permissionKey: "investors" }
     ]
   },
