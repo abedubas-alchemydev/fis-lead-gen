@@ -127,7 +127,18 @@ def _looks_like_pdfplumber_garbage(*texts: str | None) -> bool:
     """Return True if any of ``texts`` shows pdfplumber's scrambled-glyph
     signature. Used to gate whether the pdfplumber result is trustworthy
     before persisting; on a True result the caller falls through to
-    Gemini vision instead of writing the garbage to the DB."""
+    Gemini vision instead of writing the garbage to the DB.
+
+    Patterns checked (any one trips the detector):
+
+    1. Underscore mangle (font /ToUnicode broken) — 3+ underscores or
+       the ``_<char>_<char>_`` signature. AVID CAPITAL ADVISORS
+       verbatim in the prod smoke that prompted the original guard.
+    2. Unicode replacement character (\\ufffd) — what pdfplumber emits
+       when the PDF source uses a special character (em-dash, en-dash,
+       smart quotes) whose mapping is broken. Seen in DC ADVISORY
+       (``Peter Pacitto 212\\ufffd904\\ufffd9488``).
+    """
     for text in texts:
         if not text:
             continue
@@ -140,7 +151,28 @@ def _looks_like_pdfplumber_garbage(*texts: str | None) -> bool:
         # natural text but is the diagnostic shape of the mangle.
         if _GARBAGE_TEXT_PATTERN.search(text):
             return True
+        # Unicode replacement character — strong miss signal on any string.
+        if "�" in text:
+            return True
     return False
+
+
+def _name_has_embedded_phone(name: str | None) -> bool:
+    """Return True when pdfplumber's regex captured a phone number into
+    the ``contact_name`` field — a separate failure mode where the
+    "PERSON TO CONTACT" line on the PDF cover page combines the name
+    and phone on a single line and the extractor's split doesn't fire.
+
+    Real person names virtually never contain digits (Roman numerals are
+    not digits; rare "John 3rd" variants peak at 1 digit). 3+ digits in
+    a name field is the diagnostic signature of a phone-in-name event.
+    Seen in the smoke on ASANTE CAPITAL (``Alka Patel +44 203 696 4
+    730``) and four others. When True, the caller falls through to
+    Gemini vision so the name and phone land in their respective
+    fields."""
+    if not name:
+        return False
+    return sum(1 for ch in name if ch.isdigit()) >= 3
 
 
 def _render_pdf_pages_to_images(
@@ -298,15 +330,23 @@ class FocusCeoExtractionService:
         # ── Step 2: Try pdfplumber first (FREE, ~500ms) ──
         if pdf_record.local_document_path:
             text_result = await asyncio.to_thread(extract_from_pdf, pdf_record.local_document_path)
-            # Reject the pdfplumber result when its text looks scrambled
-            # (font /ToUnicode CMap broken — see _looks_like_pdfplumber_garbage).
-            # Fall through to Step 3 (Gemini vision) so the same PDF is read
-            # from its rendered images instead of its broken glyph stream.
+            # Three fall-through conditions to Step 3 (Gemini vision):
+            #
+            # 1. Scrambled glyphs (font /ToUnicode CMap broken). See
+            #    _looks_like_pdfplumber_garbage.
+            # 2. Phone embedded in the contact_name field (regex grabbed
+            #    name + phone on the same line). See _name_has_embedded_phone.
+            # 3. pdfplumber returned success but found no contact_name at
+            #    all — coverage expansion. Without this fall-through the
+            #    BD would persist as "data_not_present" and never get a
+            #    contact row, even though Gemini might find one.
             pdf_text_is_garbage = _looks_like_pdfplumber_garbage(
                 text_result.contact_name,
                 text_result.contact_email,
                 text_result.contact_phone,
             )
+            phone_in_name = _name_has_embedded_phone(text_result.contact_name)
+            no_contact_name = text_result.success and not text_result.contact_name
             if pdf_text_is_garbage:
                 logger.info(
                     "pdfplumber returned scrambled text for BD %d (%s); "
@@ -314,7 +354,26 @@ class FocusCeoExtractionService:
                     broker_dealer.id,
                     broker_dealer.name,
                 )
-            if text_result.success and not pdf_text_is_garbage:
+            elif phone_in_name:
+                logger.info(
+                    "pdfplumber captured a phone into contact_name for BD %d "
+                    "(%s); falling through to Gemini vision.",
+                    broker_dealer.id,
+                    broker_dealer.name,
+                )
+            elif no_contact_name:
+                logger.info(
+                    "pdfplumber found no contact_name for BD %d (%s); "
+                    "falling through to Gemini vision.",
+                    broker_dealer.id,
+                    broker_dealer.name,
+                )
+            if (
+                text_result.success
+                and not pdf_text_is_garbage
+                and not phone_in_name
+                and not no_contact_name
+            ):
                 confidence = 0.95 if (text_result.contact_name and text_result.net_capital) else 0.80
                 # Persist if we found a contact name
                 if text_result.contact_name and confidence >= 0.5:
@@ -500,25 +559,44 @@ class FocusCeoExtractionService:
         # Step 2: Try pdfplumber first (FREE, ~500ms, no API call)
         if pdf_record.local_document_path:
             text_result = await asyncio.to_thread(extract_from_pdf, pdf_record.local_document_path)
-            # Same garbage guard as _run_extract — when pdfplumber's text
-            # is scrambled (font /ToUnicode CMap broken) we fall through
-            # to Gemini vision so the page is read from images instead
-            # of the broken glyph stream. This branch is the batch path
-            # (run_batch → _extract_without_db), separate from the
-            # single-BD detail-page path which has its own copy of this
-            # check. PR #559 only patched the latter; this fixes the gap.
+            # Same three fall-through conditions as _run_extract:
+            #   1. Scrambled glyphs (font /ToUnicode CMap broken).
+            #   2. Phone embedded in contact_name field.
+            #   3. pdfplumber returned success but found no contact_name
+            #      at all (coverage expansion — without this, ~30% of
+            #      BDs in the prod smoke landed as "no contact" even
+            #      though Gemini would have found one).
             pdf_text_is_garbage = _looks_like_pdfplumber_garbage(
                 text_result.contact_name,
                 text_result.contact_email,
                 text_result.contact_phone,
             )
+            phone_in_name = _name_has_embedded_phone(text_result.contact_name)
+            no_contact_name = text_result.success and not text_result.contact_name
             if pdf_text_is_garbage:
                 logger.info(
                     "pdfplumber returned scrambled text for BD %d (batch path); "
                     "falling through to Gemini vision.",
                     bd_id,
                 )
-            if text_result.success and not pdf_text_is_garbage:
+            elif phone_in_name:
+                logger.info(
+                    "pdfplumber captured a phone into contact_name for BD %d "
+                    "(batch path); falling through to Gemini vision.",
+                    bd_id,
+                )
+            elif no_contact_name:
+                logger.info(
+                    "pdfplumber found no contact_name for BD %d (batch path); "
+                    "falling through to Gemini vision.",
+                    bd_id,
+                )
+            if (
+                text_result.success
+                and not pdf_text_is_garbage
+                and not phone_in_name
+                and not no_contact_name
+            ):
                 # Got data from text extraction — no Gemini needed
                 confidence = 0.95 if (text_result.contact_name and text_result.net_capital) else 0.80
                 return FocusCeoExtractionResult(

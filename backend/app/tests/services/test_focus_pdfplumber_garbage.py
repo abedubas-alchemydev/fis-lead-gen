@@ -19,7 +19,10 @@ instead of persisting the garbage.
 
 from __future__ import annotations
 
-from app.services.focus_ceo_extraction import _looks_like_pdfplumber_garbage
+from app.services.focus_ceo_extraction import (
+    _looks_like_pdfplumber_garbage,
+    _name_has_embedded_phone,
+)
 
 
 # ──────────────── garbage detector ────────────────
@@ -89,3 +92,71 @@ def test_any_garbage_field_triggers_detection() -> None:
         "clean@example.com",
         "_W__ill__",
     )
+
+
+# ───── Unicode replacement char (em-dash mangle) ─────
+
+
+def test_unicode_replacement_char_in_name_is_rejected() -> None:
+    # Verbatim from the prod re-smoke (DC ADVISORY) — pdfplumber emits
+    # the U+FFFD replacement character when the PDF source uses an
+    # em-dash (or other special char) whose font mapping is broken. The
+    # phone collapses into the contact_name field with these markers.
+    assert _looks_like_pdfplumber_garbage("Peter Pacitto 212�904�9488")
+
+
+def test_unicode_replacement_char_in_email_is_rejected() -> None:
+    assert _looks_like_pdfplumber_garbage("p.pacitto�dc.com")
+
+
+def test_unicode_replacement_char_in_phone_is_rejected() -> None:
+    assert _looks_like_pdfplumber_garbage(None, None, "212�904�9488")
+
+
+# ───── Phone-embedded-in-name detection ─────
+
+
+def test_clean_name_with_no_digits_passes() -> None:
+    assert not _name_has_embedded_phone("Jason Kavanaugh")
+    assert not _name_has_embedded_phone("William D. Hawthorne")
+
+
+def test_name_with_one_digit_passes() -> None:
+    # Edge case: "John 3rd" or "Robert IV" (Romans aren't digits, but
+    # the rare "3rd" variant has 1 digit). Below threshold so accepted.
+    assert not _name_has_embedded_phone("John 3rd")
+
+
+def test_asante_phone_in_name_is_rejected() -> None:
+    # Verbatim from the prod re-smoke (ASANTE CAPITAL).
+    assert _name_has_embedded_phone("Alka Patel +44 203 696 4 730")
+
+
+def test_american_financial_phone_in_name_is_rejected() -> None:
+    # Verbatim (AMERICAN FINANCIAL ASSOCIATES).
+    assert _name_has_embedded_phone("Henry D'Alberto 61 0-559-1600")
+
+
+def test_rf_ma_phone_in_name_is_rejected() -> None:
+    # Verbatim (RF M&A SERVICES).
+    assert _name_has_embedded_phone("Glenn Holloway (704 )414-6319")
+
+
+def test_alpha_trading_phone_in_name_is_rejected() -> None:
+    # Verbatim (ALPHA TRADING).
+    assert _name_has_embedded_phone("Shai Nathaniel +972-9-9592802")
+
+
+def test_three_digit_threshold_triggers_detection() -> None:
+    # Boundary: exactly 3 digits is the trip line.
+    assert _name_has_embedded_phone("Name 123")
+
+
+def test_two_digit_threshold_passes() -> None:
+    # Boundary: 2 digits is below the trip line.
+    assert not _name_has_embedded_phone("Name 12")
+
+
+def test_name_phone_detector_handles_empty_and_none() -> None:
+    assert not _name_has_embedded_phone(None)
+    assert not _name_has_embedded_phone("")
