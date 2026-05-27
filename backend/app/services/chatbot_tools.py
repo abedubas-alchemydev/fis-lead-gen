@@ -87,7 +87,11 @@ from app.services.gemini_responses import (
 from app.services.institutional_investors import InstitutionalInvestorRepository
 from app.services.investment_advisors import InvestmentAdvisorRepository
 from app.services.pdf_downloader import PdfDownloaderService, pdf_tempdir
-from app.services.sec_pdf_fetcher import SecPdfFetchError, fetch_sec_pdf_bytes
+from app.services.sec_pdf_fetcher import (
+    SecPdfFetchError,
+    fetch_filing_pdf_bytes,
+    fetch_sec_pdf_bytes,
+)
 from app.services.vault_retrieval import retrieve_chunks
 
 logger = logging.getLogger(__name__)
@@ -1688,12 +1692,19 @@ async def _summarise_filing_by_url(
         }
 
     try:
-        pdf_bytes = await fetch_sec_pdf_bytes(source_url)
+        # ``fetch_filing_pdf_bytes`` handles the HTML-filing-index case
+        # by walking the EDGAR ``index.json`` for the accession and
+        # picking the most useful PDF inside (Part 2A brochure for ADV,
+        # SOFC for X-17A-5, etc.). Falls back to direct streaming when
+        # the URL already ends in ``.pdf``.
+        pdf_bytes = await fetch_filing_pdf_bytes(
+            source_url, form_type=getattr(filing, "form_type", None)
+        )
     except SecPdfFetchError as exc:
         logger.warning("doxie sec pdf fetch failed: %s", exc)
-        # Surface as a clean error with the URL so the model can offer
-        # the link instead. The HTML-index case (most common for EDGAR
-        # filing URLs) gets a specific message too.
+        # XML-only forms (Form 4, most 13F-HR / 13D-G) bubble up here
+        # with the "no PDF in filing package" message — Doxie relays it
+        # and offers the source URL.
         return {
             "error": "tool_error",
             "message": (
@@ -1859,7 +1870,23 @@ async def _execute_summarize_form4_filing(
     db: AsyncSession,
     args: Mapping[str, Any],
 ) -> dict[str, Any]:
-    """Summarise the Form 4 filing behind one Form4Transaction row."""
+    """Summarise one Form 4 insider-transaction row.
+
+    Form 4 filings are filed as XML-only in EDGAR — there is no PDF in
+    the filing package to download. So this tool does NOT fetch
+    anything from SEC; it builds a deterministic structured summary
+    directly from the ``Form4Transaction`` row (which the watcher has
+    already parsed into normalised columns).
+
+    The user-facing payload is the same shape every other summarise
+    tool returns (``summary``, ``source_filing_url``, ``link``, plus a
+    handful of extras), so Doxie's prompt logic doesn't need to know
+    the implementation differs.
+    """
+    denial = _check_feature(user, INVESTORS)
+    if denial is not None:
+        return denial
+
     try:
         txn_id = int(args.get("form4_transaction_id"))
     except (TypeError, ValueError):
@@ -1871,36 +1898,141 @@ async def _execute_summarize_form4_filing(
             ),
         }
 
-    question = _opt_str(args, "question")
-
-    txn = await _form4_repo.get(db, txn_id)
+    try:
+        txn = await _form4_repo.get(db, txn_id)
+    except Exception:
+        logger.exception(
+            "doxie tool failed", extra={"tool": "summarize_form4_filing"}
+        )
+        return {
+            "error": "tool_error",
+            "message": "Lookup failed; ask the user to try again.",
+        }
     if txn is None:
         return {
             "error": "not_found",
             "message": f"No Form 4 transaction with id={txn_id}.",
         }
 
-    async def fetch_already_loaded(_session: AsyncSession) -> Any:
-        return txn
-
-    firm_name = getattr(txn, "issuer_name", None)
-    return await _summarise_filing_by_url(
-        user=user,
-        db=db,
-        feature_key=INVESTORS,
-        fetch_filing=fetch_already_loaded,
-        filing_label=(
-            f"Form 4 filing by "
-            f"{getattr(txn, 'reporting_owner_name', 'an insider')} for "
-            f"{firm_name or 'this issuer'}"
-        ),
-        firm_name=firm_name,
+    summary = _build_form4_db_summary(txn)
+    issuer_ticker = getattr(txn, "issuer_ticker", None)
+    ad_code = getattr(txn, "ad_code", None)
+    return {
+        "summary": summary,
+        "source_filing_url": getattr(txn, "source_filing_url", None),
         # Form 4 has no per-transaction detail page — link to the
-        # /investors page filtered by issuer ticker as the closest
-        # equivalent landing spot.
-        detail_link=investors_url(ticker=getattr(txn, "issuer_ticker", None)),
-        question=question,
-        tool_name="summarize_form4_filing",
+        # /investors page filtered by ticker + the relevant tab.
+        "link": investors_url(
+            ticker=issuer_ticker,
+            tab=_AD_CODE_TO_TAB.get(ad_code) if ad_code else None,
+        ),
+        # Helpful structured extras for the model to cite in chat.
+        "reporting_owner_name": getattr(txn, "reporting_owner_name", None),
+        "issuer_name": getattr(txn, "issuer_name", None),
+        "issuer_ticker": issuer_ticker,
+        "ad_code": ad_code,
+        "transaction_date": (
+            getattr(txn, "transaction_date", None).isoformat()
+            if getattr(txn, "transaction_date", None)
+            else None
+        ),
+        "filed_at": (
+            getattr(txn, "filed_at", None).isoformat()
+            if getattr(txn, "filed_at", None)
+            else None
+        ),
+        # Flag to make it explicit in logs / debug that no PDF was
+        # fetched — Form 4 is XML-only in EDGAR.
+        "data_source": "db_structured_form4_row",
+    }
+
+
+def _build_form4_db_summary(txn: Any) -> str:
+    """Compose a deterministic markdown summary from a Form4Transaction.
+
+    Skips the LLM entirely — the row is already structured. A template
+    keeps the output predictable for users who chain prompts and lets
+    the response cache across identical (user, args) calls without
+    burning Gemini quota.
+
+    ``Decimal`` and ``date`` fields are coerced to readable strings; the
+    optional fields use ``"unspecified"`` fillers rather than dropping
+    so the summary length stays similar across rows.
+    """
+    # Helpers — keep things tidy and avoid f-string clutter.
+    def fmt_int(value: Any) -> str:
+        if value is None:
+            return "unspecified shares"
+        try:
+            return f"{int(value):,} shares"
+        except (TypeError, ValueError):
+            return f"{value} shares"
+
+    def fmt_money(value: Any) -> str:
+        if value is None:
+            return "an unspecified amount"
+        try:
+            return f"${float(value):,.2f}"
+        except (TypeError, ValueError):
+            return f"${value}"
+
+    def fmt_date(value: Any) -> str:
+        if value is None:
+            return "an unspecified date"
+        try:
+            return value.isoformat()
+        except AttributeError:
+            return str(value)
+
+    insider_name = getattr(txn, "reporting_owner_name", None) or "An insider"
+    insider_title = getattr(txn, "reporting_owner_title", None)
+    issuer_name = getattr(txn, "issuer_name", None) or "an issuer"
+    ticker = getattr(txn, "issuer_ticker", None)
+    issuer_label = f"{issuer_name} ({ticker})" if ticker else issuer_name
+
+    ad_code = getattr(txn, "ad_code", None)
+    if ad_code == "A":
+        verb = "acquired"
+    elif ad_code == "D":
+        verb = "disposed of"
+    else:
+        verb = "reported a transaction in"
+
+    security_title = getattr(txn, "security_title", None) or "the issuer's securities"
+    txn_date = fmt_date(getattr(txn, "transaction_date", None))
+    shares = fmt_int(getattr(txn, "shares", None))
+    value = fmt_money(getattr(txn, "transaction_value", None))
+    txn_code = getattr(txn, "transaction_code", None)
+    is_deriv = getattr(txn, "is_derivative", False)
+    filed_at = fmt_date(getattr(txn, "filed_at", None))
+
+    role_bits: list[str] = []
+    if getattr(txn, "reporting_owner_is_director", False):
+        role_bits.append("director")
+    if getattr(txn, "reporting_owner_is_officer", False):
+        role_bits.append("officer")
+    if getattr(txn, "reporting_owner_is_ten_pct", False):
+        role_bits.append("10%+ owner")
+    role_phrase = ", ".join(role_bits) if role_bits else None
+
+    role_clause = ""
+    if insider_title and role_phrase:
+        role_clause = f" ({insider_title}; {role_phrase})"
+    elif insider_title:
+        role_clause = f" ({insider_title})"
+    elif role_phrase:
+        role_clause = f" ({role_phrase})"
+
+    deriv_clause = " (derivative security)" if is_deriv else ""
+    code_clause = f" Transaction code: `{txn_code}`." if txn_code else ""
+
+    return (
+        f"**{insider_name}**{role_clause} {verb} {shares} of "
+        f"{security_title}{deriv_clause} in **{issuer_label}** on "
+        f"{txn_date} for a total of {value}.{code_clause} Filed on "
+        f"{filed_at}.\n\nForm 4 filings are XML-only in EDGAR, so this "
+        f"summary is built from the structured data we already have on "
+        f"file — no PDF was fetched."
     )
 
 
@@ -2662,17 +2794,21 @@ TOOL_REGISTRY: dict[str, Tool] = {
     "summarize_form4_filing": Tool(
         name="summarize_form4_filing",
         description=(
-            "Read and summarize the Form 4 filing behind one insider "
-            "transaction row. Use after search_form4_filings has surfaced "
-            "an interesting transaction id. Most Form 4 EDGAR URLs point "
-            "at the filing index rather than a single PDF — the tool may "
-            "surface that as an error with the source URL."
+            "Summarise one Form 4 insider transaction. Use after "
+            "search_form4_filings has surfaced an interesting "
+            "transaction id. **Form 4 filings are filed as XML-only in "
+            "EDGAR — no PDF exists** — so this tool builds a structured "
+            "narrative from the parsed transaction row already in the "
+            "DB (insider name + title + role, issuer + ticker, shares + "
+            "value, acquired vs disposed, filing date). Fast DB-only "
+            "lookup; no SEC fetch."
         ),
         parameters_schema=_SUMMARIZE_FORM4_SCHEMA,
         feature_key=INVESTORS,
         execute=_execute_summarize_form4_filing,
-        timeout_s=PDF_TOOL_TIMEOUT_S,
-        cacheable=False,
+        # Drop PDF-tool overrides — this is now a fast DB-only call.
+        # Default 5s timeout is plenty; deterministic output benefits
+        # from the LRU cache.
     ),
     "ask_vault": Tool(
         name="ask_vault",

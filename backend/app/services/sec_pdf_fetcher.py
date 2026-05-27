@@ -27,13 +27,24 @@ from __future__ import annotations
 
 import ipaddress
 import logging
+import re
 from urllib.parse import urlparse
 
 import httpx
 
 from app.core.config import settings
+from app.services.pdf_downloader import resolve_filing_pdf_url
 
 logger = logging.getLogger(__name__)
+
+
+# Matches an EDGAR Archives path: ``/Archives/edgar/data/{cik}/{accession_no_dashes}/...``
+# Captures cik (variable-length int) and accession_no_dashes (typically 18
+# digits). The DB-stored URLs all share this prefix; anything that doesn't
+# match isn't an EDGAR filing-package URL so the chat tool should bail.
+_EDGAR_FILING_PATH_RE = re.compile(
+    r"^/Archives/edgar/data/(?P<cik>\d+)/(?P<accession>\d+)(?:/|$)"
+)
 
 
 # Source-of-truth for the allowed SEC hosts lives in
@@ -154,3 +165,81 @@ async def fetch_sec_pdf_bytes(url: str) -> bytes:
         )
 
     return body
+
+
+def _parse_edgar_filing_path(url: str) -> tuple[str, str] | None:
+    """Return ``(cik, accession_no_dashes)`` for an EDGAR filing URL.
+
+    Returns ``None`` if the URL doesn't look like an
+    ``/Archives/edgar/data/{cik}/{accession}/...`` path. Callers handle
+    that as "this URL isn't an EDGAR filing — can't resolve via
+    index.json."
+    """
+    parsed = urlparse(url)
+    if not parsed.path:
+        return None
+    match = _EDGAR_FILING_PATH_RE.match(parsed.path)
+    if match is None:
+        return None
+    return match.group("cik"), match.group("accession")
+
+
+async def fetch_filing_pdf_bytes(
+    source_filing_url: str, *, form_type: str | None = None
+) -> bytes:
+    """Resolve an EDGAR filing URL to a PDF document, then download it.
+
+    Doxie's IA / II tools store ``source_filing_url`` values that often
+    point at the EDGAR HTML filing index (the ``/.../{accession}-index.htm``
+    file) rather than a direct PDF. This helper:
+
+    1. If the URL itself ends in ``.pdf``, downloads it directly via
+       :func:`fetch_sec_pdf_bytes`.
+    2. Otherwise parses ``cik`` + ``accession`` out of the URL path and
+       calls :func:`app.services.pdf_downloader.resolve_filing_pdf_url`
+       to walk the filing's ``index.json`` and pick the most useful
+       PDF inside the package — biased by ``form_type`` so ADV filings
+       prefer the Part 2A brochure, X-17A-5 prefers the Statement of
+       Financial Condition, etc.
+    3. Downloads the resolved PDF URL with the same streaming + SSRF
+       checks as :func:`fetch_sec_pdf_bytes`.
+
+    Raises :class:`SecPdfFetchError` when:
+    - the input URL isn't an EDGAR filing path (malformed DB row),
+    - the filing package contains no PDFs (Form 4 / 13F-HR / Schedule
+      13D-G are typically XML-only — the chat tool should fall back
+      to the source URL rather than trying to summarise text-only
+      content),
+    - the resolved PDF download fails for any reason.
+    """
+    parsed = urlparse(source_filing_url)
+    if parsed.path.lower().endswith(".pdf"):
+        # Caller already has a direct PDF link — skip the resolver and
+        # download in one round-trip. (Some AdvisorFiling rows do
+        # store a direct ``.../{cik}/{accession}/primary_document.pdf``
+        # URL via ``edgar.build_edgar_filing_url`` when the watcher
+        # knew the primary doc.)
+        return await fetch_sec_pdf_bytes(source_filing_url)
+
+    parsed_ids = _parse_edgar_filing_path(source_filing_url)
+    if parsed_ids is None:
+        raise SecPdfFetchError(
+            f"URL {source_filing_url!r} isn't an EDGAR filing path — "
+            f"can't resolve to a PDF document."
+        )
+    cik, accession = parsed_ids
+
+    pdf_url = await resolve_filing_pdf_url(
+        cik=cik,
+        accession_number=accession,
+        primary_document=None,
+        form_type=form_type,
+    )
+    if pdf_url is None:
+        raise SecPdfFetchError(
+            f"no PDF in filing package for accession {accession!r}; the "
+            f"form may be XML-only (Form 4, 13F-HR, 13D/G). Offer the "
+            f"source URL to the user instead of summarising."
+        )
+
+    return await fetch_sec_pdf_bytes(pdf_url)

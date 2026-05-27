@@ -1000,7 +1000,8 @@ def test_tool_registry_has_expected_names() -> None:
 
 
 def test_pdf_tools_opt_out_of_cache_and_extend_timeout() -> None:
-    """PDF-summarisation tools share two non-default Tool fields:
+    """Tools that actually download a PDF + call Gemini share two
+    non-default ``Tool`` fields:
 
     - ``timeout_s = PDF_TOOL_TIMEOUT_S`` — the 5s default would chop most
       PDF round-trips off mid-Gemini-call.
@@ -1008,16 +1009,22 @@ def test_pdf_tools_opt_out_of_cache_and_extend_timeout() -> None:
       per-question to be worth keeping in the per-process LRU.
 
     This test guards against a copy-paste mistake where a future PDF
-    tool forgets one of those fields. ``ask_vault`` is intentionally
-    excluded — Vault retrieval is fast (one embedding + one pg query)
-    and re-uses of the same query inside a chat ARE worth caching.
+    tool forgets one of those fields.
+
+    Excluded by design:
+
+    - ``ask_vault`` — Vault retrieval is fast (one embedding + one
+      pg query); re-uses of the same query within a chat ARE worth
+      caching.
+    - ``summarize_form4_filing`` — Phase 3.1 switched this to a DB-only
+      structured summary because Form 4 filings are XML-only in EDGAR
+      (no PDF to download). It correctly uses default timeout + cache.
     """
     pdf_tool_names = {
         "summarize_broker_dealer_filing",
         "summarize_brokercheck_pdf",
         "summarize_investment_advisor_filing",
         "summarize_institutional_investor_filing",
-        "summarize_form4_filing",
     }
     for name in pdf_tool_names:
         tool = chatbot_tools.TOOL_REGISTRY[name]
@@ -1027,6 +1034,16 @@ def test_pdf_tools_opt_out_of_cache_and_extend_timeout() -> None:
         assert tool.cacheable is False, (
             f"tool {name!r} should opt out of the LRU cache"
         )
+
+    # Form 4 is intentionally NOT a PDF tool — DB-only summary.
+    form4_tool = chatbot_tools.TOOL_REGISTRY["summarize_form4_filing"]
+    assert form4_tool.timeout_s is None, (
+        "summarize_form4_filing is DB-only and should use the default timeout"
+    )
+    assert form4_tool.cacheable is True, (
+        "summarize_form4_filing should be cacheable — deterministic output "
+        "from a structured row"
+    )
 
 
 def test_ii_projection_keys_exist_on_schema() -> None:
@@ -2058,3 +2075,264 @@ class TestAskVault:
             no_access_user, db_stub, {"query": "x", "folder_id": 7}
         )
         assert result["error"] == "no_access"
+
+
+# ── summarize_form4_filing (Phase 3.1: DB-only summary) ─────────────────
+
+
+def _make_form4_txn(**overrides: Any) -> Any:
+    """SimpleNamespace shim mimicking a ``Form4Transaction`` ORM row.
+
+    Only the fields the summariser reads need to be set; the projection
+    falls through ``None`` for anything missing.
+    """
+    defaults: dict[str, Any] = {
+        "id": 99,
+        "accession_number": "0001234567-26-000001",
+        "is_derivative": False,
+        "issuer_cik": "0001234567",
+        "issuer_name": "Acme Corp.",
+        "issuer_ticker": "ACME",
+        "reporting_owner_cik": "0007654321",
+        "reporting_owner_name": "JOHN A. SMITH",
+        "reporting_owner_title": "Chief Executive Officer",
+        "reporting_owner_is_director": True,
+        "reporting_owner_is_officer": True,
+        "reporting_owner_is_ten_pct": False,
+        "security_title": "Common Stock",
+        "transaction_date": date(2026, 5, 10),
+        "transaction_code": "P",
+        "ad_code": "A",
+        "shares": Decimal("10000"),
+        "price_per_share": Decimal("25.00"),
+        "transaction_value": Decimal("250000"),
+        "source_filing_url": (
+            "https://www.sec.gov/Archives/edgar/data/1234567/"
+            "000123456726000001/0001234567-26-000001-index.htm"
+        ),
+        "filed_at": datetime(2026, 5, 12, 14, 30),
+    }
+    defaults.update(overrides)
+
+    class _Obj:
+        pass
+
+    obj = _Obj()
+    for k, v in defaults.items():
+        setattr(obj, k, v)
+    return obj
+
+
+class TestSummarizeForm4FilingDbOnly:
+    """Phase 3.1 rewrite: this tool no longer fetches anything from SEC.
+    Form 4 filings are XML-only in EDGAR; the watcher already parsed the
+    transaction into normalised columns, so the summary is built
+    deterministically from the DB row."""
+
+    async def test_happy_path_no_http_fetch(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        investors_user: AuthenticatedUser,
+        db_stub: object,
+    ) -> None:
+        """Smoke check: the tool returns a structured summary AND never
+        touches the SEC HTTP path. The fetcher stubs would explode if
+        called — proves the DB-only path is taken."""
+        monkeypatch.setattr(
+            chatbot_tools._form4_repo,
+            "get",
+            AsyncMock(return_value=_make_form4_txn()),
+        )
+
+        async def _boom_filing_fetch(*_a: Any, **_kw: Any) -> bytes:
+            raise AssertionError(
+                "Form 4 tool must not hit fetch_filing_pdf_bytes — it's DB-only"
+            )
+
+        async def _boom_direct_fetch(*_a: Any, **_kw: Any) -> bytes:
+            raise AssertionError(
+                "Form 4 tool must not hit fetch_sec_pdf_bytes — it's DB-only"
+            )
+
+        monkeypatch.setattr(
+            chatbot_tools, "fetch_filing_pdf_bytes", _boom_filing_fetch
+        )
+        monkeypatch.setattr(chatbot_tools, "fetch_sec_pdf_bytes", _boom_direct_fetch)
+
+        tool = chatbot_tools.TOOL_REGISTRY["summarize_form4_filing"]
+        result = await tool.execute(
+            investors_user, db_stub, {"form4_transaction_id": 99}
+        )
+
+        # Summary cites the structured data verbatim.
+        assert "JOHN A. SMITH" in result["summary"]
+        assert "Acme Corp." in result["summary"]
+        assert "ACME" in result["summary"]
+        assert "10,000 shares" in result["summary"]
+        assert "$250,000.00" in result["summary"]
+        assert "acquired" in result["summary"]
+        # Mentions the XML-only nature so Doxie can relay it.
+        assert "XML-only" in result["summary"]
+        # Structured extras for the model to cite.
+        assert result["reporting_owner_name"] == "JOHN A. SMITH"
+        assert result["ad_code"] == "A"
+        # Link to the /investors page filtered by ticker + buyers tab.
+        # ``tab=buyers`` is the FE default and gets stripped, leaving
+        # just the ticker filter.
+        assert result["link"] == "/investors?ticker=ACME"
+        # Helpful debug flag — distinguishes this tool from PDF
+        # summaries in logs / chat history.
+        assert result["data_source"] == "db_structured_form4_row"
+
+    async def test_disposal_uses_disposed_verb_and_sellers_tab(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        investors_user: AuthenticatedUser,
+        db_stub: object,
+    ) -> None:
+        monkeypatch.setattr(
+            chatbot_tools._form4_repo,
+            "get",
+            AsyncMock(return_value=_make_form4_txn(ad_code="D")),
+        )
+
+        tool = chatbot_tools.TOOL_REGISTRY["summarize_form4_filing"]
+        result = await tool.execute(
+            investors_user, db_stub, {"form4_transaction_id": 99}
+        )
+        assert "disposed of" in result["summary"]
+        # Sellers tab in the deep-link.
+        assert "tab=sellers" in result["link"]
+
+    async def test_derivative_security_called_out(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        investors_user: AuthenticatedUser,
+        db_stub: object,
+    ) -> None:
+        monkeypatch.setattr(
+            chatbot_tools._form4_repo,
+            "get",
+            AsyncMock(
+                return_value=_make_form4_txn(
+                    is_derivative=True,
+                    security_title="Employee Stock Option",
+                )
+            ),
+        )
+        tool = chatbot_tools.TOOL_REGISTRY["summarize_form4_filing"]
+        result = await tool.execute(
+            investors_user, db_stub, {"form4_transaction_id": 99}
+        )
+        assert "Employee Stock Option" in result["summary"]
+        assert "derivative security" in result["summary"]
+
+    async def test_not_found_returns_structured_dict(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        investors_user: AuthenticatedUser,
+        db_stub: object,
+    ) -> None:
+        monkeypatch.setattr(
+            chatbot_tools._form4_repo,
+            "get",
+            AsyncMock(return_value=None),
+        )
+        tool = chatbot_tools.TOOL_REGISTRY["summarize_form4_filing"]
+        result = await tool.execute(
+            investors_user, db_stub, {"form4_transaction_id": 9999}
+        )
+        assert result["error"] == "not_found"
+
+    async def test_403_returns_no_access(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        no_access_user: AuthenticatedUser,
+        db_stub: object,
+    ) -> None:
+        called = AsyncMock()
+        monkeypatch.setattr(chatbot_tools._form4_repo, "get", called)
+        tool = chatbot_tools.TOOL_REGISTRY["summarize_form4_filing"]
+        result = await tool.execute(
+            no_access_user, db_stub, {"form4_transaction_id": 99}
+        )
+        assert result["error"] == "no_access"
+        called.assert_not_called()
+
+    async def test_invalid_id_returns_invalid_args(
+        self,
+        investors_user: AuthenticatedUser,
+        db_stub: object,
+    ) -> None:
+        tool = chatbot_tools.TOOL_REGISTRY["summarize_form4_filing"]
+        result = await tool.execute(
+            investors_user, db_stub, {"form4_transaction_id": "abc"}
+        )
+        assert result["error"] == "invalid_args"
+
+
+# ── summarize_investment_advisor_filing routes through the new fetcher ──
+
+
+class TestSummarizeInvestmentAdvisorFilingForm4Refactor:
+    """Phase 3.1 rewires the IA / II tools to use
+    ``fetch_filing_pdf_bytes`` (which resolves an HTML-index URL to the
+    actual PDF inside via the EDGAR ``index.json`` walk) instead of the
+    naive ``fetch_sec_pdf_bytes``. This test guards the wiring — the
+    fetcher must receive the filing's ``form_type`` so the resolver can
+    bias toward the Part 2A brochure for ADV filings."""
+
+    async def test_passes_form_type_through_to_filing_fetcher(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        ia_user: AuthenticatedUser,
+        db_stub: object,
+    ) -> None:
+        from unittest.mock import MagicMock
+
+        # Stub the AdvisorFiling lookup.
+        filing = _make_filing(form_type="Form ADV")
+        filing.advisor_id = 77
+        filing.source_filing_url = (
+            "https://www.sec.gov/Archives/edgar/data/1234567/"
+            "000123456726000001/0001234567-26-000001-index.htm"
+        )
+
+        execute_result = MagicMock()
+        execute_result.scalar_one_or_none.return_value = filing
+
+        db_mock = MagicMock()
+        db_mock.execute = AsyncMock(return_value=execute_result)
+
+        monkeypatch.setattr(
+            chatbot_tools._ia_repo,
+            "get_investment_advisor",
+            AsyncMock(return_value=_make_ia_orm(name="Beta Advisors")),
+        )
+
+        captured: dict[str, Any] = {}
+
+        async def fake_fetch(
+            source_url: str, *, form_type: str | None = None
+        ) -> bytes:
+            captured["source_url"] = source_url
+            captured["form_type"] = form_type
+            return b"%PDF-1.4 brochure"
+
+        monkeypatch.setattr(chatbot_tools, "fetch_filing_pdf_bytes", fake_fetch)
+        monkeypatch.setattr(
+            chatbot_tools._gemini_client,
+            "summarize_pdf",
+            AsyncMock(return_value="Brochure summary..."),
+        )
+
+        tool = chatbot_tools.TOOL_REGISTRY["summarize_investment_advisor_filing"]
+        result = await tool.execute(ia_user, db_mock, {"filing_id": 99})
+
+        # ``form_type`` is plumbed through so the resolver picks the
+        # Part 2A brochure inside the EDGAR package.
+        assert captured["form_type"] == "Form ADV"
+        assert captured["source_url"] == filing.source_filing_url
+        assert "Brochure summary" in result["summary"]
+        # Detail link points at the advisor.
+        assert result["link"] == "/advisor-list/77"

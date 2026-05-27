@@ -97,39 +97,108 @@ _NON_FINANCIAL_MARKERS = (
 )
 
 
-def _score_pdf_candidate(name: str, primary_document: str) -> tuple[int, ...]:
-    """Sort key for picking the right PDF inside an X-17A-5 filing.
+# Form ADV multi-document packages: Part 1A is the structured XML
+# registration form, Part 2A is the customer-facing narrative brochure
+# (PDF). When Doxie summarises an ADV filing, the brochure is the
+# document the user actually wants — it has the firm description, fee
+# schedule, AUM detail, disciplinary history, etc. The Part 1 / ADV-W
+# documents are either XML or compliance-only forms with little
+# narrative content. Same substring-scan approach as the X-17A-5
+# markers (filers concatenate stems without separators).
+_ADV_BROCHURE_MARKERS = (
+    "brochure",
+    "part2a",
+    "part-2a",
+    "p2a",
+    "2a-brochure",
+    "adv2a",
+    "adv-2a",
+)
 
-    Lower tuples sort first. Tiers are evaluated in order; the resolver
-    feeds this into ``sorted(..., key=...)[0]`` so the winning filename
-    is the one with the smallest tuple.
+_ADV_NON_BROCHURE_MARKERS = (
+    "part1",
+    "part-1",
+    "p1a",
+    "p1b",
+    "adv-w",
+    "advw",
+)
 
-    Order of preference:
-      1. Strong financial-statement marker (e.g. ``SOFC``) AND no
-         non-financial marker — the Statement of Financial Condition.
-      2. No non-financial marker — penalize Compliance / Exemption /
-         Cover sub-documents that show up in multi-doc packages.
-      3. ``x-17`` / ``x17`` in the filename — loose X-17A-5 marker
-         (kept from the prior heuristic).
-      4. ``audit`` in the filename — narrower than the prior
-         ``audit OR report`` because Compliance **Report** + Exemption
-         **Report** both matched ``report`` and crowded out SOFC.
-      5. Filename equals ``primary_document`` — demoted to a tiebreaker
-         because EDGAR's ``primaryDocument`` field is unreliable for
-         multi-doc filings (often points to a Cover Letter).
-      6. Shorter filename — final tiebreaker (kept from prior).
+
+def score_pdf_candidate(
+    name: str,
+    primary_document: str,
+    *,
+    form_type: str | None = None,
+) -> tuple[int, ...]:
+    """Sort key for picking the right PDF inside an EDGAR filing package.
+
+    Lower tuples sort first. The shape of the tuple depends on the form
+    type so each filing family can apply the heuristic that makes sense
+    for its multi-document layout.
+
+    Profiles (selected by ``form_type``):
+
+    - ``X-17A-5`` (BD audited financials): prefer Statement of Financial
+      Condition, demote Compliance / Exemption / Cover sub-documents.
+      This is the original ranking — byte-for-byte unchanged so the
+      financial-extraction cron keeps picking the same document.
+
+    - ``ADV`` / ``ADV-W`` / ``ADV-NR``: prefer the Part 2A brochure PDF,
+      demote Part 1 sub-documents and ADV-W withdrawal forms.
+
+    - Anything else (``None``, ``13F-HR``, ``SC 13D``, etc.): generic
+      ranking — exact-match on ``primary_document`` first, then shortest
+      filename. No semantic filename heuristic since we don't have one
+      for those forms today.
     """
     lower = name.lower()
-    has_non_fin = any(marker in lower for marker in _NON_FINANCIAL_MARKERS)
-    has_fin = any(marker in lower for marker in _FINANCIAL_STATEMENT_MARKERS)
+    form_upper = (form_type or "").upper()
+
+    if form_upper.startswith("X-17"):
+        has_non_fin = any(marker in lower for marker in _NON_FINANCIAL_MARKERS)
+        has_fin = any(marker in lower for marker in _FINANCIAL_STATEMENT_MARKERS)
+        return (
+            0 if (has_fin and not has_non_fin) else 1,
+            1 if has_non_fin else 0,
+            0 if ("x-17" in lower or "x17" in lower) else 1,
+            0 if "audit" in lower else 1,
+            0 if name == primary_document else 1,
+            len(name),
+        )
+
+    if form_upper.startswith("ADV"):
+        has_brochure = any(marker in lower for marker in _ADV_BROCHURE_MARKERS)
+        has_non_brochure = any(marker in lower for marker in _ADV_NON_BROCHURE_MARKERS)
+        return (
+            0 if (has_brochure and not has_non_brochure) else 1,
+            1 if has_non_brochure else 0,
+            # Loose ADV marker — any filename containing "adv" wins over
+            # generic names. Most filers prefix the brochure with the
+            # firm CRD + "adv" (e.g. "111111_adv_part_2a_2026.pdf").
+            0 if "adv" in lower else 1,
+            0 if name == primary_document else 1,
+            len(name),
+        )
+
+    # Generic fallback: trust EDGAR's primary_document pointer when it
+    # exists, otherwise prefer the shortest filename (heuristic that
+    # tends to surface the headline doc over signed-pdfs / exhibits).
     return (
-        0 if (has_fin and not has_non_fin) else 1,
-        1 if has_non_fin else 0,
-        0 if ("x-17" in lower or "x17" in lower) else 1,
-        0 if "audit" in lower else 1,
         0 if name == primary_document else 1,
         len(name),
     )
+
+
+def _score_pdf_candidate(name: str, primary_document: str) -> tuple[int, ...]:
+    """Back-compat alias for the X-17A-5 ranking.
+
+    The financial-extraction cron and existing test suite call this name
+    expecting the original X-17A-5 ordering, so keep it as a thin
+    delegate. New code should call ``score_pdf_candidate`` directly with
+    an explicit ``form_type``.
+    """
+    return score_pdf_candidate(name, primary_document, form_type="X-17A-5")
 
 
 def _validate_sec_url(url: str) -> None:
@@ -158,6 +227,109 @@ def _validate_sec_url(url: str) -> None:
         return
     if ip.is_private or ip.is_loopback or ip.is_link_local or ip.is_reserved or ip.is_multicast:
         raise ValueError(f"IP literal {host!r} targets a private or reserved range.")
+
+async def _fetch_edgar_index_json(url: str) -> dict[str, object]:
+    """Module-level twin of ``PdfDownloaderService._get_json_with_retries``.
+
+    Doxie's chat tools need to resolve EDGAR filing-index URLs without
+    instantiating the full ``PdfDownloaderService`` (and re-implementing
+    the SSRF allowlist + identity-encoding + retry loop in a sibling
+    module). This is the shared primitive.
+
+    Same retry / SSRF semantics as the instance method — both call into
+    each other-shaped helpers; we keep two surfaces because the
+    PdfDownloaderService method predates this extraction and the
+    financial-extraction pipeline still depends on the instance shape.
+    """
+    _validate_sec_url(url)
+    headers = {
+        "User-Agent": settings.sec_user_agent,
+        "Accept": "application/json",
+        # Defence in depth — see ``_get_json_with_retries`` comment.
+        "Accept-Encoding": "identity",
+    }
+    last_error: Exception | None = None
+    for attempt in range(1, settings.sec_request_max_retries + 1):
+        try:
+            async with httpx.AsyncClient(
+                timeout=settings.sec_request_timeout_seconds,
+                headers=headers,
+                follow_redirects=False,
+            ) as client:
+                response = await client.get(url)
+            response.raise_for_status()
+            payload = response.json()
+            if not isinstance(payload, dict):
+                raise RuntimeError("SEC endpoint returned an unexpected JSON payload.")
+            return payload
+        except (httpx.HTTPError, ValueError, RuntimeError) as exc:
+            last_error = exc
+            if attempt == settings.sec_request_max_retries:
+                raise
+            await asyncio.sleep(min(2**attempt, 8))
+    raise RuntimeError("Unable to retrieve SEC JSON payload.") from last_error
+
+
+async def resolve_filing_pdf_url(
+    *,
+    cik: str,
+    accession_number: str,
+    primary_document: str | None = None,
+    form_type: str | None = None,
+) -> str | None:
+    """Walk an EDGAR filing's ``index.json`` and pick the best PDF inside.
+
+    Returns the fully-qualified PDF URL (one of the documents in the
+    filing package) or ``None`` if the package contains no PDFs at all
+    (most Form 4 / 13F-HR filings — those are XML-primary).
+
+    The ``form_type`` argument biases the candidate scoring:
+    X-17A-5 → Statement of Financial Condition, ADV → Part 2A brochure,
+    everything else → generic ranking. See ``score_pdf_candidate`` for
+    the per-profile heuristics.
+
+    ``primary_document`` is optional: when present we fall back to it
+    if ``index.json`` fetch fails AND the primary doc itself is a PDF
+    (legacy behaviour from the X-17A-5 path); otherwise we return None
+    on fetch failure.
+    """
+    accession_slug = accession_number.replace("-", "")
+    try:
+        cik_slug = str(int(cik))
+    except (TypeError, ValueError):
+        return None
+    filing_directory_url = f"{settings.sec_archives_base_url}/{cik_slug}/{accession_slug}/"
+    index_url = f"{filing_directory_url}index.json"
+
+    try:
+        index_payload = await _fetch_edgar_index_json(index_url)
+    except Exception:
+        if primary_document and primary_document.lower().endswith(".pdf"):
+            return f"{filing_directory_url}{primary_document}"
+        return None
+
+    directory = index_payload.get("directory", {}) if isinstance(index_payload, dict) else {}
+    items = directory.get("item", []) if isinstance(directory, dict) else []
+    pdf_candidates: list[str] = []
+    for item in items:
+        if not isinstance(item, dict):
+            continue
+        name = item.get("name")
+        if isinstance(name, str) and name.lower().endswith(".pdf"):
+            pdf_candidates.append(name)
+
+    if not pdf_candidates and primary_document and primary_document.lower().endswith(".pdf"):
+        pdf_candidates.append(primary_document)
+    if not pdf_candidates:
+        return None
+
+    primary_for_score = primary_document or ""
+    selected_name = sorted(
+        pdf_candidates,
+        key=lambda n: score_pdf_candidate(n, primary_for_score, form_type=form_type),
+    )[0]
+    return f"{filing_directory_url}{selected_name}"
+
 
 class PdfDownloaderService:
     """Thin SEC PDF fetcher.
@@ -437,38 +609,20 @@ class PdfDownloaderService:
         return results
 
     async def _resolve_pdf_url(self, *, cik: str, accession_number: str, primary_document: str) -> str | None:
-        accession_slug = accession_number.replace("-", "")
-        cik_slug = str(int(cik))
-        filing_directory_url = f"{settings.sec_archives_base_url}/{cik_slug}/{accession_slug}/"
-        index_url = f"{filing_directory_url}index.json"
+        """X-17A-5 PDF resolver.
 
-        try:
-            index_payload = await self._get_json_with_retries(index_url)
-        except Exception:
-            if primary_document.lower().endswith(".pdf"):
-                return f"{filing_directory_url}{primary_document}"
-            return None
-
-        directory = index_payload.get("directory", {}) if isinstance(index_payload, dict) else {}
-        items = directory.get("item", []) if isinstance(directory, dict) else []
-        pdf_candidates: list[str] = []
-        for item in items:
-            if not isinstance(item, dict):
-                continue
-            name = item.get("name")
-            if isinstance(name, str) and name.lower().endswith(".pdf"):
-                pdf_candidates.append(name)
-
-        if not pdf_candidates and primary_document.lower().endswith(".pdf"):
-            pdf_candidates.append(primary_document)
-        if not pdf_candidates:
-            return None
-
-        selected_name = sorted(
-            pdf_candidates,
-            key=lambda name: _score_pdf_candidate(name, primary_document),
-        )[0]
-        return f"{filing_directory_url}{selected_name}"
+        Delegates to the module-level ``resolve_filing_pdf_url`` so the
+        chat tools (which can't easily instantiate this service) share
+        the same primitive. The ``form_type="X-17A-5"`` argument keeps
+        the byte-for-byte ranking the financial-extraction pipeline
+        depends on.
+        """
+        return await resolve_filing_pdf_url(
+            cik=cik,
+            accession_number=accession_number,
+            primary_document=primary_document,
+            form_type="X-17A-5",
+        )
 
     async def _get_json_with_retries(self, url: str) -> dict[str, object]:
         # URL validation runs BEFORE the retry loop, so a rejected URL does not
