@@ -10,6 +10,7 @@ Marked ``integration`` so it only runs under ``pytest -m integration``
 
 from __future__ import annotations
 
+import hashlib
 import secrets
 from datetime import date, datetime
 from typing import Any
@@ -29,15 +30,27 @@ from app.services.chatbot_semantic import ChatbotSemanticService
 pytestmark = pytest.mark.integration
 
 
-# Deterministic 768-dim fake vectors. Each test row gets a vector tied
-# to its id so we can assert which row was returned by search.
-def _fake_vector(seed: int) -> list[float]:
-    # Pad a tiny signature into the leading dims, zero the rest. Cosine
-    # similarity between two such vectors is dominated by the leading
-    # dims so we can engineer near/far relationships predictably.
+# Deterministic 768-dim fake vectors keyed on the SHA-256 of the input
+# text. Identical text -> identical vector (so a search by content text
+# matches the seeded row exactly at cosine 1.0); distinct text -> vectors
+# whose collision probability is ~2^-256 in practice.
+#
+# The previous mapping (``abs(hash(t)) % 1000``) collapsed every input to
+# 1 of 1000 buckets, which the birthday paradox turns into a ~50% tie
+# probability once ~40 BDs accumulate in the shared integration DB. That
+# made ``test_search_returns_top_k_with_similarity`` non-deterministically
+# flaky: two different firms hashing to the same bucket got identical
+# vectors and therefore identical similarity, so the top-1 ranking was
+# at the mercy of insertion order.
+def _fake_vector(text: str) -> list[float]:
+    digest = hashlib.sha256(text.encode("utf-8")).digest()  # 32 bytes
     vec = [0.0] * 768
-    vec[0] = 1.0
-    vec[1] = float(seed) / 100.0
+    # Spread the 32 hash bytes across the leading 32 dims as floats in
+    # [0, 1). Trailing dims stay zero — cosine similarity is dominated by
+    # the leading non-zero dims, so distinct hashes produce vectors that
+    # point in measurably different directions.
+    for i, byte in enumerate(digest):
+        vec[i] = byte / 255.0
     return vec
 
 
@@ -71,13 +84,11 @@ def patch_embedding_api(monkeypatch: pytest.MonkeyPatch) -> dict[str, list[Any]]
 
     async def fake_embed_chunks(texts: list[str]) -> list[list[float]]:
         record["chunks_calls"].append(list(texts))
-        # Stable per-text vector keyed on hash so identical content
-        # produces identical vectors across calls.
-        return [_fake_vector(abs(hash(t)) % 1000) for t in texts]
+        return [_fake_vector(t) for t in texts]
 
     async def fake_embed_query(text: str) -> list[float]:
         record["query_calls"].append(text)
-        return _fake_vector(abs(hash(text)) % 1000)
+        return _fake_vector(text)
 
     monkeypatch.setattr(chatbot_semantic, "embed_chunks", fake_embed_chunks)
     monkeypatch.setattr(chatbot_semantic, "embed_query", fake_embed_query)
