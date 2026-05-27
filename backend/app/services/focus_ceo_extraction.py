@@ -21,6 +21,7 @@ import asyncio
 import base64
 import io
 import logging
+import re
 from dataclasses import dataclass
 from datetime import date, datetime, timezone
 from pathlib import Path
@@ -110,6 +111,36 @@ _RANK_DISPLAY_TITLES = {
 
 def _rank_to_display_title(officer_rank: str) -> str:
     return _RANK_DISPLAY_TITLES.get(officer_rank, "Executive Officer")
+
+
+# Signature of pdfplumber's font-encoding mangle: underscores wrapping
+# individual characters, e.g. "_W__ill_ia_m__ D__. _H_a_w_t_h_o_rn_e_".
+# This happens on PDFs whose font /ToUnicode CMap is missing or broken —
+# pdfplumber returns a glyph-stream that looks like text but is mostly
+# unusable noise. Real names and emails almost never contain this pattern.
+# When detected, the extraction flow falls through to Gemini vision which
+# reads the page as an image and is robust to the font issue.
+_GARBAGE_TEXT_PATTERN = re.compile(r"_\w_\w_")
+
+
+def _looks_like_pdfplumber_garbage(*texts: str | None) -> bool:
+    """Return True if any of ``texts`` shows pdfplumber's scrambled-glyph
+    signature. Used to gate whether the pdfplumber result is trustworthy
+    before persisting; on a True result the caller falls through to
+    Gemini vision instead of writing the garbage to the DB."""
+    for text in texts:
+        if not text:
+            continue
+        # Real names/emails rarely contain even one underscore; legitimate
+        # email addresses (e.g. ``first_last@example.com``) max out at two.
+        # 3+ is the font-mangle signature.
+        if text.count("_") >= 3:
+            return True
+        # Stronger pattern check: ``_<char>_<char>_`` is impossible in
+        # natural text but is the diagnostic shape of the mangle.
+        if _GARBAGE_TEXT_PATTERN.search(text):
+            return True
+    return False
 
 
 def _render_pdf_pages_to_images(
@@ -267,7 +298,23 @@ class FocusCeoExtractionService:
         # ── Step 2: Try pdfplumber first (FREE, ~500ms) ──
         if pdf_record.local_document_path:
             text_result = await asyncio.to_thread(extract_from_pdf, pdf_record.local_document_path)
-            if text_result.success:
+            # Reject the pdfplumber result when its text looks scrambled
+            # (font /ToUnicode CMap broken — see _looks_like_pdfplumber_garbage).
+            # Fall through to Step 3 (Gemini vision) so the same PDF is read
+            # from its rendered images instead of its broken glyph stream.
+            pdf_text_is_garbage = _looks_like_pdfplumber_garbage(
+                text_result.contact_name,
+                text_result.contact_email,
+                text_result.contact_phone,
+            )
+            if pdf_text_is_garbage:
+                logger.info(
+                    "pdfplumber returned scrambled text for BD %d (%s); "
+                    "falling through to Gemini vision.",
+                    broker_dealer.id,
+                    broker_dealer.name,
+                )
+            if text_result.success and not pdf_text_is_garbage:
                 confidence = 0.95 if (text_result.contact_name and text_result.net_capital) else 0.80
                 # Persist if we found a contact name
                 if text_result.contact_name and confidence >= 0.5:
