@@ -9,5 +9,8 @@ export default async function BrokerDealerDetailPage(props: { params: Promise<{ 
   if (!hasFeature(session.user, MASTER_LIST)) {
     return <FeatureAccessDenied feature={MASTER_LIST} />;
   }
-  return <BrokerDealerDetailClient brokerDealerId={params.id} />;
+  // `key` forces a fresh remount when the firm id changes so cross-firm
+  // navigation (Prev/Next, breadcrumb hops) cleanly resets profile +
+  // refreshState rather than briefly flashing the previous firm's data.
+  return <BrokerDealerDetailClient key={params.id} brokerDealerId={params.id} />;
 }

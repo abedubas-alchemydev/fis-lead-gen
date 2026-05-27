@@ -202,20 +202,46 @@ export function AdvisorDetailClient({ advisorId }: { advisorId: string }) {
   // transitions to "ready" the effect below re-fetches /profile so the
   // user picks up whatever fresh data the orchestrator produced without
   // ever staring at a blocking spinner.
-  const loadProfile = useCallback(async () => {
-    try {
-      const response = await apiRequest<InvestmentAdvisorProfileResponse>(
-        `/api/v1/investment-advisors/${advisorId}/profile`,
-      );
-      setData(response);
-    } catch (err) {
-      setError(err instanceof Error ? err.message : "Failed to load advisor");
-    }
+  //
+  // Split into two functions mirroring broker-dealer-detail-client.tsx:
+  //   - `reloadProfile` is bare: it lets errors propagate so the caller
+  //     decides what to do (transition re-fetches swallow them so a
+  //     transient failure doesn't replace a valid view with an error).
+  //   - The initial-fetch useEffect wraps in try/catch and surfaces
+  //     errors via setError, since a failed first load *should* show
+  //     the error page.
+  // Both success branches clear `error` so a successful retry recovers
+  // from a prior failure rather than leaving the user stuck.
+  const reloadProfile = useCallback(async () => {
+    const response = await apiRequest<InvestmentAdvisorProfileResponse>(
+      `/api/v1/investment-advisors/${advisorId}/profile`,
+    );
+    setData(response);
+    setError(null);
   }, [advisorId]);
 
   useEffect(() => {
+    let active = true;
+    async function loadProfile() {
+      try {
+        const response = await apiRequest<InvestmentAdvisorProfileResponse>(
+          `/api/v1/investment-advisors/${advisorId}/profile`,
+        );
+        if (active) {
+          setData(response);
+          setError(null);
+        }
+      } catch (err) {
+        if (active) {
+          setError(err instanceof Error ? err.message : "Failed to load advisor");
+        }
+      }
+    }
     void loadProfile();
-  }, [loadProfile]);
+    return () => {
+      active = false;
+    };
+  }, [advisorId]);
 
   // Re-fetch /profile when refresh-on-visit transitions from in-flight
   // to ready, so the page picks up any new values the orchestrator
@@ -227,9 +253,11 @@ export function AdvisorDetailClient({ advisorId }: { advisorId: string }) {
     const prev = prevRefreshPhaseRef.current;
     prevRefreshPhaseRef.current = refreshState.phase;
     if (refreshState.phase === "ready" && prev !== "ready") {
-      void loadProfile();
+      void reloadProfile().catch(() => {
+        /* re-fetch is best-effort; the stale view is still useful */
+      });
     }
-  }, [refreshState.phase, loadProfile]);
+  }, [refreshState.phase, reloadProfile]);
 
   // Restore the user's filter/sort state on back-nav, falling back to
   // the bare list URL if no return envelope was passed.
