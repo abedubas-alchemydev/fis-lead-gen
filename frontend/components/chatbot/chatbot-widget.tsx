@@ -19,7 +19,9 @@ import type { ChatMessage } from "./chatbot-message";
 const WELCOME_MESSAGE: ChatMessage = {
   id: 0,
   role: "assistant",
-  content: "Hi! I'm Doxie 👋 Ask me anything about the app or the data you're looking at."
+  content: "Hi! I'm Doxie 👋 Ask me anything about the app or the data you're looking at.",
+  // Static greeting — not streamed, so render with markdown immediately.
+  isFinalized: true
 };
 
 // Human-readable status labels shown while a tool is running. Falls back
@@ -163,7 +165,10 @@ export function ChatbotWidget() {
         }
         const restored: ChatMessage[] = history.messages.map((m) => {
           const id = nextIdRef.current++;
-          return { id, role: m.role, content: m.content };
+          // Historical assistant messages already went through the full
+          // stream → done flow on their original turn; mark them
+          // finalized so markdown renders + deep-links work immediately.
+          return { id, role: m.role, content: m.content, isFinalized: true };
         });
         setMessages(restored);
       } catch (error) {
@@ -240,7 +245,11 @@ export function ChatbotWidget() {
             toolStatus: undefined,
             // If no deltas streamed (e.g. iteration cap fallback), the
             // ``reply`` carries the final text — use it.
-            content: m.content || event.reply
+            content: m.content || event.reply,
+            // Flip to finalised so the bubble re-renders with markdown
+            // + clickable deep-links. Doing it only here (not on each
+            // text_delta) is what prevents mid-stream half-link flicker.
+            isFinalized: true
           }));
           break;
         case "error":
@@ -323,6 +332,11 @@ export function ChatbotWidget() {
           onNewChat={handleNewChat}
           isSending={isSending}
           isLoadingHistory={isLoadingHistory}
+          // Clicking a Doxie-emitted deep-link should collapse the
+          // panel so the user can see the destination page. Cmd/Ctrl/
+          // shift-click and middle-click bypass this and open in a new
+          // tab — see ChatLink in chatbot-message.tsx.
+          onInternalNavigate={closePanel}
         />
       ) : null}
     </>

@@ -69,7 +69,16 @@ DOXIE_TOOL_USAGE_PROMPT = (
     "search tools first to disambiguate, then call the profile tool on "
     "the chosen numeric id. Never invent ids. If a tool returns an error "
     "object (e.g. no_access, not_found), relay that meaning to the user "
-    "in plain language instead of re-trying the same call."
+    "in plain language instead of re-trying the same call.\n\n"
+    "Tool results may include a 'link' field (deep-link to a specific "
+    "firm) and/or a 'list_link' field (deep-link to a filtered list). "
+    "When present, embed the most relevant one in your reply as a "
+    "markdown link — e.g. '[Apex Clearing Corp](/master-list/12345)' or "
+    "'[See all California broker-dealers](/master-list?state=CA)'. Use "
+    "short, descriptive link text. Prefer one link per answer: the most "
+    "specific one (item link for a single firm, list link when "
+    "summarizing many). Never invent URLs — only use the exact link "
+    "string the tool returned."
 )
 
 

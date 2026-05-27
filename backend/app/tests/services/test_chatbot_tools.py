@@ -287,10 +287,16 @@ class TestSearchBrokerDealers:
         assert result["total_matched"] == 1
         assert len(result["items"]) == 1
         item = result["items"][0]
-        assert set(item.keys()) == set(chatbot_tools._BD_SUMMARY_KEYS)
+        # Summary keys all present (plus the new ``link`` field added in
+        # Part A — checked separately below).
+        assert set(chatbot_tools._BD_SUMMARY_KEYS).issubset(item.keys())
         assert item["name"] == "Apex Clearing Corporation"
         # Decimal must have been coerced to float by _jsonable.
         assert isinstance(item["latest_net_capital"], float)
+        # Deep-link to the firm detail page (Part A).
+        assert item["link"] == f"/master-list/{item['id']}"
+        # Wrapping response gets a list-link that re-applies the same query.
+        assert result["list_link"] == "/master-list?q=Apex"
 
     async def test_403_returns_no_access_dict_does_not_raise(
         self,
@@ -435,6 +441,8 @@ class TestGetBrokerDealerProfile:
         # Summary + profile-extra keys all present.
         for k in (*chatbot_tools._BD_SUMMARY_KEYS, *chatbot_tools._BD_PROFILE_EXTRA_KEYS):
             assert k in result
+        # Top-level deep-link to this firm (Part A).
+        assert result["link"] == "/master-list/42"
         # Financials capped at PROFILE_FINANCIALS_LIMIT (3) even though 4 returned.
         assert len(result["latest_financials"]) == chatbot_tools.PROFILE_FINANCIALS_LIMIT
         assert len(result["clearing_arrangements"]) == 2
@@ -522,7 +530,14 @@ class TestSearchInvestmentAdvisors:
         )
         tool = chatbot_tools.TOOL_REGISTRY["search_investment_advisors"]
         result = await tool.execute(ia_user, db_stub, {"query": "Beta"})
-        assert set(result["items"][0].keys()) == set(chatbot_tools._IA_SUMMARY_KEYS)
+        item = result["items"][0]
+        assert set(chatbot_tools._IA_SUMMARY_KEYS).issubset(item.keys())
+        # Deep-link to the advisor detail page (Part A).
+        assert item["link"] == f"/advisor-list/{item['id']}"
+        # The search tool disables the hard 13F scope, so the link does
+        # too via ``files_13f=all`` — otherwise the FE would silently
+        # re-filter the user's destination view.
+        assert result["list_link"] == "/advisor-list?q=Beta&files_13f=all"
 
     async def test_403_returns_no_access(
         self,
@@ -578,6 +593,7 @@ class TestGetInvestmentAdvisorProfile:
 
         for k in (*chatbot_tools._IA_SUMMARY_KEYS, *chatbot_tools._IA_PROFILE_EXTRA_KEYS):
             assert k in result
+        assert result["link"] == "/advisor-list/77"
         assert len(result["advisory_activities"]) == chatbot_tools.ADVISORY_LIST_CAP
         assert len(result["client_types"]) == chatbot_tools.CLIENT_TYPE_LIST_CAP
 
@@ -660,6 +676,11 @@ class TestSemanticFirmSearch:
         assert item["name"] == "Acme Securities LLC"
         assert item["similarity"] == 0.91
         assert "Acme Securities LLC" in item["match_snippet"]
+        # Each hit carries a deep-link; the wrapper carries a
+        # list-link that re-runs the natural-language query as a name
+        # search on the master list (best-effort fallback for the user).
+        assert item["link"] == "/master-list/42"
+        assert result["list_link"] == "/master-list?q=small+introducing+brokers"
 
     async def test_empty_hits_returns_helpful_note(
         self,
@@ -924,9 +945,14 @@ class TestSearchInstitutionalInvestors:
         result = await tool.execute(ii_user, db_stub, {"query": "Gamma"})
 
         assert result["total_matched"] == 1
-        assert set(result["items"][0].keys()) == set(chatbot_tools._II_SUMMARY_KEYS)
+        item = result["items"][0]
+        assert set(chatbot_tools._II_SUMMARY_KEYS).issubset(item.keys())
         # total_aum (Decimal) coerced to float by _jsonable.
-        assert isinstance(result["items"][0]["total_aum"], float)
+        assert isinstance(item["total_aum"], float)
+        # II detail link (Part A). No ``list_link`` on the wrapper
+        # because the institutional-investor list page was dropped in #438.
+        assert item["link"] == f"/institutional-investors/{item['id']}"
+        assert "list_link" not in result
 
     async def test_403_returns_no_access(
         self,
@@ -985,6 +1011,7 @@ class TestGetInstitutionalInvestorProfile:
 
         for k in (*chatbot_tools._II_SUMMARY_KEYS, *chatbot_tools._II_PROFILE_EXTRA_KEYS):
             assert k in result
+        assert result["link"] == "/institutional-investors/88"
         # latest_13f_filing_date (date) coerced to isoformat string.
         assert isinstance(result["latest_13f_filing_date"], str)
 
@@ -1076,7 +1103,7 @@ class TestListBrokerDealersByFilter:
 
         monkeypatch.setattr(chatbot_tools._bd_repo, "list_broker_dealers", fake_list)
         tool = chatbot_tools.TOOL_REGISTRY["list_broker_dealers_by_filter"]
-        await tool.execute(
+        result = await tool.execute(
             bd_user,
             db_stub,
             {
@@ -1088,6 +1115,11 @@ class TestListBrokerDealersByFilter:
         assert captured["min_net_capital"] == 5_000_000.0
         assert captured["max_net_capital"] == 100_000_000.0
         assert captured["clearing_partners"] == ["Pershing"]
+        # list_link mirrors the filters back into the URL so the user
+        # lands on a pre-filtered master list.
+        assert "clearing_partner=Pershing" in result["list_link"]
+        assert "min_net_capital=5000000" in result["list_link"]
+        assert "max_net_capital=100000000" in result["list_link"]
 
     async def test_limit_clamped_to_filter_max(
         self,
@@ -1168,13 +1200,16 @@ class TestListInvestmentAdvisorsByFilter:
 
         monkeypatch.setattr(chatbot_tools._ia_repo, "list_investment_advisors", fake_list)
         tool = chatbot_tools.TOOL_REGISTRY["list_investment_advisors_by_filter"]
-        await tool.execute(
+        result = await tool.execute(
             ia_user,
             db_stub,
             {"state": "NY", "min_regulatory_aum": 1_000_000_000},
         )
         assert captured["states"] == ["NY"]
         assert captured["min_regulatory_aum"] == 1_000_000_000.0
+        # list_link mirrors the filters back to the advisor list URL.
+        assert "state=NY" in result["list_link"]
+        assert "min_regulatory_aum=1000000000" in result["list_link"]
 
     async def test_403_returns_no_access(
         self,

@@ -21,6 +21,10 @@ export interface ChatbotPanelProps {
   onNewChat?: () => void;
   isSending?: boolean;
   isLoadingHistory?: boolean;
+  // Fires when the user clicks an in-app link rendered in a Doxie reply.
+  // Lets the widget collapse the panel so the user can actually see the
+  // destination page (otherwise the chat panel keeps floating over it).
+  onInternalNavigate?: () => void;
 }
 
 export interface ChatbotPanelHandle {
@@ -37,6 +41,7 @@ export const ChatbotPanel = forwardRef<ChatbotPanelHandle, ChatbotPanelProps>(fu
     onNewChat,
     isSending = false,
     isLoadingHistory = false,
+    onInternalNavigate,
   },
   ref,
 ) {
@@ -118,6 +123,8 @@ export const ChatbotPanel = forwardRef<ChatbotPanelHandle, ChatbotPanelProps>(fu
               pending={message.pending}
               error={message.error}
               toolStatus={message.toolStatus}
+              isFinalized={message.isFinalized}
+              onInternalNavigate={onInternalNavigate}
             />
           ))
         )}

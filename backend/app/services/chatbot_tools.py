@@ -52,6 +52,13 @@ from app.services.chatbot_semantic import (
     ChatbotSemanticService,
     ENTITY_TYPE_BROKER_DEALER,
 )
+from app.services.chatbot_urls import (
+    bd_detail_url,
+    bd_list_url,
+    ia_detail_url,
+    ia_list_url,
+    ii_detail_url,
+)
 from app.services.institutional_investors import InstitutionalInvestorRepository
 from app.services.investment_advisors import InvestmentAdvisorRepository
 
@@ -277,7 +284,13 @@ _II_PROFILE_EXTRA_KEYS = (
 
 
 def _project_bd_summary(item: BrokerDealerListItem) -> dict[str, Any]:
-    return _jsonable({k: getattr(item, k, None) for k in _BD_SUMMARY_KEYS})
+    out: dict[str, Any] = {k: getattr(item, k, None) for k in _BD_SUMMARY_KEYS}
+    # In-app deep link so Doxie can cite this firm with a clickable href.
+    # The id is always present on a list-item shape; defend with a guard
+    # just so a malformed test stub doesn't crash the whole projection.
+    if out.get("id") is not None:
+        out["link"] = bd_detail_url(out["id"])
+    return _jsonable(out)
 
 
 def _project_bd_profile(
@@ -288,6 +301,8 @@ def _project_bd_profile(
     out: dict[str, Any] = {k: getattr(item, k, None) for k in _BD_SUMMARY_KEYS}
     for k in _BD_PROFILE_EXTRA_KEYS:
         out[k] = getattr(item, k, None)
+    if out.get("id") is not None:
+        out["link"] = bd_detail_url(out["id"])
     out["latest_financials"] = [
         {
             "report_date": f.report_date,
@@ -312,13 +327,18 @@ def _project_bd_profile(
 
 
 def _project_ia_summary(item: InvestmentAdvisorListItem) -> dict[str, Any]:
-    return _jsonable({k: getattr(item, k, None) for k in _IA_SUMMARY_KEYS})
+    out: dict[str, Any] = {k: getattr(item, k, None) for k in _IA_SUMMARY_KEYS}
+    if out.get("id") is not None:
+        out["link"] = ia_detail_url(out["id"])
+    return _jsonable(out)
 
 
 def _project_ia_profile(item: InvestmentAdvisorListItem) -> dict[str, Any]:
     out: dict[str, Any] = {k: getattr(item, k, None) for k in _IA_SUMMARY_KEYS}
     for k in _IA_PROFILE_EXTRA_KEYS:
         out[k] = getattr(item, k, None)
+    if out.get("id") is not None:
+        out["link"] = ia_detail_url(out["id"])
     # Cap multi-select arrays so a verbose ADV doesn't blow the prompt.
     activities = item.advisory_activities or []
     out["advisory_activities"] = list(activities[:ADVISORY_LIST_CAP])
@@ -328,13 +348,18 @@ def _project_ia_profile(item: InvestmentAdvisorListItem) -> dict[str, Any]:
 
 
 def _project_ii_summary(item: InstitutionalInvestorListItem) -> dict[str, Any]:
-    return _jsonable({k: getattr(item, k, None) for k in _II_SUMMARY_KEYS})
+    out: dict[str, Any] = {k: getattr(item, k, None) for k in _II_SUMMARY_KEYS}
+    if out.get("id") is not None:
+        out["link"] = ii_detail_url(out["id"])
+    return _jsonable(out)
 
 
 def _project_ii_profile(item: InstitutionalInvestorListItem) -> dict[str, Any]:
     out: dict[str, Any] = {k: getattr(item, k, None) for k in _II_SUMMARY_KEYS}
     for k in _II_PROFILE_EXTRA_KEYS:
         out[k] = getattr(item, k, None)
+    if out.get("id") is not None:
+        out["link"] = ii_detail_url(out["id"])
     return _jsonable(out)
 
 
@@ -392,6 +417,10 @@ async def _execute_search_broker_dealers(
     return {
         "items": [_project_bd_summary(item) for item in response.items],
         "total_matched": response.meta.total,
+        # Deep-link the user into the same name-filtered list. The FE
+        # reads ``q`` and shows all matches; useful for the model to
+        # cite when the search returns more rows than we capped.
+        "list_link": bd_list_url(q=query_or_error),
     }
 
 
@@ -481,6 +510,11 @@ async def _execute_search_investment_advisors(
     return {
         "items": [_project_ia_summary(item) for item in response.items],
         "total_matched": response.meta.total,
+        # The advisor search above disabled the hard 13F default
+        # (files_13f=None), so mirror that on the link by sending
+        # ``files_13f=all`` — otherwise the FE re-applies the 13F-only
+        # scope and the user sees fewer rows than the tool returned.
+        "list_link": ia_list_url(q=query_or_error, files_13f="all"),
     }
 
 
@@ -554,6 +588,9 @@ async def _execute_search_institutional_investors(
             "error": "tool_error",
             "message": "Lookup failed; ask the user to try again.",
         }
+    # No ``list_link`` for IIs — the institutional-investor list page was
+    # dropped in #438 (sidebar tab gone). Each item still carries its own
+    # ``link`` to the detail page via _project_ii_summary.
     return {
         "items": [_project_ii_summary(item) for item in response.items],
         "total_matched": response.meta.total,
@@ -671,6 +708,15 @@ async def _execute_list_broker_dealers_by_filter(
     return {
         "items": [_project_bd_summary(item) for item in response.items],
         "total_matched": response.meta.total,
+        # Echo the same filters into the link so the user lands on a
+        # pre-filtered master list mirroring what the tool returned.
+        "list_link": bd_list_url(
+            state=state,
+            lead_priority=lead_priority,
+            clearing_partner=[clearing_partner] if clearing_partner else None,
+            min_net_capital=min_net_capital,
+            max_net_capital=max_net_capital,
+        ),
     }
 
 
@@ -760,6 +806,10 @@ async def _execute_semantic_firm_search(
         # gates or stale-row filtering. Helpful for Doxie to mention
         # when the result set is truncated.
         "candidates_considered": len(bd_ids),
+        # Pass the user's natural-language query through as a name search
+        # on the master list. Won't always match what the embedding
+        # matched on, but it's the most useful fallback link we can offer.
+        "list_link": bd_list_url(q=query_or_error),
     }
 
 
@@ -827,6 +877,13 @@ async def _execute_list_investment_advisors_by_filter(
     return {
         "items": [_project_ia_summary(item) for item in response.items],
         "total_matched": response.meta.total,
+        "list_link": ia_list_url(
+            state=state,
+            status=status if status != "All" else None,
+            files_13f=files_13f,
+            min_regulatory_aum=min_regulatory_aum,
+            max_regulatory_aum=max_regulatory_aum,
+        ),
     }
 
 
