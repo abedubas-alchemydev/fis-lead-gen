@@ -327,93 +327,19 @@ class FocusCeoExtractionService:
                 extraction_notes="No X-17A-5 PDF available for this broker-dealer.",
             )
 
-        # ── Step 2: Try pdfplumber first (FREE, ~500ms) ──
-        if pdf_record.local_document_path:
-            text_result = await asyncio.to_thread(extract_from_pdf, pdf_record.local_document_path)
-            # Three fall-through conditions to Step 3 (Gemini vision):
-            #
-            # 1. Scrambled glyphs (font /ToUnicode CMap broken). See
-            #    _looks_like_pdfplumber_garbage.
-            # 2. Phone embedded in the contact_name field (regex grabbed
-            #    name + phone on the same line). See _name_has_embedded_phone.
-            # 3. pdfplumber returned success but found no contact_name at
-            #    all — coverage expansion. Without this fall-through the
-            #    BD would persist as "data_not_present" and never get a
-            #    contact row, even though Gemini might find one.
-            pdf_text_is_garbage = _looks_like_pdfplumber_garbage(
-                text_result.contact_name,
-                text_result.contact_email,
-                text_result.contact_phone,
-            )
-            phone_in_name = _name_has_embedded_phone(text_result.contact_name)
-            no_contact_name = text_result.success and not text_result.contact_name
-            if pdf_text_is_garbage:
-                logger.info(
-                    "pdfplumber returned scrambled text for BD %d (%s); "
-                    "falling through to Gemini vision.",
-                    broker_dealer.id,
-                    broker_dealer.name,
-                )
-            elif phone_in_name:
-                logger.info(
-                    "pdfplumber captured a phone into contact_name for BD %d "
-                    "(%s); falling through to Gemini vision.",
-                    broker_dealer.id,
-                    broker_dealer.name,
-                )
-            elif no_contact_name:
-                logger.info(
-                    "pdfplumber found no contact_name for BD %d (%s); "
-                    "falling through to Gemini vision.",
-                    broker_dealer.id,
-                    broker_dealer.name,
-                )
-            if (
-                text_result.success
-                and not pdf_text_is_garbage
-                and not phone_in_name
-                and not no_contact_name
-            ):
-                confidence = 0.95 if (text_result.contact_name and text_result.net_capital) else 0.80
-                # Persist if we found a contact name
-                if text_result.contact_name and confidence >= 0.5:
-                    await self._upsert_focus_contact(
-                        db,
-                        broker_dealer=broker_dealer,
-                        ceo_name=text_result.contact_name,
-                        ceo_title=text_result.contact_title or "Filing Contact",
-                        ceo_email=text_result.contact_email,
-                        ceo_phone=text_result.contact_phone,
-                    )
-                # Persist the net capital reading (if any). pdfplumber rarely
-                # surfaces a parseable report_date, so the persistence helper
-                # falls back to the BD's last_audit_report_date when needed.
-                await self._persist_net_capital(
-                    db,
-                    broker_dealer=broker_dealer,
-                    net_capital=text_result.net_capital,
-                    excess_net_capital=text_result.excess_net_capital,
-                    total_assets=None,
-                    required_min_capital=None,
-                    extracted_report_date=None,
-                    confidence_score=confidence,
-                    source_filing_url=pdf_record.source_pdf_url,
-                )
-                return FocusCeoExtractionResult(
-                    bd_id=broker_dealer.id,
-                    ceo_name=text_result.contact_name,
-                    ceo_title=text_result.contact_title,
-                    ceo_phone=text_result.contact_phone,
-                    ceo_email=text_result.contact_email,
-                    net_capital=text_result.net_capital,
-                    report_date=None,
-                    source_pdf_url=pdf_record.source_pdf_url,
-                    confidence_score=confidence,
-                    extraction_status="success",
-                    extraction_notes="Extracted via text analysis (no API cost).",
-                )
+        # Gemini-only extraction path. The previous pdfplumber fast path
+        # was removed after the 2026-05-28 prod backfill surfaced four
+        # categories of pdfplumber quality issues that needed defensive
+        # guards (underscore mangle, � replacement chars, phone-in-name,
+        # FOCUS form section headers like "B. ACCOUNTANT IDENTIFICATION"
+        # captured as a person name). The ~$5 saved per backfill by the
+        # pdfplumber path wasn't worth the four whack-a-mole defects, so
+        # every BD now goes straight to Gemini vision for consistent
+        # quality. _looks_like_pdfplumber_garbage and _name_has_embedded_phone
+        # are kept (defense-in-depth in case pdfplumber is re-introduced
+        # via a feature flag later) but their wired call sites are gone.
 
-        # ── Step 3: Fallback to Gemini vision ──
+        # ── Gemini vision extraction ──
         page_images = await asyncio.to_thread(
             _render_pdf_pages_to_images,
             pdf_record.bytes_base64,
@@ -556,64 +482,12 @@ class FocusCeoExtractionService:
                 extraction_notes="No X-17A-5 PDF available for this broker-dealer.",
             )
 
-        # Step 2: Try pdfplumber first (FREE, ~500ms, no API call)
-        if pdf_record.local_document_path:
-            text_result = await asyncio.to_thread(extract_from_pdf, pdf_record.local_document_path)
-            # Same three fall-through conditions as _run_extract:
-            #   1. Scrambled glyphs (font /ToUnicode CMap broken).
-            #   2. Phone embedded in contact_name field.
-            #   3. pdfplumber returned success but found no contact_name
-            #      at all (coverage expansion — without this, ~30% of
-            #      BDs in the prod smoke landed as "no contact" even
-            #      though Gemini would have found one).
-            pdf_text_is_garbage = _looks_like_pdfplumber_garbage(
-                text_result.contact_name,
-                text_result.contact_email,
-                text_result.contact_phone,
-            )
-            phone_in_name = _name_has_embedded_phone(text_result.contact_name)
-            no_contact_name = text_result.success and not text_result.contact_name
-            if pdf_text_is_garbage:
-                logger.info(
-                    "pdfplumber returned scrambled text for BD %d (batch path); "
-                    "falling through to Gemini vision.",
-                    bd_id,
-                )
-            elif phone_in_name:
-                logger.info(
-                    "pdfplumber captured a phone into contact_name for BD %d "
-                    "(batch path); falling through to Gemini vision.",
-                    bd_id,
-                )
-            elif no_contact_name:
-                logger.info(
-                    "pdfplumber found no contact_name for BD %d (batch path); "
-                    "falling through to Gemini vision.",
-                    bd_id,
-                )
-            if (
-                text_result.success
-                and not pdf_text_is_garbage
-                and not phone_in_name
-                and not no_contact_name
-            ):
-                # Got data from text extraction — no Gemini needed
-                confidence = 0.95 if (text_result.contact_name and text_result.net_capital) else 0.80
-                return FocusCeoExtractionResult(
-                    bd_id=bd_id,
-                    ceo_name=text_result.contact_name,
-                    ceo_title=text_result.contact_title,
-                    ceo_phone=text_result.contact_phone,
-                    ceo_email=text_result.contact_email,
-                    net_capital=text_result.net_capital,
-                    report_date=None,
-                    source_pdf_url=pdf_record.source_pdf_url,
-                    confidence_score=confidence,
-                    extraction_status="success",
-                    extraction_notes="Extracted via pdfplumber (text mode, no API cost).",
-                )
+        # Gemini-only extraction path (batch). See _run_extract for the
+        # full rationale — every BD goes straight to Gemini vision for
+        # consistent quality, after the pdfplumber path produced four
+        # categories of defects on the 2026-05-28 backfill.
 
-        # Step 3: pdfplumber failed — fall back to Gemini vision
+        # ── Gemini vision extraction ──
         page_images = await asyncio.to_thread(
             _render_pdf_pages_to_images,
             pdf_record.bytes_base64,
@@ -639,7 +513,7 @@ class FocusCeoExtractionService:
                 net_capital=None, report_date=None,
                 source_pdf_url=pdf_record.source_pdf_url,
                 confidence_score=0.0, extraction_status="error",
-                extraction_notes=f"Gemini vision fallback failed: {exc}",
+                extraction_notes=f"Gemini vision extraction failed: {exc}",
             )
 
         report_date: date | None = None
@@ -660,7 +534,7 @@ class FocusCeoExtractionService:
             source_pdf_url=pdf_record.source_pdf_url,
             confidence_score=extraction.confidence_score,
             extraction_status="success" if extraction.confidence_score >= 0.5 else "low_confidence",
-            extraction_notes=f"Extracted via Gemini vision (fallback). {extraction.rationale}",
+            extraction_notes=f"Extracted via Gemini vision. {extraction.rationale}",
         )
 
     async def run_batch(
