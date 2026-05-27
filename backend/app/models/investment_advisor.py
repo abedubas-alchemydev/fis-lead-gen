@@ -73,6 +73,13 @@ class InvestmentAdvisor(Base):
     last_enrich_attempt_at: Mapped[datetime | None] = mapped_column(
         DateTime(timezone=True), nullable=True
     )
+    # Stamped by the bulk gap-fill runner
+    # (``scripts/gap_fill_investment_advisors.py``) on every advisor it
+    # visits — pass or fail. 30-day cooldown stops the next pass from
+    # re-firing Gemini/Apollo on firms whose source had nothing to give.
+    last_gap_fill_attempt_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True, index=True
+    )
     # Stamped by the clearing-agency-membership importer for every advisor it
     # evaluates. NULL = never checked (FE renders nothing); non-NULL with no
     # active membership row = "evaluated, not a member". Most IAs are
