@@ -27,6 +27,7 @@ from app.services.chatbot_urls import (
     ia_detail_url,
     ia_list_url,
     ii_detail_url,
+    ii_list_url,
     investors_url,
 )
 
@@ -165,6 +166,34 @@ class TestIiDetailUrl:
         assert ii_detail_url(88) == "/institutional-investors/88"
 
 
+class TestIiListUrl:
+    """The /institutional-investors list page was restored in #552 with a
+    minimal URL contract: search + page + limit. Sort is hard-coded
+    server-side and not URL-synced."""
+
+    def test_no_args_yields_bare_route(self) -> None:
+        assert ii_list_url() == "/institutional-investors"
+
+    def test_query_threads_through_as_q(self) -> None:
+        assert ii_list_url(q="Vanguard") == "/institutional-investors?q=Vanguard"
+
+    def test_default_page_and_limit_stripped(self) -> None:
+        # Match the FE's `updateUrl` behaviour: defaults are stripped so
+        # a filter-less load is plain `/institutional-investors`.
+        assert ii_list_url(page=1, limit=25) == "/institutional-investors"
+
+    def test_non_default_page_emitted(self) -> None:
+        assert ii_list_url(page=3) == "/institutional-investors?page=3"
+
+    def test_spaces_become_plus(self) -> None:
+        # Sanity: encoding matches the FE's URLSearchParams output (same
+        # check the BD / IA list URLs already enforce).
+        assert (
+            ii_list_url(q="Gamma Capital")
+            == "/institutional-investors?q=Gamma+Capital"
+        )
+
+
 # ── Investors URL ───────────────────────────────────────────────────────
 
 
@@ -216,6 +245,7 @@ def test_internal_route_prefixes_sorted_and_unique() -> None:
         ia_list_url(state="NY"),
         ia_detail_url(1),
         ii_detail_url(1),
+        ii_list_url(q="x"),
         investors_url(),
         ALERTS_URL,
         MY_FAVORITES_URL,

@@ -1079,10 +1079,11 @@ class TestSearchInstitutionalInvestors:
         assert set(chatbot_tools._II_SUMMARY_KEYS).issubset(item.keys())
         # total_aum (Decimal) coerced to float by _jsonable.
         assert isinstance(item["total_aum"], float)
-        # II detail link (Part A). No ``list_link`` on the wrapper
-        # because the institutional-investor list page was dropped in #438.
+        # Per-item detail link (Part A).
         assert item["link"] == f"/institutional-investors/{item['id']}"
-        assert "list_link" not in result
+        # II list page was restored in #552 — the wrapper now stamps
+        # ``list_link`` mirroring the query, same shape as BD/IA.
+        assert result["list_link"] == "/institutional-investors?q=Gamma"
 
     async def test_403_returns_no_access(
         self,

@@ -252,7 +252,38 @@ def ia_detail_url(advisor_id: int | str) -> str:
 
 
 # ── Institutional investor URLs ────────────────────────────────────────────
-# IIs have no list page today (#438 dropped the sidebar tab); detail-only.
+# IIs had no list page after #438 dropped the sidebar tab; #552 restored
+# it on 2026-05-27 with a minimal contract (search + page + limit only —
+# sort is hard-coded server-side, no AUM/state filters yet).
+
+
+_II_DEFAULTS = {
+    "page": 1,
+    "limit": 25,
+}
+
+
+def ii_list_url(
+    *,
+    q: str | None = None,
+    page: int | None = None,
+    limit: int | None = None,
+) -> str:
+    """Build an ``/institutional-investors`` URL with the query pre-applied.
+
+    The new (post-#552) workspace client at
+    ``frontend/components/institutional-investors/institutional-investors-
+    workspace-client.tsx`` only URL-syncs three params — search (``q``),
+    page, and limit. Sort is hard-coded to ``total_aum desc`` and not
+    user-facing. If a future iteration adds state / AUM-band filters,
+    extend this signature in lockstep with that workspace client.
+    """
+    parts: list[tuple[str, object]] = []
+    _add(parts, "q", q, "")
+    _add(parts, "page", page, _II_DEFAULTS["page"])
+    _add(parts, "limit", limit, _II_DEFAULTS["limit"])
+    qs = _build_qs(parts)
+    return f"/institutional-investors?{qs}" if qs else "/institutional-investors"
 
 
 def ii_detail_url(investor_id: int | str) -> str:

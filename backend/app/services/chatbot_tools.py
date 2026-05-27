@@ -71,6 +71,7 @@ from app.services.chatbot_urls import (
     ia_detail_url,
     ia_list_url,
     ii_detail_url,
+    ii_list_url,
     investors_url,
 )
 from app.services.finra_pdf_service import (
@@ -675,12 +676,14 @@ async def _execute_search_institutional_investors(
             "error": "tool_error",
             "message": "Lookup failed; ask the user to try again.",
         }
-    # No ``list_link`` for IIs — the institutional-investor list page was
-    # dropped in #438 (sidebar tab gone). Each item still carries its own
-    # ``link`` to the detail page via _project_ii_summary.
+    # II list page was restored in #552 — re-add ``list_link`` so the
+    # model can offer "see all matches" the way it does for BD/IA.
+    # The workspace client only URL-syncs ``q`` (sort + filters are
+    # hard-coded server-side), so the link mirrors just the query.
     return {
         "items": [_project_ii_summary(item) for item in response.items],
         "total_matched": response.meta.total,
+        "list_link": ii_list_url(q=query_or_error),
     }
 
 
