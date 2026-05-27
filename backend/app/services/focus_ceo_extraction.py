@@ -57,25 +57,52 @@ logger = logging.getLogger(__name__)
 
 _FOCUS_CEO_PROMPT = """\
 Read this broker-dealer annual audit PDF (SEC Form X-17A-5 / Statement of Financial Condition) \
-and extract the following information:
+and extract the following information. The schema uses ``ceo_*`` field names for historical \
+reasons, but the actual person you should identify is the FILING CONTACT (see priority order \
+below) — this is who the firm tells the SEC to reach about the report, and is what the dox \
+product surfaces on the broker-dealer detail page.
 
-1. **CEO or principal executive officer's full name** — typically found on the cover page, \
-   in the header, or in the oath/affirmation section at the end where a senior officer signs.
-2. **Their title** (e.g., "Chief Executive Officer", "President", "Managing Member").
-3. **Their phone number** — if listed on the cover page, header, or contact section.
-4. **Their email address** — if listed anywhere in the document.
-5. **The firm's net capital** — from the "Computation of Net Capital" or \
-   "Statement of Financial Condition" section. This is the regulatory net capital figure.
-6. **The report date** — the fiscal year-end date the report covers (as YYYY-MM-DD).
+**Priority order for identifying the contact person (return the FIRST one you find):**
 
-IMPORTANT:
-- Return ALL dollar values in FULL US DOLLARS (not thousands, not millions).
-- If the document shows "$1,234" it means $1,234 not $1,234,000.
-- If a value states "(in thousands)" then multiply by 1000.
-- Use null for any field you cannot find with reasonable confidence.
-- The confidence_score should reflect how certain you are about the CEO identification \
-  and net capital extraction (0.0 = no useful data found, 1.0 = highly confident).
-- Provide a brief rationale explaining where you found each piece of data.
+1. **"PERSON TO CONTACT REGARDING THIS REPORT"** section on the facing sheet / cover page. \
+   This is the SEC-mandated contact and is present on most filings. The block usually has \
+   four labeled lines: NAME, TELEPHONE, EMAIL ADDRESS, ADDRESS. If the facing sheet has this \
+   section, that person's name + phone + email is what you should return — regardless of \
+   their title.
+2. **"PERSON TO CONTACT"** or **"FILING CONTACT"** section anywhere else in the document.
+3. **Chief Compliance Officer / FinOp / Treasurer** signature on the oath/affirmation section \
+   at the end. The oath identifies who signed the report under penalty of perjury.
+4. **CEO / President / Managing Member** signature on the oath/affirmation section.
+
+Return the following fields (using the ``ceo_*`` schema names — the values are the contact \
+person you identified, not necessarily a CEO):
+
+1. **ceo_name** — the contact person's full name. Examples that ARE valid names:
+   "Joel D. Magerman", "Alyssa DeLeon", "William D. Hawthorne". Examples that are NOT names \
+   (do not return these — leave ceo_name as null instead):
+   - Section headers like "B. ACCOUNTANT IDENTIFICATION", "AFFIRMATION", "OATH".
+   - Auditor / accounting firm names ("PricewaterhouseCoopers LLP", "KPMG").
+   - The broker-dealer firm's own name.
+2. **ceo_title** — exactly as printed on the form. Common values: "Filing Contact", \
+   "Chief Compliance Officer", "Chief Financial Officer", "Chief Executive Officer", \
+   "President", "Managing Member", "FinOp".
+3. **ceo_phone** — the contact's phone number, as printed (any format).
+4. **ceo_email** — the contact's email address, as printed.
+5. **net_capital** — the firm's regulatory net capital from the "Computation of Net Capital" \
+   schedule (NOT total assets, NOT equity).
+6. **report_date** — the fiscal year-end date the report covers (YYYY-MM-DD).
+
+**Important constraints:**
+- Return ALL dollar values in FULL US DOLLARS (not thousands, not millions). "$1,234" means \
+  $1,234, not $1,234,000. If a value is labeled "(in thousands)", multiply by 1000.
+- Use null for any field you cannot find with reasonable confidence. Do NOT make up data.
+- Do NOT capture form labels or section headers as ``ceo_name``. If the facing sheet has a \
+  "PERSON TO CONTACT" header but the actual NAME line is blank, return null for ceo_name.
+- The ``confidence_score`` should reflect how certain you are about the contact identification \
+  and net capital extraction (0.0 = nothing useful found, 1.0 = highly confident).
+- Provide a brief rationale explaining which section each piece of data came from \
+  (e.g., "Filing contact from facing sheet PERSON TO CONTACT section", \
+  "CEO from oath at end of report").
 """
 
 
