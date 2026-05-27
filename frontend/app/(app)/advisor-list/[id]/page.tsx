@@ -13,5 +13,8 @@ export default async function AdvisorDetailPage(
   if (!hasFeature(session.user, INVESTMENT_ADVISORS)) {
     return <FeatureAccessDenied feature={INVESTMENT_ADVISORS} />;
   }
-  return <AdvisorDetailClient advisorId={params.id} />;
+  // `key` forces a fresh remount when the advisor id changes so
+  // cross-firm navigation cleanly resets profile + refreshState rather
+  // than briefly flashing the previous advisor's data.
+  return <AdvisorDetailClient key={params.id} advisorId={params.id} />;
 }

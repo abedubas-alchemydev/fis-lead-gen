@@ -442,6 +442,9 @@ export function BrokerDealerDetailClient({ brokerDealerId }: { brokerDealerId: s
       `/api/v1/broker-dealers/${brokerDealerId}/profile`,
     );
     setProfile(response);
+    // Clear any error from a prior failed fetch — a successful reload
+    // means the page is fully recoverable, render the data not the error.
+    setError(null);
   }, [brokerDealerId]);
 
   // Fetch /profile immediately on mount — stale-while-revalidate.
@@ -456,7 +459,10 @@ export function BrokerDealerDetailClient({ brokerDealerId }: { brokerDealerId: s
         const response = await apiRequest<BrokerDealerProfileResponse>(
           `/api/v1/broker-dealers/${brokerDealerId}/profile`,
         );
-        if (active) setProfile(response);
+        if (active) {
+          setProfile(response);
+          setError(null);
+        }
       } catch (loadError) {
         if (active) {
           setError(
