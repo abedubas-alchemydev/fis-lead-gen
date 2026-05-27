@@ -58,12 +58,21 @@ class ExecutiveContactService:
 
     # Tokens that mark a FINRA owner row as an entity rather than a person —
     # we skip these when building the /people/match fan-out list because
-    # Apollo's people endpoints don't enrich organizations.
+    # Apollo's people endpoints don't enrich organizations. Reused by
+    # _firm_tokens to normalise firm names before the org-match guard.
     _ORG_NAME_TOKENS = re.compile(
         r"(?<!\w)(LLC|L\.L\.C\.|LLP|L\.L\.P\.|INC\.?|INCORPORATED|"
         r"CORP\.?|CORPORATION|L\.P\.|LP|LTD\.?|LIMITED|HOLDINGS|"
         r"GROUP|MANAGEMENT|PARTNERS|PLC|TRUST|FUND|COMPANY|CO\.)(?!\w)",
         re.IGNORECASE,
+    )
+
+    # English filler words stripped when comparing firm names. Keeping the
+    # set tight ("of", "and", "the") so legitimate token-overlap matches
+    # aren't lost. Single letters and "&" / "+" are filtered separately by
+    # the length>=2 rule in _firm_tokens.
+    _FIRM_NAME_STOPWORDS = frozenset(
+        {"the", "a", "an", "of", "and", "for", "in", "to"}
     )
 
     async def list_contacts(self, db: AsyncSession, broker_dealer_id: int) -> list[ExecutiveContact]:
@@ -328,6 +337,27 @@ class ExecutiveContactService:
                 any_errored = True
             if not isinstance(person, dict):
                 continue
+            # Reject cross-firm pollution. Apollo's /people/match can
+            # return a same-name person at a different company when it
+            # has no real match at the target firm. Probe found a Morgan
+            # Stanley "Patricia Fletcher" matched to a Catholic charity
+            # — without this guard her email + LinkedIn would land on
+            # the Morgan Stanley card.
+            apollo_org = person.get("organization")
+            apollo_org_name = (
+                apollo_org.get("name") if isinstance(apollo_org, dict) else None
+            )
+            if not self._firm_name_matches(
+                apollo_org_name, broker_dealer.name
+            ):
+                logger.info(
+                    "Apollo match for %s %s rejected: org %r != %r",
+                    officer["first"],
+                    officer["last"],
+                    apollo_org_name,
+                    broker_dealer.name,
+                )
+                continue
             email = person.get("email")
             email_clean = str(email).strip() if email else None
             linkedin_url = person.get("linkedin_url")
@@ -471,6 +501,47 @@ class ExecutiveContactService:
             last_name,
         )
         return None, False
+
+    @classmethod
+    def _firm_tokens(cls, name: str) -> frozenset[str]:
+        """Tokenize a firm name for comparison: lowercase, strip org-suffix
+        words (LLC/INC/L.P./HOLDINGS/etc), drop stopwords, keep distinctive
+        word tokens of length >= 2."""
+        if not name:
+            return frozenset()
+        cleaned = cls._ORG_NAME_TOKENS.sub(" ", name.lower())
+        tokens = re.findall(r"[a-z0-9]+", cleaned)
+        return frozenset(
+            t for t in tokens if t not in cls._FIRM_NAME_STOPWORDS and len(t) >= 2
+        )
+
+    @classmethod
+    def _firm_name_matches(cls, apollo_name: str | None, bd_name: str) -> bool:
+        """True when Apollo's organization.name is plausibly the same firm
+        as the broker-dealer we're enriching.
+
+        Guards against cross-firm pollution: Apollo's /people/match can
+        return a person with the same first+last name working at a
+        completely different company (probe found a Morgan Stanley
+        "Patricia Fletcher" matched to "Franciscan Friars of the
+        Atonement"). Without this check, that stranger's email + LinkedIn
+        would land on the BD's officer card as if they belonged to it.
+
+        Strategy: tokenize both names (lowercased, org-suffix-stripped,
+        stopwords removed). Match when at least 50% of the SHORTER name's
+        tokens are present in the longer name. This tolerates natural
+        verbosity differences (FINRA "MORGAN STANLEY" vs Apollo
+        "Morgan Stanley & Co.") while rejecting unrelated firms. Returns
+        False when either side has no usable tokens — we'd rather drop a
+        possibly-correct match than write a wrong one onto a real BD.
+        """
+        bd_tokens = cls._firm_tokens(bd_name)
+        apollo_tokens = cls._firm_tokens(apollo_name or "")
+        if not bd_tokens or not apollo_tokens:
+            return False
+        shared = bd_tokens & apollo_tokens
+        smaller = min(len(bd_tokens), len(apollo_tokens))
+        return len(shared) / smaller >= 0.5
 
     @staticmethod
     def _website_domain(website: str | None) -> str | None:

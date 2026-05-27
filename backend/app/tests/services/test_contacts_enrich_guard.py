@@ -120,6 +120,24 @@ class _FakeSession:
         self.commit_count += 1
 
 
+def _apollo_response(person_fields: dict[str, Any] | None, *, org_name: str = "ACME LLC") -> dict:
+    """Wrap an Apollo /people/match response body with the matching
+    organization name. The new org-match guard in
+    ``_match_officers_via_apollo`` rejects person matches whose
+    ``organization.name`` doesn't share enough tokens with the BD name —
+    so every test that wants the contact to LAND needs to include the
+    BD's org. Pass ``person_fields=None`` to mimic Apollo's
+    "no person matched" response."""
+    if person_fields is None:
+        return {"person": None}
+    return {
+        "person": {
+            **person_fields,
+            "organization": {"name": org_name},
+        }
+    }
+
+
 # ──────────────────────────── Tests ────────────────────────────
 
 
@@ -136,16 +154,14 @@ async def test_first_call_stamps_and_calls_apollo(patch_settings: None) -> None:
     match_route = respx.post(APOLLO_MATCH_URL).mock(
         return_value=httpx.Response(
             200,
-            json={
-                "person": {
-                    "first_name": "Alice",
-                    "last_name": "Doe",
-                    "email": "alice@example.com",
-                    "email_status": "verified",
-                    "phone_numbers": [{"sanitized_number": "+15550100"}],
-                    "linkedin_url": "https://linkedin.com/in/alice",
-                }
-            },
+            json=_apollo_response({
+                "first_name": "Alice",
+                "last_name": "Doe",
+                "email": "alice@example.com",
+                "email_status": "verified",
+                "phone_numbers": [{"sanitized_number": "+15550100"}],
+                "linkedin_url": "https://linkedin.com/in/alice",
+            }),
         )
     )
 
@@ -180,7 +196,7 @@ async def test_within_cooldown_short_circuits(patch_settings: None) -> None:
     session = _FakeSession()
 
     match_route = respx.post(APOLLO_MATCH_URL).mock(
-        return_value=httpx.Response(200, json={"person": None})
+        return_value=httpx.Response(200, json=_apollo_response(None))
     )
 
     service = ExecutiveContactService()
@@ -204,7 +220,7 @@ async def test_past_cooldown_stamps_and_calls_apollo(patch_settings: None) -> No
     session = _FakeSession()
 
     match_route = respx.post(APOLLO_MATCH_URL).mock(
-        return_value=httpx.Response(200, json={"person": None})
+        return_value=httpx.Response(200, json=_apollo_response(None))
     )
     respx.post(APOLLO_ORG_URL).mock(
         return_value=httpx.Response(200, json={"organization": None})
@@ -234,7 +250,7 @@ async def test_no_result_still_stamps(patch_settings: None) -> None:
     session = _FakeSession()
 
     match_route = respx.post(APOLLO_MATCH_URL).mock(
-        return_value=httpx.Response(200, json={"person": None})
+        return_value=httpx.Response(200, json=_apollo_response(None))
     )
     org_route = respx.post(APOLLO_ORG_URL).mock(
         return_value=httpx.Response(200, json={"organization": None})
@@ -315,14 +331,12 @@ async def test_per_officer_fanout_dedupes_and_skips_org_rows(
         last = captured_payloads[-1].get("last_name", "")
         return httpx.Response(
             200,
-            json={
-                "person": {
-                    "email": f"{last.lower()}@example.com",
-                    "email_status": "verified",
-                    "linkedin_url": f"https://linkedin.com/in/{last.lower()}",
-                    "phone_numbers": None,
-                }
-            },
+            json=_apollo_response({
+                "email": f"{last.lower()}@example.com",
+                "email_status": "verified",
+                "linkedin_url": f"https://linkedin.com/in/{last.lower()}",
+                "phone_numbers": None,
+            }),
         )
 
     respx.post(APOLLO_MATCH_URL).mock(side_effect=_capture)
@@ -359,7 +373,7 @@ async def test_no_person_officers_falls_back_to_org_enrich(
     session = _FakeSession()
 
     match_route = respx.post(APOLLO_MATCH_URL).mock(
-        return_value=httpx.Response(200, json={"person": None})
+        return_value=httpx.Response(200, json=_apollo_response(None))
     )
     org_route = respx.post(APOLLO_ORG_URL).mock(
         return_value=httpx.Response(
@@ -408,14 +422,12 @@ async def test_partial_transient_still_writes_successful_matches(
             return httpx.Response(502, text="Bad Gateway")
         return httpx.Response(
             200,
-            json={
-                "person": {
-                    "email": "bob@example.com",
-                    "email_status": "verified",
-                    "linkedin_url": "https://linkedin.com/in/bob",
-                    "phone_numbers": None,
-                }
-            },
+            json=_apollo_response({
+                "email": "bob@example.com",
+                "email_status": "verified",
+                "linkedin_url": "https://linkedin.com/in/bob",
+                "phone_numbers": None,
+            }),
         )
 
     respx.post(APOLLO_MATCH_URL).mock(side_effect=_selective)
@@ -483,14 +495,12 @@ async def test_match_returns_no_channels_is_dropped(patch_settings: None) -> Non
     respx.post(APOLLO_MATCH_URL).mock(
         return_value=httpx.Response(
             200,
-            json={
-                "person": {
-                    "title": "CEO",
-                    "email": None,
-                    "linkedin_url": None,
-                    "phone_numbers": None,
-                }
-            },
+            json=_apollo_response({
+                "title": "CEO",
+                "email": None,
+                "linkedin_url": None,
+                "phone_numbers": None,
+            }),
         )
     )
     org_route = respx.post(APOLLO_ORG_URL).mock(
@@ -550,6 +560,104 @@ def test_website_domain_strips_scheme_and_path() -> None:
     assert ExecutiveContactService._website_domain("") is None
 
 
+# ───────────────────── Firm-name match guard (cross-firm pollution) ─────────────────────
+
+
+def test_firm_name_matches_canonical() -> None:
+    assert ExecutiveContactService._firm_name_matches("Morgan Stanley", "MORGAN STANLEY")
+
+
+def test_firm_name_matches_with_corporate_suffix() -> None:
+    # FINRA verbose vs Apollo bare — both reduce to {"morgan", "stanley"}.
+    assert ExecutiveContactService._firm_name_matches(
+        "Morgan Stanley & Co. LLC", "MORGAN STANLEY"
+    )
+
+
+def test_firm_name_matches_strips_punctuation_and_case() -> None:
+    assert ExecutiveContactService._firm_name_matches(
+        "TCG Capital Markets", "TCG CAPITAL MARKETS L.L.C."
+    )
+
+
+def test_firm_name_matches_rejects_unrelated_firm() -> None:
+    # The Patricia Fletcher case: Apollo found a same-name person at an
+    # entirely unrelated organization. Without this rejection, the
+    # stranger's email + LinkedIn would land on the Morgan Stanley card.
+    assert not ExecutiveContactService._firm_name_matches(
+        "Franciscan Friars of the Atonement", "MORGAN STANLEY"
+    )
+
+
+def test_firm_name_matches_rejects_when_apollo_org_missing() -> None:
+    # Conservative: if Apollo doesn't tell us the org, drop the match
+    # rather than guess.
+    assert not ExecutiveContactService._firm_name_matches(None, "ACME LLC")
+    assert not ExecutiveContactService._firm_name_matches("", "ACME LLC")
+
+
+def test_firm_name_matches_rejects_when_bd_name_empty() -> None:
+    assert not ExecutiveContactService._firm_name_matches("Some Firm Inc.", "")
+
+
+def test_firm_name_matches_handles_token_order() -> None:
+    # Token sets are unordered, so reversed order still matches.
+    assert ExecutiveContactService._firm_name_matches(
+        "Capital Markets TCG", "TCG CAPITAL MARKETS L.L.C."
+    )
+
+
+@pytest.mark.asyncio
+@respx.mock
+async def test_apollo_match_at_wrong_firm_is_rejected(
+    patch_settings: None,
+) -> None:
+    """Behavior test reproducing the probe's Patricia Fletcher case: Apollo
+    returns a real person object with email + LinkedIn, but the person
+    works at a completely different organization. The guard rejects the
+    match before it lands as a contact row."""
+    bd = _make_bd(
+        last_attempt=None,
+        name="MORGAN STANLEY",
+        executive_officers=[{"name": "FLETCHER, PATRICIA KAY", "title": "TEXAS DESIGNATED PRINCIPAL"}],
+    )
+    session = _FakeSession()
+
+    respx.post(APOLLO_MATCH_URL).mock(
+        return_value=httpx.Response(
+            200,
+            # NOTE: org_name is unrelated — this is the actual probe response.
+            json=_apollo_response(
+                {
+                    "email": "pfletcher@atonementfriars.org",
+                    "email_status": "verified",
+                    "linkedin_url": "https://linkedin.com/in/pfletcher",
+                    "phone_numbers": None,
+                },
+                org_name="Franciscan Friars of the Atonement",
+            ),
+        )
+    )
+    org_route = respx.post(APOLLO_ORG_URL).mock(
+        return_value=httpx.Response(200, json={"organization": None})
+    )
+
+    service = ExecutiveContactService()
+    await service.enrich_contacts(session, bd)
+
+    # The wrong-firm match was rejected; no contact was written; the
+    # path then fell through to org-enrich (which here returned nothing).
+    assert session.added == [], (
+        "Cross-firm match must be dropped to prevent pollution"
+    )
+    assert org_route.called, (
+        "After per-officer pass yields zero matches, we still try org enrich"
+    )
+    # Cooldown stamped because the Apollo path was Apollo-owned (no
+    # transient errors), even though everything was rejected.
+    assert bd.last_enrich_attempt_at is not None
+
+
 # ───────────────────── Auto-PDL phone resolution ─────────────────────
 
 
@@ -597,14 +705,12 @@ async def test_pdl_fills_phone_for_apollo_match(
     respx.post(APOLLO_MATCH_URL).mock(
         return_value=httpx.Response(
             200,
-            json={
-                "person": {
-                    "email": "alice@example.com",
-                    "email_status": "verified",
-                    "linkedin_url": "https://linkedin.com/in/alice",
-                    "phone_numbers": None,
-                }
-            },
+            json=_apollo_response({
+                "email": "alice@example.com",
+                "email_status": "verified",
+                "linkedin_url": "https://linkedin.com/in/alice",
+                "phone_numbers": None,
+            }),
         )
     )
     pdl_route = respx.post(PDL_PERSON_ENRICH_URL).mock(
@@ -646,14 +752,12 @@ async def test_pdl_no_match_leaves_contact_alone(
     respx.post(APOLLO_MATCH_URL).mock(
         return_value=httpx.Response(
             200,
-            json={
-                "person": {
-                    "email": "alice@example.com",
-                    "email_status": "verified",
-                    "linkedin_url": "https://linkedin.com/in/alice",
-                    "phone_numbers": None,
-                }
-            },
+            json=_apollo_response({
+                "email": "alice@example.com",
+                "email_status": "verified",
+                "linkedin_url": "https://linkedin.com/in/alice",
+                "phone_numbers": None,
+            }),
         )
     )
     pdl_route = respx.post(PDL_PERSON_ENRICH_URL).mock(
@@ -691,14 +795,12 @@ async def test_pdl_error_silenced_apollo_data_still_writes(
     respx.post(APOLLO_MATCH_URL).mock(
         return_value=httpx.Response(
             200,
-            json={
-                "person": {
-                    "email": "alice@example.com",
-                    "email_status": "verified",
-                    "linkedin_url": "https://linkedin.com/in/alice",
-                    "phone_numbers": None,
-                }
-            },
+            json=_apollo_response({
+                "email": "alice@example.com",
+                "email_status": "verified",
+                "linkedin_url": "https://linkedin.com/in/alice",
+                "phone_numbers": None,
+            }),
         )
     )
     respx.post(PDL_PERSON_ENRICH_URL).mock(
@@ -733,14 +835,12 @@ async def test_pdl_skipped_when_setting_disabled(
     respx.post(APOLLO_MATCH_URL).mock(
         return_value=httpx.Response(
             200,
-            json={
-                "person": {
-                    "email": "alice@example.com",
-                    "email_status": "verified",
-                    "linkedin_url": "https://linkedin.com/in/alice",
-                    "phone_numbers": None,
-                }
-            },
+            json=_apollo_response({
+                "email": "alice@example.com",
+                "email_status": "verified",
+                "linkedin_url": "https://linkedin.com/in/alice",
+                "phone_numbers": None,
+            }),
         )
     )
     pdl_route = respx.post(PDL_PERSON_ENRICH_URL).mock(
@@ -770,13 +870,11 @@ async def test_pdl_skipped_when_no_email(patch_settings_with_pdl: None) -> None:
     respx.post(APOLLO_MATCH_URL).mock(
         return_value=httpx.Response(
             200,
-            json={
-                "person": {
-                    "email": None,
-                    "linkedin_url": "https://linkedin.com/in/alice",
-                    "phone_numbers": None,
-                }
-            },
+            json=_apollo_response({
+                "email": None,
+                "linkedin_url": "https://linkedin.com/in/alice",
+                "phone_numbers": None,
+            }),
         )
     )
     pdl_route = respx.post(PDL_PERSON_ENRICH_URL).mock(
