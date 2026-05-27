@@ -148,15 +148,6 @@ class Settings(BaseSettings):
     # that already clear our threshold — a too-low value would return
     # billed-but-useless matches.
     pdl_min_likelihood: int = 6
-    # Auto-resolve phones via PDL during the refresh-all auto-enrich pass.
-    # Apollo's /people/match doesn't return phones on our plan (gated behind
-    # a separate Phone Numbers add-on), so after Apollo writes per-officer
-    # rows with email + LinkedIn, this step calls PDL.enrich_by_email for
-    # any contact still missing a phone. Costs ~1 PDL credit per officer
-    # per BD per cooldown window (24h default). Disable by setting
-    # CONTACT_ENRICH_AUTO_PDL_PHONES=false in the backend .env if PDL
-    # spend becomes a concern; the manual "Find Phone" button is unaffected.
-    contact_enrich_auto_pdl_phones: bool = True
     # Multi-provider contact discovery chain used by the "Generate More Details"
     # button on the firm detail page. The orchestrator walks providers in the
     # comma-separated order below; the first result with ``confidence >=
