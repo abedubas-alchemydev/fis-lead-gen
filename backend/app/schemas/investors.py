@@ -57,6 +57,12 @@ class InvestorItem(BaseModel):
     reporting_owner_id: int | None = None
     is_favorited: bool = False
 
+    # True when the reporting owner's name looks like an entity (LLC, LP,
+    # GP, Fund, Holdings, ...) rather than a natural person. Computed
+    # per-response from the name; lets the FE disable the Enrich button
+    # for rows the person-only Apollo/PDL match can never resolve.
+    is_entity: bool = False
+
 
 class InvestorListMeta(BaseModel):
     page: int
@@ -74,19 +80,24 @@ class InvestorEnrichResponse(BaseModel):
     """Returned by ``POST /investors/{id}/enrich``.
 
     Returns just the enrichment fields — the FE merges them into the
-    consolidated row it already has. ``enriched_at`` is always populated
-    after a successful Apollo call (even when Apollo returns no match)
-    so the FE can distinguish "never enriched" from "enriched, came back
-    empty" and avoid re-triggering on every render. ``txn_id`` echoes the
-    leader transaction id the FE called with so the FE knows which row
-    in its list to patch.
+    consolidated row it already has. ``enriched_at`` is populated after a
+    real Apollo/PDL attempt (even when both come back empty) so the FE can
+    distinguish "never enriched" from "enriched, came back empty" and
+    avoid re-triggering on every render. ``enriched_at`` is **NULL** when
+    ``skip_reason`` is set (e.g. entity filer) — the lookup never actually
+    ran, so caching a timestamp would be misleading. ``txn_id`` echoes the
+    leader transaction id the FE called with so the FE knows which row in
+    its list to patch. ``skip_reason`` is non-NULL only for deliberate
+    short-circuits (currently just ``"entity_filer"``); a real upstream
+    miss returns ``matched=False`` with ``skip_reason=None``.
     """
 
     txn_id: int
     enriched_phone: str | None
     enriched_email: str | None
-    enriched_at: datetime
+    enriched_at: datetime | None
     matched: bool
+    skip_reason: str | None = None
 
 
 class InvestorPipelineRunResponse(BaseModel):

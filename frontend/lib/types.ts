@@ -255,6 +255,11 @@ export type InvestorItem = {
   // membership in the caller's default list.
   reporting_owner_id: number | null;
   is_favorited: boolean;
+
+  // True when the reporting owner's name looks like an entity (LLC / LP /
+  // GP / Fund / Holdings / ...) rather than a natural person — Apollo and
+  // PDL only enrich people, so the Enrich button is disabled for these.
+  is_entity: boolean;
 };
 
 export type InvestorListResponse = {
@@ -271,8 +276,13 @@ export type InvestorEnrichResponse = {
   txn_id: number;
   enriched_phone: string | null;
   enriched_email: string | null;
-  enriched_at: string;
+  // NULL when ``skip_reason`` is set (the lookup didn't actually run);
+  // ISO timestamp on a real attempt regardless of match outcome.
+  enriched_at: string | null;
   matched: boolean;
+  // Non-null only for deliberate short-circuits. Today the only value is
+  // "entity_filer" — name looks like an org so we never hit Apollo/PDL.
+  skip_reason: string | null;
 };
 
 export type AlertsBulkReadResponse = {

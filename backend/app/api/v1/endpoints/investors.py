@@ -41,7 +41,7 @@ from app.schemas.investors import (
 )
 from app.core.feature_permissions import INVESTORS
 from app.services.auth import ensure_feature, get_current_user
-from app.services.form4_apollo import match_form4_person
+from app.services.form4_apollo import looks_like_entity, match_form4_person
 from app.services.form4_transactions import Form4TransactionRepository
 from app.services.service_models import ConsolidatedPersonRow
 
@@ -105,6 +105,7 @@ def _item_from_consolidated(row: ConsolidatedPersonRow) -> InvestorItem:
         filed_at=row.filed_at,
         reporting_owner_id=row.reporting_owner_id,
         is_favorited=row.is_favorited,
+        is_entity=looks_like_entity(row.reporting_owner_name),
     )
 
 
@@ -277,6 +278,23 @@ async def enrich_investor(
         full_name=row.reporting_owner_name,
         issuer_name=row.issuer_name,
     )
+
+    # Defense in depth: the FE disables the button for entity rows, but if
+    # a stale tab (or a direct API caller) still POSTs, the service-layer
+    # short-circuit returns ``skip_reason="entity_filer"``. We don't write
+    # ``enriched_at`` for this path — it's deterministic from the name
+    # (computed on every list response), so caching it would be misleading
+    # and would flip the row into the "Re-enrich" state for no reason.
+    if match.skip_reason == "entity_filer":
+        return InvestorEnrichResponse(
+            txn_id=txn_id,
+            enriched_phone=None,
+            enriched_email=None,
+            enriched_at=None,
+            matched=False,
+            skip_reason="entity_filer",
+        )
+
     _, enriched_at = await repository.attach_enrichment_by_person(
         db,
         reporting_owner_cik=row.reporting_owner_cik,

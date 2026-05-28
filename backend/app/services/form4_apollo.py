@@ -26,6 +26,7 @@ across both shapes.
 from __future__ import annotations
 
 import logging
+import re
 from dataclasses import dataclass
 
 import httpx
@@ -38,12 +39,36 @@ logger = logging.getLogger(__name__)
 _APOLLO_MATCH_URL = "https://api.apollo.io/v1/people/match"
 _REQUEST_TIMEOUT_SECONDS = 10.0
 
+# Reporting-owner names ending in any of these tokens are entities (funds,
+# GPs, LPs, holdcos, trusts), not natural persons. Apollo's /people/match
+# and PDL's /person/enrich are both person-only APIs and can never resolve
+# an entity name, so we short-circuit before burning a credit. Lifted from
+# the FINRA executive-owner skip list in ``services/contacts.py`` and
+# extended with ``GP`` (common Form 4 suffix for fund general partners).
+_ENTITY_NAME_TOKENS = re.compile(
+    r"(?<!\w)(LLC|L\.L\.C\.|LLP|L\.L\.P\.|INC\.?|INCORPORATED|"
+    r"CORP\.?|CORPORATION|L\.P\.|LP|GP|LTD\.?|LIMITED|HOLDINGS|"
+    r"GROUP|MANAGEMENT|PARTNERS|PLC|TRUST|FUND|COMPANY|CO\.)(?!\w)",
+    re.IGNORECASE,
+)
+
+
+def looks_like_entity(name: str) -> bool:
+    """True if the reporting-owner name looks like an entity, not a person."""
+    return bool(_ENTITY_NAME_TOKENS.search(name or ""))
+
 
 @dataclass(slots=True)
 class Form4ApolloMatch:
     phone: str | None
     email: str | None
     matched: bool
+    # ``"entity_filer"`` when the row's name matches ``looks_like_entity``
+    # and the upstream people-match was deliberately skipped. ``None`` for
+    # all other paths (real hit, real miss, or transport failure). The FE
+    # surfaces a distinct copy when set so the user understands the row
+    # wasn't a failed lookup but a no-op by design.
+    skip_reason: str | None = None
 
 
 def _split_name(full_name: str) -> tuple[str | None, str | None]:
@@ -79,9 +104,17 @@ async def match_form4_person(
     PDL primary, Apollo fallback. Returns
     ``Form4ApolloMatch(matched=False, phone=None, email=None)`` on
     missing keys, transport failure, or no-match across both providers.
-    The caller is expected to persist ``enriched_at`` regardless so the
-    FE doesn't re-trigger on every render.
+    Entity filers (LLC / LP / GP / Fund / ...) short-circuit before any
+    network call with ``skip_reason="entity_filer"`` so the caller can
+    render a distinct UI state and the row never burns an Apollo credit.
+    The caller is expected to persist ``enriched_at`` on real attempts
+    so the FE doesn't re-trigger on every render.
     """
+    if looks_like_entity(full_name):
+        return Form4ApolloMatch(
+            phone=None, email=None, matched=False, skip_reason="entity_filer"
+        )
+
     first_name, last_name = _split_name(full_name)
     if first_name is None and last_name is None:
         return Form4ApolloMatch(phone=None, email=None, matched=False)
