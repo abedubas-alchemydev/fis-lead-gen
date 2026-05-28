@@ -5,6 +5,7 @@ import { useCallback, useEffect, useState } from "react";
 import { AlertFeedCard } from "@/components/alerts/alert-feed-card";
 import { ClearingDistributionChart } from "@/components/dashboard/clearing-distribution-chart";
 import { DashboardErrorCard } from "@/components/dashboard/dashboard-error-card";
+import { DataRefreshBanner } from "@/components/dashboard/data-refresh-banner";
 import { KpiCard } from "@/components/dashboard/kpi-card";
 import type { KpiIconProps } from "@/components/dashboard/kpi-card";
 import { KpiCardSkeleton } from "@/components/dashboard/kpi-card-skeleton";
@@ -221,6 +222,11 @@ export function DashboardHomeClient() {
           <TopActions />
         </div>
       </div>
+
+      {/* Friendly notice while any user-visible refresh pipeline is in
+          flight on the backend. Self-hides when the run completes and
+          dismissible per-tab session. */}
+      <DataRefreshBanner />
 
       {/* KPI grid — branches on stats state:
           - statsError → full-width DashboardErrorCard with Retry

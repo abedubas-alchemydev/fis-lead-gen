@@ -5,7 +5,7 @@ import logging
 from datetime import datetime, timezone
 
 from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, status
-from sqlalchemy import text
+from sqlalchemy import select, text
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.db.session import SessionLocal, get_db_session
@@ -13,6 +13,7 @@ from app.models.audit_log import AuditLog
 from app.models.pipeline_run import PipelineRun
 from app.schemas.auth import AuthenticatedUser
 from app.schemas.pipeline import (
+    ActiveRefreshResponse,
     CompetitorProvidersResponse,
     PipelineRunStatusResponse,
     PipelineStatusResponse,
@@ -41,6 +42,27 @@ logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/pipeline/clearing")
 scheduled_router = APIRouter(prefix="/pipeline/run")
 admin_destructive_router = APIRouter(prefix="/pipeline")
+# Non-admin pipeline status queries (any authenticated user). Kept on its
+# own router so it doesn't share a path namespace with the per-run
+# ``/pipeline/run/{run_id}`` reader, which would shadow string suffixes
+# trying to parse as int.
+status_router = APIRouter(prefix="/pipeline")
+
+
+# Pipeline names whose existence is reassuring rather than alarming for a
+# client to see surfaced on the dashboard. Only PARENT runs — sub-pipeline
+# names (``*_owners_officers``, ``*_resolve_website``, etc.) fire as
+# children of these and would duplicate the signal.
+USER_FACING_REFRESH_PIPELINES: frozenset[str] = frozenset(
+    {
+        "investment_advisor_gap_fill",
+        "broker_dealer_gap_fill",
+        "investment_advisor_refresh_all",
+        "broker_dealer_refresh_all",
+        "populate_all",
+        "daily_filing_monitor",
+    }
+)
 repository = BrokerDealerRepository()
 advisor_repository = InvestmentAdvisorRepository()
 pipeline_service = ClearingPipelineService()
@@ -408,6 +430,38 @@ async def run_populate_all(
     )
     background_tasks.add_task(_run_populate_all_background, run.id, caller)
     return _trigger_response(run)
+
+
+@status_router.get("/active-refreshes", response_model=ActiveRefreshResponse)
+async def get_active_refreshes(
+    current_user: AuthenticatedUser = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db_session),
+) -> ActiveRefreshResponse:
+    """Return whether any user-visible refresh pipeline is in flight.
+
+    Drives the dashboard's "refreshing your records" banner. Filters on
+    ``USER_FACING_REFRESH_PIPELINES`` so the banner only lights up for
+    parent runs the user would recognize as "data refresh" work —
+    sub-pipeline children are excluded to avoid the banner flickering
+    on/off as siblings complete.
+
+    Auth: any authenticated user. The response exposes only the
+    presence of in-flight work, not which firm or what fields.
+    """
+    stmt = (
+        select(PipelineRun.started_at)
+        .where(
+            PipelineRun.status.in_(("running", "queued")),
+            PipelineRun.pipeline_name.in_(USER_FACING_REFRESH_PIPELINES),
+        )
+        .order_by(PipelineRun.started_at.asc())
+        .limit(1)
+    )
+    earliest_started_at = (await db.execute(stmt)).scalar_one_or_none()
+    return ActiveRefreshResponse(
+        is_active=earliest_started_at is not None,
+        started_at=earliest_started_at,
+    )
 
 
 @scheduled_router.get("/{run_id}", response_model=PipelineRunStatusResponse)
