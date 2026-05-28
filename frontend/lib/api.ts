@@ -863,6 +863,15 @@ export async function refreshAdvisor(
   }
 }
 
+export async function gapFillAdvisorContacts(
+  advisorId: number
+): Promise<RefreshAdvisorResponse> {
+  return apiRequest<RefreshAdvisorResponse>(
+    `/api/v1/investment-advisors/${advisorId}/gap-fill-contacts`,
+    { method: "POST" }
+  );
+}
+
 export async function getPipelineRunStatus(
   runId: number
 ): Promise<PipelineRunDetail> {
