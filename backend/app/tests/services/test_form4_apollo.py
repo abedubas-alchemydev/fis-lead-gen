@@ -18,7 +18,7 @@ import respx
 
 from app.core.config import settings
 from app.services.contact_discovery import pdl
-from app.services.form4_apollo import match_form4_person
+from app.services.form4_apollo import looks_like_entity, match_form4_person
 
 
 _APOLLO_MATCH_URL = "https://api.apollo.io/v1/people/match"
@@ -222,3 +222,85 @@ async def test_empty_name_returns_no_match() -> None:
     )
 
     assert match.matched is False
+
+
+@pytest.mark.parametrize(
+    "name",
+    [
+        "SACHEM HEAD GP LLC",
+        "VANGUARD GROUP INC",
+        "BERKSHIRE HATHAWAY INC.",
+        "BLACKROCK HOLDINGS LLC",
+        "PERSHING SQUARE CAPITAL MANAGEMENT GP",
+        "JANE SMITH FOUNDATION TRUST",
+        "Renaissance Technologies LLC",
+    ],
+)
+def test_looks_like_entity_catches_common_suffixes(name: str) -> None:
+    """Entity-name regex catches the suffixes Form 4 10%-holders use."""
+    assert looks_like_entity(name) is True
+
+
+@pytest.mark.parametrize(
+    "name",
+    [
+        "COOK TIMOTHY D",
+        "RADY ERNEST S",
+        "DOE JANE",
+        "GATES WILLIAM H III",
+    ],
+)
+def test_looks_like_entity_passes_natural_persons(name: str) -> None:
+    """Natural-person names are not falsely flagged as entities."""
+    assert looks_like_entity(name) is False
+
+
+@pytest.mark.asyncio
+@respx.mock
+async def test_entity_filer_skips_both_providers(patch_pdl_and_apollo: None) -> None:
+    """Entity name short-circuits before PDL or Apollo is called.
+
+    Routes are mocked to fail loudly so any call would show up as a
+    request-count mismatch rather than a silent miss.
+    """
+    pdl_route = respx.post(pdl.PERSON_ENRICH_URL).mock(return_value=httpx.Response(500))
+    apollo_route = respx.post(_APOLLO_MATCH_URL).mock(return_value=httpx.Response(500))
+
+    match = await match_form4_person(
+        full_name="SACHEM HEAD GP LLC",
+        issuer_name="Apple Inc.",
+    )
+
+    assert match.matched is False
+    assert match.skip_reason == "entity_filer"
+    assert match.phone is None
+    assert match.email is None
+    assert not pdl_route.called
+    assert not apollo_route.called
+
+
+@pytest.mark.asyncio
+@respx.mock
+async def test_person_name_still_calls_providers(patch_pdl_and_apollo: None) -> None:
+    """Non-entity names continue to flow into the PDL/Apollo chain.
+
+    Guard against an overly-aggressive entity regex accidentally
+    short-circuiting real persons.
+    """
+    respx.post(pdl.PERSON_ENRICH_URL).mock(return_value=httpx.Response(404))
+    apollo_route = respx.post(_APOLLO_MATCH_URL).mock(
+        return_value=httpx.Response(
+            200,
+            json={"person": {"email": "tim@apple.com", "phone_numbers": []}},
+        )
+    )
+
+    match = await match_form4_person(
+        full_name="COOK TIMOTHY D",
+        issuer_name="Apple Inc.",
+    )
+
+    assert apollo_route.called
+    assert match.skip_reason is None
+    assert match.matched is True
+    assert match.email == "tim@apple.com"
