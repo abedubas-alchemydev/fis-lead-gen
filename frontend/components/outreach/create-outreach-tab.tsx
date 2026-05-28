@@ -485,12 +485,17 @@ export function CreateOutreachTab() {
           ) : null}
         </div>
 
-        {canGenerate || stage === "generating" ? (
+        {isContact ? (
           <div>
             <button
               type="button"
               onClick={() => void handleGenerate()}
               disabled={!canGenerate}
+              title={
+                folderId === null
+                  ? "Pick a service above to enable AI draft generation."
+                  : undefined
+              }
               className="inline-flex h-10 items-center gap-2 rounded-xl border border-[rgba(99,102,241,0.3)] bg-[rgba(99,102,241,0.08)] px-3 text-[13px] font-semibold text-[#4338ca] transition hover:bg-[rgba(99,102,241,0.14)] disabled:cursor-not-allowed disabled:opacity-60"
             >
               {stage === "generating" ? (
@@ -502,6 +507,11 @@ export function CreateOutreachTab() {
                 ? "Generating…"
                 : "Generate draft with AI"}
             </button>
+            {folderId === null && folders.length > 0 ? (
+              <p className="mt-2 text-[11px] text-[var(--text-dim,#475569)]">
+                Select a service above to enable AI draft generation.
+              </p>
+            ) : null}
           </div>
         ) : null}
 
