@@ -39,6 +39,7 @@ def _make_row(
     phones: list[dict] | None = None,
     discovery_source: str | None = None,
     discovery_confidence: Decimal | None = None,
+    apollo_person_id: str | None = None,
 ) -> AdvisorContact:
     row = AdvisorContact()
     row.advisor_id = 1
@@ -51,6 +52,7 @@ def _make_row(
     row.phones = phones
     row.discovery_source = discovery_source
     row.discovery_confidence = discovery_confidence
+    row.apollo_person_id = apollo_person_id
     row.source = "adv"
     return row
 
@@ -64,6 +66,7 @@ def _make_result(
     linkedin_url: str | None = None,
     emails: list[EmailHit] | None = None,
     phones: list[PhoneHit] | None = None,
+    apollo_person_id: str | None = None,
 ) -> DiscoveryResult:
     return DiscoveryResult(
         email=email,
@@ -74,6 +77,7 @@ def _make_result(
         raw={"_": provider},
         emails=emails or [],
         phones=phones or [],
+        apollo_person_id=apollo_person_id,
     )
 
 
@@ -320,3 +324,34 @@ def test_apply_gap_fill_does_not_overwrite_existing_discovery_source() -> None:
 
     assert row.discovery_source == "pdl"
     assert row.discovery_confidence == Decimal("80.00")
+
+
+def test_apply_gap_fill_stamps_apollo_person_id_when_null() -> None:
+    """If the chain returns an Apollo person id and the row didn't have one
+    (e.g. the original enrichment used PDL or Hunter, then a later gap-fill
+    pass found the same person via Apollo), stamp it so the async phone-
+    reveal webhook can locate the row later."""
+    row = _make_row(linkedin_url="https://linkedin.com/in/jane")
+    assert row.apollo_person_id is None
+
+    merged = _make_result(
+        email="jane@acme.com",
+        apollo_person_id="587cf802f65125cad923a266",
+    )
+
+    changed = _apply_gap_fill(row, merged)
+
+    assert changed is True
+    assert row.apollo_person_id == "587cf802f65125cad923a266"
+
+
+def test_apply_gap_fill_does_not_overwrite_existing_apollo_person_id() -> None:
+    """A subsequent chain hit can't relabel an Apollo id — a webhook still
+    in flight from the original /people/match would otherwise land on the
+    wrong row."""
+    row = _make_row(apollo_person_id="original-id")
+    merged = _make_result(apollo_person_id="different-id")
+
+    _apply_gap_fill(row, merged)
+
+    assert row.apollo_person_id == "original-id"
