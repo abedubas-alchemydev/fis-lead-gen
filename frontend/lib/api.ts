@@ -126,6 +126,10 @@ import type {
   OutreachSendsListResponse,
   OutreachSendsScope,
   RecipientSearchResponse,
+  FirmSearchResponse,
+  FirmContactsResponse,
+  FavoriteSearchResponse,
+  FavoriteFirmsResponse,
   PipelineRunItem,
   PipelineStatusResponse,
   PipelineTriggerResponse,
@@ -976,6 +980,49 @@ export async function searchOutreachContacts(
 ): Promise<RecipientSearchResponse> {
   return apiRequest<RecipientSearchResponse>(
     buildApiPath("/api/v1/outreach/contacts/search", { q: query, limit })
+  );
+}
+
+// Firm-name autocomplete for the recipient picker. Picking a firm
+// opens the firm-contacts modal; see listFirmContacts.
+export async function searchOutreachFirms(
+  query: string,
+  limit = 20
+): Promise<FirmSearchResponse> {
+  return apiRequest<FirmSearchResponse>(
+    buildApiPath("/api/v1/outreach/firms/search", { q: query, limit })
+  );
+}
+
+export async function listFirmContacts(
+  entityKind: "broker_dealer" | "advisor" | "institutional_investor",
+  entityId: number
+): Promise<FirmContactsResponse> {
+  return apiRequest<FirmContactsResponse>(
+    buildApiPath("/api/v1/outreach/firms/contacts", {
+      entity_kind: entityKind,
+      entity_id: entityId
+    })
+  );
+}
+
+// Favorite-list autocomplete + drill-down. The list-firms response is
+// shaped like a firm-search response so the picker modal can reuse the
+// firm-row rendering before drilling into firm-contacts.
+export async function searchOutreachFavorites(
+  query: string,
+  limit = 20
+): Promise<FavoriteSearchResponse> {
+  return apiRequest<FavoriteSearchResponse>(
+    buildApiPath("/api/v1/outreach/favorites/search", { q: query, limit })
+  );
+}
+
+export async function listFavoriteFirms(
+  listId: number
+): Promise<FavoriteFirmsResponse> {
+  return apiRequest<FavoriteFirmsResponse>(
+    `/api/v1/outreach/favorites/${listId}/firms`
   );
 }
 

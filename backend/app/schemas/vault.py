@@ -171,6 +171,75 @@ class RecipientSearchResponse(BaseModel):
     items: list[RecipientSearchResult]
 
 
+class FirmSearchResult(BaseModel):
+    """One firm row in the recipient autocomplete dropdown.
+
+    Returned by ``GET /outreach/firms/search``. The autocomplete
+    surfaces firm rows alongside contact rows so the user can either
+    pick a known contact directly (no modal) or pick a firm to open
+    a "pick a contact at this firm" modal. ``contact_count`` only
+    counts contacts that have an email on file -- a firm whose
+    contacts all lack emails can't be sent to and shouldn't appear.
+    """
+
+    entity_kind: Literal["broker_dealer", "advisor", "institutional_investor"]
+    entity_id: int
+    entity_name: str
+    contact_count: int
+
+
+class FirmSearchResponse(BaseModel):
+    items: list[FirmSearchResult]
+
+
+class FirmContactsResponse(BaseModel):
+    """All email-bearing contacts at a single firm.
+
+    Returned by ``GET /outreach/firms/contacts`` after the user picks a
+    firm row in the recipient autocomplete. Reuses the
+    ``RecipientSearchResult`` shape since the modal renders one row per
+    contact identically to how the autocomplete renders contact-hit
+    rows, then picks one into the create-outreach form.
+    """
+
+    entity_kind: Literal["broker_dealer", "advisor", "institutional_investor"]
+    entity_id: int
+    entity_name: str
+    items: list[RecipientSearchResult]
+
+
+class FavoriteSearchResult(BaseModel):
+    """One favorite-list row in the recipient autocomplete dropdown.
+
+    Returned by ``GET /outreach/favorites/search``. ``firm_count``
+    counts only the firms in the list whose contacts have at least
+    one email -- a list whose firms are all un-emailable shouldn't
+    appear in the dropdown since picking it would land in an empty
+    drill-down modal.
+    """
+
+    list_id: int
+    name: str
+    firm_count: int
+
+
+class FavoriteSearchResponse(BaseModel):
+    items: list[FavoriteSearchResult]
+
+
+class FavoriteFirmsResponse(BaseModel):
+    """All email-bearing-contact firms in a single favorite list.
+
+    Returned by ``GET /outreach/favorites/{list_id}/firms``. The drill-
+    down modal renders one row per firm; picking a row swaps the modal
+    to the firm-contacts view (``GET /outreach/firms/contacts``).
+    """
+
+    list_id: int
+    name: str
+    items: list[FirmSearchResult]
+
+
 class OutreachSendResponse(BaseModel):
     id: int
     gmail_message_id: str

@@ -754,6 +754,50 @@ export type RecipientSearchResponse = {
   items: RecipientSearchResult[];
 };
 
+// Firm-hit row in the recipient autocomplete. Picking one opens the
+// firm-contacts modal (see FirmContactsResponse). contact_count only
+// counts contacts with an email -- a firm whose contacts all lack
+// emails can't be sent to and isn't returned by the backend.
+export type FirmSearchResult = {
+  entity_kind: "broker_dealer" | "advisor" | "institutional_investor";
+  entity_id: number;
+  entity_name: string;
+  contact_count: number;
+};
+
+export type FirmSearchResponse = {
+  items: FirmSearchResult[];
+};
+
+// Email-bearing contacts at one firm. Drives the firm-contacts modal
+// opened when the user picks a firm row in the autocomplete (or after
+// picking a firm in the favorites drill-down).
+export type FirmContactsResponse = {
+  entity_kind: "broker_dealer" | "advisor" | "institutional_investor";
+  entity_id: number;
+  entity_name: string;
+  items: RecipientSearchResult[];
+};
+
+// Favorite-list row in the recipient autocomplete. Picking one opens
+// the favorite-firms modal (drill-down 1: firms in the list). Picking
+// a firm in that modal swaps to the firm-contacts view (drill-down 2).
+export type FavoriteSearchResult = {
+  list_id: number;
+  name: string;
+  firm_count: number;
+};
+
+export type FavoriteSearchResponse = {
+  items: FavoriteSearchResult[];
+};
+
+export type FavoriteFirmsResponse = {
+  list_id: number;
+  name: string;
+  items: FirmSearchResult[];
+};
+
 export type OutreachAdhocSendRequest = {
   recipient_email: string;
   recipient_name?: string | null;
