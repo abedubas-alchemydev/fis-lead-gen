@@ -14,10 +14,12 @@ existence.
 
 from __future__ import annotations
 
+import json
 import logging
+from datetime import datetime, timedelta, timezone
 from typing import Literal
 
-from fastapi import APIRouter, Depends, HTTPException, Query, status
+from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, Query, Response, status
 from sqlalchemy import func, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -30,9 +32,17 @@ from app.models.institutional_investor import InstitutionalInvestor
 from app.models.investment_advisor import InvestmentAdvisor
 from app.models.investor_contact import InvestorContact
 from app.models.outreach_send import OutreachSend
+from app.models.pipeline_run import PipelineRun
 from app.models.vault_folder import VaultFolder
 from app.schemas.auth import AuthenticatedUser
 from app.models.favorite_list import FavoriteList, FavoriteListItem
+from app.schemas.outreach_contacts import (
+    GapFillFirmResponse,
+    OutreachContactPerson,
+    OutreachContactsFirmDetailResponse,
+    OutreachContactsFirmRow,
+    OutreachContactsFirmsResponse,
+)
 from app.schemas.vault import (
     FavoriteFirmsResponse,
     FavoriteSearchResponse,
@@ -57,8 +67,21 @@ from app.schemas.vault import (
     RecipientSearchResponse,
     RecipientSearchResult,
 )
-from app.core.feature_permissions import SENT_OUTREACH
+from app.core.feature_permissions import OUTREACH_CONTACTS, SENT_OUTREACH
+from app.services.advisor_refresh_orchestrator import (
+    GAP_FILL_ADVISOR_CONTACTS_PIPELINE_NAME,
+    run_gap_fill_advisor_contacts_background,
+)
 from app.services.auth import ensure_feature, get_current_user
+from app.services.bd_contact_gap_fill import (
+    GAP_FILL_BD_CONTACTS_PIPELINE_NAME,
+    run_gap_fill_bd_contacts_background,
+)
+from app.services.investor_contact_gap_fill import (
+    GAP_FILL_II_CONTACTS_PIPELINE_NAME,
+    run_gap_fill_ii_contacts_background,
+)
+from app.services.pipeline_reaper import STALE_REFRESH_RUN_AGE
 from app.services.email_providers import (
     PROVIDERS,
     EmailAccountNotLinked,
@@ -1748,3 +1771,514 @@ async def list_linked_providers(
     if dirty:
         await db.commit()
     return LinkedProvidersResponse(items=items)
+
+
+# --------------------------------------------------------------------------- #
+# Outreach Contacts page (`/outreach/contacts`)                               #
+# --------------------------------------------------------------------------- #
+#
+# The endpoints below back the persons-by-firm browse + per-firm gap-fill
+# loop. Distinct namespace and feature-gate from the send-flow endpoints
+# above because the gap-fill button fires expensive provider chains
+# (Apollo / PDL / Hunter / Snov) and operators may want to control that
+# spend independently of the send surface.
+
+_GAP_FILL_COOLDOWN_DAYS = 30
+
+_GAP_FILL_PIPELINE_NAMES: tuple[str, ...] = (
+    GAP_FILL_ADVISOR_CONTACTS_PIPELINE_NAME,
+    GAP_FILL_BD_CONTACTS_PIPELINE_NAME,
+    GAP_FILL_II_CONTACTS_PIPELINE_NAME,
+)
+
+_ENTITY_KIND_MARKER_KEY: dict[str, str] = {
+    "broker_dealer": "bd_id",
+    "advisor": "advisor_id",
+    "institutional_investor": "investor_id",
+}
+
+
+def _require_outreach_contacts(
+    user: AuthenticatedUser = Depends(get_current_user),
+) -> AuthenticatedUser:
+    ensure_feature(user, OUTREACH_CONTACTS)
+    return user
+
+
+def _is_recent_pipeline_run(started_at: datetime | None) -> bool:
+    """True if a PipelineRun started recently enough to still be considered
+    alive. Anything older than ``STALE_REFRESH_RUN_AGE`` is presumed orphaned
+    by an instance swap and must not be treated as in-flight."""
+    if started_at is None:
+        return False
+    if started_at.tzinfo is None:
+        started_at = started_at.replace(tzinfo=timezone.utc)
+    return started_at >= datetime.now(timezone.utc) - STALE_REFRESH_RUN_AGE
+
+
+async def _in_flight_firm_keys(
+    db: AsyncSession,
+) -> set[tuple[str, int]]:
+    """Set of (entity_kind, entity_id) pairs that currently have a gap-fill
+    PipelineRun in ``queued`` or ``running`` state. Used to compute the
+    ``gap_fill_in_progress`` flag on the firms-list response without an
+    N+1 over the per-firm rows."""
+    stmt = (
+        select(PipelineRun.pipeline_name, PipelineRun.notes, PipelineRun.started_at)
+        .where(PipelineRun.pipeline_name.in_(_GAP_FILL_PIPELINE_NAMES))
+        .where(PipelineRun.status.in_(("queued", "running")))
+    )
+    keys: set[tuple[str, int]] = set()
+    for pipeline_name, notes, started_at in (await db.execute(stmt)).all():
+        if not _is_recent_pipeline_run(started_at):
+            continue
+        try:
+            payload = json.loads(notes) if notes else {}
+        except json.JSONDecodeError:
+            continue
+        if pipeline_name == GAP_FILL_BD_CONTACTS_PIPELINE_NAME:
+            kind = "broker_dealer"
+            marker = payload.get("bd_id")
+        elif pipeline_name == GAP_FILL_ADVISOR_CONTACTS_PIPELINE_NAME:
+            kind = "advisor"
+            marker = payload.get("advisor_id")
+        else:
+            kind = "institutional_investor"
+            marker = payload.get("investor_id")
+        if isinstance(marker, int):
+            keys.add((kind, marker))
+    return keys
+
+
+@router.get(
+    "/contacts/firms",
+    response_model=OutreachContactsFirmsResponse,
+)
+async def list_outreach_contacts_firms(
+    entity_kind: Literal[
+        "broker_dealer", "advisor", "institutional_investor"
+    ]
+    | None = Query(None),
+    q: str | None = Query(None, max_length=255),
+    page: int = Query(1, ge=1),
+    limit: int = Query(50, ge=1, le=100),
+    _: AuthenticatedUser = Depends(_require_outreach_contacts),
+    db: AsyncSession = Depends(get_db_session),
+) -> OutreachContactsFirmsResponse:
+    """Paginated list of firms (BD + advisor + II) with at least one
+    contact on file.
+
+    UNIONs three per-kind SELECTs, each with correlated COUNT subqueries
+    on the matching contact table. Drops the ``email IS NOT NULL`` filter
+    used by the send-flow ``/firms/search`` endpoint because phone-only
+    contacts also count here -- the new page surfaces persons regardless
+    of channel.
+
+    ``gap_fill_in_progress`` is resolved by a single auxiliary scan over
+    ``pipeline_runs`` for in-flight gap-fill jobs, joined in Python.
+    Cheaper than three correlated EXISTS subqueries on the outer UNION.
+    """
+    needle = f"%{(q or '').strip().lower()}%" if q else None
+
+    bd_contact_count = (
+        select(func.count(ExecutiveContact.id))
+        .where(ExecutiveContact.bd_id == BrokerDealer.id)
+        .correlate(BrokerDealer)
+        .scalar_subquery()
+    )
+    bd_email_count = (
+        select(func.count(ExecutiveContact.id))
+        .where(ExecutiveContact.bd_id == BrokerDealer.id)
+        .where(ExecutiveContact.email.isnot(None))
+        .correlate(BrokerDealer)
+        .scalar_subquery()
+    )
+    bd_phone_count = (
+        select(func.count(ExecutiveContact.id))
+        .where(ExecutiveContact.bd_id == BrokerDealer.id)
+        .where(ExecutiveContact.phone.isnot(None))
+        .correlate(BrokerDealer)
+        .scalar_subquery()
+    )
+    bd_last_enriched = (
+        select(func.max(ExecutiveContact.enriched_at))
+        .where(ExecutiveContact.bd_id == BrokerDealer.id)
+        .correlate(BrokerDealer)
+        .scalar_subquery()
+    )
+
+    advisor_contact_count = (
+        select(func.count(AdvisorContact.id))
+        .where(AdvisorContact.advisor_id == InvestmentAdvisor.id)
+        .correlate(InvestmentAdvisor)
+        .scalar_subquery()
+    )
+    advisor_email_count = (
+        select(func.count(AdvisorContact.id))
+        .where(AdvisorContact.advisor_id == InvestmentAdvisor.id)
+        .where(AdvisorContact.email.isnot(None))
+        .correlate(InvestmentAdvisor)
+        .scalar_subquery()
+    )
+    advisor_phone_count = (
+        select(func.count(AdvisorContact.id))
+        .where(AdvisorContact.advisor_id == InvestmentAdvisor.id)
+        .where(AdvisorContact.phone.isnot(None))
+        .correlate(InvestmentAdvisor)
+        .scalar_subquery()
+    )
+    advisor_last_enriched = (
+        select(func.max(AdvisorContact.enriched_at))
+        .where(AdvisorContact.advisor_id == InvestmentAdvisor.id)
+        .correlate(InvestmentAdvisor)
+        .scalar_subquery()
+    )
+
+    investor_contact_count = (
+        select(func.count(InvestorContact.id))
+        .where(InvestorContact.investor_id == InstitutionalInvestor.id)
+        .correlate(InstitutionalInvestor)
+        .scalar_subquery()
+    )
+    investor_email_count = (
+        select(func.count(InvestorContact.id))
+        .where(InvestorContact.investor_id == InstitutionalInvestor.id)
+        .where(InvestorContact.email.isnot(None))
+        .correlate(InstitutionalInvestor)
+        .scalar_subquery()
+    )
+    investor_phone_count = (
+        select(func.count(InvestorContact.id))
+        .where(InvestorContact.investor_id == InstitutionalInvestor.id)
+        .where(InvestorContact.phone.isnot(None))
+        .correlate(InstitutionalInvestor)
+        .scalar_subquery()
+    )
+    investor_last_enriched = (
+        select(func.max(InvestorContact.enriched_at))
+        .where(InvestorContact.investor_id == InstitutionalInvestor.id)
+        .correlate(InstitutionalInvestor)
+        .scalar_subquery()
+    )
+
+    rows: list[OutreachContactsFirmRow] = []
+
+    if entity_kind in (None, "broker_dealer"):
+        bd_stmt = (
+            select(
+                BrokerDealer.id,
+                BrokerDealer.name,
+                bd_contact_count.label("contact_count"),
+                bd_email_count.label("with_email_count"),
+                bd_phone_count.label("with_phone_count"),
+                bd_last_enriched.label("last_enriched_at"),
+                BrokerDealer.last_gap_fill_attempt_at,
+            )
+            .where(bd_contact_count > 0)
+            .order_by(BrokerDealer.name.asc())
+        )
+        if needle:
+            bd_stmt = bd_stmt.where(func.lower(BrokerDealer.name).like(needle))
+        for r in (await db.execute(bd_stmt)).all():
+            rows.append(
+                OutreachContactsFirmRow(
+                    entity_kind="broker_dealer",
+                    entity_id=r.id,
+                    name=r.name or "",
+                    contact_count=int(r.contact_count or 0),
+                    with_email_count=int(r.with_email_count or 0),
+                    with_phone_count=int(r.with_phone_count or 0),
+                    last_enriched_at=r.last_enriched_at,
+                    last_gap_fill_attempt_at=r.last_gap_fill_attempt_at,
+                    gap_fill_in_progress=False,
+                )
+            )
+
+    if entity_kind in (None, "advisor"):
+        advisor_stmt = (
+            select(
+                InvestmentAdvisor.id,
+                InvestmentAdvisor.name,
+                advisor_contact_count.label("contact_count"),
+                advisor_email_count.label("with_email_count"),
+                advisor_phone_count.label("with_phone_count"),
+                advisor_last_enriched.label("last_enriched_at"),
+                InvestmentAdvisor.last_gap_fill_attempt_at,
+            )
+            .where(advisor_contact_count > 0)
+            .order_by(InvestmentAdvisor.name.asc())
+        )
+        if needle:
+            advisor_stmt = advisor_stmt.where(
+                func.lower(InvestmentAdvisor.name).like(needle)
+            )
+        for r in (await db.execute(advisor_stmt)).all():
+            rows.append(
+                OutreachContactsFirmRow(
+                    entity_kind="advisor",
+                    entity_id=r.id,
+                    name=r.name or "",
+                    contact_count=int(r.contact_count or 0),
+                    with_email_count=int(r.with_email_count or 0),
+                    with_phone_count=int(r.with_phone_count or 0),
+                    last_enriched_at=r.last_enriched_at,
+                    last_gap_fill_attempt_at=r.last_gap_fill_attempt_at,
+                    gap_fill_in_progress=False,
+                )
+            )
+
+    if entity_kind in (None, "institutional_investor"):
+        investor_stmt = (
+            select(
+                InstitutionalInvestor.id,
+                InstitutionalInvestor.name,
+                investor_contact_count.label("contact_count"),
+                investor_email_count.label("with_email_count"),
+                investor_phone_count.label("with_phone_count"),
+                investor_last_enriched.label("last_enriched_at"),
+                InstitutionalInvestor.last_gap_fill_attempt_at,
+            )
+            .where(investor_contact_count > 0)
+            .order_by(InstitutionalInvestor.name.asc())
+        )
+        if needle:
+            investor_stmt = investor_stmt.where(
+                func.lower(InstitutionalInvestor.name).like(needle)
+            )
+        for r in (await db.execute(investor_stmt)).all():
+            rows.append(
+                OutreachContactsFirmRow(
+                    entity_kind="institutional_investor",
+                    entity_id=r.id,
+                    name=r.name or "",
+                    contact_count=int(r.contact_count or 0),
+                    with_email_count=int(r.with_email_count or 0),
+                    with_phone_count=int(r.with_phone_count or 0),
+                    last_enriched_at=r.last_enriched_at,
+                    last_gap_fill_attempt_at=r.last_gap_fill_attempt_at,
+                    gap_fill_in_progress=False,
+                )
+            )
+
+    rows.sort(key=lambda r: (r.name.lower(), r.entity_kind))
+    total = len(rows)
+    start = (page - 1) * limit
+    paged = rows[start : start + limit]
+
+    # Attach gap_fill_in_progress only to rows in the current page.
+    if paged:
+        in_flight = await _in_flight_firm_keys(db)
+        for r in paged:
+            if (r.entity_kind, r.entity_id) in in_flight:
+                r.gap_fill_in_progress = True
+
+    return OutreachContactsFirmsResponse(items=paged, total=total)
+
+
+@router.get(
+    "/contacts/firms/{entity_kind}/{entity_id}/persons",
+    response_model=OutreachContactsFirmDetailResponse,
+)
+async def list_outreach_contacts_firm_persons(
+    entity_kind: Literal[
+        "broker_dealer", "advisor", "institutional_investor"
+    ],
+    entity_id: int,
+    _: AuthenticatedUser = Depends(_require_outreach_contacts),
+    db: AsyncSession = Depends(get_db_session),
+) -> OutreachContactsFirmDetailResponse:
+    """All contacts at a single firm, regardless of channel availability.
+
+    Unlike ``/firms/contacts`` (the send-flow endpoint, which filters to
+    email-bearing rows), this one returns every contact on file with the
+    full shape (email, phone, linkedin_url, enriched_at) so the persons
+    accordion can show e.g. a phone-only contact for a firm whose email
+    discovery missed.
+    """
+    if entity_kind == "broker_dealer":
+        firm = await db.get(BrokerDealer, entity_id)
+        if firm is None:
+            raise HTTPException(status_code=404, detail="firm_not_found")
+        contact_stmt = (
+            select(
+                ExecutiveContact.id,
+                ExecutiveContact.name,
+                ExecutiveContact.title,
+                ExecutiveContact.email,
+                ExecutiveContact.phone,
+                ExecutiveContact.linkedin_url,
+                ExecutiveContact.enriched_at,
+            )
+            .where(ExecutiveContact.bd_id == entity_id)
+            .order_by(ExecutiveContact.name.asc())
+        )
+    elif entity_kind == "advisor":
+        firm = await db.get(InvestmentAdvisor, entity_id)
+        if firm is None:
+            raise HTTPException(status_code=404, detail="firm_not_found")
+        contact_stmt = (
+            select(
+                AdvisorContact.id,
+                AdvisorContact.name,
+                AdvisorContact.title,
+                AdvisorContact.email,
+                AdvisorContact.phone,
+                AdvisorContact.linkedin_url,
+                AdvisorContact.enriched_at,
+            )
+            .where(AdvisorContact.advisor_id == entity_id)
+            .order_by(AdvisorContact.name.asc())
+        )
+    else:
+        firm = await db.get(InstitutionalInvestor, entity_id)
+        if firm is None:
+            raise HTTPException(status_code=404, detail="firm_not_found")
+        contact_stmt = (
+            select(
+                InvestorContact.id,
+                InvestorContact.name,
+                InvestorContact.title,
+                InvestorContact.email,
+                InvestorContact.phone,
+                InvestorContact.linkedin_url,
+                InvestorContact.enriched_at,
+            )
+            .where(InvestorContact.investor_id == entity_id)
+            .order_by(InvestorContact.name.asc())
+        )
+
+    items: list[OutreachContactPerson] = []
+    for r in (await db.execute(contact_stmt)).all():
+        items.append(
+            OutreachContactPerson(
+                contact_id=r.id,
+                name=r.name or "",
+                title=r.title,
+                email=r.email,
+                phone=r.phone,
+                linkedin_url=r.linkedin_url,
+                enriched_at=r.enriched_at,
+            )
+        )
+
+    return OutreachContactsFirmDetailResponse(
+        entity_kind=entity_kind,
+        entity_id=entity_id,
+        entity_name=firm.name or "",
+        items=items,
+    )
+
+
+@router.post(
+    "/contacts/firms/{entity_kind}/{entity_id}/gap-fill",
+    response_model=GapFillFirmResponse,
+)
+async def dispatch_firm_gap_fill(
+    entity_kind: Literal[
+        "broker_dealer", "advisor", "institutional_investor"
+    ],
+    entity_id: int,
+    background_tasks: BackgroundTasks,
+    response: Response,
+    current_user: AuthenticatedUser = Depends(_require_outreach_contacts),
+    db: AsyncSession = Depends(get_db_session),
+) -> GapFillFirmResponse:
+    """Trigger a per-firm contact gap-fill across any of the three entity
+    kinds. Returns 202 + run_id for FE polling against
+    ``/pipeline-runs/{id}``.
+
+    Coexists with the legacy per-kind endpoints
+    (``/broker-dealers/{id}/enrich`` -- full-replace path,
+    ``/investment-advisors/{id}/gap-fill-contacts`` -- single-firm route
+    used by the advisor detail page). The 30-day ``last_gap_fill_attempt_at``
+    cooldown is independent of the legacy BD ``last_enrich_attempt_at``
+    cooldown -- a user can gap-fill 24h after a fresh ``/enrich`` since the
+    point of gap-fill is to retry channels the initial enrichment missed.
+    """
+    # Load the parent row + map the kind to its runner inputs.
+    if entity_kind == "broker_dealer":
+        firm: BrokerDealer | InvestmentAdvisor | InstitutionalInvestor | None = (
+            await db.get(BrokerDealer, entity_id)
+        )
+        pipeline_name = GAP_FILL_BD_CONTACTS_PIPELINE_NAME
+        marker_key = "bd_id"
+        background_runner = run_gap_fill_bd_contacts_background
+    elif entity_kind == "advisor":
+        firm = await db.get(InvestmentAdvisor, entity_id)
+        pipeline_name = GAP_FILL_ADVISOR_CONTACTS_PIPELINE_NAME
+        marker_key = "advisor_id"
+        background_runner = run_gap_fill_advisor_contacts_background
+    else:
+        firm = await db.get(InstitutionalInvestor, entity_id)
+        pipeline_name = GAP_FILL_II_CONTACTS_PIPELINE_NAME
+        marker_key = "investor_id"
+        background_runner = run_gap_fill_ii_contacts_background
+
+    if firm is None:
+        raise HTTPException(status_code=404, detail="firm_not_found")
+
+    last_attempt = firm.last_gap_fill_attempt_at
+    if last_attempt is not None and last_attempt.tzinfo is None:
+        last_attempt = last_attempt.replace(tzinfo=timezone.utc)
+    cooldown_cutoff = datetime.now(timezone.utc) - timedelta(
+        days=_GAP_FILL_COOLDOWN_DAYS
+    )
+    if last_attempt is not None and last_attempt >= cooldown_cutoff:
+        days_remaining = max(
+            1,
+            _GAP_FILL_COOLDOWN_DAYS
+            - (datetime.now(timezone.utc) - last_attempt).days,
+        )
+        raise HTTPException(
+            status_code=status.HTTP_429_TOO_MANY_REQUESTS,
+            detail=(
+                f"Gap-fill cooldown active. Try again in {days_remaining} day(s)."
+            ),
+            headers={"Retry-After": str(days_remaining * 86400)},
+        )
+
+    marker = f'"{marker_key}": {entity_id}'
+    in_flight_stmt = (
+        select(PipelineRun)
+        .where(PipelineRun.pipeline_name == pipeline_name)
+        .where(PipelineRun.status.in_(("queued", "running")))
+        .where(PipelineRun.notes.ilike(f"%{marker}%"))
+        .order_by(PipelineRun.id.desc())
+        .limit(1)
+    )
+    in_flight = (await db.execute(in_flight_stmt)).scalar_one_or_none()
+    if in_flight is not None and _is_recent_pipeline_run(in_flight.started_at):
+        response.status_code = status.HTTP_202_ACCEPTED
+        return GapFillFirmResponse(
+            run_id=in_flight.id,
+            status="in_flight",
+            entity_kind=entity_kind,
+            entity_id=entity_id,
+            reason="A gap-fill run is already in flight for this firm.",
+        )
+
+    trigger_source = f"outreach_contacts_gap_fill:{current_user.email}"
+    run = PipelineRun(
+        pipeline_name=pipeline_name,
+        trigger_source=trigger_source,
+        status="queued",
+        total_items=1,
+        processed_items=0,
+        success_count=0,
+        failure_count=0,
+        notes=json.dumps({marker_key: entity_id, "stage": "queued"}),
+    )
+    db.add(run)
+    await db.commit()
+    await db.refresh(run)
+
+    background_tasks.add_task(background_runner, run.id, entity_id, trigger_source)
+
+    response.status_code = status.HTTP_202_ACCEPTED
+    return GapFillFirmResponse(
+        run_id=run.id,
+        status=run.status,
+        entity_kind=entity_kind,
+        entity_id=entity_id,
+        reason=None,
+    )

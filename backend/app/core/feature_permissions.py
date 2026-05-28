@@ -17,6 +17,7 @@ INSTITUTIONAL_INVESTORS = "institutional_investors"
 ALERTS = "alerts"
 EMAIL_EXTRACTOR = "email_extractor"
 SENT_OUTREACH = "sent_outreach"
+OUTREACH_CONTACTS = "outreach_contacts"
 MY_FAVORITES = "my_favorites"
 VISITED_FIRMS = "visited_firms"
 DASHBOARD = "dashboard"
@@ -33,6 +34,7 @@ ALL_FEATURE_KEYS: frozenset[str] = frozenset(
         ALERTS,
         EMAIL_EXTRACTOR,
         SENT_OUTREACH,
+        OUTREACH_CONTACTS,
         MY_FAVORITES,
         VISITED_FIRMS,
         DASHBOARD,

@@ -14,6 +14,7 @@ export const INSTITUTIONAL_INVESTORS = "institutional_investors" as const;
 export const ALERTS = "alerts" as const;
 export const EMAIL_EXTRACTOR = "email_extractor" as const;
 export const SENT_OUTREACH = "sent_outreach" as const;
+export const OUTREACH_CONTACTS = "outreach_contacts" as const;
 export const MY_FAVORITES = "my_favorites" as const;
 export const VISITED_FIRMS = "visited_firms" as const;
 export const DASHBOARD = "dashboard" as const;
@@ -29,6 +30,7 @@ export const ALL_FEATURE_KEYS = [
   ALERTS,
   EMAIL_EXTRACTOR,
   SENT_OUTREACH,
+  OUTREACH_CONTACTS,
   MY_FAVORITES,
   VISITED_FIRMS,
   DASHBOARD,
@@ -47,6 +49,7 @@ export const FEATURE_LABELS: Record<FeatureKey, string> = {
   alerts: "Alerts",
   email_extractor: "Email Extractor",
   sent_outreach: "Sent Outreach",
+  outreach_contacts: "Outreach Contacts",
   my_favorites: "My Favorites",
   visited_firms: "Visited Firms",
   dashboard: "Dashboard",
@@ -63,6 +66,7 @@ export const ENABLED_FEATURE_KEYS: ReadonlySet<FeatureKey> = new Set([
   ALERTS,
   EMAIL_EXTRACTOR,
   SENT_OUTREACH,
+  OUTREACH_CONTACTS,
   MY_FAVORITES,
   VISITED_FIRMS,
   DASHBOARD,
