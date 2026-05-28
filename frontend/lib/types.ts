@@ -695,11 +695,36 @@ export type OutreachSendItem = {
   provider: EmailProviderId;
   gmail_message_id: string | null;
   error: string | null;
-  broker_dealer_id: number;
-  broker_dealer_name: string;
-  contact_id: number;
+  // Polymorphic across firm types. firm_type discriminates which
+  // (id, name) pair is populated:
+  //   - "broker_dealer"  -> broker_dealer_id / broker_dealer_name
+  //   - "advisor"        -> advisor_id / advisor_name
+  //   - "institutional_investor" -> institutional_investor_id /
+  //                                  institutional_investor_name
+  //   - "adhoc"          -> all firm fields null; recipient_email is
+  //                          the actual destination address
+  firm_type?: "broker_dealer" | "advisor" | "institutional_investor" | "adhoc";
+  broker_dealer_id: number | null;
+  broker_dealer_name: string | null;
+  advisor_id?: number | null;
+  advisor_name?: string | null;
+  institutional_investor_id?: number | null;
+  institutional_investor_name?: string | null;
+  contact_type?:
+    | "executive_contact"
+    | "advisor_contact"
+    | "investor_contact"
+    | "adhoc";
+  contact_id: number | null;
+  advisor_contact_id?: number | null;
+  investor_contact_id?: number | null;
   contact_name: string;
   contact_email: string | null;
+  // Adhoc destination: populated only on firm_type="adhoc" rows.
+  // Contact-based rows leave these null and the FE falls back to
+  // contact_email / contact_name.
+  recipient_email?: string | null;
+  recipient_name?: string | null;
   folder_id: number | null;
   folder_name: string | null;
   // Populated only when the admin "all users" scope is requested. Null
@@ -707,6 +732,35 @@ export type OutreachSendItem = {
   user_id?: string | null;
   sender_name?: string | null;
   sender_email?: string | null;
+};
+
+// ── /outreach/sent?tab=create surface ───────────────────────────────
+// The new Create tab lets the user start a send from scratch. Picks a
+// recipient via autocomplete (search across all 3 contact tables) OR
+// types a free-form email; the latter posts to /outreach/adhoc-send,
+// the former dispatches to the matching per-entity endpoint.
+
+export type RecipientSearchResult = {
+  entity_kind: "broker_dealer" | "advisor" | "institutional_investor";
+  entity_id: number;
+  entity_name: string;
+  contact_id: number;
+  contact_name: string;
+  contact_title: string | null;
+  contact_email: string;
+};
+
+export type RecipientSearchResponse = {
+  items: RecipientSearchResult[];
+};
+
+export type OutreachAdhocSendRequest = {
+  recipient_email: string;
+  recipient_name?: string | null;
+  subject: string;
+  body: string;
+  sender_account_id?: string | null;
+  folder_id?: number | null;
 };
 
 // GET /api/v1/outreach/linked-providers — used by the Outreach modal to
