@@ -21,6 +21,7 @@ import type {
   OutreachSendsListResponse,
   OutreachSendsScope,
 } from "@/lib/types";
+import { Segmented, type SegmentedItem } from "@/components/ui/segmented";
 
 const CARD =
   "rounded-2xl border border-[var(--border,rgba(30,64,175,0.1))] bg-[var(--surface,#ffffff)] p-6 shadow-[var(--shadow-card,0_1px_2px_rgba(15,23,42,0.04),0_4px_14px_rgba(15,23,42,0.05))]";
@@ -35,13 +36,13 @@ const PAGE_SIZE = 50;
 
 type StatusFilter = "all" | OutreachSendStatus;
 
-const STATUS_FILTERS: { value: StatusFilter; label: string }[] = [
+const STATUS_ITEMS: ReadonlyArray<SegmentedItem> = [
   { value: "all", label: "All" },
   { value: "sent", label: "Sent" },
   { value: "failed", label: "Failed" },
 ];
 
-const SCOPE_FILTERS: { value: OutreachSendsScope; label: string }[] = [
+const SCOPE_ITEMS: ReadonlyArray<SegmentedItem> = [
   { value: "mine", label: "My sends" },
   { value: "all", label: "All users" },
 ];
@@ -167,10 +168,10 @@ export function OutreachSentClient({ isAdmin = false }: { isAdmin?: boolean }) {
           </div>
           <div className="flex flex-wrap items-center gap-2">
             {isAdmin ? (
-              <ScopePills
+              <Segmented
                 value={scope}
                 onChange={(next) => {
-                  setScope(next);
+                  setScope(next as OutreachSendsScope);
                   setOffset(0);
                   setExpandedId(null);
                   // Detail cache is keyed by id and can collide between
@@ -179,15 +180,19 @@ export function OutreachSentClient({ isAdmin = false }: { isAdmin?: boolean }) {
                   // lacks sender fields when scope=all is active.
                   setDetailCache({});
                 }}
+                items={SCOPE_ITEMS}
+                ariaLabel="Scope"
               />
             ) : null}
-            <FilterPills
+            <Segmented
               value={statusFilter}
               onChange={(next) => {
-                setStatusFilter(next);
+                setStatusFilter(next as StatusFilter);
                 setOffset(0);
                 setExpandedId(null);
               }}
+              items={STATUS_ITEMS}
+              ariaLabel="Status"
             />
           </div>
         </div>
@@ -251,7 +256,7 @@ export function OutreachSentClient({ isAdmin = false }: { isAdmin?: boolean }) {
                   setExpandedId(null);
                   setOffset(Math.max(0, offset - PAGE_SIZE));
                 }}
-                className="rounded-xl border border-[var(--border,rgba(30,64,175,0.1))] bg-white px-3 py-1.5 font-semibold text-[#0f172a] transition hover:bg-[var(--surface-2,#f1f6fd)] disabled:cursor-not-allowed disabled:opacity-50"
+                className="rounded-[8px] border border-[var(--border-2,rgba(30,64,175,0.16))] bg-[var(--surface,#ffffff)] px-3 py-1.5 text-[12px] font-medium text-[var(--text-dim,#475569)] transition hover:bg-[var(--surface-2,#f1f6fd)] disabled:cursor-not-allowed disabled:opacity-45"
               >
                 Previous
               </button>
@@ -265,7 +270,7 @@ export function OutreachSentClient({ isAdmin = false }: { isAdmin?: boolean }) {
                   setExpandedId(null);
                   setOffset(offset + PAGE_SIZE);
                 }}
-                className="rounded-xl border border-[var(--border,rgba(30,64,175,0.1))] bg-white px-3 py-1.5 font-semibold text-[#0f172a] transition hover:bg-[var(--surface-2,#f1f6fd)] disabled:cursor-not-allowed disabled:opacity-50"
+                className="rounded-[8px] border border-[var(--border-2,rgba(30,64,175,0.16))] bg-[var(--surface,#ffffff)] px-3 py-1.5 text-[12px] font-medium text-[var(--text-dim,#475569)] transition hover:bg-[var(--surface-2,#f1f6fd)] disabled:cursor-not-allowed disabled:opacity-45"
               >
                 Next
               </button>
@@ -274,66 +279,6 @@ export function OutreachSentClient({ isAdmin = false }: { isAdmin?: boolean }) {
         ) : null}
       </div>
     </section>
-  );
-}
-
-function FilterPills({
-  value,
-  onChange,
-}: {
-  value: StatusFilter;
-  onChange: (next: StatusFilter) => void;
-}) {
-  return (
-    <div className="inline-flex rounded-xl border border-[var(--border,rgba(30,64,175,0.1))] bg-[var(--surface-2,#f1f6fd)] p-1 text-[11px] font-semibold uppercase tracking-[0.06em]">
-      {STATUS_FILTERS.map((option) => {
-        const active = option.value === value;
-        return (
-          <button
-            key={option.value}
-            type="button"
-            onClick={() => onChange(option.value)}
-            className={
-              active
-                ? "rounded-lg bg-white px-3 py-1.5 text-[#0f172a] shadow-[0_1px_3px_rgba(15,23,42,0.08)]"
-                : "rounded-lg px-3 py-1.5 text-[var(--text-muted,#94a3b8)] transition hover:text-[var(--text,#0f172a)]"
-            }
-          >
-            {option.label}
-          </button>
-        );
-      })}
-    </div>
-  );
-}
-
-function ScopePills({
-  value,
-  onChange,
-}: {
-  value: OutreachSendsScope;
-  onChange: (next: OutreachSendsScope) => void;
-}) {
-  return (
-    <div className="inline-flex rounded-xl border border-[var(--border,rgba(30,64,175,0.1))] bg-[var(--surface-2,#f1f6fd)] p-1 text-[11px] font-semibold uppercase tracking-[0.06em]">
-      {SCOPE_FILTERS.map((option) => {
-        const active = option.value === value;
-        return (
-          <button
-            key={option.value}
-            type="button"
-            onClick={() => onChange(option.value)}
-            className={
-              active
-                ? "rounded-lg bg-white px-3 py-1.5 text-[#0f172a] shadow-[0_1px_3px_rgba(15,23,42,0.08)]"
-                : "rounded-lg px-3 py-1.5 text-[var(--text-muted,#94a3b8)] transition hover:text-[var(--text,#0f172a)]"
-            }
-          >
-            {option.label}
-          </button>
-        );
-      })}
-    </div>
   );
 }
 
