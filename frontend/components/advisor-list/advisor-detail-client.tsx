@@ -13,11 +13,13 @@ import {
   Loader2,
   RefreshCw,
   Search,
+  Sparkles,
 } from "lucide-react";
 
 import {
   apiRequest,
   buildApiPath,
+  gapFillAdvisorContacts,
   getPipelineRunStatus,
   refreshAdvisor,
 } from "@/lib/api";
@@ -130,6 +132,13 @@ export function AdvisorDetailClient({ advisorId }: { advisorId: string }) {
   const [currentScanId, setCurrentScanId] = useState<number | null>(null);
   const [isHydratingScan, setIsHydratingScan] = useState(true);
 
+  // Gap-fill button state. Distinct from Refresh because gap-fill only
+  // targets advisor_contacts rows missing channels and is gated by a 30-day
+  // cooldown — the 429 surfaces via gapFillError.
+  const [isGapFilling, setIsGapFilling] = useState(false);
+  const [gapFillError, setGapFillError] = useState<string | null>(null);
+  const [gapFillNotice, setGapFillNotice] = useState<string | null>(null);
+
   // Fetch /profile immediately on mount. Errors surface via setError so
   // a failed first load shows the error page. `reloadProfile` is the
   // re-fetch helper the manual Refresh button calls; it lets the caller
@@ -201,6 +210,65 @@ export function AdvisorDetailClient({ advisorId }: { advisorId: string }) {
       setRefreshError(err instanceof Error ? err.message : "Refresh failed.");
     } finally {
       setIsRefreshing(false);
+    }
+  }, [advisorId, reloadProfile]);
+
+  // Gap-fill handler. POST /gap-fill-contacts on click, poll the run until
+  // terminal (180s deadline — same as refresh-all; the chain fan-out is
+  // bounded by the per-firm officer cap), then reload /profile so the new
+  // emails/phones/LinkedIn URLs land in the icon popovers. Error/notice
+  // strings show inline; the 429 cooldown comes through as a plain message.
+  const runGapFill = useCallback(async () => {
+    const numericId = Number(advisorId);
+    if (!Number.isFinite(numericId)) return;
+    setIsGapFilling(true);
+    setGapFillError(null);
+    setGapFillNotice(null);
+    try {
+      const result = await gapFillAdvisorContacts(numericId);
+      if (result.run_id !== null) {
+        const runId = result.run_id;
+        const deadline = Date.now() + 180_000;
+        const TERMINAL = new Set([
+          "completed",
+          "completed_with_errors",
+          "failed",
+        ]);
+        while (Date.now() < deadline) {
+          try {
+            const detail = await getPipelineRunStatus(runId);
+            if (TERMINAL.has(detail.status)) {
+              let summary = `Gap-fill ${detail.status}.`;
+              if (detail.notes) {
+                try {
+                  const parsed = JSON.parse(detail.notes) as {
+                    summary?: unknown;
+                  };
+                  if (typeof parsed.summary === "string") {
+                    summary = parsed.summary;
+                  }
+                } catch {
+                  /* notes wasn't JSON — fall back to the default. */
+                }
+              }
+              setGapFillNotice(summary);
+              break;
+            }
+          } catch {
+            /* transient poll error — keep waiting */
+          }
+          await new Promise<void>((resolve) => setTimeout(resolve, 2000));
+        }
+      } else {
+        setGapFillNotice(result.reason ?? "Gap-fill skipped.");
+      }
+      await reloadProfile();
+    } catch (err) {
+      setGapFillError(
+        err instanceof Error ? err.message : "Gap-fill failed.",
+      );
+    } finally {
+      setIsGapFilling(false);
     }
   }, [advisorId, reloadProfile]);
 
@@ -522,8 +590,22 @@ export function AdvisorDetailClient({ advisorId }: { advisorId: string }) {
         <div className="flex shrink-0 items-center gap-2.5">
           <button
             type="button"
+            onClick={() => void runGapFill()}
+            disabled={isGapFilling || isRefreshing}
+            title="Re-query contact providers for rows missing LinkedIn, email, or phone (30-day cooldown)"
+            className={SECONDARY_BTN}
+          >
+            {isGapFilling ? (
+              <Loader2 className="h-4 w-4 animate-spin" strokeWidth={2.5} />
+            ) : (
+              <Sparkles className="h-4 w-4" strokeWidth={2} />
+            )}
+            {isGapFilling ? "Gap-filling…" : "Gap-fill contacts"}
+          </button>
+          <button
+            type="button"
             onClick={() => void runManualRefresh()}
-            disabled={isRefreshing}
+            disabled={isRefreshing || isGapFilling}
             className={SECONDARY_BTN}
           >
             {isRefreshing ? (
@@ -539,6 +621,18 @@ export function AdvisorDetailClient({ advisorId }: { advisorId: string }) {
       {refreshError ? (
         <div className="mb-3 rounded-2xl border border-[rgba(239,68,68,0.25)] bg-[rgba(239,68,68,0.08)] px-4 py-2.5 text-[13px] text-[var(--pill-red-text,#b91c1c)]">
           {refreshError}
+        </div>
+      ) : null}
+
+      {gapFillError ? (
+        <div className="mb-3 rounded-2xl border border-[rgba(239,68,68,0.25)] bg-[rgba(239,68,68,0.08)] px-4 py-2.5 text-[13px] text-[var(--pill-red-text,#b91c1c)]">
+          {gapFillError}
+        </div>
+      ) : null}
+
+      {gapFillNotice ? (
+        <div className="mb-3 rounded-2xl border border-[var(--border,rgba(30,64,175,0.1))] bg-[var(--surface-2,#f1f6fd)] px-4 py-2.5 text-[13px] text-[var(--text-dim,#475569)]">
+          {gapFillNotice}
         </div>
       ) : null}
 
