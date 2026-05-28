@@ -1,7 +1,7 @@
 """Add advisor_id to extraction_run and discovered_email.
 
-Revision ID: 20260528_0063
-Revises: 20260528_0062
+Revision ID: 20260528_0064
+Revises: 20260528_0063
 Create Date: 2026-05-28
 
 Adds an ``advisor_id`` FK column to both ``extraction_run`` and
@@ -29,8 +29,8 @@ import sqlalchemy as sa
 from alembic import op
 
 
-revision: str = "20260528_0063"
-down_revision: str | None = "20260528_0062"
+revision: str = "20260528_0064"
+down_revision: str | None = "20260528_0063"
 branch_labels: str | Sequence[str] | None = None
 depends_on: str | Sequence[str] | None = None
 
