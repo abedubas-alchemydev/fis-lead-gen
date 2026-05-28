@@ -996,6 +996,8 @@ def test_tool_registry_has_expected_names() -> None:
         "summarize_institutional_investor_filing",
         "summarize_form4_filing",
         "ask_vault",
+        # Phase 4 PR #1 — app-knowledge tool.
+        "get_app_help",
     }
 
 
@@ -2337,3 +2339,141 @@ class TestSummarizeInvestmentAdvisorFilingForm4Refactor:
         assert "Brochure summary" in result["summary"]
         # Detail link points at the advisor.
         assert result["link"] == "/advisor-list/77"
+
+
+# ── get_app_help ────────────────────────────────────────────────────────
+
+
+class TestGetAppHelp:
+    """The app-help tool is unique among the registry: it has NO feature
+    gate (every user can ask Doxie how DOX works), but it DOES silently
+    filter results to features the calling user can actually see — so
+    a viewer asking about admin-only Users gets the fallback catalog
+    instead of a leaked admin page. These tests pin both behaviours."""
+
+    async def test_topic_match_returns_visible_feature_with_link(
+        self,
+        bd_user: AuthenticatedUser,
+        db_stub: object,
+    ) -> None:
+        tool = chatbot_tools.TOOL_REGISTRY["get_app_help"]
+        result = await tool.execute(bd_user, db_stub, {"topic": "Master List"})
+
+        assert result["total_matched"] >= 1
+        top = result["items"][0]
+        assert top["feature_key"] == MASTER_LIST
+        assert top["route"] == "/master-list"
+        # Deep-link mirrors the route so the FE can render an in-app jump.
+        assert top["link"] == "/master-list"
+        # Full projection (matched path) includes the verbose action prose.
+        assert "what_to_do_here" in top
+        assert top["what_to_do_here"]
+
+    async def test_domain_jargon_synonym_matches(
+        self,
+        ii_user: AuthenticatedUser,
+        db_stub: object,
+    ) -> None:
+        tool = chatbot_tools.TOOL_REGISTRY["get_app_help"]
+        result = await tool.execute(ii_user, db_stub, {"topic": "13F"})
+
+        assert result["total_matched"] >= 1
+        assert result["items"][0]["feature_key"] == INSTITUTIONAL_INVESTORS
+
+    async def test_missing_topic_returns_invalid_args(
+        self,
+        bd_user: AuthenticatedUser,
+        db_stub: object,
+    ) -> None:
+        tool = chatbot_tools.TOOL_REGISTRY["get_app_help"]
+        result = await tool.execute(bd_user, db_stub, {})
+        assert result["error"] == "invalid_args"
+
+    async def test_blank_topic_returns_invalid_args(
+        self,
+        bd_user: AuthenticatedUser,
+        db_stub: object,
+    ) -> None:
+        tool = chatbot_tools.TOOL_REGISTRY["get_app_help"]
+        result = await tool.execute(bd_user, db_stub, {"topic": "   "})
+        assert result["error"] == "invalid_args"
+
+    async def test_no_match_falls_back_to_visible_catalog(
+        self,
+        bd_user: AuthenticatedUser,
+        db_stub: object,
+    ) -> None:
+        """Topic with no matches anywhere → catalog of features the user
+        CAN see. Bd-only viewer gets just Master List in their catalog."""
+        tool = chatbot_tools.TOOL_REGISTRY["get_app_help"]
+        result = await tool.execute(
+            bd_user, db_stub, {"topic": "quantum entanglement"}
+        )
+
+        assert result["total_matched"] == 0
+        assert "note" in result
+        assert "quantum entanglement" in result["note"]
+        keys = {item["feature_key"] for item in result["items"]}
+        assert keys == {MASTER_LIST}
+        # Catalog projection drops verbose prose to keep prompt budget small.
+        for item in result["items"]:
+            assert "what_to_do_here" not in item
+
+    async def test_no_access_user_match_falls_through_to_empty_catalog(
+        self,
+        no_access_user: AuthenticatedUser,
+        db_stub: object,
+    ) -> None:
+        """User with no feature_permissions and no admin role asking about
+        Master List → no visible matches AND no visible catalog. The
+        fallback path returns the empty catalog rather than 403'ing —
+        the tool is never permission-gated."""
+        tool = chatbot_tools.TOOL_REGISTRY["get_app_help"]
+        result = await tool.execute(
+            no_access_user, db_stub, {"topic": "Master List"}
+        )
+
+        assert result["total_matched"] == 0
+        assert result["items"] == []
+
+    async def test_viewer_cannot_see_admin_only_users_entry(
+        self,
+        bd_user: AuthenticatedUser,
+        db_stub: object,
+    ) -> None:
+        """Non-admin user asking about 'Users' (admin-only feature) gets
+        the fallback catalog, not the admin page details."""
+        tool = chatbot_tools.TOOL_REGISTRY["get_app_help"]
+        result = await tool.execute(bd_user, db_stub, {"topic": "users"})
+
+        # Either nothing matched, or the only match was filtered out and
+        # we fell back to the catalog. Either way, USERS must not appear.
+        matched_keys = {item["feature_key"] for item in result["items"]}
+        assert "users" not in matched_keys
+
+    async def test_admin_sees_admin_only_users_entry(
+        self,
+        db_stub: object,
+    ) -> None:
+        admin = _make_user(role="admin", features=[])
+        tool = chatbot_tools.TOOL_REGISTRY["get_app_help"]
+        result = await tool.execute(admin, db_stub, {"topic": "user management"})
+
+        assert result["total_matched"] >= 1
+        top = result["items"][0]
+        assert top["feature_key"] == "users"
+        assert top["admin_only"] is True
+
+    async def test_result_is_jsonable_for_gemini_payload(
+        self,
+        bd_user: AuthenticatedUser,
+        db_stub: object,
+    ) -> None:
+        """The whole result must round-trip through json.dumps — otherwise
+        httpx will fail to encode the functionResponse part."""
+        import json
+
+        tool = chatbot_tools.TOOL_REGISTRY["get_app_help"]
+        result = await tool.execute(bd_user, db_stub, {"topic": "Master List"})
+        # Should not raise.
+        json.dumps(result)

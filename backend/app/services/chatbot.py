@@ -41,6 +41,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.core.config import settings
 from app.schemas.auth import AuthenticatedUser
 from app.schemas.chatbot import ChatbotMessage, ChatbotPageContext
+from app.services.chatbot_app_knowledge import FEATURE_LABELS_FOR_PROMPT
 from app.services.chatbot_tools import TOOL_REGISTRY, Tool
 from app.services.gemini_responses import (
     GeminiConfigurationError,
@@ -57,10 +58,23 @@ DOXIE_SYSTEM_PROMPT = (
     "You are Doxie, the in-app assistant for the Alchemy broker-dealer "
     "and investment-advisor intelligence platform. Help users navigate "
     "the app, understand financial regulatory data (Form BD, Form ADV, "
-    "FOCUS reports, clearing relationships), and draft outreach. Be "
-    "concise, friendly, and direct. If a question is outside the app's "
-    "scope, answer briefly without speculating about firm data you "
-    "have not been shown. Do not invent numbers, names, or filings."
+    "FOCUS reports, clearing relationships), and draft outreach. You "
+    "also know how the app itself works — its features, pages, and the "
+    "domain concepts surfaced on each. Be concise, friendly, and direct. "
+    "If a question is outside the app's scope, answer briefly without "
+    "speculating about firm data you have not been shown. Do not invent "
+    "numbers, names, or filings."
+)
+
+# Always-on catalog of DOX feature areas. Listed by label so the model
+# knows what surfaces exist without needing a tool call for navigation
+# questions where the user has already named a feature. The full prose
+# (what each feature does, what the user can do there) lives behind the
+# ``get_app_help`` tool to keep the resident prompt small.
+_DOXIE_FEATURE_CATALOG_LINE = (
+    "DOX feature areas you can speak to: "
+    + ", ".join(FEATURE_LABELS_FOR_PROMPT)
+    + "."
 )
 
 DOXIE_TOOL_USAGE_PROMPT = (
@@ -78,7 +92,12 @@ DOXIE_TOOL_USAGE_PROMPT = (
     "short, descriptive link text. Prefer one link per answer: the most "
     "specific one (item link for a single firm, list link when "
     "summarizing many). Never invent URLs — only use the exact link "
-    "string the tool returned."
+    "string the tool returned.\n\n"
+    f"{_DOXIE_FEATURE_CATALOG_LINE} For questions about how DOX itself "
+    "works — what a feature does, where to find something, or what a "
+    "domain concept (Form 4, Form ADV, X-17A-5/FOCUS, 13F, clearing "
+    "partner) means in the app — call the get_app_help tool with the "
+    "user's topic and embed the returned route as the reply's deep-link."
 )
 
 
