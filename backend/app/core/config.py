@@ -134,6 +134,25 @@ class Settings(BaseSettings):
     # Stamped on Apollo-owned outcomes only (success + no-result). Transient
     # 5xx / network errors do not engage the cooldown. Set to 0 to disable.
     apollo_enrich_cooldown_hours: int = 24
+    # Apollo's phone-number reveal flow is async: /people/match with
+    # ``reveal_phone_number=true`` returns the person object synchronously
+    # (email + linkedin) but phone_numbers arrive minutes later as a POST
+    # to the ``webhook_url`` we provide on each request. Apollo doesn't
+    # sign webhooks (no HMAC header, per docs), so we secure the callback
+    # by embedding a shared secret in the URL path: every webhook URL we
+    # hand Apollo is ``{public_base_url}/api/v1/webhooks/apollo/{secret}
+    # /phone-reveal``, and the handler constant-time-compares the path
+    # segment to this setting. When ``apollo_webhook_secret`` is unset,
+    # the provider DOES NOT request phone reveal — the feature stays
+    # dormant until both this and ``public_base_url`` are configured.
+    apollo_webhook_secret: str | None = None
+    # Absolute base URL of the public Cloud Run service, used to construct
+    # the ``webhook_url`` we register with Apollo on each /people/match
+    # call. Distinct from ``backend_audience`` (which is bound to the
+    # Cloud Scheduler OIDC audience and may differ in staging/prod). When
+    # unset, Apollo phone-reveal is skipped — provider falls back to the
+    # current sync-only behaviour.
+    public_base_url: str | None = None
     zoominfo_api_key: str | None = None
     # People Data Labs — the first provider in the discovery chain that
     # actually returns person phones via API (PR #419's audit showed Apollo

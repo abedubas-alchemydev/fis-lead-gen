@@ -392,6 +392,15 @@ def _merge_discovery_results(
             linkedin_url = r.linkedin_url
             break
 
+    # apollo_person_id: first non-null in chain order. Only apollo_match
+    # ever sets it; if a future Apollo-shaped provider also populates it,
+    # chain order picks the winner the same way linkedin_url does.
+    apollo_person_id: str | None = None
+    for r in results:
+        if r.apollo_person_id:
+            apollo_person_id = r.apollo_person_id
+            break
+
     email_scalar = _highest_confidence_value(merged_emails)
     phone_scalar = _highest_confidence_value(merged_phones)
 
@@ -405,6 +414,7 @@ def _merge_discovery_results(
         raw={r.provider: r.raw for r in results},
         emails=merged_emails,
         phones=merged_phones,
+        apollo_person_id=apollo_person_id,
     )
 
 
@@ -506,6 +516,7 @@ def _build_executive_row(
         source=source,
         discovery_source=result.provider[:32],
         discovery_confidence=Decimal(str(round(result.confidence, 2))),
+        apollo_person_id=result.apollo_person_id,
         enriched_at=datetime.now(timezone.utc),
     )
 
@@ -530,6 +541,7 @@ def _build_investor_row(
         source=source,
         discovery_source=result.provider[:32],
         discovery_confidence=Decimal(str(round(result.confidence, 2))),
+        apollo_person_id=result.apollo_person_id,
         enriched_at=datetime.now(timezone.utc),
     )
 
@@ -554,6 +566,7 @@ def _build_advisor_row(
         source=source,
         discovery_source=result.provider[:32],
         discovery_confidence=Decimal(str(round(result.confidence, 2))),
+        apollo_person_id=result.apollo_person_id,
         enriched_at=datetime.now(timezone.utc),
     )
 

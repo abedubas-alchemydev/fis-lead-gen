@@ -79,6 +79,20 @@ class ApolloMatchProvider(ContactDiscoveryProvider):
         if domain:
             payload["domain"] = domain
 
+        # Async phone-reveal opt-in. Apollo's sync response still returns
+        # email/linkedin immediately; phone_numbers arrive minutes later via
+        # POST to webhook_url. Both settings must be configured — when either
+        # is missing the feature stays dormant and we keep the current
+        # behaviour (no reveal request, no callback to fail on).
+        webhook_secret = settings.apollo_webhook_secret
+        base_url = settings.public_base_url
+        if webhook_secret and base_url:
+            payload["reveal_phone_number"] = True
+            payload["webhook_url"] = (
+                f"{base_url.rstrip('/')}/api/v1/webhooks/apollo/"
+                f"{webhook_secret}/phone-reveal"
+            )
+
         headers = {
             "Content-Type": "application/json",
             "Cache-Control": "no-cache",
@@ -118,6 +132,15 @@ class ApolloMatchProvider(ContactDiscoveryProvider):
 
         phone = first_apollo_phone(person.get("phone_numbers"))
         linkedin_url = person.get("linkedin_url") or None
+        # MongoDB-style id from the sync response. Trimmed to the column's
+        # String(64) cap so a future Apollo format change can't blow up the
+        # INSERT — we'd rather store a truncated id than fail the enrich.
+        person_id_raw = person.get("id")
+        apollo_person_id = (
+            str(person_id_raw).strip()[:64]
+            if isinstance(person_id_raw, (str, int))
+            else None
+        )
 
         return DiscoveryResult(
             email=str(email).strip() if email else None,
@@ -126,6 +149,7 @@ class ApolloMatchProvider(ContactDiscoveryProvider):
             confidence=confidence,
             provider=self.name,
             raw=person,
+            apollo_person_id=apollo_person_id,
         )
 
     async def find_org(

@@ -1431,6 +1431,13 @@ def _apply_gap_fill(row: AdvisorContact, merged: DiscoveryResult) -> bool:
     if row.discovery_confidence is None:
         row.discovery_confidence = Decimal(str(round(merged.confidence, 2)))
         changed = True
+    # Stamp the Apollo person id when previously NULL so the async phone-
+    # reveal webhook can find this row later. Never overwrite — if a prior
+    # enrich already linked the row to an Apollo id, keep it (otherwise a
+    # webhook still in flight would land on the wrong row).
+    if row.apollo_person_id is None and merged.apollo_person_id:
+        row.apollo_person_id = merged.apollo_person_id
+        changed = True
 
     return changed
 

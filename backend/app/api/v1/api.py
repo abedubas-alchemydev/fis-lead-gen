@@ -22,6 +22,7 @@ from app.api.v1.endpoints import (
     vault,
     vault_files,
     visits,
+    webhooks_apollo,
 )
 
 api_router = APIRouter()
@@ -51,3 +52,4 @@ api_router.include_router(contacts.router, tags=["contacts"])
 api_router.include_router(users_admin.router, tags=["users-admin"])
 api_router.include_router(clearing_memberships_admin.router)
 api_router.include_router(chatbot.router, tags=["chatbot"])
+api_router.include_router(webhooks_apollo.router, tags=["webhooks"])

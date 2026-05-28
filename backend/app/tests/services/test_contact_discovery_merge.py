@@ -31,6 +31,7 @@ def _make_result(
     emails: list[EmailHit] | None = None,
     phones: list[PhoneHit] | None = None,
     raw: dict | None = None,
+    apollo_person_id: str | None = None,
 ) -> DiscoveryResult:
     return DiscoveryResult(
         email=email,
@@ -41,6 +42,7 @@ def _make_result(
         raw=raw if raw is not None else {"_": provider},
         emails=emails or [],
         phones=phones or [],
+        apollo_person_id=apollo_person_id,
     )
 
 
@@ -269,3 +271,40 @@ def test_merge_phone_dedup_is_case_sensitive_and_keeps_punctuation() -> None:
     assert merged is not None
     # Different surface forms are distinct values; we don't normalise here.
     assert len(merged.phones) == 2
+
+
+def test_merge_picks_first_non_null_apollo_person_id() -> None:
+    """``apollo_person_id`` is first-non-null in chain order — same shape
+    as ``linkedin_url``. Lets the webhook handler correlate Apollo's async
+    phone callback back to whichever row this merged result wrote, even
+    when a higher-confidence provider (without an apollo id) won the
+    ``provider`` tiebreak."""
+    apollo_result = _make_result(
+        provider="apollo_match",
+        confidence=85.0,
+        email="jane@acme.com",
+        apollo_person_id="587cf802f65125cad923a266",
+    )
+    pdl_result = _make_result(
+        provider="pdl",
+        confidence=90.0,
+        email="jane@acme.com",
+        apollo_person_id=None,
+    )
+
+    merged = _merge_discovery_results([apollo_result, pdl_result])
+
+    assert merged is not None
+    assert merged.apollo_person_id == "587cf802f65125cad923a266"
+    # PDL still wins the provider tiebreak even though Apollo seeded the id.
+    assert merged.provider == "pdl"
+
+
+def test_merge_apollo_person_id_none_when_no_provider_sets_it() -> None:
+    pdl_result = _make_result(provider="pdl", confidence=80.0, email="x@a.com")
+    hunter_result = _make_result(provider="hunter", confidence=70.0, email="x@a.com")
+
+    merged = _merge_discovery_results([pdl_result, hunter_result])
+
+    assert merged is not None
+    assert merged.apollo_person_id is None
