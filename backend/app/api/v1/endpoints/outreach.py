@@ -32,7 +32,14 @@ from app.models.investor_contact import InvestorContact
 from app.models.outreach_send import OutreachSend
 from app.models.vault_folder import VaultFolder
 from app.schemas.auth import AuthenticatedUser
+from app.models.favorite_list import FavoriteList, FavoriteListItem
 from app.schemas.vault import (
+    FavoriteFirmsResponse,
+    FavoriteSearchResponse,
+    FavoriteSearchResult,
+    FirmContactsResponse,
+    FirmSearchResponse,
+    FirmSearchResult,
     LinkedProviderItem,
     LinkedProvidersResponse,
     OutreachAdhocSendRequest,
@@ -796,18 +803,21 @@ async def search_outreach_contacts(
 ) -> RecipientSearchResponse:
     """Partial-match search across BD / advisor / investor contacts.
 
-    Returns rows whose contact name, email, or parent firm name
-    contains ``q`` (case-insensitive). Only includes contacts that
-    have an email on file -- outreach can't go anywhere without one
-    and the dropdown shouldn't tease un-pickable options.
+    Returns rows whose contact ``name`` or ``email`` contains ``q``
+    (case-insensitive). Firm-name matches are intentionally NOT
+    surfaced here -- those go through the separate ``/firms/search``
+    endpoint so the FE can render them as firm rows (one per firm)
+    rather than per-contact rows. The FE calls both endpoints in
+    parallel and renders the combined dropdown.
+
+    Only includes contacts that have an email on file -- outreach
+    can't go anywhere without one and the dropdown shouldn't tease
+    un-pickable options.
 
     Three small queries (one per contact table) combined in Python.
     The volume is bounded by ``limit`` per kind so the merged result
     is at most 3 * limit before the final cap is applied; that keeps
-    the SQL simple at the cost of one extra in-Python pass. UNION ALL
-    in SQL would be marginally faster but the cross-table type
-    differences (each contact table has its own FK column name) make
-    the SQL clumsy enough that this is the cleaner factoring.
+    the SQL simple at the cost of one extra in-Python pass.
     """
 
     needle = f"%{q.strip().lower()}%"
@@ -828,7 +838,6 @@ async def search_outreach_contacts(
             or_(
                 func.lower(ExecutiveContact.name).like(needle),
                 func.lower(ExecutiveContact.email).like(needle),
-                func.lower(BrokerDealer.name).like(needle),
             )
         )
         .order_by(ExecutiveContact.name.asc())
@@ -849,7 +858,6 @@ async def search_outreach_contacts(
             or_(
                 func.lower(AdvisorContact.name).like(needle),
                 func.lower(AdvisorContact.email).like(needle),
-                func.lower(InvestmentAdvisor.name).like(needle),
             )
         )
         .order_by(AdvisorContact.name.asc())
@@ -873,7 +881,6 @@ async def search_outreach_contacts(
             or_(
                 func.lower(InvestorContact.name).like(needle),
                 func.lower(InvestorContact.email).like(needle),
-                func.lower(InstitutionalInvestor.name).like(needle),
             )
         )
         .order_by(InvestorContact.name.asc())
@@ -922,6 +929,424 @@ async def search_outreach_contacts(
     # overall limit. Keeps results predictable for the FE's combobox.
     results.sort(key=lambda r: (r.contact_name.lower(), r.entity_kind))
     return RecipientSearchResponse(items=results[:limit])
+
+
+@router.get("/firms/search", response_model=FirmSearchResponse)
+async def search_outreach_firms(
+    q: str = Query(..., min_length=1, max_length=255),
+    limit: int = Query(20, ge=1, le=50),
+    _: AuthenticatedUser = Depends(_require_sent_outreach),
+    db: AsyncSession = Depends(get_db_session),
+) -> FirmSearchResponse:
+    """Partial-match firm-name search across BD / advisor / investor.
+
+    Returns one row per firm whose name contains ``q``. Used by the
+    create-outreach recipient autocomplete alongside
+    ``/contacts/search``: contact-name hits go through the contact
+    endpoint, firm-name hits land here. Firms with zero email-bearing
+    contacts are excluded -- picking one would land in an empty modal.
+
+    ``contact_count`` counts only contacts with a non-NULL email since
+    that's what the modal will offer the user to send to.
+    """
+
+    needle = f"%{q.strip().lower()}%"
+    per_kind_limit = limit
+
+    # Sub-counts via correlated COUNT subqueries; one ROUND TRIP per
+    # firm kind. Cheap because the outer LIKE is selective.
+    bd_count = (
+        select(func.count(ExecutiveContact.id))
+        .where(ExecutiveContact.bd_id == BrokerDealer.id)
+        .where(ExecutiveContact.email.isnot(None))
+        .correlate(BrokerDealer)
+        .scalar_subquery()
+    )
+    advisor_count = (
+        select(func.count(AdvisorContact.id))
+        .where(AdvisorContact.advisor_id == InvestmentAdvisor.id)
+        .where(AdvisorContact.email.isnot(None))
+        .correlate(InvestmentAdvisor)
+        .scalar_subquery()
+    )
+    investor_count = (
+        select(func.count(InvestorContact.id))
+        .where(InvestorContact.investor_id == InstitutionalInvestor.id)
+        .where(InvestorContact.email.isnot(None))
+        .correlate(InstitutionalInvestor)
+        .scalar_subquery()
+    )
+
+    bd_stmt = (
+        select(
+            BrokerDealer.id.label("entity_id"),
+            BrokerDealer.name.label("entity_name"),
+            bd_count.label("contact_count"),
+        )
+        .where(func.lower(BrokerDealer.name).like(needle))
+        .where(bd_count > 0)
+        .order_by(BrokerDealer.name.asc())
+        .limit(per_kind_limit)
+    )
+    advisor_stmt = (
+        select(
+            InvestmentAdvisor.id.label("entity_id"),
+            InvestmentAdvisor.name.label("entity_name"),
+            advisor_count.label("contact_count"),
+        )
+        .where(func.lower(InvestmentAdvisor.name).like(needle))
+        .where(advisor_count > 0)
+        .order_by(InvestmentAdvisor.name.asc())
+        .limit(per_kind_limit)
+    )
+    investor_stmt = (
+        select(
+            InstitutionalInvestor.id.label("entity_id"),
+            InstitutionalInvestor.name.label("entity_name"),
+            investor_count.label("contact_count"),
+        )
+        .where(func.lower(InstitutionalInvestor.name).like(needle))
+        .where(investor_count > 0)
+        .order_by(InstitutionalInvestor.name.asc())
+        .limit(per_kind_limit)
+    )
+
+    results: list[FirmSearchResult] = []
+    for row in (await db.execute(bd_stmt)).all():
+        results.append(
+            FirmSearchResult(
+                entity_kind="broker_dealer",
+                entity_id=row.entity_id,
+                entity_name=row.entity_name or "",
+                contact_count=int(row.contact_count or 0),
+            )
+        )
+    for row in (await db.execute(advisor_stmt)).all():
+        results.append(
+            FirmSearchResult(
+                entity_kind="advisor",
+                entity_id=row.entity_id,
+                entity_name=row.entity_name or "",
+                contact_count=int(row.contact_count or 0),
+            )
+        )
+    for row in (await db.execute(investor_stmt)).all():
+        results.append(
+            FirmSearchResult(
+                entity_kind="institutional_investor",
+                entity_id=row.entity_id,
+                entity_name=row.entity_name or "",
+                contact_count=int(row.contact_count or 0),
+            )
+        )
+
+    results.sort(key=lambda r: (r.entity_name.lower(), r.entity_kind))
+    return FirmSearchResponse(items=results[:limit])
+
+
+@router.get("/firms/contacts", response_model=FirmContactsResponse)
+async def list_firm_contacts(
+    entity_kind: Literal[
+        "broker_dealer", "advisor", "institutional_investor"
+    ] = Query(...),
+    entity_id: int = Query(..., gt=0),
+    _: AuthenticatedUser = Depends(_require_sent_outreach),
+    db: AsyncSession = Depends(get_db_session),
+) -> FirmContactsResponse:
+    """All email-bearing contacts at a single firm.
+
+    Backs the "pick a contact" modal that opens when the user selects
+    a firm row in the recipient autocomplete. The modal renders rows
+    identically to how the autocomplete renders contact-hit rows;
+    picking one wires the create-outreach form with the same
+    contact-typed recipient as if the user had picked the contact
+    directly in the autocomplete.
+    """
+
+    if entity_kind == "broker_dealer":
+        firm_stmt = select(BrokerDealer).where(BrokerDealer.id == entity_id)
+        firm = (await db.execute(firm_stmt)).scalar_one_or_none()
+        if firm is None:
+            raise HTTPException(
+                status_code=404, detail="outreach_inputs_not_found"
+            )
+        contact_stmt = (
+            select(
+                ExecutiveContact.id.label("contact_id"),
+                ExecutiveContact.name.label("contact_name"),
+                ExecutiveContact.title.label("contact_title"),
+                ExecutiveContact.email.label("contact_email"),
+            )
+            .where(ExecutiveContact.bd_id == entity_id)
+            .where(ExecutiveContact.email.isnot(None))
+            .order_by(ExecutiveContact.name.asc())
+        )
+    elif entity_kind == "advisor":
+        firm_stmt = select(InvestmentAdvisor).where(
+            InvestmentAdvisor.id == entity_id
+        )
+        firm = (await db.execute(firm_stmt)).scalar_one_or_none()
+        if firm is None:
+            raise HTTPException(
+                status_code=404, detail="outreach_inputs_not_found"
+            )
+        contact_stmt = (
+            select(
+                AdvisorContact.id.label("contact_id"),
+                AdvisorContact.name.label("contact_name"),
+                AdvisorContact.title.label("contact_title"),
+                AdvisorContact.email.label("contact_email"),
+            )
+            .where(AdvisorContact.advisor_id == entity_id)
+            .where(AdvisorContact.email.isnot(None))
+            .order_by(AdvisorContact.name.asc())
+        )
+    else:
+        firm_stmt = select(InstitutionalInvestor).where(
+            InstitutionalInvestor.id == entity_id
+        )
+        firm = (await db.execute(firm_stmt)).scalar_one_or_none()
+        if firm is None:
+            raise HTTPException(
+                status_code=404, detail="outreach_inputs_not_found"
+            )
+        contact_stmt = (
+            select(
+                InvestorContact.id.label("contact_id"),
+                InvestorContact.name.label("contact_name"),
+                InvestorContact.title.label("contact_title"),
+                InvestorContact.email.label("contact_email"),
+            )
+            .where(InvestorContact.investor_id == entity_id)
+            .where(InvestorContact.email.isnot(None))
+            .order_by(InvestorContact.name.asc())
+        )
+
+    items: list[RecipientSearchResult] = []
+    for row in (await db.execute(contact_stmt)).all():
+        items.append(
+            RecipientSearchResult(
+                entity_kind=entity_kind,
+                entity_id=entity_id,
+                entity_name=firm.name or "",
+                contact_id=row.contact_id,
+                contact_name=row.contact_name or "",
+                contact_title=row.contact_title,
+                contact_email=row.contact_email,
+            )
+        )
+
+    return FirmContactsResponse(
+        entity_kind=entity_kind,
+        entity_id=entity_id,
+        entity_name=firm.name or "",
+        items=items,
+    )
+
+
+@router.get("/favorites/search", response_model=FavoriteSearchResponse)
+async def search_outreach_favorites(
+    q: str = Query(..., min_length=1, max_length=255),
+    limit: int = Query(20, ge=1, le=50),
+    current_user: AuthenticatedUser = Depends(_require_sent_outreach),
+    db: AsyncSession = Depends(get_db_session),
+) -> FavoriteSearchResponse:
+    """Partial-match search across the caller's favorite lists.
+
+    Returns user-owned lists whose name contains ``q``. ``firm_count``
+    is the number of email-bearing-contact firms in the list -- a
+    list with zero such firms is excluded since picking it would
+    land in an empty drill-down modal. Reporting-owner items
+    (insiders) don't have a contact table, so they're not counted.
+    """
+
+    needle = f"%{q.strip().lower()}%"
+
+    # Per-list count of firms whose contacts have at least one email.
+    # SUM of three EXISTS() per item, then SUM over items in the list.
+    # Done in SQL for the count so we don't N+1 across each list's items.
+    bd_has_email = (
+        select(ExecutiveContact.id)
+        .where(ExecutiveContact.bd_id == FavoriteListItem.broker_dealer_id)
+        .where(ExecutiveContact.email.isnot(None))
+        .exists()
+    )
+    advisor_has_email = (
+        select(AdvisorContact.id)
+        .where(AdvisorContact.advisor_id == FavoriteListItem.advisor_id)
+        .where(AdvisorContact.email.isnot(None))
+        .exists()
+    )
+    investor_has_email = (
+        select(InvestorContact.id)
+        .where(
+            InvestorContact.investor_id == FavoriteListItem.institutional_investor_id
+        )
+        .where(InvestorContact.email.isnot(None))
+        .exists()
+    )
+
+    firm_count_subq = (
+        select(func.count(FavoriteListItem.id))
+        .where(FavoriteListItem.list_id == FavoriteList.id)
+        .where(
+            or_(
+                bd_has_email,
+                advisor_has_email,
+                investor_has_email,
+            )
+        )
+        .correlate(FavoriteList)
+        .scalar_subquery()
+    )
+
+    stmt = (
+        select(
+            FavoriteList.id.label("list_id"),
+            FavoriteList.name.label("name"),
+            firm_count_subq.label("firm_count"),
+        )
+        .where(FavoriteList.user_id == current_user.id)
+        .where(func.lower(FavoriteList.name).like(needle))
+        .where(firm_count_subq > 0)
+        .order_by(FavoriteList.name.asc())
+        .limit(limit)
+    )
+
+    items = [
+        FavoriteSearchResult(
+            list_id=row.list_id,
+            name=row.name,
+            firm_count=int(row.firm_count or 0),
+        )
+        for row in (await db.execute(stmt)).all()
+    ]
+    return FavoriteSearchResponse(items=items)
+
+
+@router.get(
+    "/favorites/{list_id}/firms", response_model=FavoriteFirmsResponse
+)
+async def list_favorite_firms(
+    list_id: int,
+    current_user: AuthenticatedUser = Depends(_require_sent_outreach),
+    db: AsyncSession = Depends(get_db_session),
+) -> FavoriteFirmsResponse:
+    """Firms in a favorite list, filtered to those with email-bearing contacts.
+
+    Drives the second view of the recipient drill-down modal. The user
+    picks one of these firms; the modal then swaps to the firm-contacts
+    view (``GET /outreach/firms/contacts``) for the chosen firm.
+    """
+
+    list_row = (
+        await db.execute(
+            select(FavoriteList).where(
+                FavoriteList.id == list_id,
+                FavoriteList.user_id == current_user.id,
+            )
+        )
+    ).scalar_one_or_none()
+    if list_row is None:
+        raise HTTPException(
+            status_code=404, detail="outreach_inputs_not_found"
+        )
+
+    bd_count = (
+        select(func.count(ExecutiveContact.id))
+        .where(ExecutiveContact.bd_id == BrokerDealer.id)
+        .where(ExecutiveContact.email.isnot(None))
+        .correlate(BrokerDealer)
+        .scalar_subquery()
+    )
+    advisor_count = (
+        select(func.count(AdvisorContact.id))
+        .where(AdvisorContact.advisor_id == InvestmentAdvisor.id)
+        .where(AdvisorContact.email.isnot(None))
+        .correlate(InvestmentAdvisor)
+        .scalar_subquery()
+    )
+    investor_count = (
+        select(func.count(InvestorContact.id))
+        .where(InvestorContact.investor_id == InstitutionalInvestor.id)
+        .where(InvestorContact.email.isnot(None))
+        .correlate(InstitutionalInvestor)
+        .scalar_subquery()
+    )
+
+    bd_stmt = (
+        select(
+            BrokerDealer.id.label("entity_id"),
+            BrokerDealer.name.label("entity_name"),
+            bd_count.label("contact_count"),
+        )
+        .join(FavoriteListItem, FavoriteListItem.broker_dealer_id == BrokerDealer.id)
+        .where(FavoriteListItem.list_id == list_id)
+        .where(bd_count > 0)
+        .order_by(BrokerDealer.name.asc())
+    )
+    advisor_stmt = (
+        select(
+            InvestmentAdvisor.id.label("entity_id"),
+            InvestmentAdvisor.name.label("entity_name"),
+            advisor_count.label("contact_count"),
+        )
+        .join(
+            FavoriteListItem,
+            FavoriteListItem.advisor_id == InvestmentAdvisor.id,
+        )
+        .where(FavoriteListItem.list_id == list_id)
+        .where(advisor_count > 0)
+        .order_by(InvestmentAdvisor.name.asc())
+    )
+    investor_stmt = (
+        select(
+            InstitutionalInvestor.id.label("entity_id"),
+            InstitutionalInvestor.name.label("entity_name"),
+            investor_count.label("contact_count"),
+        )
+        .join(
+            FavoriteListItem,
+            FavoriteListItem.institutional_investor_id == InstitutionalInvestor.id,
+        )
+        .where(FavoriteListItem.list_id == list_id)
+        .where(investor_count > 0)
+        .order_by(InstitutionalInvestor.name.asc())
+    )
+
+    firms: list[FirmSearchResult] = []
+    for row in (await db.execute(bd_stmt)).all():
+        firms.append(
+            FirmSearchResult(
+                entity_kind="broker_dealer",
+                entity_id=row.entity_id,
+                entity_name=row.entity_name or "",
+                contact_count=int(row.contact_count or 0),
+            )
+        )
+    for row in (await db.execute(advisor_stmt)).all():
+        firms.append(
+            FirmSearchResult(
+                entity_kind="advisor",
+                entity_id=row.entity_id,
+                entity_name=row.entity_name or "",
+                contact_count=int(row.contact_count or 0),
+            )
+        )
+    for row in (await db.execute(investor_stmt)).all():
+        firms.append(
+            FirmSearchResult(
+                entity_kind="institutional_investor",
+                entity_id=row.entity_id,
+                entity_name=row.entity_name or "",
+                contact_count=int(row.contact_count or 0),
+            )
+        )
+
+    firms.sort(key=lambda r: (r.entity_name.lower(), r.entity_kind))
+    return FavoriteFirmsResponse(
+        list_id=list_row.id, name=list_row.name, items=firms
+    )
 
 
 @router.post("/adhoc-send", response_model=OutreachSendResponse)
