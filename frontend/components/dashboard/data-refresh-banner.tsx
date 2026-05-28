@@ -1,7 +1,7 @@
 "use client";
 
 import { useCallback, useEffect, useState } from "react";
-import { X } from "lucide-react";
+import { RefreshCw, X } from "lucide-react";
 
 import { apiRequest } from "@/lib/api";
 
@@ -91,22 +91,29 @@ export function DataRefreshBanner() {
 
   return (
     <div
-      className="data-refresh-banner relative mb-4 flex items-center gap-3 overflow-hidden rounded-2xl border border-[var(--border-2,rgba(30,64,175,0.16))] bg-[var(--surface-2,#f1f6fd)] px-4 py-3 text-[13px] text-[var(--text-dim,#475569)]"
+      className="data-refresh-banner relative mb-5 flex items-center gap-4 overflow-hidden rounded-2xl border border-[rgba(99,102,241,0.25)] bg-[rgba(99,102,241,0.10)] px-5 py-4 text-[14px] text-[var(--text,#0f172a)] shadow-[0_1px_3px_rgba(15,23,42,0.04)]"
       role="status"
       aria-live="polite"
     >
-      {/* Shimmer overlay — animated horizontal gradient sweep. Pure CSS so
-       * it stays smooth on low-end clients. Respects prefers-reduced-motion. */}
+      {/* Shimmer overlay — animated horizontal gradient sweep across the
+       * banner background. Pure CSS so it stays smooth on low-end clients.
+       * prefers-reduced-motion neutralises it below. */}
       <span className="data-refresh-banner__shimmer pointer-events-none absolute inset-0" aria-hidden />
 
-      {/* Pulsing dot — same idiom as RefreshingIndicator so visual
-       * language is consistent across the app. */}
-      <span className="relative inline-flex h-2 w-2 shrink-0" aria-hidden>
-        <span className="absolute inline-flex h-full w-full animate-ping rounded-full bg-[var(--accent,#6366f1)] opacity-60" />
-        <span className="relative inline-flex h-2 w-2 rounded-full bg-[var(--accent,#6366f1)]" />
+      {/* Spinning refresh icon — visual cue for "data is moving" that's
+       * recognisable at a glance. Sits in a soft accent circle so the
+       * spin reads even on the tinted banner background. */}
+      <span
+        className="relative inline-flex h-9 w-9 shrink-0 items-center justify-center rounded-full bg-[rgba(99,102,241,0.18)] text-[var(--accent,#6366f1)]"
+        aria-hidden
+      >
+        <RefreshCw
+          className="data-refresh-banner__icon h-5 w-5"
+          strokeWidth={2.25}
+        />
       </span>
 
-      <span className="relative flex-1 font-medium text-[var(--text,#0f172a)]">
+      <span className="relative flex-1 font-medium leading-snug">
         {BANNER_COPY}
       </span>
 
@@ -114,23 +121,48 @@ export function DataRefreshBanner() {
         type="button"
         onClick={handleDismiss}
         aria-label="Dismiss data refresh notice"
-        className="relative inline-flex h-7 w-7 shrink-0 items-center justify-center rounded-full text-[var(--text-muted,#94a3b8)] transition hover:bg-[var(--surface,#ffffff)] hover:text-[var(--text,#0f172a)]"
+        className="relative inline-flex h-8 w-8 shrink-0 items-center justify-center rounded-full text-[var(--text-muted,#94a3b8)] transition hover:bg-[var(--surface,#ffffff)] hover:text-[var(--text,#0f172a)]"
       >
         <X className="h-4 w-4" strokeWidth={2} aria-hidden />
       </button>
 
       <style jsx>{`
+        .data-refresh-banner {
+          animation: data-refresh-banner-enter 320ms cubic-bezier(0.16, 1, 0.3, 1) both;
+        }
+        .data-refresh-banner__icon {
+          animation: data-refresh-banner-spin 2.4s linear infinite;
+          transform-origin: 50% 50%;
+        }
         .data-refresh-banner__shimmer {
           background: linear-gradient(
             90deg,
             transparent 0%,
-            rgba(99, 102, 241, 0.08) 50%,
+            rgba(99, 102, 241, 0.12) 50%,
             transparent 100%
           );
           background-size: 200% 100%;
           background-repeat: no-repeat;
           background-position: -100% 0;
           animation: data-refresh-banner-shimmer 3s linear infinite;
+        }
+        @keyframes data-refresh-banner-enter {
+          from {
+            opacity: 0;
+            transform: translateY(-8px);
+          }
+          to {
+            opacity: 1;
+            transform: translateY(0);
+          }
+        }
+        @keyframes data-refresh-banner-spin {
+          from {
+            transform: rotate(0deg);
+          }
+          to {
+            transform: rotate(360deg);
+          }
         }
         @keyframes data-refresh-banner-shimmer {
           0% {
@@ -141,8 +173,12 @@ export function DataRefreshBanner() {
           }
         }
         @media (prefers-reduced-motion: reduce) {
+          .data-refresh-banner,
+          .data-refresh-banner__icon,
           .data-refresh-banner__shimmer {
             animation: none;
+          }
+          .data-refresh-banner__shimmer {
             background: none;
           }
         }
