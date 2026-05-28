@@ -45,6 +45,7 @@ class InvestorItem(BaseModel):
 
     enriched_phone: str | None
     enriched_email: str | None
+    enriched_linkedin_url: str | None = None
     enriched_at: datetime | None
 
     source_filing_url: str | None
@@ -95,6 +96,7 @@ class InvestorEnrichResponse(BaseModel):
     txn_id: int
     enriched_phone: str | None
     enriched_email: str | None
+    enriched_linkedin_url: str | None = None
     enriched_at: datetime | None
     matched: bool
     skip_reason: str | None = None

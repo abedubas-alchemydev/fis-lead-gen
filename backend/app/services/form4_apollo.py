@@ -69,6 +69,11 @@ class Form4ApolloMatch:
     # surfaces a distinct copy when set so the user understands the row
     # wasn't a failed lookup but a no-op by design.
     skip_reason: str | None = None
+    # LinkedIn profile URL when either provider returned one. PDL prefixes
+    # bare URLs with ``https://`` upstream; Apollo returns full URLs.
+    # ``matched`` counts a LinkedIn-only hit so the FE doesn't show
+    # "Apollo returned no match" when a usable handle was recovered.
+    linkedin_url: str | None = None
 
 
 def _split_name(full_name: str) -> tuple[str | None, str | None]:
@@ -139,7 +144,10 @@ async def match_form4_person(
             return Form4ApolloMatch(
                 phone=pdl_hit.phone,
                 email=pdl_hit.email,
-                matched=bool(pdl_hit.email) or bool(pdl_hit.phone),
+                linkedin_url=pdl_hit.linkedin_url,
+                matched=bool(pdl_hit.email)
+                or bool(pdl_hit.phone)
+                or bool(pdl_hit.linkedin_url),
             )
 
     # ── Apollo fallback ──────────────────────────────────────────
@@ -203,9 +211,17 @@ async def match_form4_person(
                 phone = entry.strip()
                 break
 
-    matched = bool(email) or bool(phone)
+    linkedin_raw = person.get("linkedin_url")
+    linkedin_url = (
+        linkedin_raw.strip()
+        if isinstance(linkedin_raw, str) and linkedin_raw.strip()
+        else None
+    )
+
+    matched = bool(email) or bool(phone) or bool(linkedin_url)
     return Form4ApolloMatch(
         phone=phone,
         email=email if isinstance(email, str) and email.strip() else None,
+        linkedin_url=linkedin_url,
         matched=matched,
     )

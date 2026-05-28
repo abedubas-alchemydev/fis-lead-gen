@@ -244,6 +244,7 @@ export type InvestorItem = {
 
   enriched_phone: string | null;
   enriched_email: string | null;
+  enriched_linkedin_url: string | null;
   enriched_at: string | null;
 
   source_filing_url: string | null;
@@ -276,6 +277,7 @@ export type InvestorEnrichResponse = {
   txn_id: number;
   enriched_phone: string | null;
   enriched_email: string | null;
+  enriched_linkedin_url: string | null;
   // NULL when ``skip_reason`` is set (the lookup didn't actually run);
   // ISO timestamp on a real attempt regardless of match outcome.
   enriched_at: string | null;

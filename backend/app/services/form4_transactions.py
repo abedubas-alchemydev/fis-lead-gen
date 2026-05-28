@@ -328,15 +328,17 @@ class Form4TransactionRepository:
         reporting_owner_cik: str,
         phone: str | None,
         email: str | None,
+        linkedin_url: str | None,
     ) -> tuple[int, datetime]:
         """Apply Apollo enrichment to every ``form4_transactions`` row for a person.
 
-        A single Apollo lookup yields phone/email for one reporting
-        person; CIK is the SEC-assigned per-person identifier, so writing
-        WHERE ``reporting_owner_cik = X`` covers all of that person's
-        transactions across every issuer they appear under. ``enriched_at``
-        is always stamped so the FE can distinguish "never enriched" from
-        "enriched, came back empty" without re-firing Apollo.
+        A single Apollo lookup yields phone/email/LinkedIn for one
+        reporting person; CIK is the SEC-assigned per-person identifier,
+        so writing WHERE ``reporting_owner_cik = X`` covers all of that
+        person's transactions across every issuer they appear under.
+        ``enriched_at`` is always stamped so the FE can distinguish
+        "never enriched" from "enriched, came back empty" without
+        re-firing Apollo.
 
         Returns ``(rowcount, enriched_at)``.
         """
@@ -347,6 +349,7 @@ class Form4TransactionRepository:
             .values(
                 enriched_phone=phone,
                 enriched_email=email,
+                enriched_linkedin_url=linkedin_url,
                 enriched_at=enriched_at,
             )
         )
@@ -401,6 +404,7 @@ def _row_to_consolidated(mapping) -> ConsolidatedPersonRow:
         txn_count=txn_count,
         enriched_phone=mapping["enriched_phone"],
         enriched_email=mapping["enriched_email"],
+        enriched_linkedin_url=mapping["enriched_linkedin_url"],
         enriched_at=mapping["enriched_at"],
         source_filing_url=mapping["source_filing_url"],
         filed_at=mapping["filed_at"],
