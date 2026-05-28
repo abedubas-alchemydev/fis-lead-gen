@@ -44,6 +44,7 @@ def _base_mapping(**overrides) -> dict:
         "txn_count": 2,
         "enriched_phone": None,
         "enriched_email": None,
+        "enriched_linkedin_url": None,
         "enriched_at": None,
         "source_filing_url": "https://www.sec.gov/Archives/edgar/data/123/0001234567-26-000001-index.htm",
         "filed_at": datetime(2026, 5, 13, 14, 30, tzinfo=timezone.utc),
