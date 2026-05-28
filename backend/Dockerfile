@@ -23,12 +23,18 @@ RUN apt-get update \
     && apt-get purge -y --auto-remove git \
     && rm -rf /var/lib/apt/lists/*
 
-# Install dependencies
-COPY requirements.txt .
+# Install dependencies. The Docker build context is the repo root (so
+# `scripts/` can ship into the image for the Cloud Run Job that runs
+# the advisor gap-fill batch); the requirements file lives under
+# `backend/` and is copied explicitly.
+COPY backend/requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 
-# Copy application code
-COPY . .
+# Copy backend application code at /app (PYTHONPATH=/app above keeps
+# `from app...` imports working) and the repo-root scripts directory
+# under /app/scripts so the Cloud Run Job can `python scripts/...`.
+COPY backend/ /app/
+COPY scripts/ /app/scripts/
 
 # Run migrations then start the server
 # In production, migrations can be run as a separate init step
