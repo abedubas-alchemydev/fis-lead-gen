@@ -18,7 +18,7 @@ import {
 import { AlertPriorityBadge } from "@/components/alerts/alert-priority-badge";
 import { ArrangementFields } from "@/components/master-list/detail/arrangement-fields";
 import { ContactRow } from "@/components/master-list/detail/contact-row";
-import { EmailScansSection } from "@/components/master-list/detail/email-scans-section";
+import { EmailScansSection } from "@/components/email-extractor/email-scans-section";
 import { FinancialTrendChart } from "@/components/master-list/detail/financial-trend-chart";
 import { FirmWebsiteLink } from "@/components/master-list/detail/firm-website-link";
 import { FocusReportSection } from "@/components/master-list/detail/focus-report-section";
@@ -1401,7 +1401,8 @@ export function BrokerDealerDetailClient({ brokerDealerId }: { brokerDealerId: s
       {/* ── Discovered emails (full width) ── */}
       <div className="mt-4">
         <EmailScansSection
-          brokerDealerId={brokerDealerId}
+          entityKind="bd"
+          entityId={Number(brokerDealerId)}
           currentScanId={currentScanId}
           resolvedDomain={resolvedDomain}
           isHydrating={isHydratingScan}

@@ -28,6 +28,7 @@ export interface DiscoveredEmailResponse {
   confidence: number | null;
   attribution: string | null;
   bd_id: number | null;
+  advisor_id: number | null;
   enriched_name: string | null;
   enriched_title: string | null;
   enriched_linkedin_url: string | null;
@@ -62,6 +63,7 @@ export interface ScanListItem {
   domain: string;
   person_name: string | null;
   bd_id: number | null;
+  advisor_id: number | null;
   status: RunStatus;
   total_items: number;
   processed_items: number;
@@ -127,6 +129,23 @@ export async function listScansForBrokerDealer(
 ): Promise<ScanListItem[]> {
   return apiRequest<ScanListItem[]>(
     buildApiPath("/api/v1/email-extractor/scans", { bd_id: bdId, limit })
+  );
+}
+
+// Generic entity-scoped scan list. Dispatches to either the bd_id or
+// advisor_id query param so the inline "Discovered Emails" section can
+// hydrate from either /master-list/{id} or /advisor-list/{id} without
+// duplicating the wrapper.
+export async function listScansForEntity(
+  entity: { kind: "bd"; id: number } | { kind: "advisor"; id: number },
+  limit = 1
+): Promise<ScanListItem[]> {
+  const params =
+    entity.kind === "bd"
+      ? { bd_id: entity.id, limit }
+      : { advisor_id: entity.id, limit };
+  return apiRequest<ScanListItem[]>(
+    buildApiPath("/api/v1/email-extractor/scans", params)
   );
 }
 

@@ -30,6 +30,8 @@ import {
   type AdvisorListQueryState,
 } from "@/lib/advisor-list-state";
 import { formatCurrency, formatDate } from "@/lib/format";
+import { EmailScansSection } from "@/components/email-extractor/email-scans-section";
+import { listScansForEntity } from "@/lib/email-extractor";
 import { ListPicker } from "@/components/list-picker/list-picker";
 import { OutreachButton } from "@/components/master-list/outreach-button";
 import { ChannelIconCell } from "@/components/advisor-list/channel-icon-cell";
@@ -120,6 +122,13 @@ export function AdvisorDetailClient({ advisorId }: { advisorId: string }) {
   // fresh-from-source data.
   const [isRefreshing, setIsRefreshing] = useState(false);
   const [refreshError, setRefreshError] = useState<string | null>(null);
+
+  // Inline "Discovered Emails" section state. Mirrors the BD detail page:
+  // `currentScanId` is the single source of truth, seeded from `?scanId=`
+  // (deep-link / post-Find-Emails refresh) or the most-recent scan for
+  // this advisor on first load. See hydration + URL-sync effects below.
+  const [currentScanId, setCurrentScanId] = useState<number | null>(null);
+  const [isHydratingScan, setIsHydratingScan] = useState(true);
 
   // Fetch /profile immediately on mount. Errors surface via setError so
   // a failed first load shows the error page. `reloadProfile` is the
@@ -294,6 +303,70 @@ export function AdvisorDetailClient({ advisorId }: { advisorId: string }) {
     };
   }, [advisorId, returnState]);
 
+  // Hydrate the inline "Discovered Emails" section. Two sources, in
+  // precedence order:
+  //   1. `?scanId=` in the URL — wins, so deep-links and post-Find-Emails
+  //      refreshes re-open the same scan.
+  //   2. Most-recent scan for this advisor via list-scans-by-advisor_id —
+  //      so the user sees prior emails on first load without re-running.
+  // Reads `window.location.search` directly so this effect doesn't have
+  // to depend on the reactive `searchParams` (the URL-sync effect below
+  // would otherwise feed back into this and re-fetch on every change).
+  useEffect(() => {
+    const numericId = Number(advisorId);
+    if (!Number.isFinite(numericId)) {
+      setIsHydratingScan(false);
+      return;
+    }
+
+    const urlScanId = new URLSearchParams(window.location.search).get(
+      "scanId",
+    );
+    if (urlScanId) {
+      const parsed = Number(urlScanId);
+      if (Number.isFinite(parsed)) {
+        setCurrentScanId(parsed);
+        setIsHydratingScan(false);
+        return;
+      }
+    }
+
+    let active = true;
+    setIsHydratingScan(true);
+    setCurrentScanId(null);
+    listScansForEntity({ kind: "advisor", id: numericId }, 1)
+      .then((scans) => {
+        if (!active) return;
+        if (scans.length > 0) {
+          setCurrentScanId(scans[0].id);
+        }
+      })
+      .catch(() => {
+        /* swallow — empty state will render */
+      })
+      .finally(() => {
+        if (active) setIsHydratingScan(false);
+      });
+
+    return () => {
+      active = false;
+    };
+  }, [advisorId]);
+
+  // Persist the active scan in the URL so a refresh re-opens the same
+  // scan inside the inline section. Guards against a feedback loop by
+  // checking whether `?scanId=` already matches before replacing.
+  useEffect(() => {
+    if (currentScanId === null) return;
+    const desired = String(currentScanId);
+    if (searchParams.get("scanId") === desired) return;
+    const params = new URLSearchParams(searchParams.toString());
+    params.set("scanId", desired);
+    router.replace(
+      `/advisor-list/${advisorId}?${params.toString()}` as Route,
+    );
+  }, [currentScanId, advisorId, searchParams, router]);
+
   // Same-shape /advisor-list/{id} link that preserves the return envelope so
   // chaining Next/Previous keeps the user's filtered context.
   const buildAdjacentHref = (id: number): Route => {
@@ -323,6 +396,26 @@ export function AdvisorDetailClient({ advisorId }: { advisorId: string }) {
   const advisoryActivities = advisor.advisory_activities ?? [];
   const clientTypes = advisor.client_types ?? [];
   const clientCounts = advisor.client_counts ?? null;
+
+  // Resolve the firm domain for the inline Find-emails section: prefer the
+  // advisor's website, fall back to the first contact email's domain.
+  // Advisor contacts carry a multi-value `emails[]` array (not the single
+  // `email` field used on BD contacts) so the lookup walks both shapes.
+  const websiteDomain = advisor.website
+    ? advisor.website
+        .replace(/^https?:\/\//i, "")
+        .replace(/\/+$/, "")
+        .split("/")[0]
+        ?.toLowerCase() ?? null
+    : null;
+  const contactEmail =
+    contacts.find((c) => (c.emails ?? [])[0]?.value)?.emails?.[0]?.value ??
+    contacts.find((c) => c.email)?.email ??
+    null;
+  const emailDomain = contactEmail
+    ? contactEmail.split("@")[1]?.toLowerCase() ?? null
+    : null;
+  const resolvedDomain = websiteDomain || emailDomain;
 
   return (
     <div className="px-7 pb-12 pt-7 animate-fade-in lg:px-9">
@@ -795,6 +888,18 @@ export function AdvisorDetailClient({ advisorId }: { advisorId: string }) {
             </div>
           )}
         </SectionPanel>
+      </div>
+
+      {/* ── Discovered emails (full width) ── */}
+      <div className="mt-4">
+        <EmailScansSection
+          entityKind="advisor"
+          entityId={Number(advisorId)}
+          currentScanId={currentScanId}
+          resolvedDomain={resolvedDomain}
+          isHydrating={isHydratingScan}
+          onScanCreated={setCurrentScanId}
+        />
       </div>
     </div>
   );

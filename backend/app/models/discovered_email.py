@@ -40,6 +40,9 @@ class DiscoveredEmail(Base):
     bd_id: Mapped[int | None] = mapped_column(
         Integer, ForeignKey("broker_dealers.id", ondelete="SET NULL"), nullable=True, index=True
     )
+    advisor_id: Mapped[int | None] = mapped_column(
+        Integer, ForeignKey("investment_advisors.id", ondelete="SET NULL"), nullable=True, index=True
+    )
     enriched_name: Mapped[str | None] = mapped_column(String(255), nullable=True)
     enriched_title: Mapped[str | None] = mapped_column(String(255), nullable=True)
     enriched_linkedin_url: Mapped[str | None] = mapped_column(String(512), nullable=True)
