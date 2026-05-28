@@ -40,8 +40,9 @@ import asyncio
 import base64
 import json
 import logging
-from dataclasses import dataclass
+from dataclasses import asdict, dataclass
 from datetime import date, datetime, timedelta, timezone
+from decimal import Decimal
 from typing import Iterable, Literal
 from urllib.parse import urlparse
 
@@ -60,7 +61,12 @@ from app.services.brokercheck_pdf import (
     FinraPdfFetchError,
     FinraPdfNotFound,
 )
-from app.services.contact_discovery.orchestrator import discover_advisor_contact
+from app.services.contact_discovery.base import DiscoveryResult, EmailHit, PhoneHit
+from app.services.contact_discovery.orchestrator import (
+    _highest_confidence_value,
+    _walk_chain,
+    discover_advisor_contact,
+)
 from app.services.edgar import EdgarService, build_edgar_filing_url
 from app.services.finra_pdf_service import fetch_brokercheck_pdf
 from app.services.gemini_responses import (
@@ -205,6 +211,11 @@ SUB_REFRESH_FILINGS = "investment_advisor_refresh_filings"
 SUB_ENRICH_CONTACTS = "investment_advisor_enrich_contacts"
 SUB_REFRESH_IAPD_SUMMARY = "investment_advisor_refresh_iapd_summary"
 
+# Standalone pipeline name for the manual per-advisor contact gap-fill flow.
+# Not a child of REFRESH_ADVISOR_ALL — the endpoint creates ONE PipelineRun and
+# the runner finalizes it directly, so no parent/child split is needed.
+GAP_FILL_ADVISOR_CONTACTS_PIPELINE_NAME = "investment_advisor_gap_fill_contacts"
+
 # Short human labels used in the parent's notes.summary toast string.
 _SUB_LABEL: dict[str, str] = {
     SUB_REFRESH_OWNERS_OFFICERS: "owners",
@@ -213,6 +224,12 @@ _SUB_LABEL: dict[str, str] = {
     SUB_ENRICH_CONTACTS: "contacts",
     SUB_REFRESH_IAPD_SUMMARY: "iapd",
 }
+
+# How many days the manual gap-fill endpoint waits before allowing another
+# attempt on the same advisor. Matches scripts/gap_fill_investment_advisors.py
+# COOLDOWN_DAYS so an ad-hoc trigger and the nightly bulk runner share one
+# fairness budget.
+GAP_FILL_COOLDOWN_DAYS = 30
 
 
 # How many officers we hand to the discovery chain per advisor. Cooldown bounds
@@ -1252,6 +1269,326 @@ _RUNNERS = {
 
 
 # ---------------------------------------------------------------------------
+# Per-advisor contact gap-fill
+# ---------------------------------------------------------------------------
+#
+# _run_enrich_contacts has a hard idempotency guard: once any advisor_contacts
+# row exists, it returns without touching data. That's right for the cooldown-
+# gated refresh-all path -- nobody wants the orchestrator silently re-firing
+# paid provider calls on every detail-page visit. The downside: if provider
+# coverage was partial on the first enrichment (Apollo had email, PDL didn't
+# have LinkedIn, etc.), those gaps are now frozen forever.
+#
+# This sub-pipeline is the explicit out: an opt-in, ad-hoc retry that
+# re-queries the full chain ONLY for rows missing one or more of
+# (linkedin_url, email, phone), and merges the new chain hit INTO the
+# existing row without clobbering anything we already have. Triggered via
+# POST /investment-advisors/{id}/gap-fill-contacts; gated by a 30-day
+# cooldown on advisor.last_gap_fill_attempt_at (shared with the bulk runner
+# at scripts/gap_fill_investment_advisors.py so both flows pay into the same
+# fairness budget).
+
+
+def _is_gap_row(row: AdvisorContact) -> bool:
+    """True if ``row`` is missing any of LinkedIn URL, email, or phone.
+
+    A scalar value (``row.email``) or a non-empty JSONB array (``row.emails``)
+    both count as "present" — a row with ``emails=[{value:'a@b.com',...}]``
+    and ``email=None`` is NOT a gap, because the schema layer projects the
+    array on read."""
+    has_email = bool(row.email) or bool(row.emails)
+    has_phone = bool(row.phone) or bool(row.phones)
+    has_linkedin = bool(row.linkedin_url)
+    return not (has_email and has_phone and has_linkedin)
+
+
+def _apply_gap_fill(row: AdvisorContact, merged: DiscoveryResult) -> bool:
+    """Merge ``merged`` INTO ``row`` in place. Returns True iff anything changed.
+
+    Non-destructive merge semantics:
+
+    - ``emails`` / ``phones``: append new entries only; existing entries are
+      never replaced or removed. Dedupe key matches the chain merger
+      (lowercase value for emails, raw stripped for phones).
+    - ``linkedin_url``: fill ONLY when currently NULL. We never overwrite a
+      URL even if the chain returned a different one — manual edits and the
+      first-non-null choice from the original enrichment both stay sticky.
+    - Scalar ``email`` / ``phone``: fill ONLY when currently NULL, using
+      ``_highest_confidence_value`` over the post-merge array.
+    - ``discovery_source`` / ``discovery_confidence``: stamp ONLY when
+      previously NULL (names-only ``adv`` rows get a real provider attribution
+      on first hit).
+    """
+    changed = False
+
+    existing_emails: list[dict] = list(row.emails or [])
+    seen_email_keys: set[str] = set()
+    for entry in existing_emails:
+        value = (entry.get("value") if isinstance(entry, dict) else None) or ""
+        key = value.lower().strip()
+        if key:
+            seen_email_keys.add(key)
+    for hit in merged.emails:
+        key = (hit.value or "").lower().strip()
+        if not key or key in seen_email_keys:
+            continue
+        seen_email_keys.add(key)
+        existing_emails.append(asdict(hit))
+        changed = True
+    # Also lift the merged scalar email when it wasn't already represented
+    # in the array (matches _merge_discovery_results' lifting behaviour).
+    if merged.email:
+        scalar_key = merged.email.lower().strip()
+        if scalar_key and scalar_key not in seen_email_keys:
+            seen_email_keys.add(scalar_key)
+            existing_emails.append(
+                asdict(
+                    EmailHit(
+                        value=merged.email,
+                        type="work",
+                        confidence=merged.confidence,
+                        source=merged.provider,
+                    )
+                )
+            )
+            changed = True
+    if changed:
+        row.emails = existing_emails
+
+    existing_phones: list[dict] = list(row.phones or [])
+    seen_phone_keys: set[str] = set()
+    for entry in existing_phones:
+        value = (entry.get("value") if isinstance(entry, dict) else None) or ""
+        key = value.strip()
+        if key:
+            seen_phone_keys.add(key)
+    phones_changed = False
+    for hit in merged.phones:
+        key = (hit.value or "").strip()
+        if not key or key in seen_phone_keys:
+            continue
+        seen_phone_keys.add(key)
+        existing_phones.append(asdict(hit))
+        phones_changed = True
+    if merged.phone:
+        scalar_key = merged.phone.strip()
+        if scalar_key and scalar_key not in seen_phone_keys:
+            seen_phone_keys.add(scalar_key)
+            existing_phones.append(
+                asdict(
+                    PhoneHit(
+                        value=merged.phone,
+                        type="work",
+                        confidence=merged.confidence,
+                        source=merged.provider,
+                    )
+                )
+            )
+            phones_changed = True
+    if phones_changed:
+        row.phones = existing_phones
+        changed = True
+
+    if row.linkedin_url is None and merged.linkedin_url:
+        row.linkedin_url = merged.linkedin_url
+        changed = True
+
+    if row.email is None and row.emails:
+        hits = [
+            EmailHit(
+                value=e["value"],
+                type=e.get("type") or "work",
+                confidence=e.get("confidence"),
+                source=e.get("source") or "",
+            )
+            for e in row.emails
+            if isinstance(e, dict) and e.get("value")
+        ]
+        scalar = _highest_confidence_value(hits) if hits else None
+        if scalar:
+            row.email = scalar
+            changed = True
+
+    if row.phone is None and row.phones:
+        hits = [
+            PhoneHit(
+                value=p["value"],
+                type=p.get("type") or "work",
+                confidence=p.get("confidence"),
+                source=p.get("source") or "",
+            )
+            for p in row.phones
+            if isinstance(p, dict) and p.get("value")
+        ]
+        scalar = _highest_confidence_value(hits) if hits else None
+        if scalar:
+            row.phone = scalar
+            changed = True
+
+    if row.discovery_source is None and merged.provider:
+        row.discovery_source = merged.provider[:32]
+        changed = True
+    if row.discovery_confidence is None:
+        row.discovery_confidence = Decimal(str(round(merged.confidence, 2)))
+        changed = True
+
+    return changed
+
+
+async def _run_gap_fill_contacts(
+    run_id: int, advisor_id: int, trigger_source: str
+) -> None:
+    """Run the per-advisor contact gap-fill job to terminal state.
+
+    Iterates existing ``advisor_contacts`` rows for the advisor, filters to
+    those where :func:`_is_gap_row` returns True, re-runs ``_walk_chain``
+    for each gap row, and merges the result via :func:`_apply_gap_fill`.
+    Stamps ``advisor.last_gap_fill_attempt_at`` and finalizes the
+    PipelineRun row in place. Errors are swallowed into a ``failed``
+    terminal state so the background task never leaves the parent stuck
+    on ``queued``.
+    """
+    async with SessionLocal() as db:
+        run = await db.get(PipelineRun, run_id)
+        if run is not None:
+            run.status = "running"
+            await db.commit()
+
+    try:
+        async with SessionLocal() as db:
+            advisor = await db.get(InvestmentAdvisor, advisor_id)
+            if advisor is None:
+                await _finalize_gap_fill_run(
+                    run_id,
+                    status="failed",
+                    success=0,
+                    failure=1,
+                    summary="Advisor row disappeared between queue and run.",
+                )
+                return
+            firm_name = advisor.name
+            domain = _canonicalize_domain(_domain_from_website(advisor.website))
+            chain_org_name = _normalize_org_name(firm_name)
+
+            rows_stmt = (
+                select(AdvisorContact)
+                .where(AdvisorContact.advisor_id == advisor_id)
+                .order_by(AdvisorContact.id.asc())
+            )
+            rows = list((await db.execute(rows_stmt)).scalars().all())
+
+        gap_rows = [r for r in rows if _is_gap_row(r)]
+        if not rows:
+            summary = "No contacts on file; nothing to gap-fill."
+            await _stamp_gap_fill_attempt(advisor_id)
+            await _finalize_gap_fill_run(
+                run_id, status="completed", success=1, failure=0, summary=summary
+            )
+            return
+        if not gap_rows:
+            summary = f"All {len(rows)} contact(s) already complete."[:180]
+            await _stamp_gap_fill_attempt(advisor_id)
+            await _finalize_gap_fill_run(
+                run_id, status="completed", success=1, failure=0, summary=summary
+            )
+            return
+
+        filled = 0
+        chain_hits = 0
+        async with SessionLocal() as db:
+            # Re-load the rows in this session so the in-place mutations
+            # commit; the earlier read session is closed.
+            row_ids = [r.id for r in gap_rows]
+            db_rows_stmt = (
+                select(AdvisorContact)
+                .where(AdvisorContact.id.in_(row_ids))
+                .order_by(AdvisorContact.id.asc())
+            )
+            db_rows = list((await db.execute(db_rows_stmt)).scalars().all())
+            for row in db_rows:
+                split = _split_officer_name(row.name)
+                if split is None:
+                    continue
+                first_name, last_name = split
+                merged = await _walk_chain(
+                    "person",
+                    first_name=first_name,
+                    last_name=last_name,
+                    org_name=chain_org_name or row.name,
+                    domain=domain,
+                    cache_name=row.name,
+                )
+                if merged is None:
+                    continue
+                chain_hits += 1
+                if _apply_gap_fill(row, merged):
+                    row.enriched_at = datetime.now(timezone.utc)
+                    filled += 1
+            if filled:
+                await db.commit()
+
+        await _stamp_gap_fill_attempt(advisor_id)
+        summary = (
+            f"Gap-filled {filled} of {len(gap_rows)} contact(s) "
+            f"({chain_hits} chain hit(s), {len(rows)} total on file)."
+        )[:180]
+        await _finalize_gap_fill_run(
+            run_id, status="completed", success=1, failure=0, summary=summary
+        )
+    except Exception as exc:
+        logger.exception(
+            "advisor gap-fill-contacts failed for advisor %s", advisor_id
+        )
+        await _finalize_gap_fill_run(
+            run_id,
+            status="failed",
+            success=0,
+            failure=1,
+            summary=f"{type(exc).__name__}: {str(exc)[:180]}",
+        )
+
+
+async def _stamp_gap_fill_attempt(advisor_id: int) -> None:
+    """Stamp ``last_gap_fill_attempt_at`` so the bulk runner and this
+    endpoint share one fairness budget per advisor."""
+    async with SessionLocal() as db:
+        advisor = await db.get(InvestmentAdvisor, advisor_id)
+        if advisor is not None:
+            advisor.last_gap_fill_attempt_at = datetime.now(timezone.utc)
+            await db.commit()
+
+
+async def _finalize_gap_fill_run(
+    run_id: int,
+    *,
+    status: str,
+    success: int,
+    failure: int,
+    summary: str,
+) -> None:
+    """Write the terminal state onto the gap-fill PipelineRun. Mirrors
+    :func:`_finalize_child` but works on a standalone (non-parented) run."""
+    async with SessionLocal() as db:
+        run = await db.get(PipelineRun, run_id)
+        if run is None:
+            return
+        run.status = status
+        run.processed_items = success + failure
+        run.success_count = success
+        run.failure_count = failure
+        run.completed_at = datetime.now(timezone.utc)
+        existing_notes: dict = {}
+        if run.notes:
+            try:
+                existing_notes = json.loads(run.notes)
+            except json.JSONDecodeError:
+                existing_notes = {}
+        existing_notes["summary"] = summary
+        run.notes = json.dumps(existing_notes)
+        await db.commit()
+
+
+# ---------------------------------------------------------------------------
 # Parent orchestrator
 # ---------------------------------------------------------------------------
 
@@ -1376,7 +1713,12 @@ __all__ = [
     "SUB_REFRESH_FILINGS",
     "SUB_ENRICH_CONTACTS",
     "SUB_REFRESH_IAPD_SUMMARY",
+    "GAP_FILL_ADVISOR_CONTACTS_PIPELINE_NAME",
+    "GAP_FILL_COOLDOWN_DAYS",
     "decide_pipelines",
     "required_provider_keys",
     "run_advisor_refresh",
+    "_is_gap_row",
+    "_apply_gap_fill",
+    "_run_gap_fill_contacts",
 ]
