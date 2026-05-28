@@ -5,7 +5,7 @@ from __future__ import annotations
 from datetime import datetime
 from typing import Literal
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, EmailStr, Field
 
 
 # Which transport actually ran (or should run) an outreach send. New
@@ -123,6 +123,54 @@ class OutreachInvestorSendRequest(BaseModel):
     sender_account_id: str | None = Field(default=None, max_length=255)
 
 
+class OutreachAdhocSendRequest(BaseModel):
+    """Body for ``POST /outreach/adhoc-send``.
+
+    Used by the ``/outreach/sent?tab=create`` workspace when the user
+    sends to a free-form email address with no contact / firm record
+    in the system. No firm / contact context, so Gemini draft
+    generation is unavailable on this path -- the FE always provides
+    a hand-written subject + body.
+
+    ``folder_id`` is optional metadata: when provided, it lets the
+    sent-history table label the service the send was about; when
+    omitted (e.g. user wrote a totally one-off message), the row
+    shows ``(deleted)`` / ``—`` for service the same way it would
+    for any send whose folder has since been deleted.
+    """
+
+    recipient_email: EmailStr
+    recipient_name: str | None = Field(default=None, max_length=255)
+    subject: str = Field(..., min_length=1, max_length=998)
+    body: str = Field(..., min_length=1, max_length=100_000)
+    sender_account_id: str | None = Field(default=None, max_length=255)
+    folder_id: int | None = Field(default=None, gt=0)
+
+
+class RecipientSearchResult(BaseModel):
+    """One contact row in the recipient autocomplete dropdown.
+
+    Returned by ``GET /outreach/contacts/search``. UNIONs the three
+    contact tables (executive_contacts, advisor_contacts,
+    investor_contacts) with their parent firm joined for display.
+    Excludes rows with no email -- you can't send outreach to a
+    contact without an address, and the dropdown shouldn't tease
+    options the user can't pick.
+    """
+
+    entity_kind: Literal["broker_dealer", "advisor", "institutional_investor"]
+    entity_id: int
+    entity_name: str
+    contact_id: int
+    contact_name: str
+    contact_title: str | None
+    contact_email: str
+
+
+class RecipientSearchResponse(BaseModel):
+    items: list[RecipientSearchResult]
+
+
 class OutreachSendResponse(BaseModel):
     id: int
     gmail_message_id: str
@@ -138,10 +186,15 @@ class OutreachSendItem(BaseModel):
     expands a row.
 
     Polymorphic across firm types: ``firm_type`` discriminates
-    broker_dealer / advisor / institutional_investor. The matching pair
-    of id/name fields is populated; the others are None. Legacy
-    ``broker_dealer_id`` + ``broker_dealer_name`` stay populated for BD
-    rows for FE backwards compatibility.
+    broker_dealer / advisor / institutional_investor / adhoc. The
+    matching pair of id/name fields is populated; the others are None.
+    Legacy ``broker_dealer_id`` + ``broker_dealer_name`` stay populated
+    for BD rows for FE backwards compatibility.
+
+    Adhoc rows (``firm_type="adhoc"``) carry the destination address
+    in ``recipient_email`` / ``recipient_name``; all firm + contact
+    id/name fields are None. Contact-based rows leave the recipient_*
+    fields None and the FE falls back to ``contact_email``.
     """
 
     id: int
@@ -168,6 +221,12 @@ class OutreachSendItem(BaseModel):
     investor_contact_id: int | None = None
     contact_name: str = ""
     contact_email: str | None = None
+    # Adhoc destination address + display name. Populated only for
+    # ``firm_type="adhoc"`` rows; None for contact-based rows. The FE
+    # treats ``recipient_email`` as the canonical address on adhoc
+    # rows and falls back to ``contact_email`` on contact rows.
+    recipient_email: str | None = None
+    recipient_name: str | None = None
     # Folder may be NULL if the service folder was deleted after the
     # send. The send row stays so the audit history doesn't lose
     # entries.

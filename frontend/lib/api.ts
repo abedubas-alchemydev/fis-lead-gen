@@ -116,6 +116,7 @@ import type {
   OutreachAdvisorSendRequest,
   OutreachDraft,
   OutreachDraftRequest,
+  OutreachAdhocSendRequest,
   OutreachInvestorDraftRequest,
   OutreachInvestorSendRequest,
   OutreachSendDetail,
@@ -124,6 +125,7 @@ import type {
   OutreachSendStatus,
   OutreachSendsListResponse,
   OutreachSendsScope,
+  RecipientSearchResponse,
   PipelineRunItem,
   PipelineStatusResponse,
   PipelineTriggerResponse,
@@ -962,6 +964,28 @@ export async function getOutreachSend(
   return apiRequest<OutreachSendDetail>(
     buildApiPath(`/api/v1/outreach/sends/${sendId}`, { scope })
   );
+}
+
+// ── /outreach/sent?tab=create surface ─────────────────────────────────
+// Backs the recipient combobox (search across all three contact tables)
+// and the free-form-email send path for the new Create Outreach tab.
+
+export async function searchOutreachContacts(
+  query: string,
+  limit = 20
+): Promise<RecipientSearchResponse> {
+  return apiRequest<RecipientSearchResponse>(
+    buildApiPath("/api/v1/outreach/contacts/search", { q: query, limit })
+  );
+}
+
+export async function sendAdhocOutreach(
+  payload: OutreachAdhocSendRequest
+): Promise<OutreachSendResponse> {
+  return apiRequest<OutreachSendResponse>("/api/v1/outreach/adhoc-send", {
+    method: "POST",
+    body: JSON.stringify(payload)
+  });
 }
 
 // Admin-only flat view of every firm a target user has saved across all

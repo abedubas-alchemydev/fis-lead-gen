@@ -1,6 +1,7 @@
 "use client";
 
 import Link from "next/link";
+import type { Route } from "next";
 import { useCallback, useEffect, useMemo, useState } from "react";
 import {
   AlertCircle,
@@ -47,7 +48,7 @@ const SCOPE_ITEMS: ReadonlyArray<SegmentedItem> = [
   { value: "all", label: "All users" },
 ];
 
-export function OutreachSentClient({ isAdmin = false }: { isAdmin?: boolean }) {
+export function SentHistoryTab({ isAdmin = false }: { isAdmin?: boolean }) {
   const [data, setData] = useState<OutreachSendsListResponse | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
@@ -128,23 +129,7 @@ export function OutreachSentClient({ isAdmin = false }: { isAdmin?: boolean }) {
   const showSenderColumn = isAdmin && scope === "all";
 
   return (
-    <section className="space-y-6">
-      <div className="flex flex-wrap items-center gap-4">
-        <div className="min-w-0">
-          <p className="text-[12px] uppercase tracking-[0.06em] text-[var(--text-muted,#94a3b8)]">
-            Vault <span className="text-[var(--text-dim,#475569)]">/</span> Outreach
-          </p>
-          <h1 className="mt-1 text-[24px] font-bold tracking-[-0.02em] text-[var(--text,#0f172a)]">
-            Sent outreach
-          </h1>
-          <p className="mt-2 max-w-3xl text-[13px] leading-5 text-[var(--text-dim,#475569)]">
-            {showSenderColumn
-              ? "Every outreach email sent across all users, including failed attempts and the reason they didn't go through. Click a row to read the full message."
-              : "Every outreach email you've sent through Gmail, plus any failed attempts and the reason they didn't go through. Click a row to read the full message."}
-          </p>
-        </div>
-      </div>
-
+    <div className="space-y-6">
       {error ? (
         <div className="flex items-start gap-2 rounded-xl border border-red-500/25 bg-red-500/12 px-4 py-3 text-sm text-[var(--pill-red-text,#b91c1c)]">
           <AlertCircle className="mt-0.5 h-4 w-4 shrink-0" aria-hidden />
@@ -278,7 +263,7 @@ export function OutreachSentClient({ isAdmin = false }: { isAdmin?: boolean }) {
           </div>
         ) : null}
       </div>
-    </section>
+    </div>
   );
 }
 
@@ -328,22 +313,34 @@ function RowGroup({
           </td>
         ) : null}
         <td className="px-5 py-4 text-[var(--text,#0f172a)]">
-          <div className="font-semibold">{item.contact_name || "—"}</div>
-          {item.contact_email ? (
+          <div className="font-semibold">
+            {item.contact_name || item.recipient_name || (
+              <span className="text-[var(--text-muted,#94a3b8)]">
+                {item.firm_type === "adhoc" ? "Ad-hoc recipient" : "—"}
+              </span>
+            )}
+          </div>
+          {item.contact_email || item.recipient_email ? (
             <div className="mt-0.5 inline-flex items-center gap-1.5 text-xs text-[var(--text-dim,#475569)]">
               <Mail className="h-3 w-3 text-[var(--text-muted,#94a3b8)]" aria-hidden />
-              {item.contact_email}
+              {item.contact_email ?? item.recipient_email}
             </div>
           ) : null}
         </td>
         <td className="px-5 py-4 text-[var(--text-dim,#475569)]">
-          <Link
-            href={`/master-list/${item.broker_dealer_id}`}
-            onClick={(e) => e.stopPropagation()}
-            className="underline-offset-4 hover:underline"
-          >
-            {item.broker_dealer_name || "—"}
-          </Link>
+          {item.broker_dealer_id ? (
+            <Link
+              href={`/master-list/${item.broker_dealer_id}`}
+              onClick={(e) => e.stopPropagation()}
+              className="underline-offset-4 hover:underline"
+            >
+              {item.broker_dealer_name || "—"}
+            </Link>
+          ) : (
+            <span className="text-[var(--text-muted,#94a3b8)]">
+              {item.advisor_name ?? item.institutional_investor_name ?? "—"}
+            </span>
+          )}
         </td>
         <td className="px-5 py-4 text-[var(--text-dim,#475569)]">
           {item.folder_name ?? <span className="text-[var(--text-muted,#94a3b8)]">(deleted)</span>}
@@ -514,7 +511,14 @@ function EmptyState({
         You haven&apos;t sent any outreach yet
       </p>
       <p className="mt-1 text-xs text-[var(--text-dim,#475569)]">
-        Open a firm on the{" "}
+        Switch to the{" "}
+        <Link
+          href={"/outreach/sent?tab=create" as Route}
+          className="font-semibold text-[var(--text,#0f172a)] underline-offset-4 hover:underline"
+        >
+          Create outreach
+        </Link>{" "}
+        tab or open a firm on the{" "}
         <Link
           href="/master-list"
           className="font-semibold text-[var(--text,#0f172a)] underline-offset-4 hover:underline"

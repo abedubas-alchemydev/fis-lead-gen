@@ -18,7 +18,7 @@ import logging
 from typing import Literal
 
 from fastapi import APIRouter, Depends, HTTPException, Query, status
-from sqlalchemy import func, select
+from sqlalchemy import func, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.db.session import get_db_session
@@ -35,6 +35,7 @@ from app.schemas.auth import AuthenticatedUser
 from app.schemas.vault import (
     LinkedProviderItem,
     LinkedProvidersResponse,
+    OutreachAdhocSendRequest,
     OutreachAdvisorDraftRequest,
     OutreachAdvisorSendRequest,
     OutreachDraftRequest,
@@ -46,6 +47,8 @@ from app.schemas.vault import (
     OutreachSendRequest,
     OutreachSendResponse,
     OutreachSendsListResponse,
+    RecipientSearchResponse,
+    RecipientSearchResult,
 )
 from app.core.feature_permissions import SENT_OUTREACH
 from app.services.auth import ensure_feature, get_current_user
@@ -499,8 +502,11 @@ def _row_to_item(row: tuple, *, include_sender: bool) -> dict:
         firm_type = "broker_dealer"
     elif send.advisor_id is not None:
         firm_type = "advisor"
-    else:
+    elif send.institutional_investor_id is not None:
         firm_type = "institutional_investor"
+    else:
+        # All firm FKs null = adhoc row from /outreach/adhoc-send.
+        firm_type = "adhoc"
 
     if send.contact_id is not None:
         contact_type = "executive_contact"
@@ -510,10 +516,17 @@ def _row_to_item(row: tuple, *, include_sender: bool) -> dict:
         contact_type = "advisor_contact"
         contact_name = row[6] or ""
         contact_email = row[7]
-    else:
+    elif send.investor_contact_id is not None:
         contact_type = "investor_contact"
         contact_name = row[8] or ""
         contact_email = row[9]
+    else:
+        # Adhoc rows: no joined contact. The recipient address lives
+        # on the send row itself (recipient_email column); the FE
+        # uses recipient_name when present, else falls back to email.
+        contact_type = "adhoc"
+        contact_name = send.recipient_name or ""
+        contact_email = send.recipient_email
 
     payload = {
         "id": send.id,
@@ -538,6 +551,8 @@ def _row_to_item(row: tuple, *, include_sender: bool) -> dict:
         "investor_contact_id": send.investor_contact_id,
         "contact_name": contact_name,
         "contact_email": contact_email,
+        "recipient_email": send.recipient_email,
+        "recipient_name": send.recipient_name,
         "folder_id": send.folder_id,
         "folder_name": row[10],
     }
@@ -765,11 +780,217 @@ async def send_investor_outreach(
     )
 
 
+# ── Create-outreach tab: recipient autocomplete + adhoc send ──────────
+# The new /outreach/sent?tab=create workspace needs (a) a way to search
+# across all three contact tables to populate its recipient combobox,
+# and (b) a send path that doesn't require the recipient to live in
+# our contact tables at all -- free-form email entry.
+
+
+@router.get("/contacts/search", response_model=RecipientSearchResponse)
+async def search_outreach_contacts(
+    q: str = Query(..., min_length=1, max_length=255),
+    limit: int = Query(20, ge=1, le=50),
+    _: AuthenticatedUser = Depends(_require_sent_outreach),
+    db: AsyncSession = Depends(get_db_session),
+) -> RecipientSearchResponse:
+    """Partial-match search across BD / advisor / investor contacts.
+
+    Returns rows whose contact name, email, or parent firm name
+    contains ``q`` (case-insensitive). Only includes contacts that
+    have an email on file -- outreach can't go anywhere without one
+    and the dropdown shouldn't tease un-pickable options.
+
+    Three small queries (one per contact table) combined in Python.
+    The volume is bounded by ``limit`` per kind so the merged result
+    is at most 3 * limit before the final cap is applied; that keeps
+    the SQL simple at the cost of one extra in-Python pass. UNION ALL
+    in SQL would be marginally faster but the cross-table type
+    differences (each contact table has its own FK column name) make
+    the SQL clumsy enough that this is the cleaner factoring.
+    """
+
+    needle = f"%{q.strip().lower()}%"
+    per_kind_limit = limit  # over-fetch per kind; trim after merge.
+
+    exec_stmt = (
+        select(
+            ExecutiveContact.id.label("contact_id"),
+            ExecutiveContact.name.label("contact_name"),
+            ExecutiveContact.title.label("contact_title"),
+            ExecutiveContact.email.label("contact_email"),
+            BrokerDealer.id.label("entity_id"),
+            BrokerDealer.name.label("entity_name"),
+        )
+        .join(BrokerDealer, BrokerDealer.id == ExecutiveContact.bd_id)
+        .where(ExecutiveContact.email.isnot(None))
+        .where(
+            or_(
+                func.lower(ExecutiveContact.name).like(needle),
+                func.lower(ExecutiveContact.email).like(needle),
+                func.lower(BrokerDealer.name).like(needle),
+            )
+        )
+        .order_by(ExecutiveContact.name.asc())
+        .limit(per_kind_limit)
+    )
+    advisor_stmt = (
+        select(
+            AdvisorContact.id.label("contact_id"),
+            AdvisorContact.name.label("contact_name"),
+            AdvisorContact.title.label("contact_title"),
+            AdvisorContact.email.label("contact_email"),
+            InvestmentAdvisor.id.label("entity_id"),
+            InvestmentAdvisor.name.label("entity_name"),
+        )
+        .join(InvestmentAdvisor, InvestmentAdvisor.id == AdvisorContact.advisor_id)
+        .where(AdvisorContact.email.isnot(None))
+        .where(
+            or_(
+                func.lower(AdvisorContact.name).like(needle),
+                func.lower(AdvisorContact.email).like(needle),
+                func.lower(InvestmentAdvisor.name).like(needle),
+            )
+        )
+        .order_by(AdvisorContact.name.asc())
+        .limit(per_kind_limit)
+    )
+    investor_stmt = (
+        select(
+            InvestorContact.id.label("contact_id"),
+            InvestorContact.name.label("contact_name"),
+            InvestorContact.title.label("contact_title"),
+            InvestorContact.email.label("contact_email"),
+            InstitutionalInvestor.id.label("entity_id"),
+            InstitutionalInvestor.name.label("entity_name"),
+        )
+        .join(
+            InstitutionalInvestor,
+            InstitutionalInvestor.id == InvestorContact.investor_id,
+        )
+        .where(InvestorContact.email.isnot(None))
+        .where(
+            or_(
+                func.lower(InvestorContact.name).like(needle),
+                func.lower(InvestorContact.email).like(needle),
+                func.lower(InstitutionalInvestor.name).like(needle),
+            )
+        )
+        .order_by(InvestorContact.name.asc())
+        .limit(per_kind_limit)
+    )
+
+    results: list[RecipientSearchResult] = []
+    for row in (await db.execute(exec_stmt)).all():
+        results.append(
+            RecipientSearchResult(
+                entity_kind="broker_dealer",
+                entity_id=row.entity_id,
+                entity_name=row.entity_name or "",
+                contact_id=row.contact_id,
+                contact_name=row.contact_name or "",
+                contact_title=row.contact_title,
+                contact_email=row.contact_email,
+            )
+        )
+    for row in (await db.execute(advisor_stmt)).all():
+        results.append(
+            RecipientSearchResult(
+                entity_kind="advisor",
+                entity_id=row.entity_id,
+                entity_name=row.entity_name or "",
+                contact_id=row.contact_id,
+                contact_name=row.contact_name or "",
+                contact_title=row.contact_title,
+                contact_email=row.contact_email,
+            )
+        )
+    for row in (await db.execute(investor_stmt)).all():
+        results.append(
+            RecipientSearchResult(
+                entity_kind="institutional_investor",
+                entity_id=row.entity_id,
+                entity_name=row.entity_name or "",
+                contact_id=row.contact_id,
+                contact_name=row.contact_name or "",
+                contact_title=row.contact_title,
+                contact_email=row.contact_email,
+            )
+        )
+
+    # Stable sort by contact name across kinds, then trim to the
+    # overall limit. Keeps results predictable for the FE's combobox.
+    results.sort(key=lambda r: (r.contact_name.lower(), r.entity_kind))
+    return RecipientSearchResponse(items=results[:limit])
+
+
+@router.post("/adhoc-send", response_model=OutreachSendResponse)
+async def send_adhoc_outreach(
+    payload: OutreachAdhocSendRequest,
+    current_user: AuthenticatedUser = Depends(_require_sent_outreach),
+    db: AsyncSession = Depends(get_db_session),
+) -> OutreachSendResponse:
+    """Send outreach to a free-form email with no firm / contact context.
+
+    Mirrors the BD / advisor / investor send paths but skips the
+    contact-lookup leg -- the FE has already validated the recipient
+    is an email address (or autocompleted from a contact, in which
+    case the per-kind send endpoints handle it instead). Folder is
+    optional: when provided, the sent-history table labels the row
+    with the service name; when omitted, the row shows ``—``.
+
+    Audit row leaves every firm / contact FK NULL and carries the
+    address in ``recipient_email`` + ``recipient_name``. The XOR
+    relaxation in migration 0063 permits the all-null FK state.
+    """
+
+    folder: VaultFolder | None = None
+    if payload.folder_id is not None:
+        folder = (
+            await db.execute(
+                select(VaultFolder).where(
+                    VaultFolder.id == payload.folder_id,
+                    VaultFolder.user_id == current_user.id,
+                )
+            )
+        ).scalar_one_or_none()
+        if folder is None:
+            raise HTTPException(
+                status_code=404, detail="outreach_inputs_not_found"
+            )
+
+    sender_account = await _resolve_sender_account(
+        db=db,
+        current_user=current_user,
+        folder=folder,
+        explicit_account_id=payload.sender_account_id,
+    )
+    audit = OutreachSend(
+        user_id=current_user.id,
+        folder_id=folder.id if folder else None,
+        subject=payload.subject,
+        body=payload.body,
+        status="failed",
+        provider=sender_account.provider_id,
+        recipient_email=payload.recipient_email,
+        recipient_name=payload.recipient_name,
+    )
+    return await _provider_send_and_record(
+        db=db,
+        current_user=current_user,
+        audit=audit,
+        sender_account=sender_account,
+        recipient_email=payload.recipient_email,
+        subject=payload.subject,
+        body=payload.body,
+    )
+
+
 async def _resolve_sender_account(
     *,
     db: AsyncSession,
     current_user: AuthenticatedUser,
-    folder: VaultFolder,
+    folder: VaultFolder | None,
     explicit_account_id: str | None,
 ) -> Account:
     """Pick which linked OAuth account should send for this request.
@@ -778,7 +999,8 @@ async def _resolve_sender_account(
       1. Explicit ``sender_account_id`` from the request body (the
          picker in the outreach modal).
       2. The folder's ``default_sender_account_id`` (set on the vault
-         folder detail page).
+         folder detail page). Skipped when ``folder`` is None — the
+         adhoc-send path doesn't require a folder.
       3. The first linked account with the send scope already granted
          (oldest first; lets onboarding "just work" with one account).
       4. The first linked account at all (will surface a 412
@@ -807,7 +1029,7 @@ async def _resolve_sender_account(
             )
         return account
 
-    if folder.default_sender_account_id:
+    if folder is not None and folder.default_sender_account_id:
         stmt = select(Account).where(
             Account.id == folder.default_sender_account_id,
             Account.user_id == current_user.id,
