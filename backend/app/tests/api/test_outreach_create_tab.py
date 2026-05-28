@@ -73,9 +73,12 @@ async def _seed_search_fixtures(
       (bd_ids, advisor_ids, investor_ids,
        exec_contact_ids, advisor_contact_ids, investor_contact_ids).
 
-    The token is embedded in the firm name for two rows and in the
-    contact email for the third so the search exercises all three
-    OR branches.
+    The token is embedded in each contact's email (or name) so the
+    contact-search hits all three entity kinds. Firm-name matches
+    don't count for contact-search anymore -- they go through
+    /outreach/firms/search instead. Two firm rows ALSO carry the
+    token in their firm name so the separate firm-search tests can
+    reuse this fixture.
     """
     bd_ids: list[int] = []
     advisor_ids: list[int] = []
@@ -117,7 +120,7 @@ async def _seed_search_fixtures(
             bd_id=bd_match.id,
             name="Alice Reyes",
             title="CFO",
-            email="alice@example.com",
+            email=f"alice-{needle_token}@example.com",
         )
         exec_without_email = ExecutiveContact(
             bd_id=bd_no_email.id,
@@ -129,7 +132,7 @@ async def _seed_search_fixtures(
             advisor_id=advisor_match.id,
             name="Cathy Lim",
             title="Head of Trading",
-            email="cathy@example.com",
+            email=f"cathy-{needle_token}@example.com",
         )
         investor_contact_match_by_email = InvestorContact(
             investor_id=investor_match.id,
@@ -316,3 +319,249 @@ async def test_adhoc_send_412_when_no_linked_account() -> None:
     finally:
         app.dependency_overrides.clear()
         await _cleanup([user_id], [], [], [])
+
+
+# ── /outreach/firms/search + /outreach/firms/contacts ────────────────
+
+
+async def test_firms_search_returns_rows_from_all_three_kinds() -> None:
+    user_id = await _seed_user()
+    token = secrets.token_hex(4)
+    bd_ids, advisor_ids, investor_ids, *_ = await _seed_search_fixtures(token)
+    # The investor firm in the shared fixture doesn't carry the token in
+    # its name -- seed a token-named investor so all three kinds match.
+    async with SessionLocal() as session:
+        named_investor = InstitutionalInvestor(name=f"Investor {token} Capital")
+        session.add(named_investor)
+        await session.commit()
+        await session.refresh(named_investor)
+        investor_ids.append(named_investor.id)
+        named_investor_contact = InvestorContact(
+            investor_id=named_investor.id,
+            name="Edna Cruz",
+            title="Director",
+            email="edna@example.com",
+        )
+        session.add(named_investor_contact)
+        await session.commit()
+
+    app.dependency_overrides[get_current_user] = lambda: _override_user(user_id)
+    try:
+        async with _client() as client:
+            response = await client.get(
+                "/api/v1/outreach/firms/search", params={"q": token}
+            )
+        assert response.status_code == 200, response.text
+        items = response.json()["items"]
+        kinds = {item["entity_kind"] for item in items}
+        assert "broker_dealer" in kinds
+        assert "advisor" in kinds
+        assert "institutional_investor" in kinds
+        # The "Some unrelated BD" + the bd_no_email row that has the
+        # token in a NAME but its single contact lacks an email should
+        # not appear (contact_count > 0 filter on email-bearing rows).
+        bd_rows = [i for i in items if i["entity_kind"] == "broker_dealer"]
+        for row in bd_rows:
+            assert row["contact_count"] >= 1
+    finally:
+        app.dependency_overrides.clear()
+        await _cleanup([user_id], bd_ids, advisor_ids, investor_ids)
+
+
+async def test_firms_search_excludes_firms_with_no_emailable_contacts() -> None:
+    user_id = await _seed_user()
+    token = secrets.token_hex(4)
+    bd_ids: list[int] = []
+    async with SessionLocal() as session:
+        empty_bd = BrokerDealer(
+            name=f"Empty BD {token}",
+            matched_source="edgar",
+            is_deficient=False,
+            status="active",
+        )
+        session.add(empty_bd)
+        await session.commit()
+        await session.refresh(empty_bd)
+        bd_ids.append(empty_bd.id)
+        no_email_contact = ExecutiveContact(
+            bd_id=empty_bd.id,
+            name="Nobody Useful",
+            title="N/A",
+            email=None,
+        )
+        session.add(no_email_contact)
+        await session.commit()
+
+    app.dependency_overrides[get_current_user] = lambda: _override_user(user_id)
+    try:
+        async with _client() as client:
+            response = await client.get(
+                "/api/v1/outreach/firms/search", params={"q": token}
+            )
+        assert response.status_code == 200, response.text
+        items = response.json()["items"]
+        # Empty BD (no emailable contact) must not appear.
+        assert all(it["entity_id"] != empty_bd.id for it in items)
+    finally:
+        app.dependency_overrides.clear()
+        await _cleanup([user_id], bd_ids, [], [])
+
+
+async def test_firm_contacts_returns_emailable_contacts() -> None:
+    user_id = await _seed_user()
+    token = secrets.token_hex(4)
+    bd_ids, advisor_ids, investor_ids, *_ = await _seed_search_fixtures(token)
+    bd_id = bd_ids[0]  # the BD whose name carries the token, with Alice
+    app.dependency_overrides[get_current_user] = lambda: _override_user(user_id)
+    try:
+        async with _client() as client:
+            response = await client.get(
+                "/api/v1/outreach/firms/contacts",
+                params={"entity_kind": "broker_dealer", "entity_id": bd_id},
+            )
+        assert response.status_code == 200, response.text
+        payload = response.json()
+        assert payload["entity_kind"] == "broker_dealer"
+        assert payload["entity_id"] == bd_id
+        assert len(payload["items"]) == 1
+        assert payload["items"][0]["contact_name"] == "Alice Reyes"
+    finally:
+        app.dependency_overrides.clear()
+        await _cleanup([user_id], bd_ids, advisor_ids, investor_ids)
+
+
+async def test_firm_contacts_404_on_unknown_firm() -> None:
+    user_id = await _seed_user()
+    app.dependency_overrides[get_current_user] = lambda: _override_user(user_id)
+    try:
+        async with _client() as client:
+            response = await client.get(
+                "/api/v1/outreach/firms/contacts",
+                params={"entity_kind": "broker_dealer", "entity_id": 999_999_999},
+            )
+        assert response.status_code == 404
+    finally:
+        app.dependency_overrides.clear()
+        await _cleanup([user_id], [], [], [])
+
+
+# ── /outreach/favorites/search + /outreach/favorites/{id}/firms ──────
+
+
+async def _seed_favorite_list(
+    user_id: str, list_name: str, bd_ids_to_link: list[int]
+) -> int:
+    """Create a FavoriteList for the user and link the given BDs into it."""
+    from app.models.favorite_list import FavoriteList, FavoriteListItem
+
+    async with SessionLocal() as session:
+        fav_list = FavoriteList(user_id=user_id, name=list_name)
+        session.add(fav_list)
+        await session.commit()
+        await session.refresh(fav_list)
+        for bd_id in bd_ids_to_link:
+            session.add(
+                FavoriteListItem(list_id=fav_list.id, broker_dealer_id=bd_id)
+            )
+        await session.commit()
+        return fav_list.id
+
+
+async def _cleanup_favorite(list_id: int) -> None:
+    from app.models.favorite_list import FavoriteList
+
+    async with SessionLocal() as session:
+        await session.execute(
+            delete(FavoriteList).where(FavoriteList.id == list_id)
+        )
+        await session.commit()
+
+
+async def test_favorites_search_returns_owned_lists_matching_query() -> None:
+    user_id = await _seed_user()
+    token = secrets.token_hex(4)
+    bd_ids, advisor_ids, investor_ids, *_ = await _seed_search_fixtures(token)
+    list_id = await _seed_favorite_list(
+        user_id, f"My {token} Targets", [bd_ids[0]]
+    )
+    app.dependency_overrides[get_current_user] = lambda: _override_user(user_id)
+    try:
+        async with _client() as client:
+            response = await client.get(
+                "/api/v1/outreach/favorites/search", params={"q": token}
+            )
+        assert response.status_code == 200, response.text
+        items = response.json()["items"]
+        assert any(item["list_id"] == list_id for item in items)
+        match = next(item for item in items if item["list_id"] == list_id)
+        # Only the bd_ids[0] (Alice with email) counts; bd_ids[1]
+        # (no-email contact) wouldn't even if it were in the list.
+        assert match["firm_count"] == 1
+    finally:
+        app.dependency_overrides.clear()
+        await _cleanup_favorite(list_id)
+        await _cleanup([user_id], bd_ids, advisor_ids, investor_ids)
+
+
+async def test_favorites_search_excludes_empty_lists() -> None:
+    user_id = await _seed_user()
+    token = secrets.token_hex(4)
+    # List name matches but it has zero firms with emailable contacts.
+    list_id = await _seed_favorite_list(user_id, f"Empty {token} List", [])
+    app.dependency_overrides[get_current_user] = lambda: _override_user(user_id)
+    try:
+        async with _client() as client:
+            response = await client.get(
+                "/api/v1/outreach/favorites/search", params={"q": token}
+            )
+        assert response.status_code == 200, response.text
+        items = response.json()["items"]
+        assert all(item["list_id"] != list_id for item in items)
+    finally:
+        app.dependency_overrides.clear()
+        await _cleanup_favorite(list_id)
+        await _cleanup([user_id], [], [], [])
+
+
+async def test_favorite_firms_returns_emailable_contact_firms() -> None:
+    user_id = await _seed_user()
+    token = secrets.token_hex(4)
+    bd_ids, advisor_ids, investor_ids, *_ = await _seed_search_fixtures(token)
+    # Link both BDs (one with emailable contact, one without).
+    list_id = await _seed_favorite_list(
+        user_id, f"Mixed {token} List", bd_ids
+    )
+    app.dependency_overrides[get_current_user] = lambda: _override_user(user_id)
+    try:
+        async with _client() as client:
+            response = await client.get(
+                f"/api/v1/outreach/favorites/{list_id}/firms"
+            )
+        assert response.status_code == 200, response.text
+        payload = response.json()
+        assert payload["list_id"] == list_id
+        # Only the BD with an emailable contact should appear.
+        assert len(payload["items"]) == 1
+        assert payload["items"][0]["entity_kind"] == "broker_dealer"
+        assert payload["items"][0]["entity_id"] == bd_ids[0]
+    finally:
+        app.dependency_overrides.clear()
+        await _cleanup_favorite(list_id)
+        await _cleanup([user_id], bd_ids, advisor_ids, investor_ids)
+
+
+async def test_favorite_firms_404_on_other_users_list() -> None:
+    owner_id = await _seed_user()
+    other_id = await _seed_user()
+    list_id = await _seed_favorite_list(owner_id, "Owner's List", [])
+    app.dependency_overrides[get_current_user] = lambda: _override_user(other_id)
+    try:
+        async with _client() as client:
+            response = await client.get(
+                f"/api/v1/outreach/favorites/{list_id}/firms"
+            )
+        assert response.status_code == 404
+    finally:
+        app.dependency_overrides.clear()
+        await _cleanup_favorite(list_id)
+        await _cleanup([owner_id, other_id], [], [], [])
