@@ -7,6 +7,7 @@ import logging
 import re
 import secrets
 from collections import OrderedDict
+from collections.abc import Awaitable, Callable
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Literal
@@ -20,6 +21,12 @@ from app.core.config import settings
 logger = logging.getLogger(__name__)
 
 _GEMINI_KEY_SHAPE = re.compile(r"^AIzaSy[A-Za-z0-9_\-]{33}$")
+
+# Status codes that should retry rather than raise immediately. The Gemini
+# generate-content path used this set inline; ``_request_with_retries`` now
+# centralizes it so the Files API upload / status poll share the same
+# transient-failure classification.
+_RETRYABLE_STATUS_CODES: frozenset[int] = frozenset({408, 409, 429, 500, 502, 503, 504})
 
 # ─────────────────────── Files API LRU (ADR-0001 phase 2) ───────────────────
 #
@@ -1128,11 +1135,11 @@ class GeminiResponsesClient:
             "Content-Type": f"multipart/related; boundary={boundary}",
         }
         try:
-            async with httpx.AsyncClient(timeout=self.timeout) as client:
-                response = await client.post(
-                    self._files_api_upload_url(), headers=headers, content=body
-                )
-            response.raise_for_status()
+            response = await self._request_with_retries(
+                request=lambda client: client.post(
+                    self._files_api_upload_url(), headers=headers, content=body,
+                ),
+            )
         except httpx.HTTPStatusError as exc:
             detail = exc.response.text.strip()
             raise GeminiExtractionError(
@@ -1167,9 +1174,9 @@ class GeminiResponsesClient:
         for _ in range(attempts):
             await asyncio.sleep(delay_seconds)
             try:
-                async with httpx.AsyncClient(timeout=self.timeout) as client:
-                    response = await client.get(url, headers=headers)
-                response.raise_for_status()
+                response = await self._request_with_retries(
+                    request=lambda client: client.get(url, headers=headers),
+                )
             except httpx.HTTPError as exc:
                 raise GeminiExtractionError(
                     f"Files API status poll failed for {file_name}."
@@ -1209,32 +1216,78 @@ class GeminiResponsesClient:
                 "Files API delete network error for %s: %s", file_name, exc
             )
 
-    async def _post_with_retries(self, payload: dict[str, object]) -> dict[str, object]:
-        url = f"{self.base_url}/models/{settings.gemini_pdf_model}:generateContent"
-        headers = {"x-goog-api-key": settings.gemini_api_key}
-        last_error: Exception | None = None
+    async def _request_with_retries(
+        self,
+        *,
+        request: Callable[[httpx.AsyncClient], Awaitable[httpx.Response]],
+        retryable_status_codes: frozenset[int] = _RETRYABLE_STATUS_CODES,
+    ) -> httpx.Response:
+        """Execute ``request`` against a fresh ``httpx.AsyncClient`` with
+        exponential backoff retries on transient failures.
+
+        Retries on:
+          - any ``httpx.HTTPError`` (network / timeout / protocol — the
+            "Files API upload failed due to a network error" shape we
+            observed in production when a single TLS blip aborted a
+            multi-MB ADV upload mid-stream)
+          - ``httpx.HTTPStatusError`` whose status code is in
+            ``retryable_status_codes`` (408/409/429/500/502/503/504)
+
+        Non-retryable status codes (4xx other than 408/409/429) bubble up
+        immediately so the caller can surface the original status + body
+        to the operator.
+
+        After ``self.max_retries`` attempts, re-raises the last seen
+        exception unmodified — the caller wraps it into a
+        ``GeminiExtractionError`` with whatever message fits the call
+        site (Files API upload vs status poll vs generate-content).
+
+        Side-effect note: a partial-success upload (server saw the
+        bytes, the response then dropped) that we then retry will leave
+        an orphan in Gemini's Files API. Files TTL to ~48 hours per
+        provider docs, so the orphan self-cleans. No cleanup needed
+        here.
+        """
+        last_status_error: httpx.HTTPStatusError | None = None
+        last_network_error: httpx.HTTPError | None = None
 
         for attempt in range(1, self.max_retries + 1):
             try:
                 async with httpx.AsyncClient(timeout=self.timeout) as client:
-                    response = await client.post(url, headers=headers, json=payload)
+                    response = await request(client)
                 response.raise_for_status()
-                return response.json()
+                return response
             except httpx.HTTPStatusError as exc:
-                last_error = exc
-                if exc.response.status_code not in {408, 409, 429, 500, 502, 503, 504} or attempt == self.max_retries:
-                    detail = exc.response.text.strip()
-                    raise GeminiExtractionError(
-                        f"Gemini request failed with status {exc.response.status_code}: {detail or 'No response body.'}"
-                    ) from exc
+                last_status_error = exc
+                if exc.response.status_code not in retryable_status_codes:
+                    raise
             except httpx.HTTPError as exc:
-                last_error = exc
-                if attempt == self.max_retries:
-                    raise GeminiExtractionError("Gemini request failed due to a network error.") from exc
+                last_network_error = exc
 
-            await asyncio.sleep(min(2**attempt, 8))
+            if attempt < self.max_retries:
+                await asyncio.sleep(min(2 ** attempt, 8))
 
-        raise GeminiExtractionError("Gemini request failed after retries.") from last_error
+        if last_status_error is not None:
+            raise last_status_error
+        assert last_network_error is not None
+        raise last_network_error
+
+    async def _post_with_retries(self, payload: dict[str, object]) -> dict[str, object]:
+        url = f"{self.base_url}/models/{settings.gemini_pdf_model}:generateContent"
+        headers = {"x-goog-api-key": settings.gemini_api_key}
+        try:
+            response = await self._request_with_retries(
+                request=lambda client: client.post(url, headers=headers, json=payload),
+            )
+        except httpx.HTTPStatusError as exc:
+            detail = exc.response.text.strip()
+            raise GeminiExtractionError(
+                f"Gemini request failed with status {exc.response.status_code}: "
+                f"{detail or 'No response body.'}"
+            ) from exc
+        except httpx.HTTPError as exc:
+            raise GeminiExtractionError("Gemini request failed due to a network error.") from exc
+        return response.json()
 
     def _extract_response_text(self, payload: dict[str, object]) -> str:
         candidates = payload.get("candidates", [])
