@@ -8,6 +8,7 @@ import { useRouter, useSearchParams } from "next/navigation";
 import {
   AlertTriangle,
   ArrowUpRight,
+  Linkedin,
   Loader2,
   MailPlus,
   Phone,
@@ -297,6 +298,7 @@ export function InvestorsClient() {
                 ...row,
                 enriched_phone: result.enriched_phone,
                 enriched_email: result.enriched_email,
+                enriched_linkedin_url: result.enriched_linkedin_url,
                 enriched_at: result.enriched_at,
               }
             : row,
@@ -884,7 +886,21 @@ function InvestorRow({
                 {row.enriched_email}
               </a>
             ) : null}
-            {!row.enriched_phone && !row.enriched_email && !row.is_entity ? (
+            {row.enriched_linkedin_url ? (
+              <a
+                href={row.enriched_linkedin_url}
+                target="_blank"
+                rel="noreferrer"
+                className="inline-flex items-center gap-1 text-[#6366f1] hover:underline"
+              >
+                <Linkedin className="h-3.5 w-3.5" strokeWidth={2} aria-hidden />
+                LinkedIn
+              </a>
+            ) : null}
+            {!row.enriched_phone
+            && !row.enriched_email
+            && !row.enriched_linkedin_url
+            && !row.is_entity ? (
               <span className="text-[11px] italic text-[var(--text-muted,#94a3b8)]">
                 Apollo returned no match
               </span>

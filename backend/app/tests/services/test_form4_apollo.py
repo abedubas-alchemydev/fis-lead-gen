@@ -43,7 +43,7 @@ def patch_apollo_only(monkeypatch: pytest.MonkeyPatch) -> None:
 async def test_pdl_primary_returns_match_skips_apollo(
     patch_pdl_and_apollo: None,
 ) -> None:
-    """PDL hit -> phone+email returned, Apollo never called."""
+    """PDL hit -> phone+email+linkedin returned, Apollo never called."""
     pdl_route = respx.post(pdl.PERSON_ENRICH_URL).mock(
         return_value=httpx.Response(
             200,
@@ -55,6 +55,9 @@ async def test_pdl_primary_returns_match_skips_apollo(
                         {"address": "jane@example.com", "type": "professional"}
                     ],
                     "mobile_phone": "+15551234567",
+                    # PDL returns bare URLs; the provider layer prefixes
+                    # ``https://`` before handing the DiscoveryResult up.
+                    "linkedin_url": "linkedin.com/in/janedoe",
                 },
             },
         )
@@ -69,6 +72,7 @@ async def test_pdl_primary_returns_match_skips_apollo(
     assert match.matched is True
     assert match.email == "jane@example.com"
     assert match.phone == "+15551234567"
+    assert match.linkedin_url == "https://linkedin.com/in/janedoe"
     assert pdl_route.called
     assert not apollo_route.called
 
@@ -76,7 +80,7 @@ async def test_pdl_primary_returns_match_skips_apollo(
 @pytest.mark.asyncio
 @respx.mock
 async def test_pdl_miss_falls_back_to_apollo(patch_pdl_and_apollo: None) -> None:
-    """PDL 404 -> Apollo runs and provides the match."""
+    """PDL 404 -> Apollo runs and provides the match (with LinkedIn)."""
     respx.post(pdl.PERSON_ENRICH_URL).mock(return_value=httpx.Response(404))
     apollo_route = respx.post(_APOLLO_MATCH_URL).mock(
         return_value=httpx.Response(
@@ -85,6 +89,7 @@ async def test_pdl_miss_falls_back_to_apollo(patch_pdl_and_apollo: None) -> None
                 "person": {
                     "email": "jane@example.com",
                     "phone_numbers": [{"sanitized_number": "+15559998888"}],
+                    "linkedin_url": "https://www.linkedin.com/in/janedoe",
                 }
             },
         )
@@ -98,6 +103,7 @@ async def test_pdl_miss_falls_back_to_apollo(patch_pdl_and_apollo: None) -> None
     assert match.matched is True
     assert match.email == "jane@example.com"
     assert match.phone == "+15559998888"
+    assert match.linkedin_url == "https://www.linkedin.com/in/janedoe"
     assert apollo_route.called
 
 
@@ -275,6 +281,7 @@ async def test_entity_filer_skips_both_providers(patch_pdl_and_apollo: None) -> 
     assert match.skip_reason == "entity_filer"
     assert match.phone is None
     assert match.email is None
+    assert match.linkedin_url is None
     assert not pdl_route.called
     assert not apollo_route.called
 
@@ -304,3 +311,73 @@ async def test_person_name_still_calls_providers(patch_pdl_and_apollo: None) -> 
     assert match.skip_reason is None
     assert match.matched is True
     assert match.email == "tim@apple.com"
+
+
+@pytest.mark.asyncio
+@respx.mock
+async def test_pdl_linkedin_only_still_counts_as_match(
+    patch_pdl_and_apollo: None,
+) -> None:
+    """PDL returns only a LinkedIn URL (no email/phone) -> matched=True.
+
+    Defends the ``matched = email OR phone OR linkedin_url`` rule. A
+    LinkedIn-only hit is still a usable contact handle, so the FE
+    should not render "Apollo returned no match" copy for it.
+    """
+    respx.post(pdl.PERSON_ENRICH_URL).mock(
+        return_value=httpx.Response(
+            200,
+            json={
+                "likelihood": 8,
+                "data": {
+                    "linkedin_url": "linkedin.com/in/janedoe",
+                },
+            },
+        )
+    )
+    apollo_route = respx.post(_APOLLO_MATCH_URL).mock(return_value=httpx.Response(200))
+
+    match = await match_form4_person(
+        full_name="DOE JANE",
+        issuer_name="Example Corp",
+    )
+
+    assert match.matched is True
+    assert match.email is None
+    assert match.phone is None
+    assert match.linkedin_url == "https://linkedin.com/in/janedoe"
+    assert not apollo_route.called
+
+
+@pytest.mark.asyncio
+@respx.mock
+async def test_apollo_response_without_linkedin_returns_none(
+    patch_apollo_only: None,
+) -> None:
+    """Apollo person hit that omits ``linkedin_url`` -> ``match.linkedin_url is None``.
+
+    Older Apollo accounts and free-tier responses sometimes drop the
+    field entirely; the service must default to None rather than KeyError
+    or treat the missing key as a falsy match.
+    """
+    respx.post(_APOLLO_MATCH_URL).mock(
+        return_value=httpx.Response(
+            200,
+            json={
+                "person": {
+                    "email": "tim@apple.com",
+                    "phone_numbers": [{"sanitized_number": "+15551234567"}],
+                }
+            },
+        )
+    )
+
+    match = await match_form4_person(
+        full_name="COOK TIMOTHY D",
+        issuer_name="Apple Inc.",
+    )
+
+    assert match.matched is True
+    assert match.email == "tim@apple.com"
+    assert match.phone == "+15551234567"
+    assert match.linkedin_url is None

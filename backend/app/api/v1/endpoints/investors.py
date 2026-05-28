@@ -100,6 +100,7 @@ def _item_from_consolidated(row: ConsolidatedPersonRow) -> InvestorItem:
         txn_count=row.txn_count,
         enriched_phone=row.enriched_phone,
         enriched_email=row.enriched_email,
+        enriched_linkedin_url=row.enriched_linkedin_url,
         enriched_at=row.enriched_at,
         source_filing_url=row.source_filing_url,
         filed_at=row.filed_at,
@@ -300,11 +301,13 @@ async def enrich_investor(
         reporting_owner_cik=row.reporting_owner_cik,
         phone=match.phone,
         email=match.email,
+        linkedin_url=match.linkedin_url,
     )
     return InvestorEnrichResponse(
         txn_id=txn_id,
         enriched_phone=match.phone,
         enriched_email=match.email,
+        enriched_linkedin_url=match.linkedin_url,
         enriched_at=enriched_at,
         matched=match.matched,
     )

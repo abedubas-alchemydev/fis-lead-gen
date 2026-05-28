@@ -85,6 +85,7 @@ class Form4Transaction(Base):
     # ── Optional Apollo enrichment (filled on the per-row Enrich click) ──
     enriched_phone: Mapped[str | None] = mapped_column(String(64), nullable=True)
     enriched_email: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    enriched_linkedin_url: Mapped[str | None] = mapped_column(Text, nullable=True)
     enriched_at: Mapped[datetime | None] = mapped_column(
         DateTime(timezone=True), nullable=True
     )

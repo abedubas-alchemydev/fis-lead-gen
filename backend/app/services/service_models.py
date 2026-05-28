@@ -299,6 +299,7 @@ class ConsolidatedPersonRow:
     # writes the same values to every underlying row so this is authoritative)
     enriched_phone: str | None
     enriched_email: str | None
+    enriched_linkedin_url: str | None
     enriched_at: datetime | None
 
     source_filing_url: str | None
