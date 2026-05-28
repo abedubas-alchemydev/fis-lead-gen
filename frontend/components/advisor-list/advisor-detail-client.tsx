@@ -857,7 +857,49 @@ export function AdvisorDetailClient({ advisorId }: { advisorId: string }) {
             />
           ) : null}
 
-          {executiveOfficers.length > 0 ? (
+          {/* Executive officers — one merged table. When contacts are
+              populated (enrichment chain has run), drive from advisor_contacts
+              so names come out title-cased and the Channels/Outreach columns
+              show. Pre-enrichment, fall back to the raw Form ADV officer
+              list so the page still shows the roster. The two sources are
+              the same 27 people for a fully-enriched advisor; the chain's
+              names-only fallback guarantees parity even when no provider
+              matched a given officer. */}
+          {contacts.length > 0 ? (
+            <PeopleTable
+              title="Executive officers"
+              items={contacts}
+              columns={[
+                {
+                  header: "Name",
+                  cell: (c) => (
+                    <span className="font-semibold text-[var(--text,#0f172a)]">
+                      {c.name}
+                    </span>
+                  ),
+                },
+                { header: "Title", cell: (c) => c.title ?? "—" },
+                {
+                  header: "Channels",
+                  cell: (c) => <ChannelIconCell contact={c} />,
+                  className: "whitespace-nowrap",
+                },
+                {
+                  header: "Outreach",
+                  cell: (c) =>
+                    c.email ? (
+                      <OutreachButton
+                        entityKind="advisor"
+                        entityId={Number(advisorId)}
+                        entityName={advisor.name}
+                        contact={c}
+                      />
+                    ) : null,
+                  className: "whitespace-nowrap",
+                },
+              ]}
+            />
+          ) : executiveOfficers.length > 0 ? (
             <PeopleTable
               title="Executive officers"
               items={executiveOfficers}
@@ -892,42 +934,6 @@ export function AdvisorDetailClient({ advisorId }: { advisorId: string }) {
                 {
                   header: "Ownership",
                   cell: (o) => o.ownership_pct ?? "—",
-                  className: "whitespace-nowrap",
-                },
-              ]}
-            />
-          ) : null}
-
-          {contacts.length > 0 ? (
-            <PeopleTable
-              title="Enriched contacts"
-              items={contacts}
-              columns={[
-                {
-                  header: "Name",
-                  cell: (c) => (
-                    <span className="font-semibold text-[var(--text,#0f172a)]">
-                      {c.name}
-                    </span>
-                  ),
-                },
-                { header: "Title", cell: (c) => c.title ?? "—" },
-                {
-                  header: "Channels",
-                  cell: (c) => <ChannelIconCell contact={c} />,
-                  className: "whitespace-nowrap",
-                },
-                {
-                  header: "Outreach",
-                  cell: (c) =>
-                    c.email ? (
-                      <OutreachButton
-                        entityKind="advisor"
-                        entityId={Number(advisorId)}
-                        entityName={advisor.name}
-                        contact={c}
-                      />
-                    ) : null,
                   className: "whitespace-nowrap",
                 },
               ]}
