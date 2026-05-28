@@ -1,7 +1,7 @@
 """Add enriched_linkedin_url to form4_transactions.
 
-Revision ID: 20260528_0065
-Revises: 20260528_0064
+Revision ID: 20260528_0066
+Revises: 20260528_0065
 Create Date: 2026-05-28
 
 Form 4 Re-enrich captures phone + email today but discards the LinkedIn
@@ -27,8 +27,8 @@ import sqlalchemy as sa
 from alembic import op
 
 
-revision: str = "20260528_0065"
-down_revision: str | None = "20260528_0064"
+revision: str = "20260528_0066"
+down_revision: str | None = "20260528_0065"
 branch_labels: str | Sequence[str] | None = None
 depends_on: str | Sequence[str] | None = None
 
