@@ -59,6 +59,11 @@ from app.schemas.pipeline import ClearingArrangementItem
 from app.services.alerts import AlertRepository
 from app.services.auth import ensure_feature
 from app.services.broker_dealers import BrokerDealerRepository
+from app.services.chatbot_app_knowledge import (
+    AppFeatureHelp,
+    find_topics,
+    list_all_features,
+)
 from app.services.chatbot_semantic import (
     ChatbotSemanticService,
     ENTITY_TYPE_BROKER_DEALER,
@@ -2151,6 +2156,123 @@ async def _execute_ask_vault(
     }
 
 
+# ── App knowledge ────────────────────────────────────────────────────────
+
+
+# Max registry hits surfaced per call. Keeping the cap low (3) is
+# deliberate: Doxie should answer one specific "what is X / where is X"
+# question per turn rather than overwhelm with the full catalog. The
+# fallback path (no matches → ``list_all_features``) sidesteps this cap
+# and uses its own slimmer projection so the prompt budget stays bounded.
+APP_HELP_RESULT_LIMIT = 3
+
+
+def _user_can_see_feature(user: AuthenticatedUser, feature_key: str) -> bool:
+    """Non-raising mirror of ``ensure_feature`` — admin always passes.
+
+    Used by ``get_app_help`` to silently filter entries the caller lacks
+    access to. ``ensure_feature`` raises 403 which we don't want here:
+    the tool should still answer, just with a smaller catalog.
+    """
+    if user.role == "admin":
+        return True
+    return feature_key in (user.feature_permissions or [])
+
+
+def _project_app_help_entry(
+    feature_key: str, entry: AppFeatureHelp, *, full: bool
+) -> dict[str, Any]:
+    """Compact projection of one ``AppFeatureHelp``.
+
+    ``full=True`` projects every field (used for direct topic matches);
+    ``full=False`` drops ``what_to_do_here`` (used for the fallback
+    catalog so 13 entries don't blow the prompt budget).
+    """
+    out: dict[str, Any] = {
+        "feature_key": feature_key,
+        "label": entry.label,
+        "route": entry.route,
+        "summary": entry.summary,
+        "admin_only": entry.admin_only,
+        # The FE renders ``link`` as an in-app navigation when the route
+        # prefix is in ``INTERNAL_ROUTE_PREFIXES``. Routes used here are
+        # all in that allowlist — see ``app.services.chatbot_urls`` and
+        # ``frontend/components/chatbot/chatbot-message.tsx``.
+        "link": entry.route,
+    }
+    if full:
+        out["what_to_do_here"] = entry.what_to_do_here
+    return out
+
+
+async def _execute_get_app_help(
+    user: AuthenticatedUser,
+    db: AsyncSession,
+    args: Mapping[str, Any],
+) -> dict[str, Any]:
+    """Look up DOX feature documentation by topic.
+
+    No feature-permission gate — every authenticated user should be able
+    to ask Doxie "what is X / where do I find Y" even when they don't
+    have access to X. The result *filters* entries the user can't see
+    so we don't leak admin-only surfaces, but the tool itself is always
+    callable.
+
+    Topic match runs against label, synonyms, route, and summary text
+    via ``chatbot_app_knowledge.find_topics``. On no match, the tool
+    falls back to listing every visible feature so Doxie can still
+    offer "here's everything you can do".
+    """
+    topic = _opt_str(args, "topic")
+    if not topic:
+        return {
+            "error": "invalid_args",
+            "message": (
+                "Argument 'topic' is required. Pass the feature name "
+                "(e.g. 'Vault'), domain concept ('Form 4', '13F'), or "
+                "what the user is trying to do ('find emails')."
+            ),
+        }
+
+    matches = find_topics(topic, max_results=APP_HELP_RESULT_LIMIT)
+    visible_matches = [
+        (key, entry)
+        for key, entry in matches
+        if _user_can_see_feature(user, key)
+    ]
+
+    if visible_matches:
+        return {
+            "items": [
+                _project_app_help_entry(key, entry, full=True)
+                for key, entry in visible_matches
+            ],
+            "total_matched": len(visible_matches),
+        }
+
+    # Fallback: the topic matched nothing (or matched only features the
+    # caller can't access). Return the catalog of features they CAN see
+    # so Doxie can pivot to "here's what's available".
+    catalog = [
+        (key, entry)
+        for key, entry in list_all_features()
+        if _user_can_see_feature(user, key)
+    ]
+    return {
+        "items": [
+            _project_app_help_entry(key, entry, full=False)
+            for key, entry in catalog
+        ],
+        "total_matched": 0,
+        "note": (
+            f"No DOX feature matched the topic {topic!r}. The 'items' "
+            f"list contains every feature the user can currently access — "
+            f"offer those as the next step, or ask for a more specific "
+            f"topic."
+        ),
+    }
+
+
 # ── Tool declarations ────────────────────────────────────────────────────
 
 _SEARCH_PARAMETERS_SCHEMA: dict[str, Any] = {
@@ -2571,6 +2693,24 @@ _ASK_VAULT_SCHEMA: dict[str, Any] = {
 }
 
 
+_APP_HELP_PARAMETERS_SCHEMA: dict[str, Any] = {
+    "type": "object",
+    "properties": {
+        "topic": {
+            "type": "string",
+            "description": (
+                "What the user wants help with — a feature name "
+                "('Vault', 'Email Extractor'), a domain concept "
+                "('Form 4', '13F', 'FOCUS', 'clearing partner'), or a "
+                "natural-language description of what they're trying to "
+                "do ('find emails', 'see new filings'). Case-insensitive."
+            ),
+        },
+    },
+    "required": ["topic"],
+}
+
+
 TOOL_REGISTRY: dict[str, Tool] = {
     "search_broker_dealers": Tool(
         name="search_broker_dealers",
@@ -2831,5 +2971,29 @@ TOOL_REGISTRY: dict[str, Tool] = {
         # default 5s is fine. Caching is also OK because retrieve_chunks
         # is purely a function of (folder_id, query) at a point in time
         # and the chat-level TTL is short.
+    ),
+    "get_app_help": Tool(
+        name="get_app_help",
+        description=(
+            "Look up DOX feature documentation. Call this whenever the "
+            "user asks how DOX itself works — 'where do I see filing "
+            "alerts?', 'what is the Vault?', 'how do I find executive "
+            "emails?', 'what does Form 4 mean here?'. Accepts a free-form "
+            "topic and matches against feature names, domain concepts, "
+            "and natural-language synonyms (e.g. 'FOCUS', '13F', "
+            "'insider buys'). Returns up to 3 best-matching feature "
+            "entries with route and prose, plus an in-app deep-link the "
+            "user can click. Always allowed — no feature gate — but "
+            "results are filtered to features the calling user can "
+            "actually see."
+        ),
+        parameters_schema=_APP_HELP_PARAMETERS_SCHEMA,
+        # ``feature_key`` is informational only; the execute function
+        # never raises on permissions (it silently filters instead) so
+        # the value here doesn't gate anything. Any constant works;
+        # pick DASHBOARD as a sensible default since every user lands
+        # on it.
+        feature_key="dashboard",
+        execute=_execute_get_app_help,
     ),
 }
