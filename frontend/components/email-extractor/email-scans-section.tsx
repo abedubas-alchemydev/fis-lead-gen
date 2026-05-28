@@ -6,16 +6,18 @@ import { SectionPanel } from "@/components/ui/section-panel";
 import { FindEmailsButton } from "./find-emails-button";
 
 // Inline scan-results section rendered below "Filing History" on
-// /master-list/{id}. Owns the "Find emails" trigger in its header and
+// /master-list/{id} and below "Recent regulatory filings" on
+// /advisor-list/{id}. Owns the "Find emails" trigger in its header and
 // flips between an empty/hydrating SectionPanel and the live
 // ScanDetailView once `currentScanId` is set.
 //
-// Hydration + URL sync live in broker-dealer-detail-client.tsx (via the
-// list-scans-by-bd_id endpoint and a router.replace effect on
-// `?scanId=`). This component is purely presentational so it stays
-// trivially testable.
+// Hydration + URL sync live in the parent client (broker-dealer-detail-client
+// or advisor-detail-client) via the list-scans-by-entity helper and a
+// router.replace effect on `?scanId=`. This component is purely presentational
+// so it stays trivially testable.
 export interface EmailScansSectionProps {
-  brokerDealerId: string;
+  entityKind: "bd" | "advisor";
+  entityId: number;
   currentScanId: number | null;
   resolvedDomain: string | null;
   isHydrating: boolean;
@@ -23,7 +25,8 @@ export interface EmailScansSectionProps {
 }
 
 export function EmailScansSection({
-  brokerDealerId,
+  entityKind,
+  entityId,
   currentScanId,
   resolvedDomain,
   isHydrating,
@@ -39,7 +42,8 @@ export function EmailScansSection({
       title="Per-firm scan history"
       headerAction={
         <FindEmailsButton
-          brokerDealerId={brokerDealerId}
+          entityKind={entityKind}
+          entityId={entityId}
           resolvedDomain={resolvedDomain}
           onScanCreated={onScanCreated}
         />

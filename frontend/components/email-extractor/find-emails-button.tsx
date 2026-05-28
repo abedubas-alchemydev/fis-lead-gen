@@ -5,19 +5,22 @@ import { Search } from "lucide-react";
 
 import { apiRequest } from "@/lib/api";
 
-// "Find emails" button rendered in the firm-detail Discovered Emails
-// section header. Resolves the firm's domain (firm website preferred,
+// "Find emails" button rendered in the entity-detail "Discovered Emails"
+// section header. Resolves the entity's domain (firm website preferred,
 // falling back to a contact-email domain), kicks off a scan via
 //   POST /api/v1/email-extractor/scans
-// and notifies the parent via `onScanCreated` so the inline scan-results
-// section on the same page can render the new scan in place. Disabled when
-// no domain can be resolved or while a scan creation is in flight.
+// with either `bd_id` or `advisor_id` depending on `entityKind`, and
+// notifies the parent via `onScanCreated` so the inline scan-results
+// section on the same page can render the new scan in place. Disabled
+// when no domain can be resolved or while a scan creation is in flight.
 export function FindEmailsButton({
-  brokerDealerId,
+  entityKind,
+  entityId,
   resolvedDomain,
   onScanCreated,
 }: {
-  brokerDealerId: string;
+  entityKind: "bd" | "advisor";
+  entityId: number;
   resolvedDomain: string | null;
   onScanCreated: (scanId: number) => void;
 }) {
@@ -31,14 +34,14 @@ export function FindEmailsButton({
     setIsStarting(true);
     setError(null);
     try {
+      const body: Record<string, unknown> = { domain: resolvedDomain };
+      if (entityKind === "bd") body.bd_id = entityId;
+      else body.advisor_id = entityId;
       const created = await apiRequest<{ id: number }>(
         "/api/v1/email-extractor/scans",
         {
           method: "POST",
-          body: JSON.stringify({
-            domain: resolvedDomain,
-            bd_id: Number(brokerDealerId),
-          }),
+          body: JSON.stringify(body),
         }
       );
       onScanCreated(created.id);

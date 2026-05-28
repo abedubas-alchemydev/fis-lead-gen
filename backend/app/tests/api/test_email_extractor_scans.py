@@ -18,7 +18,9 @@ from datetime import datetime
 import httpx
 import pytest
 
+from app.db.session import SessionLocal
 from app.main import app
+from app.models.investment_advisor import InvestmentAdvisor
 from app.schemas.auth import AuthenticatedUser
 from app.services.auth import get_current_user
 
@@ -87,3 +89,78 @@ async def test_get_scan_unknown_returns_404() -> None:
         response = await client.get("/api/v1/email-extractor/scans/999999999")
     assert response.status_code == 404
     assert response.json()["detail"] == "scan not found"
+
+
+async def _seed_advisor() -> int:
+    async with SessionLocal() as session:
+        advisor = InvestmentAdvisor(
+            name=f"Advisor Scan Test {secrets.token_hex(4)}",
+            matched_source="edgar",
+            status="active",
+        )
+        session.add(advisor)
+        await session.commit()
+        await session.refresh(advisor)
+        return advisor.id
+
+
+async def test_post_scan_with_advisor_id_round_trip() -> None:
+    advisor_id = await _seed_advisor()
+    transport = httpx.ASGITransport(app=app)
+    async with httpx.AsyncClient(transport=transport, base_url="http://testserver") as client:
+        post_response = await client.post(
+            "/api/v1/email-extractor/scans",
+            json={"domain": "advisor-example.com", "advisor_id": advisor_id},
+        )
+        assert post_response.status_code == 202
+        scan_id = post_response.json()["id"]
+
+        list_response = await client.get(
+            "/api/v1/email-extractor/scans",
+            params={"advisor_id": advisor_id, "limit": 5},
+        )
+        assert list_response.status_code == 200
+        items = list_response.json()
+        ids = {item["id"] for item in items}
+        assert scan_id in ids
+        for item in items:
+            assert item["advisor_id"] == advisor_id
+
+
+async def test_post_scan_rejects_both_bd_and_advisor_id() -> None:
+    transport = httpx.ASGITransport(app=app)
+    async with httpx.AsyncClient(transport=transport, base_url="http://testserver") as client:
+        response = await client.post(
+            "/api/v1/email-extractor/scans",
+            json={"domain": "example.com", "bd_id": 1, "advisor_id": 1},
+        )
+    assert response.status_code == 422
+
+
+async def test_list_scans_filter_by_advisor_id_narrows() -> None:
+    advisor_a = await _seed_advisor()
+    advisor_b = await _seed_advisor()
+
+    transport = httpx.ASGITransport(app=app)
+    async with httpx.AsyncClient(transport=transport, base_url="http://testserver") as client:
+        post_a = await client.post(
+            "/api/v1/email-extractor/scans",
+            json={"domain": "advisor-a.example.com", "advisor_id": advisor_a},
+        )
+        post_b = await client.post(
+            "/api/v1/email-extractor/scans",
+            json={"domain": "advisor-b.example.com", "advisor_id": advisor_b},
+        )
+        assert post_a.status_code == 202
+        assert post_b.status_code == 202
+        scan_a_id = post_a.json()["id"]
+        scan_b_id = post_b.json()["id"]
+
+        only_a = await client.get(
+            "/api/v1/email-extractor/scans",
+            params={"advisor_id": advisor_a, "limit": 50},
+        )
+        assert only_a.status_code == 200
+        a_ids = {item["id"] for item in only_a.json()}
+        assert scan_a_id in a_ids
+        assert scan_b_id not in a_ids

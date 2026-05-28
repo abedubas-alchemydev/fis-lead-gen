@@ -56,6 +56,7 @@ async def create_scan(
         domain=payload.domain,
         person_name=payload.person_name,
         bd_id=payload.bd_id,
+        advisor_id=payload.advisor_id,
         status=RunStatus.queued.value,
     )
     db.add(scan)
@@ -68,6 +69,7 @@ async def create_scan(
 @router.get("/scans", response_model=list[ScanListItem])
 async def list_scans(
     bd_id: int | None = Query(default=None, description="Filter scans tied to a specific broker-dealer."),
+    advisor_id: int | None = Query(default=None, description="Filter scans tied to a specific investment advisor."),
     limit: int = Query(default=20, ge=1, le=100),
     offset: int = Query(default=0, ge=0),
     db: AsyncSession = Depends(get_db_session),
@@ -76,11 +78,13 @@ async def list_scans(
     """Recent scans across all users, sorted by created_at desc.
 
     Powers the 'Recent scans' list on /email-extractor and the per-firm
-    history section on broker-dealer detail pages.
+    history section on broker-dealer and advisor detail pages.
     """
     stmt = select(ExtractionRun).order_by(ExtractionRun.created_at.desc())
     if bd_id is not None:
         stmt = stmt.where(ExtractionRun.bd_id == bd_id)
+    if advisor_id is not None:
+        stmt = stmt.where(ExtractionRun.advisor_id == advisor_id)
     stmt = stmt.offset(offset).limit(limit)
     return (await db.execute(stmt)).scalars().all()
 
