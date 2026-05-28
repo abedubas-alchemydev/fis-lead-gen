@@ -267,10 +267,10 @@ const navSections: ReadonlyArray<NavSection> = [
     ]
   },
   {
-    label: "Outreach",
+    label: "Outbound",
     items: [
       { href: "/email-extractor", label: "Email Extractor", icon: EmailExtractorIcon, badgeKey: null, permissionKey: "email_extractor" },
-      { href: "/outreach/sent" as Route, label: "Sent Outreach", icon: SentOutreachIcon, badgeKey: null, permissionKey: "sent_outreach" }
+      { href: "/outreach/sent" as Route, label: "Outreach", icon: SentOutreachIcon, badgeKey: null, permissionKey: "sent_outreach" }
     ]
   },
   {
