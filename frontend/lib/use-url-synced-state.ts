@@ -8,11 +8,12 @@ import {
   useSearchParams,
 } from "next/navigation";
 
-// A frozen empty URLSearchParams typed as ReadonlyURLSearchParams so the
-// hydration-safe initial parse() runs against the same shape useSearchParams
-// returns. ReadonlyURLSearchParams is a structural subset of URLSearchParams
-// (read-only methods only), so the cast is sound at runtime — only readonly
-// methods are called by callers' parsers.
+// A frozen empty URLSearchParams typed as ReadonlyURLSearchParams. Used to
+// produce a "no filters applied" state shape that the SSR pass + the first
+// client render can both emit — see the hydration-gate comment below.
+// ReadonlyURLSearchParams is a structural subset of URLSearchParams
+// (read-only methods only), so the cast is sound at runtime: callers' parse()
+// functions only invoke read-only methods (.get / .getAll).
 const EMPTY_SEARCH_PARAMS = new URLSearchParams() as unknown as ReadonlyURLSearchParams;
 
 // URL-backed filter state with a synchronous local mirror.
@@ -26,6 +27,21 @@ const EMPTY_SEARCH_PARAMS = new URLSearchParams() as unknown as ReadonlyURLSearc
 // between events — lets edits accumulate. We reconcile with the URL by
 // comparing canonical serialized strings via `build`, so our own commits
 // round-trip back equal (no loop) while external navigation is adopted.
+//
+// Hydration safety: the SSR pass renders this hook with whatever search
+// params are on the request URL. On hydration the client's first render
+// must emit the same HTML or React throws #418 ("text content does not
+// match server-rendered HTML"). Even though `parse(searchParams)` is
+// deterministic, subtle render-timing differences between SSR and the
+// first client render on workspace pages opened via share-links /
+// Back-nav (PPR, route-cache reuse, streaming) could surface as text
+// mismatches in the filter-derived UI. Fix: keep the *stored* state on
+// `urlState` (no behavior change), but *return* `emptyState` to the
+// caller until the client has mounted. Both server and the first client
+// render emit the "no filters applied" markup → identical HTML → no
+// mismatch. On the next render after mount, the returned state flips
+// to the real URL-derived state. Mirrors the deferred-render pattern
+// used in components/security/watermark-overlay.tsx.
 //
 // Contract: `build` MUST be deterministic for a given state (stable key
 // order, defaults stripped), and `parse`/`build` MUST be stable references
@@ -44,28 +60,10 @@ export function useUrlSyncedState<T extends object>(
   const urlState = useMemo(() => parse(searchParams), [searchParams, parse]);
   const urlString = useMemo(() => build(urlState), [urlState, build]);
 
-  // Seed state with `parse(empty params)` so the server-rendered HTML
-  // and the client's first render agree regardless of the URL the page
-  // was loaded with. Hydrating with URL-derived state directly used to
-  // throw React #418 ("text content does not match server-rendered
-  // HTML") on workspace pages opened via share-links / Back-nav,
-  // because subtle render-timing differences between the SSR pass and
-  // the hydration pass (PPR / route cache reuse / streaming) could
-  // produce divergent text for the filter-derived UI (active count
-  // chips, pre-filled inputs, selected segmented values). The mount
-  // effect below upgrades state to the real `urlState` immediately on
-  // the next client render — same pattern the watermark overlay uses
-  // in components/security/watermark-overlay.tsx.
-  const emptyState = useMemo<T>(
-    () => parse(EMPTY_SEARCH_PARAMS),
-    [parse],
-  );
-  const [state, setState] = useState<T>(emptyState);
+  const [state, setState] = useState<T>(urlState);
 
-  // First mount: upgrade defaults → real URL state.
-  // Subsequent runs: adopt the URL on external navigation (Back/Forward,
-  // share-link click). Our own commits serialize back to `urlString`, so
-  // this no-ops for them.
+  // External navigation (Back/Forward, share-link) → adopt the URL. Our own
+  // commits serialize back to `urlString`, so this no-ops for them.
   useEffect(() => {
     setState((prev) => (build(prev) === urlString ? prev : urlState));
   }, [urlString, urlState, build]);
@@ -87,5 +85,18 @@ export function useUrlSyncedState<T extends object>(
     setState(next);
   }, []);
 
-  return { state, updateState, replaceState };
+  // Hydration gate: parse(empty) is identical on server and the first
+  // client render regardless of URL. After client mount, fall through
+  // to the actual URL-synced state.
+  const emptyState = useMemo<T>(() => parse(EMPTY_SEARCH_PARAMS), [parse]);
+  const [mounted, setMounted] = useState(false);
+  useEffect(() => {
+    setMounted(true);
+  }, []);
+
+  return {
+    state: mounted ? state : emptyState,
+    updateState,
+    replaceState,
+  };
 }
