@@ -196,10 +196,15 @@ jobs:
 
       - name: Build and push backend
         run: |
+          # Build context is the repo root (was `backend/`) so the
+          # Dockerfile can also COPY `scripts/` into the image for the
+          # Cloud Run Job that runs the advisor gap-fill batch. The
+          # repo-root `.dockerignore` keeps `frontend/`, `node_modules/`,
+          # `.git/`, plans, etc. out of the build context.
           docker build \
             -t ${{ vars.GCP_REGISTRY }}/backend:${{ env.SHORT_SHA }} \
             -t ${{ vars.GCP_REGISTRY }}/backend:latest-${{ env.ENV }} \
-            -f backend/Dockerfile backend/
+            -f backend/Dockerfile .
           docker push ${{ vars.GCP_REGISTRY }}/backend --all-tags
 
       - name: Build and push frontend
@@ -265,6 +270,33 @@ jobs:
             --timeout=3600 \
             --min-instances=1 \
             --labels=commit-sha=${{ env.SHORT_SHA }},environment=${{ env.ENV }}
+
+      # Cloud Run Job that runs scripts/gap_fill_investment_advisors.py
+      # against the staging Neon DB. Triggered manually with
+      # `gcloud run jobs execute fis-advisor-gap-fill-staging`; the script
+      # walks 13F-filer advisors, calls the per-firm orchestrator, and
+      # stamps a 30-day cooldown on each row. Reuses the backend image
+      # (same SHA) — the only difference is CMD. Staging-only by design:
+      # there is no parallel prod job resource, so a push to main can't
+      # accidentally run this against the prod DB. See
+      # plans/my-client-wants-to-cached-map.md.
+      - name: Deploy advisor gap-fill Cloud Run Job (staging)
+        if: env.ENV == 'staging'
+        run: |
+          gcloud run jobs deploy fis-advisor-gap-fill-staging \
+            --image=${{ vars.GCP_REGISTRY }}/backend:${{ env.SHORT_SHA }} \
+            --region=${{ vars.GCP_REGION }} \
+            --project=${{ vars.GCP_PROJECT_ID }} \
+            --command=python \
+            --args=scripts/gap_fill_investment_advisors.py,--apply \
+            --task-timeout=86400 \
+            --memory=2Gi \
+            --cpu=2 \
+            --max-retries=0 \
+            --parallelism=1 \
+            --tasks=1 \
+            --set-secrets=DATABASE_URL=DATABASE_URL_BACKEND_STAGING:latest,GEMINI_API_KEY=GEMINI_API_KEY:latest,APOLLO_API_KEY=APOLLO_API_KEY:latest,SERPAPI_API_KEY=SERPAPI_API_KEY:latest,HUNTER_API_KEY=HUNTER_API_KEY:latest,SNOV_CLIENT_ID=SNOV_CLIENT_ID:latest,SNOV_CLIENT_SECRET=SNOV_CLIENT_SECRET:latest,PDL_API_KEY=PDL_API_KEY:latest \
+            --labels=commit-sha=${{ env.SHORT_SHA }},environment=staging,kind=batch-job
 
       - name: Deploy frontend to Cloud Run
         run: |

@@ -1,0 +1,55 @@
+# Excludes for backend image build (context = repo root after 2026-05-28).
+# Build context now includes `scripts/` for the Cloud Run Job; this file
+# keeps everything else out so the Docker build context stays small.
+#
+# Anything inside the backend dir is governed by backend/.dockerignore.
+
+# Frontend tree — huge, irrelevant to the Python backend image.
+frontend/
+
+# Git internals.
+.git/
+.gitignore
+.gitattributes
+
+# Node / Next / build outputs.
+node_modules/
+.next/
+.npm/
+.yarn/
+
+# Python virtualenvs and caches.
+.venv/
+venv/
+__pycache__/
+*.pyc
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+
+# IDE / OS detritus.
+.idea/
+.vscode/
+.DS_Store
+Thumbs.db
+
+# Documentation / planning / scratch — not needed at runtime.
+*.md
+docs/
+Documentation/
+plans/
+prompts/
+reports/
+
+# Tool sub-projects (separately maintained).
+brokercheck_extractor/
+
+# Local caches and ephemeral state.
+.playwright-mcp/
+.claude/
+.tmp/
+
+# Local env files — should never end up in an image.
+.env
+.env.local
+.env.*.local
