@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from datetime import datetime
 
-from sqlalchemy import Boolean, DateTime, ForeignKey, String, Text, func
+from sqlalchemy import Boolean, DateTime, ForeignKey, String, Text, UniqueConstraint, func
 from sqlalchemy.orm import Mapped, mapped_column
 
 from app.db.base import Base
@@ -18,6 +18,18 @@ class AdvisorFiling(Base):
     """
 
     __tablename__ = "advisor_filings"
+    __table_args__ = (
+        # Per-advisor uniqueness on the SEC accession (or synthesized
+        # form|date fallback). The original migration scoped this
+        # globally, which tripped when two advisors shared an SEC
+        # filer-agent and the same accession appeared on both rows. See
+        # migration ``20260528_0068`` for the swap.
+        UniqueConstraint(
+            "advisor_id",
+            "dedupe_key",
+            name="uq_advisor_filings_advisor_dedupe_key",
+        ),
+    )
 
     id: Mapped[int] = mapped_column(primary_key=True, autoincrement=True)
     advisor_id: Mapped[int] = mapped_column(
@@ -25,7 +37,7 @@ class AdvisorFiling(Base):
         index=True,
         nullable=False,
     )
-    dedupe_key: Mapped[str] = mapped_column(String(255), unique=True, nullable=False)
+    dedupe_key: Mapped[str] = mapped_column(String(255), nullable=False)
     form_type: Mapped[str] = mapped_column(String(64), index=True, nullable=False)
     priority: Mapped[str] = mapped_column(String(16), nullable=False)
     filed_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), index=True, nullable=False)
