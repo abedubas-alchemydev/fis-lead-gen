@@ -40,9 +40,8 @@ import asyncio
 import base64
 import json
 import logging
-from dataclasses import asdict, dataclass
+from dataclasses import dataclass
 from datetime import date, datetime, timedelta, timezone
-from decimal import Decimal
 from typing import Iterable, Literal
 from urllib.parse import urlparse
 
@@ -61,9 +60,11 @@ from app.services.brokercheck_pdf import (
     FinraPdfFetchError,
     FinraPdfNotFound,
 )
-from app.services.contact_discovery.base import DiscoveryResult, EmailHit, PhoneHit
+from app.services.contact_discovery.gap_fill_common import (
+    apply_gap_fill,
+    is_gap_row,
+)
 from app.services.contact_discovery.orchestrator import (
-    _highest_confidence_value,
     _walk_chain,
     discover_advisor_contact,
 )
@@ -1289,157 +1290,16 @@ _RUNNERS = {
 # fairness budget).
 
 
-def _is_gap_row(row: AdvisorContact) -> bool:
-    """True if ``row`` is missing any of LinkedIn URL, email, or phone.
-
-    A scalar value (``row.email``) or a non-empty JSONB array (``row.emails``)
-    both count as "present" — a row with ``emails=[{value:'a@b.com',...}]``
-    and ``email=None`` is NOT a gap, because the schema layer projects the
-    array on read."""
-    has_email = bool(row.email) or bool(row.emails)
-    has_phone = bool(row.phone) or bool(row.phones)
-    has_linkedin = bool(row.linkedin_url)
-    return not (has_email and has_phone and has_linkedin)
-
-
-def _apply_gap_fill(row: AdvisorContact, merged: DiscoveryResult) -> bool:
-    """Merge ``merged`` INTO ``row`` in place. Returns True iff anything changed.
-
-    Non-destructive merge semantics:
-
-    - ``emails`` / ``phones``: append new entries only; existing entries are
-      never replaced or removed. Dedupe key matches the chain merger
-      (lowercase value for emails, raw stripped for phones).
-    - ``linkedin_url``: fill ONLY when currently NULL. We never overwrite a
-      URL even if the chain returned a different one — manual edits and the
-      first-non-null choice from the original enrichment both stay sticky.
-    - Scalar ``email`` / ``phone``: fill ONLY when currently NULL, using
-      ``_highest_confidence_value`` over the post-merge array.
-    - ``discovery_source`` / ``discovery_confidence``: stamp ONLY when
-      previously NULL (names-only ``adv`` rows get a real provider attribution
-      on first hit).
-    """
-    changed = False
-
-    existing_emails: list[dict] = list(row.emails or [])
-    seen_email_keys: set[str] = set()
-    for entry in existing_emails:
-        value = (entry.get("value") if isinstance(entry, dict) else None) or ""
-        key = value.lower().strip()
-        if key:
-            seen_email_keys.add(key)
-    for hit in merged.emails:
-        key = (hit.value or "").lower().strip()
-        if not key or key in seen_email_keys:
-            continue
-        seen_email_keys.add(key)
-        existing_emails.append(asdict(hit))
-        changed = True
-    # Also lift the merged scalar email when it wasn't already represented
-    # in the array (matches _merge_discovery_results' lifting behaviour).
-    if merged.email:
-        scalar_key = merged.email.lower().strip()
-        if scalar_key and scalar_key not in seen_email_keys:
-            seen_email_keys.add(scalar_key)
-            existing_emails.append(
-                asdict(
-                    EmailHit(
-                        value=merged.email,
-                        type="work",
-                        confidence=merged.confidence,
-                        source=merged.provider,
-                    )
-                )
-            )
-            changed = True
-    if changed:
-        row.emails = existing_emails
-
-    existing_phones: list[dict] = list(row.phones or [])
-    seen_phone_keys: set[str] = set()
-    for entry in existing_phones:
-        value = (entry.get("value") if isinstance(entry, dict) else None) or ""
-        key = value.strip()
-        if key:
-            seen_phone_keys.add(key)
-    phones_changed = False
-    for hit in merged.phones:
-        key = (hit.value or "").strip()
-        if not key or key in seen_phone_keys:
-            continue
-        seen_phone_keys.add(key)
-        existing_phones.append(asdict(hit))
-        phones_changed = True
-    if merged.phone:
-        scalar_key = merged.phone.strip()
-        if scalar_key and scalar_key not in seen_phone_keys:
-            seen_phone_keys.add(scalar_key)
-            existing_phones.append(
-                asdict(
-                    PhoneHit(
-                        value=merged.phone,
-                        type="work",
-                        confidence=merged.confidence,
-                        source=merged.provider,
-                    )
-                )
-            )
-            phones_changed = True
-    if phones_changed:
-        row.phones = existing_phones
-        changed = True
-
-    if row.linkedin_url is None and merged.linkedin_url:
-        row.linkedin_url = merged.linkedin_url
-        changed = True
-
-    if row.email is None and row.emails:
-        hits = [
-            EmailHit(
-                value=e["value"],
-                type=e.get("type") or "work",
-                confidence=e.get("confidence"),
-                source=e.get("source") or "",
-            )
-            for e in row.emails
-            if isinstance(e, dict) and e.get("value")
-        ]
-        scalar = _highest_confidence_value(hits) if hits else None
-        if scalar:
-            row.email = scalar
-            changed = True
-
-    if row.phone is None and row.phones:
-        hits = [
-            PhoneHit(
-                value=p["value"],
-                type=p.get("type") or "work",
-                confidence=p.get("confidence"),
-                source=p.get("source") or "",
-            )
-            for p in row.phones
-            if isinstance(p, dict) and p.get("value")
-        ]
-        scalar = _highest_confidence_value(hits) if hits else None
-        if scalar:
-            row.phone = scalar
-            changed = True
-
-    if row.discovery_source is None and merged.provider:
-        row.discovery_source = merged.provider[:32]
-        changed = True
-    if row.discovery_confidence is None:
-        row.discovery_confidence = Decimal(str(round(merged.confidence, 2)))
-        changed = True
-    # Stamp the Apollo person id when previously NULL so the async phone-
-    # reveal webhook can find this row later. Never overwrite — if a prior
-    # enrich already linked the row to an Apollo id, keep it (otherwise a
-    # webhook still in flight would land on the wrong row).
-    if row.apollo_person_id is None and merged.apollo_person_id:
-        row.apollo_person_id = merged.apollo_person_id
-        changed = True
-
-    return changed
+# ``_is_gap_row`` and ``_apply_gap_fill`` are thin aliases over the
+# generic helpers in ``contact_discovery.gap_fill_common``. The same
+# merge semantics apply to executive_contacts / advisor_contacts /
+# investor_contacts, so keeping one source of truth there avoids
+# triplicating ~250 LOC across the three per-kind gap-fill runners.
+# The apollo_person_id stamping (added in PR #586 for the async phone-
+# reveal webhook) lives in gap_fill_common.apply_gap_fill so the BD and
+# II runners pick it up automatically.
+_is_gap_row = is_gap_row
+_apply_gap_fill = apply_gap_fill
 
 
 async def _run_gap_fill_contacts(
@@ -1552,6 +1412,27 @@ async def _run_gap_fill_contacts(
             success=0,
             failure=1,
             summary=f"{type(exc).__name__}: {str(exc)[:180]}",
+        )
+
+
+async def run_gap_fill_advisor_contacts_background(
+    run_id: int, advisor_id: int, trigger_source: str
+) -> None:
+    """Defensive wrapper around :func:`_run_gap_fill_contacts` so an
+    unhandled exception in the background task doesn't leave the
+    PipelineRun stuck on ``queued``. Mirror of the BD/II variants in
+    ``services.bd_contact_gap_fill`` / ``services.investor_contact_gap_fill``
+    -- the existing private wrapper in
+    ``api.v1.endpoints.investment_advisors`` (used by the per-advisor
+    route) predates these and is kept for backward-compat."""
+    try:
+        await _run_gap_fill_contacts(run_id, advisor_id, trigger_source)
+    except Exception:
+        logger.exception(
+            "advisor gap-fill-contacts background task failed "
+            "(run_id=%s advisor_id=%s)",
+            run_id,
+            advisor_id,
         )
 
 

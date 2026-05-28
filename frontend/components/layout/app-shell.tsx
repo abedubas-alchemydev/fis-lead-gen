@@ -158,6 +158,18 @@ function UsersIcon(props: IconProps) {
   );
 }
 
+// Address-book glyph for the persons-by-firm browse / per-firm enrich page.
+function OutreachContactsIcon(props: IconProps) {
+  return (
+    <IconBase {...props}>
+      <path d="M4 4h14a2 2 0 012 2v12a2 2 0 01-2 2H4z" />
+      <path d="M4 8h-2M4 12h-2M4 16h-2" />
+      <circle cx="11" cy="11" r="2.5" />
+      <path d="M7 17c0-2.2 1.8-4 4-4s4 1.8 4 4" />
+    </IconBase>
+  );
+}
+
 // Paper-plane glyph for the per-user "sent outreach" history view.
 function SentOutreachIcon(props: IconProps) {
   return (
@@ -270,6 +282,7 @@ const navSections: ReadonlyArray<NavSection> = [
     label: "Outbound",
     items: [
       { href: "/email-extractor", label: "Email Extractor", icon: EmailExtractorIcon, badgeKey: null, permissionKey: "email_extractor" },
+      { href: "/outreach/contacts" as Route, label: "Contacts", icon: OutreachContactsIcon, badgeKey: null, permissionKey: "outreach_contacts" },
       { href: "/outreach/sent" as Route, label: "Outreach", icon: SentOutreachIcon, badgeKey: null, permissionKey: "sent_outreach" }
     ]
   },
