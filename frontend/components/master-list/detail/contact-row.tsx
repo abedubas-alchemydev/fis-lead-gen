@@ -74,7 +74,7 @@ export function ContactRow<
       {showFindPhone ? (
         <>
           <span className="text-[var(--text-muted,#94a3b8)] italic">
-            Phone unavailable
+            Mobile number not publicly available
           </span>
           <FindPhoneButton
             entityKind={entityKind}
