@@ -251,7 +251,7 @@ export function OutreachSentClient({ isAdmin = false }: { isAdmin?: boolean }) {
                   setExpandedId(null);
                   setOffset(Math.max(0, offset - PAGE_SIZE));
                 }}
-                className="rounded-xl border border-[var(--border,rgba(30,64,175,0.1))] bg-white px-3 py-1.5 font-semibold text-[var(--text,#0f172a)] transition hover:bg-[var(--surface-2,#f1f6fd)] disabled:cursor-not-allowed disabled:opacity-50"
+                className="rounded-xl border border-[var(--border,rgba(30,64,175,0.1))] bg-white px-3 py-1.5 font-semibold text-[#0f172a] transition hover:bg-[var(--surface-2,#f1f6fd)] disabled:cursor-not-allowed disabled:opacity-50"
               >
                 Previous
               </button>
@@ -265,7 +265,7 @@ export function OutreachSentClient({ isAdmin = false }: { isAdmin?: boolean }) {
                   setExpandedId(null);
                   setOffset(offset + PAGE_SIZE);
                 }}
-                className="rounded-xl border border-[var(--border,rgba(30,64,175,0.1))] bg-white px-3 py-1.5 font-semibold text-[var(--text,#0f172a)] transition hover:bg-[var(--surface-2,#f1f6fd)] disabled:cursor-not-allowed disabled:opacity-50"
+                className="rounded-xl border border-[var(--border,rgba(30,64,175,0.1))] bg-white px-3 py-1.5 font-semibold text-[#0f172a] transition hover:bg-[var(--surface-2,#f1f6fd)] disabled:cursor-not-allowed disabled:opacity-50"
               >
                 Next
               </button>
@@ -295,7 +295,7 @@ function FilterPills({
             onClick={() => onChange(option.value)}
             className={
               active
-                ? "rounded-lg bg-white px-3 py-1.5 text-[var(--text,#0f172a)] shadow-[0_1px_3px_rgba(15,23,42,0.08)]"
+                ? "rounded-lg bg-white px-3 py-1.5 text-[#0f172a] shadow-[0_1px_3px_rgba(15,23,42,0.08)]"
                 : "rounded-lg px-3 py-1.5 text-[var(--text-muted,#94a3b8)] transition hover:text-[var(--text,#0f172a)]"
             }
           >
@@ -325,7 +325,7 @@ function ScopePills({
             onClick={() => onChange(option.value)}
             className={
               active
-                ? "rounded-lg bg-white px-3 py-1.5 text-[var(--text,#0f172a)] shadow-[0_1px_3px_rgba(15,23,42,0.08)]"
+                ? "rounded-lg bg-white px-3 py-1.5 text-[#0f172a] shadow-[0_1px_3px_rgba(15,23,42,0.08)]"
                 : "rounded-lg px-3 py-1.5 text-[var(--text-muted,#94a3b8)] transition hover:text-[var(--text,#0f172a)]"
             }
           >
