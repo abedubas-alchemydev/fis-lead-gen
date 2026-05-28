@@ -47,10 +47,7 @@ export function AuthHero() {
 
       {/* Middle: headline + KPIs */}
       <div className="relative my-auto">
-        <h1 className="animate-fade-in-left max-w-md text-[clamp(1.875rem,1.4vw+1.4rem,2.5rem)] font-semibold leading-[1.1] tracking-tight text-white">
-          Institutional Finance Intelligence
-        </h1>
-        <p className="animate-fade-in-left delay-150 mt-4 max-w-md text-sm leading-relaxed text-white/60">
+        <p className="animate-fade-in-left max-w-md text-sm leading-relaxed text-white/60">
           Enterprise broker-dealer intelligence for surfacing clearing opportunities, tracking risk
           signals, and managing qualified prospects in one system.
         </p>
