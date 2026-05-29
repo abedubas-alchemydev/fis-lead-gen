@@ -20,9 +20,12 @@ from app.models.financial_metric import FinancialMetric
 from app.models.pipeline_run import PipelineRun
 from app.models.scoring_setting import ScoringSetting
 from app.schemas.broker_dealer import BrokerDealerListMeta, BrokerDealerListResponse
+from app.services.clearing_auto_group import (
+    auto_group_long_tail,
+    expand_auto_group_predicate,
+    load_rejected_signatures,
+)
 from app.services.clearing_consolidation import (
-    consolidated_label_set,
-    expand_filter_predicate,
     load_providers as load_consolidation_providers,
 )
 from app.services.scoring import CompetitorLookup, calculate_lead_score, classify_lead_priority
@@ -292,12 +295,12 @@ class BrokerDealerRepository:
             filters.append(BrokerDealer.lead_priority.in_(lead_priorities))
 
         if clearing_partners:
-            # Selected labels are canonical short forms ("Pershing", "Apex"),
-            # not raw extracted strings. Expand each label back to the set
-            # of raw values that consolidate to it, then filter by
-            # `current_clearing_partner IN (raw_values)`. Reuses the same
-            # consolidate function the dropdown uses, so what the user sees
-            # and what they filter by are guaranteed to agree.
+            # Selected labels are display labels ("Pershing", or an
+            # auto-grouped base name like "Acme Securities"), not raw
+            # extracted strings. Expand each back to the set of raw values
+            # in its group, then filter by `current_clearing_partner IN
+            # (raw_values)`. Reuses the same grouping the dropdown renders,
+            # so what the user sees and what they filter by agree.
             distinct_raw_stmt = (
                 select(BrokerDealer.current_clearing_partner)
                 .where(BrokerDealer.current_clearing_partner.is_not(None))
@@ -307,11 +310,13 @@ class BrokerDealerRepository:
                 (await db.execute(distinct_raw_stmt)).scalars().all()
             )
             providers = await load_consolidation_providers(db)
-            predicate = expand_filter_predicate(
+            rejected = await load_rejected_signatures(db)
+            predicate = expand_auto_group_predicate(
                 clearing_partners,
                 providers,
                 BrokerDealer.current_clearing_partner,
                 distinct_raw,
+                rejected,
             )
             if predicate is not None:
                 filters.append(predicate)
@@ -562,7 +567,11 @@ class BrokerDealerRepository:
         / "BNY PERSHING"). The dropdown groups them via
         ``CompetitorProvider`` aliases into one entry per canonical firm
         (using ``display_name`` as the short label). Long-tail raw values
-        that don't match any provider are kept as their trimmed text.
+        that don't match any provider are then auto-grouped by similarity
+        (``clearing_auto_group``) so a base name and its longer variants
+        ("Acme Securities" / "Acme Securities Trust Co") collapse into one
+        entry under the shorter base name; anything still distinct keeps its
+        own trimmed text.
         """
         stmt = (
             select(BrokerDealer.current_clearing_partner)
@@ -571,7 +580,9 @@ class BrokerDealerRepository:
         )
         rows = (await db.execute(stmt)).scalars().all()
         providers = await load_consolidation_providers(db)
-        return consolidated_label_set(list(rows), providers)
+        rejected = await load_rejected_signatures(db)
+        groups = auto_group_long_tail(list(rows), providers, rejected)
+        return sorted(groups.keys(), key=lambda label: label.lower())
 
     async def list_types_of_business(self, db: AsyncSession) -> list[dict[str, object]]:
         """Distinct types-of-business across all firms with per-type counts.

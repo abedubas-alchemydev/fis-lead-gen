@@ -163,11 +163,12 @@ export function SuggestedMergesCard({ onAccepted }: { onAccepted?: () => void })
             ) : null}
           </h2>
           <p className="mt-1.5 text-[13px] leading-5 text-[var(--text-dim,#475569)]">
-            Cluster pass groups raw variants of the same firm
-            (&ldquo;RBC Capital Markets, LLC&rdquo;, &ldquo;RBC Capital Markets
-            LLC&rdquo;, etc.) so they collapse into one Clearing Arrangement
-            entry. Review each cluster and accept to create a competitor
-            provider with the variants as aliases.
+            Duplicate variants of the same firm (&ldquo;RBC Capital Markets,
+            LLC&rdquo;, &ldquo;RBC Capital Markets LLC&rdquo;, etc.) are now
+            grouped automatically in the Clearing Arrangement filter. Use this
+            list to refine a cluster &mdash; accept it to lock in a canonical
+            label and competitor provider, or reject it to split a wrong
+            auto-merge back apart.
           </p>
         </div>
         <button
