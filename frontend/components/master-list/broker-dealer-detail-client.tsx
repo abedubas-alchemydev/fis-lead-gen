@@ -1376,11 +1376,8 @@ export function BrokerDealerDetailClient({ brokerDealerId }: { brokerDealerId: s
             )}
           </div>
         </SectionPanel>
-      </div>
-      </div>
 
-      {/* ── Filing history (full width) ── */}
-      <div className="mt-4">
+        {/* Filing History */}
         <SectionPanel
           eyebrow="Filing History"
           title="Chronological filing timeline"
@@ -1474,6 +1471,7 @@ export function BrokerDealerDetailClient({ brokerDealerId }: { brokerDealerId: s
             </>
           ) : null}
         </SectionPanel>
+      </div>
       </div>
 
       {/* ── Discovered emails (full width) ── */}
