@@ -65,6 +65,7 @@ from app.services.contact_discovery.gap_fill_common import (
     is_gap_row,
 )
 from app.services.contact_discovery.orchestrator import (
+    _build_advisor_row,
     _walk_chain,
     discover_advisor_contact,
 )
@@ -216,6 +217,12 @@ SUB_REFRESH_IAPD_SUMMARY = "investment_advisor_refresh_iapd_summary"
 # Not a child of REFRESH_ADVISOR_ALL — the endpoint creates ONE PipelineRun and
 # the runner finalizes it directly, so no parent/child split is needed.
 GAP_FILL_ADVISOR_CONTACTS_PIPELINE_NAME = "investment_advisor_gap_fill_contacts"
+
+# Standalone pipeline name for the bulk roster-backfill flow (Job B): walk the
+# executive_officers roster and materialise a per-officer advisor_contacts row,
+# bypassing the _run_enrich_contacts idempotency guard. Driven by
+# scripts/backfill_advisor_roster_contacts.py.
+BACKFILL_ROSTER_CONTACTS_PIPELINE_NAME = "investment_advisor_backfill_roster_contacts"
 
 # Short human labels used in the parent's notes.summary toast string.
 _SUB_LABEL: dict[str, str] = {
@@ -1477,6 +1484,214 @@ async def _finalize_gap_fill_run(
 
 
 # ---------------------------------------------------------------------------
+# Per-advisor roster backfill (Job B)
+# ---------------------------------------------------------------------------
+#
+# The gap-fill path above only re-queries advisor_contacts rows that already
+# exist. But for most advisors the contact roster was never materialised:
+# _run_enrich_contacts ran once (often before the executive_officers JSONB was
+# extracted), created a single org-level row, and the idempotency guard then
+# froze the advisor at ~1 contact forever. The result on staging: 2,951
+# advisors carry a full officer roster on the IA row, yet advisor_contacts
+# averages ~1.0 rows/advisor.
+#
+# This sub-pipeline is the backfill: it walks the executive_officers roster
+# and, for each officer, EITHER gap-fills the matching existing row OR creates
+# the missing one via the discovery chain. It deliberately bypasses the
+# idempotency guard (that's the whole point), but it's still non-destructive:
+# existing rows are only gap-filled (never overwritten), and officers are
+# de-duped against existing rows by parsed (first, last) so re-runs don't
+# create duplicates. Same 30-day cooldown stamp as gap-fill so the bulk runner
+# and the per-advisor flows share one fairness budget.
+
+
+def _roster_match_key(name: str) -> tuple[str, str] | None:
+    """Parse a contact/officer name into a lowercased ``(first, last)`` dedupe
+    key. Handles both the Form ADV ``"LAST, FIRST, MIDDLE"`` roster form and
+    the title-cased ``"First Last"`` form discovered rows are stored under, so
+    a roster officer matches the row a prior enrichment already wrote for them.
+    Returns ``None`` when the name can't be split into both halves."""
+    split = _split_officer_name(name)
+    if split is None:
+        return None
+    first, last = split
+    return (first.lower(), last.lower())
+
+
+async def _run_backfill_roster_contacts(
+    run_id: int, advisor_id: int, trigger_source: str
+) -> None:
+    """Materialise the full officer roster into ``advisor_contacts``.
+
+    For each officer on ``InvestmentAdvisor.executive_officers``: run the
+    discovery chain once, then either gap-fill the existing matching row or
+    create the missing one (a names-only row when the chain found nothing, so
+    the People panel still shows the full roster). Bypasses the
+    ``_run_enrich_contacts`` idempotency guard; non-destructive and idempotent
+    on re-run via ``(first, last)`` de-dupe. Stamps
+    ``last_gap_fill_attempt_at`` and finalizes the PipelineRun in place."""
+    async with SessionLocal() as db:
+        run = await db.get(PipelineRun, run_id)
+        if run is not None:
+            run.status = "running"
+            await db.commit()
+
+    try:
+        async with SessionLocal() as db:
+            advisor = await db.get(InvestmentAdvisor, advisor_id)
+            if advisor is None:
+                await _finalize_gap_fill_run(
+                    run_id,
+                    status="failed",
+                    success=0,
+                    failure=1,
+                    summary="Advisor row disappeared between queue and run.",
+                )
+                return
+            firm_name = advisor.name
+            domain = _canonicalize_domain(_domain_from_website(advisor.website))
+            chain_org_name = _normalize_org_name(firm_name)
+            roster = (
+                advisor.executive_officers
+                if isinstance(advisor.executive_officers, list)
+                else []
+            )
+            existing_rows = list(
+                (
+                    await db.execute(
+                        select(AdvisorContact).where(
+                            AdvisorContact.advisor_id == advisor_id
+                        )
+                    )
+                ).scalars().all()
+            )
+
+        # Parse + cap the roster work list up front.
+        work: list[dict[str, str]] = []
+        for officer in roster:
+            if not isinstance(officer, dict):
+                continue
+            display_name = str(officer.get("name") or "").strip()
+            split = _split_officer_name(display_name)
+            if split is None:
+                continue
+            first_name, last_name = split
+            title = str(officer.get("title") or "").strip() or "Executive Officer"
+            work.append(
+                {
+                    "display_name": display_name,
+                    "first_name": first_name,
+                    "last_name": last_name,
+                    "title": title,
+                }
+            )
+            if len(work) >= _MAX_OFFICERS_TO_ENRICH:
+                break
+
+        if not work:
+            await _stamp_gap_fill_attempt(advisor_id)
+            await _finalize_gap_fill_run(
+                run_id,
+                status="completed",
+                success=1,
+                failure=0,
+                summary="No roster officers to backfill.",
+            )
+            return
+
+        # Map existing rows by parsed (first, last) so a roster officer
+        # matches whatever row a prior enrichment already wrote for them
+        # (whether stored as "Andre Perold" or "PEROLD, ANDRE, FRANCOIS").
+        existing_by_key: dict[tuple[str, str], int] = {}
+        for row in existing_rows:
+            key = _roster_match_key(row.name)
+            if key is not None and key not in existing_by_key:
+                existing_by_key[key] = row.id
+
+        created = 0
+        filled = 0
+        chain_hits = 0
+        created_keys: set[tuple[str, str]] = set()
+        now = datetime.now(timezone.utc)
+
+        async with SessionLocal() as db:
+            for entry in work:
+                key = (entry["first_name"].lower(), entry["last_name"].lower())
+                existing_id = existing_by_key.get(key)
+                # A duplicate roster entry we already created this run — skip
+                # so we never write the same person twice.
+                if existing_id is None and key in created_keys:
+                    continue
+
+                merged = await _walk_chain(
+                    "person",
+                    first_name=entry["first_name"],
+                    last_name=entry["last_name"],
+                    org_name=chain_org_name or entry["display_name"],
+                    domain=domain,
+                    cache_name=f"{entry['first_name']} {entry['last_name']}",
+                )
+                if merged is not None:
+                    chain_hits += 1
+
+                if existing_id is not None:
+                    row = await db.get(AdvisorContact, existing_id)
+                    if row is not None and merged is not None and _apply_gap_fill(row, merged):
+                        row.enriched_at = now
+                        filled += 1
+                    continue
+
+                # No existing row for this officer — create one.
+                if merged is not None:
+                    db.add(
+                        _build_advisor_row(
+                            advisor_id=advisor_id,
+                            name=f"{entry['first_name']} {entry['last_name']}",
+                            title=entry["title"],
+                            result=merged,
+                        )
+                    )
+                else:
+                    db.add(
+                        AdvisorContact(
+                            advisor_id=advisor_id,
+                            name=entry["display_name"][:255],
+                            title=entry["title"][:255],
+                            email=None,
+                            phone=None,
+                            linkedin_url=None,
+                            source="adv",
+                            enriched_at=now,
+                        )
+                    )
+                created += 1
+                created_keys.add(key)
+
+            if created or filled:
+                await db.commit()
+
+        await _stamp_gap_fill_attempt(advisor_id)
+        summary = (
+            f"Roster backfill: created {created}, gap-filled {filled} "
+            f"({chain_hits} chain hit(s) over {len(work)} roster officer(s))."
+        )[:180]
+        await _finalize_gap_fill_run(
+            run_id, status="completed", success=1, failure=0, summary=summary
+        )
+    except Exception as exc:
+        logger.exception(
+            "advisor roster-backfill failed for advisor %s", advisor_id
+        )
+        await _finalize_gap_fill_run(
+            run_id,
+            status="failed",
+            success=0,
+            failure=1,
+            summary=f"{type(exc).__name__}: {str(exc)[:180]}",
+        )
+
+
+# ---------------------------------------------------------------------------
 # Parent orchestrator
 # ---------------------------------------------------------------------------
 
@@ -1603,10 +1818,12 @@ __all__ = [
     "SUB_REFRESH_IAPD_SUMMARY",
     "GAP_FILL_ADVISOR_CONTACTS_PIPELINE_NAME",
     "GAP_FILL_COOLDOWN_DAYS",
+    "BACKFILL_ROSTER_CONTACTS_PIPELINE_NAME",
     "decide_pipelines",
     "required_provider_keys",
     "run_advisor_refresh",
     "_is_gap_row",
     "_apply_gap_fill",
     "_run_gap_fill_contacts",
+    "_run_backfill_roster_contacts",
 ]
