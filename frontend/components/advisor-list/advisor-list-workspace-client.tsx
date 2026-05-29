@@ -660,6 +660,7 @@ export function AdvisorListWorkspaceClient() {
               onChange={(event) =>
                 updateState({ sortBy: event.target.value, page: 1 })
               }
+              aria-label="Sort by"
               className="h-[38px] rounded-[10px] border border-[var(--border,rgba(30,64,175,0.1))] bg-[var(--surface,#ffffff)] px-3 text-[13px] text-[var(--text,#0f172a)] outline-none transition focus:border-[var(--accent,#6366f1)] focus:shadow-[0_0_0_3px_rgba(99,102,241,0.15)]"
             >
               {SORT_OPTIONS.map((option) => (
@@ -682,6 +683,7 @@ export function AdvisorListWorkspaceClient() {
                   page: 1,
                 })
               }
+              aria-label="Direction"
               className="h-[38px] rounded-[10px] border border-[var(--border,rgba(30,64,175,0.1))] bg-[var(--surface,#ffffff)] px-3 text-[13px] text-[var(--text,#0f172a)] outline-none transition focus:border-[var(--accent,#6366f1)] focus:shadow-[0_0_0_3px_rgba(99,102,241,0.15)]"
             >
               <option value="asc">Ascending</option>
@@ -698,6 +700,7 @@ export function AdvisorListWorkspaceClient() {
               onChange={(event) =>
                 updateState({ limit: Number(event.target.value), page: 1 })
               }
+              aria-label="Page size"
               className="h-[38px] rounded-[10px] border border-[var(--border,rgba(30,64,175,0.1))] bg-[var(--surface,#ffffff)] px-3 text-[13px] text-[var(--text,#0f172a)] outline-none transition focus:border-[var(--accent,#6366f1)] focus:shadow-[0_0_0_3px_rgba(99,102,241,0.15)]"
             >
               {[25, 50, 100].map((pageSize) => (
