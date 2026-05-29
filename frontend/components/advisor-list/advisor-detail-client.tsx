@@ -612,32 +612,6 @@ export function AdvisorDetailClient({ advisorId }: { advisorId: string }) {
           </div>
         </div>
         <div className="flex shrink-0 items-center gap-2.5">
-          <div className="flex items-center gap-1">
-            <button
-              type="button"
-              disabled={!prevId}
-              onClick={() => prevId && router.push(buildAdjacentHref(prevId))}
-              title="Previous advisor"
-              aria-label="Previous advisor"
-              className="inline-flex h-9 w-9 items-center justify-center rounded-[10px] border border-[var(--border-2,rgba(30,64,175,0.16))] bg-[var(--surface,#ffffff)] text-[var(--text-dim,#475569)] transition hover:bg-[var(--surface-2,#f1f6fd)] hover:text-[var(--text,#0f172a)] disabled:cursor-not-allowed disabled:opacity-45"
-            >
-              <ArrowLeft className="h-4 w-4" strokeWidth={2} aria-hidden />
-            </button>
-            <button
-              type="button"
-              disabled={!nextId}
-              onClick={() => nextId && router.push(buildAdjacentHref(nextId))}
-              title="Next advisor"
-              aria-label="Next advisor"
-              className="inline-flex h-9 w-9 items-center justify-center rounded-[10px] border border-[var(--border-2,rgba(30,64,175,0.16))] bg-[var(--surface,#ffffff)] text-[var(--text-dim,#475569)] transition hover:bg-[var(--surface-2,#f1f6fd)] hover:text-[var(--text,#0f172a)] disabled:cursor-not-allowed disabled:opacity-45"
-            >
-              <ArrowRight className="h-4 w-4" strokeWidth={2} aria-hidden />
-            </button>
-          </div>
-          <span
-            className="h-6 w-px bg-[var(--border-2,rgba(30,64,175,0.16))]"
-            aria-hidden
-          />
           <button
             type="button"
             onClick={() => void runGapFill()}
@@ -685,6 +659,34 @@ export function AdvisorDetailClient({ advisorId }: { advisorId: string }) {
           {gapFillNotice}
         </div>
       ) : null}
+
+      {/* ── Adjacent-advisor nav — mirrors the master-list detail page ── */}
+      <div className="mb-5 flex items-center justify-between gap-3">
+        <button
+          type="button"
+          disabled={!prevId}
+          onClick={() => prevId && router.push(buildAdjacentHref(prevId))}
+          className={SECONDARY_BTN}
+        >
+          <ArrowLeft className="h-4 w-4" strokeWidth={2} />
+          Previous
+        </button>
+        <Link
+          href={backHref}
+          className="text-[12px] uppercase tracking-[0.08em] text-[var(--text-muted,#94a3b8)] transition hover:text-[var(--text,#0f172a)]"
+        >
+          Back to Investment Advisors
+        </Link>
+        <button
+          type="button"
+          disabled={!nextId}
+          onClick={() => nextId && router.push(buildAdjacentHref(nextId))}
+          className={SECONDARY_BTN}
+        >
+          Next
+          <ArrowRight className="h-4 w-4" strokeWidth={2} />
+        </button>
+      </div>
 
       {/* ── KPI strip ───────────────────────────────────────────────────── */}
       <div className="mb-4 grid gap-3 sm:grid-cols-2 lg:grid-cols-4">
