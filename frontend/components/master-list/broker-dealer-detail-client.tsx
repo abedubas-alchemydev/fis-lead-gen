@@ -1109,12 +1109,18 @@ export function BrokerDealerDetailClient({ brokerDealerId }: { brokerDealerId: s
                       entityKind="broker-dealer"
                       entityId={bd.id}
                       onContactUpdated={handleContactUpdated}
+                      forceActiveLook
                     />
                   ),
                   className: "whitespace-nowrap",
                 },
                 {
                   header: "Outreach",
+                  // Matched officers go through the firm/contact draft path
+                  // (real contact id). FINRA officers with no enriched
+                  // contact row have no contact id, so they use the adhoc
+                  // path — Gemini still drafts from the service folder; the
+                  // modal disables Send until the contact has an email.
                   cell: (o) =>
                     o.contact ? (
                       <OutreachButton
@@ -1124,9 +1130,17 @@ export function BrokerDealerDetailClient({ brokerDealerId }: { brokerDealerId: s
                         contact={o.contact}
                       />
                     ) : (
-                      <span className="text-xs italic text-[var(--text-muted,#94a3b8)]">
-                        No outreach available
-                      </span>
+                      <OutreachButton
+                        entityKind="adhoc"
+                        entityId={bd.id}
+                        entityName={bd.name}
+                        contact={{
+                          id: 0,
+                          name: o.name ?? "—",
+                          title: o.title ?? "",
+                          email: null,
+                        }}
+                      />
                     ),
                   className: "whitespace-nowrap",
                 },
@@ -1156,6 +1170,7 @@ export function BrokerDealerDetailClient({ brokerDealerId }: { brokerDealerId: s
                       entityKind="broker-dealer"
                       entityId={bd.id}
                       onContactUpdated={handleContactUpdated}
+                      forceActiveLook
                     />
                   ),
                   className: "whitespace-nowrap",

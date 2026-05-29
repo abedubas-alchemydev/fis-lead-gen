@@ -314,6 +314,10 @@ export function OutreachModal({
   const senderEmail =
     selectedAccount?.email_address ??
     (session.data?.user?.email ?? null);
+  // Drafting works without a recipient address (folder + RAG only), but
+  // sending obviously can't. When the contact has no email on file we let
+  // the user generate + copy a draft and disable Send with an inline note.
+  const recipientHasEmail = !!contact.email;
 
   async function handleGenerate() {
     if (folderId === null) return;
@@ -347,7 +351,9 @@ export function OutreachModal({
       } else {
         draft = await generateAdhocOutreachDraft({
           folder_id: folderId,
-          recipient_email: contact.email ?? "",
+          // Null (not "") when unknown so the optional EmailStr passes —
+          // the draft endpoint ignores the address anyway.
+          recipient_email: contact.email ?? null,
           recipient_name: contact.name
         });
       }
@@ -809,6 +815,13 @@ export function OutreachModal({
           </div>
         ) : null}
 
+        {(stage === "draft" || stage === "sending") && !recipientHasEmail ? (
+          <div className="mt-4 rounded-xl border border-amber-200 bg-amber-50/70 px-3 py-2 text-xs leading-5 text-[var(--text-dim,#475569)]">
+            This contact has no email on file, so sending is disabled. You can
+            still generate, edit, and copy the draft.
+          </div>
+        ) : null}
+
         <div className="mt-6 flex items-center justify-end gap-3">
           {stage === "draft" ? (
             <button
@@ -852,7 +865,15 @@ export function OutreachModal({
               type="button"
               onClick={() => void handleSend()}
               disabled={
-                stage === "sending" || !subject.trim() || !body.trim()
+                stage === "sending" ||
+                !subject.trim() ||
+                !body.trim() ||
+                !recipientHasEmail
+              }
+              title={
+                recipientHasEmail
+                  ? undefined
+                  : "No email on file for this contact — drafting only."
               }
               className="inline-flex h-10 items-center rounded-xl bg-[var(--accent,#6366f1)] px-4 text-sm font-semibold text-white shadow-lg shadow-[var(--accent,#6366f1)]/20 transition hover:bg-[var(--accent-2,#8b5cf6)] disabled:cursor-not-allowed disabled:opacity-60"
             >

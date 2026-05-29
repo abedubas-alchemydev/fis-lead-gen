@@ -199,10 +199,18 @@ class OutreachAdhocDraftRequest(BaseModel):
     ``folder_id`` is required (unlike on the send path): without a
     service folder there's nothing concrete for the LLM to pitch, so
     the FE only enables the Generate button once a service is picked.
+
+    ``recipient_email`` is optional: the draft is generated from the
+    service folder + RAG + optional ``recipient_name`` only — the
+    address is never read here. Leaving it off lets the firm-detail
+    People section draft for FINRA officers that have no email on file
+    yet (the send path still requires a real address). When supplied it
+    must be a valid address so an obviously malformed value is caught
+    early.
     """
 
     folder_id: int = Field(..., gt=0)
-    recipient_email: EmailStr
+    recipient_email: EmailStr | None = None
     recipient_name: str | None = Field(default=None, max_length=255)
 
 
