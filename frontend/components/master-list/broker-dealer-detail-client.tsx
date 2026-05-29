@@ -1440,7 +1440,7 @@ function MiniStat({
 // firms with long lists don't push the rest of the card off-screen.
 function CollapsiblePillList({
   items,
-  collapsedCount = 8,
+  collapsedCount = 6,
 }: {
   items: string[];
   collapsedCount?: number;
