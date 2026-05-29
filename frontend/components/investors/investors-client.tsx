@@ -30,6 +30,7 @@ import {
 import { STATE_NAMES, stateCodeFromName } from "@/lib/states";
 import { Combo } from "@/components/ui/combo";
 import { ListPicker } from "@/components/list-picker/list-picker";
+import { OutreachModal } from "@/components/master-list/outreach-modal";
 import { Tag } from "@/components/ui/tag";
 import { ThemeToggle } from "@/components/ui/theme-toggle";
 import { TransactionValueRangeFilter } from "@/components/investors/filters/transaction-value-range-filter";
@@ -828,6 +829,7 @@ function InvestorRow({
   enriching: boolean;
   onEnrich: () => void;
 }) {
+  const [outreachOpen, setOutreachOpen] = useState(false);
   const adChipClass =
     row.ad_code === "A"
       ? "border-emerald-200 bg-emerald-50 text-emerald-700"
@@ -847,9 +849,16 @@ function InvestorRow({
     .filter((s) => s && s.trim().length > 0)
     .join(" • ");
   const hasEnrichment = !!row.enriched_at;
+  // Outreach addresses the insider by their enriched email via the adhoc
+  // path, so the button only sends once a contact email exists. Shown on
+  // every row (disabled otherwise) so the affordance is discoverable.
+  const canOutreach = !!row.enriched_email;
+  const outreachDisabledTitle = row.is_entity
+    ? "Entity filer — people-match doesn't apply to organizations"
+    : "Find this insider's contact first to enable outreach";
 
   return (
-    <div className="grid gap-3 py-3 md:grid-cols-[minmax(0,1.4fr)_minmax(0,1.2fr)_minmax(0,160px)]">
+    <div className="grid gap-3 py-3 md:grid-cols-[minmax(0,1.4fr)_minmax(0,1.2fr)_minmax(0,220px)]">
       <div className="min-w-0">
         <div className="flex flex-wrap items-center gap-2">
           <span className="text-[14px] font-semibold text-[var(--text,#0f172a)]">
@@ -940,7 +949,7 @@ function InvestorRow({
           </a>
         ) : null}
       </div>
-      <div className="flex items-start justify-end gap-2">
+      <div className="flex flex-wrap items-start justify-end gap-2">
         <ListPicker
           variant="row-heart"
           entityType="reporting_owner"
@@ -964,7 +973,31 @@ function InvestorRow({
           ) : null}
           {hasEnrichment ? "Re-enrich" : "Find contact"}
         </button>
+        <button
+          type="button"
+          onClick={() => setOutreachOpen(true)}
+          disabled={!canOutreach}
+          title={canOutreach ? undefined : outreachDisabledTitle}
+          className="inline-flex items-center gap-1.5 rounded-md bg-[var(--accent,#6366f1)] px-2.5 py-1 text-[11px] font-semibold text-white transition hover:bg-[var(--accent-2,#8b5cf6)] disabled:cursor-not-allowed disabled:opacity-50"
+        >
+          <MailPlus className="h-3.5 w-3.5" strokeWidth={2} aria-hidden />
+          Outreach
+        </button>
       </div>
+      {outreachOpen && row.enriched_email ? (
+        <OutreachModal
+          entityKind="adhoc"
+          entityId={0}
+          entityName=""
+          contact={{
+            id: row.reporting_owner_id ?? 0,
+            name: row.reporting_owner_name,
+            title: row.reporting_owner_title ?? "",
+            email: row.enriched_email,
+          }}
+          onClose={() => setOutreachOpen(false)}
+        />
+      ) : null}
     </div>
   );
 }
