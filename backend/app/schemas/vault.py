@@ -87,6 +87,22 @@ class OutreachSignatureUpdate(BaseModel):
     signature: str = Field(default="", max_length=5000)
 
 
+class OptimizeInstructionsRequest(BaseModel):
+    """Body for ``POST /outreach/optimize-instructions``.
+
+    ``text`` is the raw per-service outreach instructions the user typed in
+    the Vault editor; the endpoint returns an LLM-polished version. Capped at
+    the same 10_000 chars as ``VaultFolderUpdate.outreach_instructions`` so a
+    client bypassing the editor can't blow out the prompt size.
+    """
+
+    text: str = Field(..., min_length=1, max_length=10_000)
+
+
+class OptimizeInstructionsResponse(BaseModel):
+    optimized_text: str
+
+
 class OutreachSendRequest(BaseModel):
     broker_dealer_id: int = Field(..., gt=0)
     contact_id: int = Field(..., gt=0)

@@ -53,6 +53,8 @@ from app.schemas.vault import (
     FirmSearchResult,
     LinkedProviderItem,
     LinkedProvidersResponse,
+    OptimizeInstructionsRequest,
+    OptimizeInstructionsResponse,
     OutreachAdhocDraftRequest,
     OutreachAdhocSendRequest,
     OutreachAdvisorDraftRequest,
@@ -103,6 +105,7 @@ from app.services.outreach import (
     OutreachDraftError,
     ServiceContext,
     generate_outreach_draft,
+    optimize_instructions,
 )
 from app.services.vault_retrieval import retrieve_chunks
 
@@ -331,6 +334,37 @@ async def create_adhoc_outreach_draft(
         ) from exc
 
     return OutreachDraftResponse(subject=draft.subject, body=draft.body)
+
+
+@router.post("/optimize-instructions", response_model=OptimizeInstructionsResponse)
+async def optimize_outreach_instructions(
+    payload: OptimizeInstructionsRequest,
+    current_user: AuthenticatedUser = Depends(get_current_user),
+) -> OptimizeInstructionsResponse:
+    """Rewrite the user's per-service outreach instructions via Gemini Flash.
+
+    Backs the "Optimize Prompt" button on the Vault service editor. Stateless
+    — no folder lookup; the text is sent and an improved version returned, so
+    it works from the create form (before a folder exists) as well as the
+    detail editor. Misconfigured Gemini key is a 503; any other Gemini
+    failure (or empty input) is a 502.
+    """
+    try:
+        optimized = await optimize_instructions(payload.text)
+    except OutreachConfigurationError as exc:
+        logger.error("optimize instructions configuration error: %s", exc)
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="Prompt optimization is not configured. Contact an administrator.",
+        ) from exc
+    except OutreachDraftError as exc:
+        logger.warning("optimize instructions failed: %s", exc)
+        raise HTTPException(
+            status_code=status.HTTP_502_BAD_GATEWAY,
+            detail="The optimization service is unavailable. Try again in a moment.",
+        ) from exc
+
+    return OptimizeInstructionsResponse(optimized_text=optimized)
 
 
 @router.post("/send", response_model=OutreachSendResponse)

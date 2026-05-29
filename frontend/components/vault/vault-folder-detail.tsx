@@ -3,23 +3,20 @@
 import Link from "next/link";
 import { useCallback, useEffect, useRef, useState } from "react";
 
+import { ArrowLeft } from "lucide-react";
+
 import {
   ApiError,
   deleteVaultFile,
   deleteVaultFolder,
-  getLinkedProviders,
   listVaultFiles,
   listVaultFolders,
   retryVaultFile,
   updateVaultFolder
 } from "@/lib/api";
-import type {
-  EmailProviderId,
-  LinkedProviderItem,
-  VaultFolder,
-  VaultFolderFile
-} from "@/lib/types";
+import type { VaultFolder, VaultFolderFile } from "@/lib/types";
 
+import { DefaultSenderSelect } from "./default-sender-select";
 import { ExpandableTextarea } from "./expandable-textarea";
 import { VaultFileRow } from "./vault-file-row";
 import { VaultFileUploader } from "./vault-file-uploader";
@@ -160,6 +157,13 @@ export function VaultFolderDetail({ folderId }: { folderId: number }) {
 
   return (
     <div className="space-y-6">
+      <Link
+        href="/vault"
+        className="inline-flex items-center gap-1.5 text-xs font-medium text-[var(--accent,#6366f1)] underline-offset-4 transition hover:underline"
+      >
+        <ArrowLeft className="h-3.5 w-3.5" aria-hidden />
+        Back to Vault
+      </Link>
       <FolderEditor
         folder={folder}
         onSaved={(updated) => setFolder(updated)}
@@ -216,12 +220,6 @@ export function VaultFolderDetail({ folderId }: { folderId: number }) {
   );
 }
 
-const PROVIDER_LABEL: Record<EmailProviderId, string> = {
-  google: "Gmail",
-  microsoft: "Outlook",
-  yahoo: "Yahoo Mail"
-};
-
 function FolderEditor({
   folder,
   onSaved,
@@ -237,9 +235,6 @@ function FolderEditor({
   const [defaultSenderAccountId, setDefaultSenderAccountId] = useState<
     string | null
   >(folder.default_sender_account_id);
-  const [linkedProviders, setLinkedProviders] = useState<LinkedProviderItem[]>(
-    []
-  );
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [savedAt, setSavedAt] = useState<number | null>(null);
@@ -260,25 +255,6 @@ function FolderEditor({
     folder.outreach_instructions,
     folder.default_sender_account_id
   ]);
-
-  // Lazy load linked accounts so the dropdown is populated. Failure is
-  // non-fatal -- the picker just shows "None" until the user retries
-  // by reopening the page.
-  useEffect(() => {
-    let cancelled = false;
-    (async () => {
-      try {
-        const result = await getLinkedProviders();
-        if (cancelled) return;
-        setLinkedProviders(result.items);
-      } catch {
-        // No-op: the rest of the editor still works without a picker.
-      }
-    })();
-    return () => {
-      cancelled = true;
-    };
-  }, []);
 
   const dirty =
     name !== folder.name ||
@@ -343,28 +319,10 @@ function FolderEditor({
           onChange={setInstructions}
           maxLength={INSTRUCTIONS_MAX}
         />
-        <label className="block text-xs font-medium uppercase tracking-[0.18em] text-[var(--text-muted,#94a3b8)]">
-          Default sender for this service
-          <select
-            value={defaultSenderAccountId ?? ""}
-            onChange={(event) =>
-              setDefaultSenderAccountId(event.target.value || null)
-            }
-            className="mt-2 block w-full rounded-xl border border-[var(--border,rgba(30,64,175,0.1))] bg-[var(--surface,#ffffff)] px-3 py-2 text-sm text-[var(--text,#0f172a)] outline-none transition focus:border-[var(--accent,#6366f1)] focus:ring-2 focus:ring-[var(--accent,#6366f1)]/20"
-          >
-            <option value="">None (use first available)</option>
-            {linkedProviders.map((p) => (
-              <option key={p.account_id} value={p.account_id}>
-                {p.email_address ?? `${PROVIDER_LABEL[p.provider]} account`}{" "}
-                ({PROVIDER_LABEL[p.provider]})
-              </option>
-            ))}
-          </select>
-          <p className="mt-1 text-[11px] leading-4 text-[var(--text-muted,#94a3b8)]">
-            Outreach for this service preselects this address. Users can
-            override per-send.
-          </p>
-        </label>
+        <DefaultSenderSelect
+          value={defaultSenderAccountId}
+          onChange={setDefaultSenderAccountId}
+        />
       </div>
 
       {error ? (

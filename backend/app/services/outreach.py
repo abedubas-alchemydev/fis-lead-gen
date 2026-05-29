@@ -375,3 +375,91 @@ async def generate_outreach_draft(
         raise OutreachDraftError("Gemini draft is missing a body.")
 
     return OutreachDraft(subject=subject.strip(), body=body.strip())
+
+
+_OPTIMIZE_INSTRUCTIONS = (
+    "You are an expert prompt editor. The text below is a set of permanent "
+    "instructions a user wrote to guide an AI that drafts cold outreach emails "
+    "for one of their services. Rewrite the instructions so they are clear, "
+    "well-organized, and grammatically correct: fix spelling and grammar, "
+    "tighten wording, and phrase each rule as a concrete directive the drafting "
+    "AI can follow. Preserve the user's intent and every concrete constraint "
+    "they specified — do NOT invent new rules, examples, or facts. Keep it "
+    "concise. Return ONLY the improved instructions as plain text, with no "
+    "preamble, commentary, surrounding quotes, or Markdown code fences."
+)
+
+
+def _build_optimize_payload(text: str) -> dict[str, object]:
+    """Plain-text ``generateContent`` envelope for instruction optimization.
+
+    Unlike ``_build_payload`` (which forces the subject/body JSON schema),
+    this asks for a single free-text response — the rewritten instructions.
+    Temperature is lower than draft generation so the rewrite stays faithful
+    to what the user wrote rather than inventing flourishes.
+    """
+    prompt = f"{_OPTIMIZE_INSTRUCTIONS}\n\n── User instructions ──\n{text}"
+    return {
+        "contents": [
+            {
+                "role": "user",
+                "parts": [{"text": prompt}],
+            }
+        ],
+        "generationConfig": {
+            "temperature": 0.3,
+            "topP": 0.9,
+        },
+    }
+
+
+def _strip_code_fence(text: str) -> str:
+    """Drop a wrapping ```...``` fence if the model added one anyway.
+
+    The prompt forbids Markdown, but Flash occasionally wraps output in a
+    fence regardless. Cheap defensive cleanup so the user never sees stray
+    backticks pasted into their instructions.
+    """
+    if not text.startswith("```"):
+        return text
+    lines = text.splitlines()
+    if lines and lines[0].startswith("```"):
+        lines = lines[1:]
+    if lines and lines[-1].strip() == "```":
+        lines = lines[:-1]
+    return "\n".join(lines).strip()
+
+
+async def optimize_instructions(text: str) -> str:
+    """Rewrite per-service outreach instructions for clarity + correctness.
+
+    Backs ``POST /outreach/optimize-instructions`` (the "Optimize Prompt"
+    button on the Vault service editor). Sends the user's typed instructions
+    to Gemini Flash and returns an improved version — spelling/grammar fixed,
+    wording tightened, intent preserved. Plain-text in, plain-text out; no
+    RAG, no firm/contact context.
+
+    Same configuration/error contract as ``generate_outreach_draft``:
+    ``OutreachConfigurationError`` if ``GEMINI_API_KEY`` is missing or
+    malformed (endpoint maps to 503); ``OutreachDraftError`` for an empty
+    input or any provider/parse failure (endpoint maps to 502).
+    """
+    api_key = settings.gemini_api_key
+    if not api_key:
+        raise OutreachConfigurationError("GEMINI_API_KEY is not configured.")
+    if not _GEMINI_KEY_SHAPE.match(api_key):
+        raise OutreachConfigurationError(
+            f"GEMINI_API_KEY has invalid shape (length={len(api_key)}). "
+            f"Expected 39 chars matching ^AIzaSy[A-Za-z0-9_-]{{33}}$."
+        )
+
+    cleaned = (text or "").strip()
+    if not cleaned:
+        raise OutreachDraftError("Cannot optimize empty instructions.")
+
+    payload = _build_optimize_payload(cleaned[:_INSTRUCTIONS_BUDGET])
+    response_payload = await _post_with_retries(payload)
+    optimized = _strip_code_fence(_extract_text(response_payload).strip())
+    if not optimized:
+        raise OutreachDraftError("Gemini returned empty optimized instructions.")
+    return optimized

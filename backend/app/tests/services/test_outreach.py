@@ -24,6 +24,7 @@ from app.services.outreach import (
     _build_adhoc_prompt,
     _build_personalized_prompt,
     generate_outreach_draft,
+    optimize_instructions,
 )
 
 _VALID_KEY = "AIzaSy" + "a" * 33  # 39 chars, matches ^AIzaSy[A-Za-z0-9_\-]{33}$
@@ -340,3 +341,65 @@ async def test_generate_outreach_draft_partial_firm_falls_to_adhoc(
 
     assert "Firm operations text" not in captured["prompt"]
     assert "Do NOT invent firm details" in captured["prompt"]
+
+
+# ── Optimize instructions ─────────────────────────────────────────────────────
+
+
+def _gemini_text_response(text: str) -> httpx.Response:
+    """Mock a plain-text (non-JSON) Gemini response for optimize_instructions."""
+    return httpx.Response(
+        200,
+        json={"candidates": [{"content": {"parts": [{"text": text}]}}]},
+    )
+
+
+@respx.mock
+async def test_optimize_instructions_returns_cleaned_text(patch_gemini) -> None:
+    route = respx.post(_GEMINI_URL).mock(
+        return_value=_gemini_text_response(
+            "Keep emails under 100 words. Always mention the 24-hour turnaround."
+        )
+    )
+
+    result = await optimize_instructions("keep emails shrot, mention 24hr turnaround")
+
+    assert result == "Keep emails under 100 words. Always mention the 24-hour turnaround."
+    assert route.call_count == 1
+
+
+@respx.mock
+async def test_optimize_instructions_strips_markdown_code_fence(patch_gemini) -> None:
+    """Flash sometimes wraps output in a fence despite the no-Markdown rule."""
+    respx.post(_GEMINI_URL).mock(
+        return_value=_gemini_text_response("```\nKeep it formal and concise.\n```")
+    )
+
+    result = await optimize_instructions("be formal")
+
+    assert result == "Keep it formal and concise."
+
+
+async def test_optimize_instructions_missing_key_raises_configuration_error(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(settings, "gemini_api_key", None)
+
+    with pytest.raises(OutreachConfigurationError):
+        await optimize_instructions("some instructions")
+
+
+async def test_optimize_instructions_empty_text_raises_draft_error(patch_gemini) -> None:
+    """Whitespace-only input never reaches Gemini — guarded as a draft error."""
+    with pytest.raises(OutreachDraftError):
+        await optimize_instructions("   ")
+
+
+@respx.mock
+async def test_optimize_instructions_gemini_500_raises_draft_error(
+    patch_gemini, no_backoff_sleep
+) -> None:
+    respx.post(_GEMINI_URL).mock(return_value=httpx.Response(500, text="boom"))
+
+    with pytest.raises(OutreachDraftError):
+        await optimize_instructions("some instructions")
