@@ -75,6 +75,11 @@ const SMTP_STATUS_STYLES: Record<
 const ROW_BTN =
   "inline-flex items-center gap-1 rounded-md border border-[var(--border-2,rgba(30,64,175,0.16))] bg-[var(--surface,#ffffff)] px-2.5 py-1 text-[11px] font-semibold text-[var(--text-dim,#475569)] transition hover:bg-[var(--surface-2,#f1f6fd)] hover:text-[var(--text,#0f172a)] disabled:cursor-not-allowed disabled:opacity-50";
 
+// A scan can surface hundreds of discovered emails; page the results table so
+// the DOM stays bounded and the panel doesn't grow into an endless scroll.
+// Mirrors PEOPLE_TABLE_PAGE_SIZE's pager affordance on the detail pages.
+const RESULTS_PAGE_SIZE = 20;
+
 // ── Helpers ──────────────────────────────────────────────────────────────
 
 function formatConfidence(c: number | null): React.ReactNode {
@@ -390,6 +395,48 @@ function ResultsTable({
   );
 }
 
+function ResultsPager({
+  page,
+  pageSize,
+  total,
+  onPrev,
+  onNext,
+}: {
+  page: number;
+  pageSize: number;
+  total: number;
+  onPrev: () => void;
+  onNext: () => void;
+}): React.ReactElement {
+  const totalPages = Math.max(1, Math.ceil(total / pageSize));
+  const start = page * pageSize;
+  return (
+    <div className="flex items-center justify-end gap-2 text-[12px] text-[var(--text-muted,#94a3b8)]">
+      <button
+        type="button"
+        onClick={onPrev}
+        disabled={page === 0}
+        className="rounded-md px-2 py-1 transition hover:bg-[var(--surface-2,#f1f6fd)] disabled:cursor-not-allowed disabled:opacity-40 disabled:hover:bg-transparent"
+        aria-label="Previous page of results"
+      >
+        Prev
+      </button>
+      <span aria-live="polite" className="tabular-nums">
+        {start + 1}–{Math.min(start + pageSize, total)} of {total}
+      </span>
+      <button
+        type="button"
+        onClick={onNext}
+        disabled={page >= totalPages - 1}
+        className="rounded-md px-2 py-1 transition hover:bg-[var(--surface-2,#f1f6fd)] disabled:cursor-not-allowed disabled:opacity-40 disabled:hover:bg-transparent"
+        aria-label="Next page of results"
+      >
+        Next
+      </button>
+    </div>
+  );
+}
+
 function MiniStat({
   label,
   value,
@@ -449,6 +496,7 @@ export function ScanDetailView({
   const [verifyErrors, setVerifyErrors] = useState<Record<number, string>>({});
   const [enrichInFlight, setEnrichInFlight] = useState<Set<number>>(new Set());
   const [searchQuery, setSearchQuery] = useState("");
+  const [page, setPage] = useState(0);
   const toast = useToast();
 
   const pollRef = useRef<ReturnType<typeof setInterval> | null>(null);
@@ -511,6 +559,8 @@ export function ScanDetailView({
     setVerifyInFlight(new Set());
     setVerifyErrors({});
     setEnrichInFlight(new Set());
+    setSearchQuery("");
+    setPage(0);
     stopPolling();
 
     let active = true;
@@ -730,6 +780,19 @@ export function ScanDetailView({
     ? formatRelativeTime(scan.completed_at)
     : "—";
 
+  // Page over the (possibly search-filtered) results. ``page`` can fall out of
+  // range when the filtered set shrinks — e.g. the user types a query while on
+  // a later page — so clamp before slicing rather than risk an empty render.
+  const totalResults = filteredEmails.length;
+  const totalPages = Math.max(1, Math.ceil(totalResults / RESULTS_PAGE_SIZE));
+  const safePage = Math.min(page, totalPages - 1);
+  const pageStart = safePage * RESULTS_PAGE_SIZE;
+  const pagedEmails = filteredEmails.slice(
+    pageStart,
+    pageStart + RESULTS_PAGE_SIZE
+  );
+  const showPager = totalResults > RESULTS_PAGE_SIZE;
+
   return (
     <div className="space-y-4">
       {/* Status pill row */}
@@ -861,7 +924,10 @@ export function ScanDetailView({
                 <input
                   type="search"
                   value={searchQuery}
-                  onChange={(e) => setSearchQuery(e.target.value)}
+                  onChange={(e) => {
+                    setSearchQuery(e.target.value);
+                    setPage(0);
+                  }}
                   placeholder="Search email, name, title, company, or phone"
                   aria-label="Search discovered emails"
                   className="w-full rounded-md border border-[var(--border,rgba(30,64,175,0.1))] bg-[var(--surface,#ffffff)] py-1.5 pl-8 pr-3 text-[13px] text-[var(--text,#0f172a)] placeholder:text-[var(--text-muted,#94a3b8)] focus:border-[var(--blue,#3b82f6)] focus:outline-none focus:ring-2 focus:ring-[rgba(59,130,246,0.2)]"
@@ -879,15 +945,28 @@ export function ScanDetailView({
                 No emails match &ldquo;{searchQuery}&rdquo;.
               </div>
             ) : (
-              <ResultsTable
-                rows={filteredEmails}
-                localVerifications={localVerifications}
-                verifyInFlight={verifyInFlight}
-                verifyErrors={verifyErrors}
-                onVerify={handleVerify}
-                enrichInFlight={enrichInFlight}
-                onEnrich={handleEnrich}
-              />
+              <>
+                <ResultsTable
+                  rows={pagedEmails}
+                  localVerifications={localVerifications}
+                  verifyInFlight={verifyInFlight}
+                  verifyErrors={verifyErrors}
+                  onVerify={handleVerify}
+                  enrichInFlight={enrichInFlight}
+                  onEnrich={handleEnrich}
+                />
+                {showPager ? (
+                  <ResultsPager
+                    page={safePage}
+                    pageSize={RESULTS_PAGE_SIZE}
+                    total={totalResults}
+                    onPrev={() => setPage(Math.max(0, safePage - 1))}
+                    onNext={() =>
+                      setPage(Math.min(totalPages - 1, safePage + 1))
+                    }
+                  />
+                ) : null}
+              </>
             )}
           </div>
         )}
