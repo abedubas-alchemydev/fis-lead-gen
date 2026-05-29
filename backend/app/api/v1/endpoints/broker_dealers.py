@@ -683,11 +683,17 @@ async def extract_focus_ceo(
     _: AuthenticatedUser = Depends(_require_master_list),
     db: AsyncSession = Depends(get_db_session),
 ) -> FocusCeoExtractionResponse:
-    """On-demand extraction of CEO contact info and net capital from the latest FOCUS Report PDF.
+    """On-demand (manual / ops) extraction of the FOCUS filing contact + net
+    capital from the latest X-17A-5 PDF.
 
     Downloads the most recent X-17A-5 filing for this broker-dealer, sends it to
-    Gemini for structured extraction, and persists the CEO as an ExecutiveContact
-    with source="focus_report".
+    Gemini for structured extraction, and persists the contact person as an
+    ExecutiveContact with source="focus_report".
+
+    No longer backs a FE button — the detail-page "Extract FOCUS Data" button
+    was retired once bulk coverage moved into the gap-fill backfill (the
+    refresh-all orchestrator's ``broker_dealer_focus_contact`` sub-pipeline).
+    Kept as the single-firm manual trigger for ops / re-extraction.
     """
     broker_dealer = await repository.get_broker_dealer(db, broker_dealer_id)
     if broker_dealer is None:

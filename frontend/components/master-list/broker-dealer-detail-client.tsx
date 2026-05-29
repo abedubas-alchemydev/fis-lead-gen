@@ -24,7 +24,6 @@ import { PeopleTable } from "@/components/master-list/detail/people-table";
 import { EmailScansSection } from "@/components/email-extractor/email-scans-section";
 import { FinancialTrendChart } from "@/components/master-list/detail/financial-trend-chart";
 import { FirmWebsiteLink } from "@/components/master-list/detail/firm-website-link";
-import { FocusReportSection } from "@/components/master-list/detail/focus-report-section";
 import {
   classificationDisplay,
   clearingTypeLabel,
@@ -979,8 +978,6 @@ export function BrokerDealerDetailClient({ brokerDealerId }: { brokerDealerId: s
               </a>
             ) : null}
           </div>
-
-          <FocusReportSection brokerDealerId={brokerDealerId} onProfileRefresh={reloadProfile} />
         </SectionPanel>
       </div>
 

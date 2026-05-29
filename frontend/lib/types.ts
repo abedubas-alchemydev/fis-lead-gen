@@ -582,19 +582,6 @@ export type DataRefreshResponse = {
   refreshed_broker_dealers: number;
 };
 
-export type FocusCeoExtractionResponse = {
-  ceo_name: string | null;
-  ceo_title: string | null;
-  ceo_phone: string | null;
-  ceo_email: string | null;
-  net_capital: number | null;
-  report_date: string | null;
-  source_pdf_url: string | null;
-  confidence_score: number;
-  extraction_status: string;
-  extraction_notes: string | null;
-};
-
 // ── Vault folders + Outreach drafts ───────────────────────────────────────
 // Mirrors backend/app/schemas/vault.py. Each folder is a named service
 // (e.g. "Custody") plus a freeform description AND a permanent
