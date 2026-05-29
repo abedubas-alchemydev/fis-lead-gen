@@ -672,6 +672,14 @@ export type OutreachSendResponse = {
   status: string;
 };
 
+// Per-user outreach signature (footer). `signature` is "" when unset, so
+// callers can treat "no footer" and "empty footer" the same. Read by the
+// compose surfaces to prefill the editable Footer field and by the
+// account-settings editor; written by the editor.
+export type OutreachSignature = {
+  signature: string;
+};
+
 // Per-user "sent outreach" history. Body is omitted from list payload to
 // keep response sizes down — fetch via OutreachSendDetail when the user
 // expands a row. folder_id/folder_name are nullable because folder

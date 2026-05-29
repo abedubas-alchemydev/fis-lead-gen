@@ -12,6 +12,7 @@ import {
   generateInvestorOutreachDraft,
   generateOutreachDraft,
   getLinkedProviders,
+  getOutreachSignature,
   listVaultFolders,
   sendAdhocOutreach,
   sendAdvisorOutreach,
@@ -163,6 +164,10 @@ export function OutreachModal({
   const [folderId, setFolderId] = useState<number | null>(null);
   const [subject, setSubject] = useState("");
   const [body, setBody] = useState("");
+  const [footer, setFooter] = useState("");
+  // Set true once the user touches the Footer field so a late signature
+  // fetch can't clobber their edit. Mirrors userOverrodeSenderRef.
+  const userEditedFooterRef = useRef(false);
   const [error, setError] = useState<string | null>(null);
   const [copyState, setCopyState] = useState<"idle" | "subject" | "body">("idle");
   // Toggled when the BE returns 412 <provider>_account_not_linked /
@@ -262,6 +267,26 @@ export function OutreachModal({
     };
   }, []);
 
+  // Signature fetch — prefills the editable Footer field. Runs in
+  // parallel with the folders/providers fetches. Non-fatal on failure:
+  // the footer just starts empty. The ref guard means a slow response
+  // can't overwrite a footer the user has already edited.
+  useEffect(() => {
+    let cancelled = false;
+    (async () => {
+      try {
+        const result = await getOutreachSignature();
+        if (cancelled || !isMountedRef.current) return;
+        if (!userEditedFooterRef.current) setFooter(result.signature);
+      } catch {
+        // Swallow — empty footer is a fine default.
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+
   const selectedFolder = useMemo(
     () => folders.find((f) => f.id === folderId) ?? null,
     [folders, folderId]
@@ -339,6 +364,12 @@ export function OutreachModal({
 
   async function handleSend() {
     if (!subject.trim() || !body.trim()) return;
+    // Append the (possibly edited) footer beneath the body. Merged on the
+    // client so the BE send contract is unchanged and the audit row
+    // stores exactly what was transmitted.
+    const outgoingBody = footer.trim()
+      ? `${body.trimEnd()}\n\n${footer.trim()}`
+      : body;
     setStage("sending");
     setError(null);
     setLinkActionNeeded(false);
@@ -354,7 +385,7 @@ export function OutreachModal({
           contact_id: contact.id,
           folder_id: folderId ?? 0,
           subject,
-          body,
+          body: outgoingBody,
           // Server derives provider from the resolved account; we still
           // pass ``provider`` for back-compat with older deploys.
           provider: providerId,
@@ -366,7 +397,7 @@ export function OutreachModal({
           advisor_contact_id: contact.id,
           folder_id: folderId ?? 0,
           subject,
-          body,
+          body: outgoingBody,
           provider: providerId,
           sender_account_id: senderAccountId
         });
@@ -376,7 +407,7 @@ export function OutreachModal({
           investor_contact_id: contact.id,
           folder_id: folderId ?? 0,
           subject,
-          body,
+          body: outgoingBody,
           provider: providerId,
           sender_account_id: senderAccountId
         });
@@ -388,7 +419,7 @@ export function OutreachModal({
           recipient_name: contact.name,
           folder_id: folderId,
           subject,
-          body,
+          body: outgoingBody,
           sender_account_id: senderAccountId
         });
       }
@@ -698,6 +729,27 @@ export function OutreachModal({
                 onChange={(event) => setBody(event.target.value)}
                 disabled={stage === "sending"}
                 rows={10}
+                data-allow-copy
+                className="mt-1 block w-full rounded-xl border border-[var(--border,rgba(30,64,175,0.1))] bg-[var(--surface,#ffffff)] px-3 py-2 text-sm leading-6 text-[var(--text,#0f172a)] outline-none transition focus:border-[var(--accent,#6366f1)] focus:ring-2 focus:ring-[var(--accent,#6366f1)]/20 disabled:cursor-not-allowed disabled:opacity-60"
+              />
+            </div>
+            <div>
+              <div className="flex items-center justify-between">
+                <label className="text-xs font-medium uppercase tracking-[0.18em] text-[var(--text-muted,#94a3b8)]">
+                  Footer
+                </label>
+                <span className="text-[11px] text-[var(--text-muted,#94a3b8)]">
+                  Appended below your message
+                </span>
+              </div>
+              <textarea
+                value={footer}
+                onChange={(event) => {
+                  userEditedFooterRef.current = true;
+                  setFooter(event.target.value);
+                }}
+                disabled={stage === "sending"}
+                rows={4}
                 data-allow-copy
                 className="mt-1 block w-full rounded-xl border border-[var(--border,rgba(30,64,175,0.1))] bg-[var(--surface,#ffffff)] px-3 py-2 text-sm leading-6 text-[var(--text,#0f172a)] outline-none transition focus:border-[var(--accent,#6366f1)] focus:ring-2 focus:ring-[var(--accent,#6366f1)]/20 disabled:cursor-not-allowed disabled:opacity-60"
               />

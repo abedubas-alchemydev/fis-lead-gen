@@ -64,6 +64,29 @@ class OutreachDraftResponse(BaseModel):
     body: str
 
 
+class OutreachSignatureResponse(BaseModel):
+    """The caller's saved outreach signature (footer).
+
+    ``signature`` is the empty string when the user has never saved one,
+    so the compose surfaces can treat "no footer" and "empty footer"
+    identically without a null check.
+    """
+
+    signature: str
+
+
+class OutreachSignatureUpdate(BaseModel):
+    """Body for ``PUT /outreach/signature``.
+
+    5000 chars is generous for an email footer (name, title, firm,
+    phone, disclaimer); the DB column is unbounded TEXT but we cap here
+    so a client can't store something pathological. Empty string clears
+    the footer.
+    """
+
+    signature: str = Field(default="", max_length=5000)
+
+
 class OutreachSendRequest(BaseModel):
     broker_dealer_id: int = Field(..., gt=0)
     contact_id: int = Field(..., gt=0)

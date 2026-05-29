@@ -29,6 +29,7 @@ from app.models.pipeline_run import PipelineRun
 from app.models.reporting_owner import ReportingOwner
 from app.models.scoring_setting import ScoringSetting
 from app.models.user_activity import UserActivity
+from app.models.user_outreach_settings import UserOutreachSettings
 from app.models.user_visit import UserVisit
 from app.models.vault_folder import VaultFolder
 from app.models.vault_folder_chunk import VaultFolderChunk
@@ -70,6 +71,7 @@ __all__ = [
     "ReportingOwner",
     "ScoringSetting",
     "UserActivity",
+    "UserOutreachSettings",
     "UserVisit",
     "VaultFolder",
     "VaultFolderChunk",
