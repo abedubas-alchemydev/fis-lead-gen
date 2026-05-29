@@ -3,14 +3,12 @@
 import {
   ChevronDown,
   ChevronRight,
-  ExternalLink,
   Loader2,
-  Mail,
-  Phone,
   RefreshCcw,
 } from "lucide-react";
 import { useCallback, useState } from "react";
 
+import { ContactPersonRow } from "@/components/outreach-contacts/contact-person-row";
 import { Pill } from "@/components/ui/pill";
 import {
   listOutreachContactsFirmPersons,
@@ -180,61 +178,11 @@ export function FirmRow({
           ) : (
             <ul className="space-y-2">
               {persons.map((person) => (
-                <li
+                <ContactPersonRow
                   key={person.contact_id}
-                  className="rounded-md border border-[var(--border,rgba(30,64,175,0.1))] bg-[var(--surface,#ffffff)] px-3 py-2"
-                >
-                  <div className="flex flex-wrap items-baseline gap-x-3 gap-y-1">
-                    <span className="text-[13px] font-semibold text-[var(--text,#0f172a)]">
-                      {person.name || "(no name)"}
-                    </span>
-                    {person.title ? (
-                      <span className="text-[12px] text-[var(--text-dim,#475569)]">
-                        {person.title}
-                      </span>
-                    ) : null}
-                  </div>
-                  <div className="mt-1 flex flex-wrap gap-x-4 gap-y-1 text-[12px] text-[var(--text-dim,#475569)]">
-                    {person.email ? (
-                      <span className="inline-flex items-center gap-1">
-                        <Mail className="h-3 w-3" strokeWidth={2} />
-                        <a
-                          href={`mailto:${person.email}`}
-                          className="hover:text-[#6366f1]"
-                        >
-                          {person.email}
-                        </a>
-                      </span>
-                    ) : null}
-                    {person.phone ? (
-                      <span className="inline-flex items-center gap-1">
-                        <Phone className="h-3 w-3" strokeWidth={2} />
-                        <a
-                          href={`tel:${person.phone}`}
-                          className="hover:text-[#6366f1]"
-                        >
-                          {person.phone}
-                        </a>
-                      </span>
-                    ) : null}
-                    {person.linkedin_url ? (
-                      <a
-                        href={person.linkedin_url}
-                        target="_blank"
-                        rel="noopener noreferrer"
-                        className="inline-flex items-center gap-1 hover:text-[#6366f1]"
-                      >
-                        <ExternalLink className="h-3 w-3" strokeWidth={2} />
-                        LinkedIn
-                      </a>
-                    ) : null}
-                    {!person.email && !person.phone && !person.linkedin_url ? (
-                      <span className="italic text-[var(--text-muted,#94a3b8)]">
-                        No channels on file
-                      </span>
-                    ) : null}
-                  </div>
-                </li>
+                  person={person}
+                  firm={firm}
+                />
               ))}
             </ul>
           )}
