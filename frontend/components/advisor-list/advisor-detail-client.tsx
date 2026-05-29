@@ -1,6 +1,7 @@
 "use client";
 
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import clsx from "clsx";
 import Link from "next/link";
 import type { Route } from "next";
 import { useRouter, useSearchParams } from "next/navigation";
@@ -23,7 +24,7 @@ import {
   getPipelineRunStatus,
   refreshAdvisor,
 } from "@/lib/api";
-import { Button } from "@/components/ui/button";
+import { Button, buttonBase, buttonSizes } from "@/components/ui/button";
 import { DetailPageSkeleton } from "@/components/ui/detail-page-skeleton";
 import {
   buildAdvisorListUrl,
@@ -141,6 +142,15 @@ export function AdvisorDetailClient({ advisorId }: { advisorId: string }) {
   // component instance persists across Prev/Next — only advisorId changes).
   const [showAllFilings, setShowAllFilings] = useState(false);
 
+  // "Generate More Details" — placeholder CTA mirroring the BD detail page's
+  // People-panel button. No advisor /enrich endpoint exists yet, so the click
+  // runs a short processing simulation (see generateMoreDetails below) rather
+  // than calling the backend. enrichTimerRef holds the pending sim timer so it
+  // can be cancelled on advisor-switch / unmount.
+  const [isEnriching, setIsEnriching] = useState(false);
+  const [enrichNotice, setEnrichNotice] = useState<string | null>(null);
+  const enrichTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+
   // Fetch /profile immediately on mount. Errors surface via setError so
   // a failed first load shows the error page. `reloadProfile` is the
   // re-fetch helper the manual Refresh button calls; it lets the caller
@@ -177,9 +187,20 @@ export function AdvisorDetailClient({ advisorId }: { advisorId: string }) {
     };
   }, [advisorId]);
 
-  // Collapse the filings list again whenever we navigate to another advisor.
+  // Collapse the filings list — and cancel any in-flight "Generate More
+  // Details" simulation — whenever we navigate to another advisor (the
+  // instance may persist across Prev/Next, so reset rather than rely on
+  // remount). The cleanup also clears the timer on unmount.
   useEffect(() => {
     setShowAllFilings(false);
+    setIsEnriching(false);
+    setEnrichNotice(null);
+    return () => {
+      if (enrichTimerRef.current) {
+        clearTimeout(enrichTimerRef.current);
+        enrichTimerRef.current = null;
+      }
+    };
   }, [advisorId]);
 
   // Manual refresh handler. POST /refresh-all on click, poll the parent
@@ -278,6 +299,22 @@ export function AdvisorDetailClient({ advisorId }: { advisorId: string }) {
       setIsGapFilling(false);
     }
   }, [advisorId, reloadProfile]);
+
+  // Placeholder processing simulation for "Generate More Details". There's no
+  // advisor /enrich endpoint yet, so this just shows the spinner/"Generating…"
+  // state for a beat, then settles into the same info notice the BD People
+  // panel surfaces when enrichment turns up nothing new. Swap the timeout for
+  // a real enrich call + setData fold-in when the backend lands.
+  const generateMoreDetails = useCallback(() => {
+    if (enrichTimerRef.current) clearTimeout(enrichTimerRef.current);
+    setIsEnriching(true);
+    setEnrichNotice(null);
+    enrichTimerRef.current = setTimeout(() => {
+      setIsEnriching(false);
+      setEnrichNotice("No new contacts found for these officers.");
+      enrichTimerRef.current = null;
+    }, 2200);
+  }, []);
 
   // Restore the user's filter/sort state on back-nav, falling back to
   // the bare list URL if no return envelope was passed.
@@ -796,6 +833,35 @@ export function AdvisorDetailClient({ advisorId }: { advisorId: string }) {
 
         {/* People */}
         <SectionPanel eyebrow="People" title="Owners, officers, and contacts">
+          <div className="mb-4 flex flex-wrap items-center justify-between gap-3">
+            <p className="text-xs text-[var(--text-muted,#94a3b8)]">
+              Discover additional executive contacts for this firm.
+            </p>
+            <button
+              type="button"
+              onClick={generateMoreDetails}
+              disabled={isEnriching}
+              className={clsx(
+                buttonBase,
+                buttonSizes.md,
+                "shrink-0 bg-gradient-to-br from-[#6366f1] to-[#8b5cf6] text-white shadow-[0_6px_16px_rgba(99,102,241,0.35)] hover:brightness-110",
+              )}
+            >
+              {isEnriching ? (
+                <Loader2 className="h-4 w-4 animate-spin" strokeWidth={2.5} />
+              ) : (
+                <Sparkles className="h-4 w-4" strokeWidth={2} />
+              )}
+              {isEnriching ? "Generating…" : "Generate More Details"}
+            </button>
+          </div>
+
+          {enrichNotice ? (
+            <div className="mb-3 rounded-2xl border border-[rgba(59,130,246,0.25)] bg-[rgba(59,130,246,0.08)] px-4 py-3 text-sm text-[var(--pill-blue-text,#1d4ed8)]">
+              {enrichNotice}
+            </div>
+          ) : null}
+
           {directOwners.length === 0 &&
           executiveOfficers.length === 0 &&
           indirectOwners.length === 0 &&
