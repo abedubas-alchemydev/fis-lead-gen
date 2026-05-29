@@ -14,6 +14,7 @@ import {
   ExternalLink,
   Loader2,
   RefreshCw,
+  Sparkles,
 } from "lucide-react";
 
 import { AlertPriorityBadge } from "@/components/alerts/alert-priority-badge";
@@ -24,6 +25,7 @@ import { PeopleTable } from "@/components/master-list/detail/people-table";
 import { EmailScansSection } from "@/components/email-extractor/email-scans-section";
 import { FinancialTrendChart } from "@/components/master-list/detail/financial-trend-chart";
 import { FirmWebsiteLink } from "@/components/master-list/detail/firm-website-link";
+import { FocusReportSection } from "@/components/master-list/detail/focus-report-section";
 import {
   classificationDisplay,
   clearingTypeLabel,
@@ -166,6 +168,9 @@ export function BrokerDealerDetailClient({ brokerDealerId }: { brokerDealerId: s
   const [error, setError] = useState<string | null>(null);
   const [isHealthChecking, setIsHealthChecking] = useState(false);
   const [healthCheckResult, setHealthCheckResult] = useState<string | null>(null);
+  const [isEnriching, setIsEnriching] = useState(false);
+  const [enrichError, setEnrichError] = useState<string | null>(null);
+  const [enrichNotice, setEnrichNotice] = useState<string | null>(null);
   const [prevId, setPrevId] = useState<number | null>(null);
   const [nextId, setNextId] = useState<number | null>(null);
   // Inline "Discovered Emails" section state. `currentScanId` is the
@@ -654,6 +659,37 @@ export function BrokerDealerDetailClient({ brokerDealerId }: { brokerDealerId: s
 
   const { broker_dealer: bd } = profile;
   const location = [bd.city, bd.state].filter(Boolean).join(", ");
+
+  // "Generate More Details" — re-runs contact enrichment for this firm and
+  // folds any newly discovered executive contacts into the People panel.
+  // The /enrich body is optional on the BE (company-level discovery); a
+  // notice is surfaced when the chain returns no new names so the click
+  // never reads as a silent no-op.
+  async function enrichContacts() {
+    setIsEnriching(true);
+    setEnrichError(null);
+    setEnrichNotice(null);
+    try {
+      const previousNames = new Set(
+        (profile?.executive_contacts ?? []).map((c) => c.name.trim().toLowerCase()),
+      );
+      const contacts = await apiRequest<BrokerDealerProfileResponse["executive_contacts"]>(
+        `/api/v1/broker-dealers/${brokerDealerId}/enrich`,
+        { method: "POST" },
+      );
+      setProfile((c) => (c ? { ...c, executive_contacts: contacts } : c));
+      const hasNewContact = contacts.some(
+        (c) => !previousNames.has(c.name.trim().toLowerCase()),
+      );
+      if (!hasNewContact) {
+        setEnrichNotice("No new contacts found for these officers.");
+      }
+    } catch (err) {
+      setEnrichError(err instanceof Error ? err.message : "Unable to enrich contacts.");
+    } finally {
+      setIsEnriching(false);
+    }
+  }
   const websiteDomain = bd.website
     ? bd.website.replace(/^https?:\/\//i, "").replace(/\/+$/, "").split("/")[0]?.toLowerCase() ?? null
     : null;
@@ -978,12 +1014,45 @@ export function BrokerDealerDetailClient({ brokerDealerId }: { brokerDealerId: s
               </a>
             ) : null}
           </div>
+
+          <FocusReportSection brokerDealerId={brokerDealerId} onProfileRefresh={reloadProfile} />
         </SectionPanel>
       </div>
 
       <div className="flex min-w-0 flex-1 flex-col gap-4">
         {/* People */}
         <SectionPanel eyebrow="People" title="Owners, officers, and contacts">
+          <div className="mb-4 flex flex-wrap items-center justify-between gap-3">
+            <p className="text-xs text-[var(--text-muted,#94a3b8)]">
+              Discover additional executive contacts for this firm.
+            </p>
+            <button
+              type="button"
+              onClick={() => void enrichContacts()}
+              disabled={isEnriching}
+              className="inline-flex shrink-0 items-center gap-2 rounded-[10px] bg-gradient-to-br from-[#6366f1] to-[#8b5cf6] px-4 py-2 text-[13px] font-semibold text-white shadow-[0_6px_16px_rgba(99,102,241,0.35)] transition hover:brightness-110 disabled:cursor-not-allowed disabled:opacity-60"
+            >
+              {isEnriching ? (
+                <Loader2 className="h-4 w-4 animate-spin" strokeWidth={2.5} />
+              ) : (
+                <Sparkles className="h-4 w-4" strokeWidth={2} />
+              )}
+              {isEnriching ? "Generating…" : "Generate More Details"}
+            </button>
+          </div>
+
+          {enrichError ? (
+            <div className="mb-3 rounded-2xl border border-[rgba(245,158,11,0.25)] bg-[rgba(245,158,11,0.08)] px-4 py-3 text-sm text-[var(--pill-amber-text,#b45309)]">
+              {enrichError}
+            </div>
+          ) : null}
+
+          {enrichNotice ? (
+            <div className="mb-3 rounded-2xl border border-[rgba(59,130,246,0.25)] bg-[rgba(59,130,246,0.08)] px-4 py-3 text-sm text-[var(--pill-blue-text,#1d4ed8)]">
+              {enrichNotice}
+            </div>
+          ) : null}
+
           {(!bd.direct_owners || bd.direct_owners.length === 0) &&
           (!bd.executive_officers || bd.executive_officers.length === 0) &&
           profile.executive_contacts.length === 0 ? (
@@ -1047,7 +1116,7 @@ export function BrokerDealerDetailClient({ brokerDealerId }: { brokerDealerId: s
                 {
                   header: "Outreach",
                   cell: (o) =>
-                    o.contact && o.contact.email ? (
+                    o.contact ? (
                       <OutreachButton
                         entityKind="broker_dealer"
                         entityId={bd.id}
@@ -1093,19 +1162,14 @@ export function BrokerDealerDetailClient({ brokerDealerId }: { brokerDealerId: s
                 },
                 {
                   header: "Outreach",
-                  cell: (c) =>
-                    c.email ? (
-                      <OutreachButton
-                        entityKind="broker_dealer"
-                        entityId={bd.id}
-                        entityName={bd.name}
-                        contact={c}
-                      />
-                    ) : (
-                      <span className="text-xs italic text-[var(--text-muted,#94a3b8)]">
-                        No outreach available
-                      </span>
-                    ),
+                  cell: (c) => (
+                    <OutreachButton
+                      entityKind="broker_dealer"
+                      entityId={bd.id}
+                      entityName={bd.name}
+                      contact={c}
+                    />
+                  ),
                   className: "whitespace-nowrap",
                 },
               ]}
