@@ -777,7 +777,7 @@ export function MasterListWorkspaceClient() {
               value={healthFilter}
               onChange={(next) => updateState({ health: next, page: 1 })}
               items={HEALTH_ITEMS}
-              ariaLabel="Financial health"
+              ariaLabel="Financial Health"
             />
           </div>
           <div>
@@ -788,7 +788,7 @@ export function MasterListWorkspaceClient() {
               value={prospectPriorityFilter}
               onChange={(next) => updateState({ prospectPriority: next, page: 1 })}
               items={PRIORITY_ITEMS}
-              ariaLabel="Prospect priority"
+              ariaLabel="Prospect Priority"
             />
           </div>
         </div>
