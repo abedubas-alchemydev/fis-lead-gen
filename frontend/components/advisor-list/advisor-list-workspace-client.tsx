@@ -5,7 +5,7 @@ import Link from "next/link";
 import type { Route } from "next";
 import { useUrlSyncedState } from "@/lib/use-url-synced-state";
 
-import { ArrowDown, ArrowUp, ChevronDown, Heart, Search, X } from "lucide-react";
+import { ArrowDown, ArrowUp, ChevronDown, Heart, Info, Search, X } from "lucide-react";
 
 import { apiRequest, buildApiPath, getInvestmentAdvisorLatest13fPath } from "@/lib/api";
 import { formatCurrency, formatDate, formatRelativeTime } from "@/lib/format";
@@ -808,6 +808,7 @@ export function AdvisorListWorkspaceClient() {
                 </th>
                 {COLUMNS.map((column) => {
                   const isSorted = state.sortBy === column.key;
+                  const columnTitle = (column as { title?: string }).title;
                   if (NON_SORTABLE_KEYS.has(column.key)) {
                     return (
                       <th
@@ -821,23 +822,35 @@ export function AdvisorListWorkspaceClient() {
                   return (
                     <th
                       key={column.key}
-                      title={(column as { title?: string }).title}
                       className="whitespace-nowrap border-b border-[var(--border,rgba(30,64,175,0.1))] bg-[var(--surface-2,#f1f6fd)] px-5 py-3 text-[11px] font-semibold uppercase tracking-[0.08em] text-[var(--text-muted,#94a3b8)]"
                     >
-                      <button
-                        type="button"
-                        onClick={() => toggleSort(column.key)}
-                        className="inline-flex items-center gap-1 transition hover:text-[var(--text,#0f172a)]"
-                      >
-                        {column.label}
-                        {isSorted ? (
-                          state.sortDir === "asc" ? (
-                            <ArrowUp className="h-3 w-3" strokeWidth={2} />
-                          ) : (
-                            <ArrowDown className="h-3 w-3" strokeWidth={2} />
-                          )
+                      <span className="inline-flex items-center gap-1">
+                        <button
+                          type="button"
+                          onClick={() => toggleSort(column.key)}
+                          className="inline-flex items-center gap-1 transition hover:text-[var(--text,#0f172a)]"
+                        >
+                          {column.label}
+                          {isSorted ? (
+                            state.sortDir === "asc" ? (
+                              <ArrowUp className="h-3 w-3" strokeWidth={2} />
+                            ) : (
+                              <ArrowDown className="h-3 w-3" strokeWidth={2} />
+                            )
+                          ) : null}
+                        </button>
+                        {columnTitle ? (
+                          <span
+                            tabIndex={0}
+                            role="img"
+                            aria-label={columnTitle}
+                            title={columnTitle}
+                            className="inline-flex cursor-help items-center rounded-full outline-none transition hover:text-[var(--text,#0f172a)] focus-visible:ring-2 focus-visible:ring-[var(--accent,#6366f1)]"
+                          >
+                            <Info className="h-3 w-3" strokeWidth={2} aria-hidden />
+                          </span>
                         ) : null}
-                      </button>
+                      </span>
                     </th>
                   );
                 })}
