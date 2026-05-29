@@ -10,11 +10,28 @@ import type {
 } from "@/lib/types";
 
 // Discriminates which BE endpoint pair the OutreachModal targets when the
-// user clicks Generate / Send. Investor support is reserved for symmetry
-// with the BE schemas (PR #420) and the parallel API helpers in api.ts —
-// no UI surface invokes it yet, but the type stays here so adding one
-// later is a no-op change.
-export type OutreachEntityKind = "broker_dealer" | "advisor" | "investor";
+// user clicks Generate / Send. "broker_dealer" / "advisor" / "investor"
+// hit the per-firm draft+send endpoints (firm id + contact id). "adhoc"
+// hits the free-form /outreach/adhoc-* pair, addressing the recipient by
+// email alone — used by the /investors insider feed, whose rows are Form 4
+// reporting persons with no firm/contact FK.
+export type OutreachEntityKind =
+  | "broker_dealer"
+  | "advisor"
+  | "investor"
+  | "adhoc";
+
+// Minimal recipient shape for the adhoc path. The Form 4 insider feed has
+// no contact-table row — the email comes from per-row enrichment — so we
+// synthesize one of these. `id` is unused on the adhoc send (no contact
+// FK) but stays a required number so the firm branches keep `contact.id`
+// typed as number; `title` stays a plain string for the same reason.
+export type AdhocOutreachContact = {
+  id: number;
+  name: string;
+  title: string;
+  email: string | null;
+};
 
 // Structural overlap is sufficient for the modal: it only reads
 // {id, name, title, email}. Each contact item type already carries an
@@ -23,7 +40,8 @@ export type OutreachEntityKind = "broker_dealer" | "advisor" | "investor";
 export type OutreachContact =
   | ExecutiveContactItem
   | AdvisorContactItem
-  | InvestorContactItem;
+  | InvestorContactItem
+  | AdhocOutreachContact;
 
 interface OutreachButtonProps {
   entityKind: OutreachEntityKind;

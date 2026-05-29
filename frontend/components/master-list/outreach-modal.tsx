@@ -6,11 +6,13 @@ import { useEffect, useMemo, useRef, useState } from "react";
 
 import {
   ApiError,
+  generateAdhocOutreachDraft,
   generateAdvisorOutreachDraft,
   generateInvestorOutreachDraft,
   generateOutreachDraft,
   getLinkedProviders,
   listVaultFolders,
+  sendAdhocOutreach,
   sendAdvisorOutreach,
   sendInvestorOutreach,
   sendOutreachEmail
@@ -283,9 +285,10 @@ export function OutreachModal({
     setError(null);
     try {
       // Branch on entityKind so the right /outreach/{kind}-draft endpoint
-      // runs. The wire payloads differ only in their id field names
+      // runs. The firm payloads differ only in their id field names
       // (broker_dealer_id vs advisor_id vs institutional_investor_id),
-      // wrapped by the per-kind helpers in api.ts.
+      // wrapped by the per-kind helpers in api.ts; the adhoc path carries
+      // the recipient email instead of any firm/contact FK.
       let draft;
       if (entityKind === "broker_dealer") {
         draft = await generateOutreachDraft({
@@ -299,11 +302,17 @@ export function OutreachModal({
           advisor_contact_id: contact.id,
           folder_id: folderId
         });
-      } else {
+      } else if (entityKind === "investor") {
         draft = await generateInvestorOutreachDraft({
           institutional_investor_id: entityId,
           investor_contact_id: contact.id,
           folder_id: folderId
+        });
+      } else {
+        draft = await generateAdhocOutreachDraft({
+          folder_id: folderId,
+          recipient_email: contact.email ?? "",
+          recipient_name: contact.name
         });
       }
       if (!isMountedRef.current) return;
@@ -350,7 +359,7 @@ export function OutreachModal({
           provider: providerId,
           sender_account_id: senderAccountId
         });
-      } else {
+      } else if (entityKind === "investor") {
         await sendInvestorOutreach({
           institutional_investor_id: entityId,
           investor_contact_id: contact.id,
@@ -358,6 +367,17 @@ export function OutreachModal({
           subject,
           body,
           provider: providerId,
+          sender_account_id: senderAccountId
+        });
+      } else {
+        // Adhoc: address by recipient email, no firm/contact FK. Folder is
+        // optional here (the sent-history row just shows "—" without one).
+        await sendAdhocOutreach({
+          recipient_email: contact.email ?? "",
+          recipient_name: contact.name,
+          folder_id: folderId,
+          subject,
+          body,
           sender_account_id: senderAccountId
         });
       }
@@ -467,23 +487,30 @@ export function OutreachModal({
               id="outreach-modal-title"
               className="mt-1 text-lg font-semibold tracking-tight text-[var(--text,#0f172a)]"
             >
-              {contact.name}{" "}
-              <span className="text-sm font-medium text-[var(--text-muted,#94a3b8)]">
-                - {contact.title}
-              </span>
+              {contact.name}
+              {contact.title ? (
+                <span className="text-sm font-medium text-[var(--text-muted,#94a3b8)]">
+                  {" "}- {contact.title}
+                </span>
+              ) : null}
             </h2>
             <p className="mt-1 text-xs text-[var(--text-muted,#94a3b8)]">
-              At <span className="font-medium text-[var(--text-dim,#475569)]">{entityName}</span>
-              {contact.email ? (
+              {entityName ? (
                 <>
-                  {" "}-{" "}
-                  <a
-                    href={`mailto:${contact.email}`}
-                    className="text-[var(--accent,#6366f1)] underline-offset-4 hover:underline"
-                  >
-                    {contact.email}
-                  </a>
+                  At{" "}
+                  <span className="font-medium text-[var(--text-dim,#475569)]">
+                    {entityName}
+                  </span>
+                  {contact.email ? <>{" "}-{" "}</> : null}
                 </>
+              ) : null}
+              {contact.email ? (
+                <a
+                  href={`mailto:${contact.email}`}
+                  className="text-[var(--accent,#6366f1)] underline-offset-4 hover:underline"
+                >
+                  {contact.email}
+                </a>
               ) : null}
             </p>
             {senderEmail && (stage === "draft" || stage === "sending") ? (
