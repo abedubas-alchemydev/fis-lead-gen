@@ -47,7 +47,7 @@ export function YahooButton({
         disabled
         aria-disabled
         title="Yahoo sign-in is being set up. Available soon."
-        className="flex w-full cursor-not-allowed items-center justify-center gap-3 rounded-xl border border-[var(--border,rgba(30,64,175,0.1))] bg-[var(--surface,#ffffff)] px-4 py-3 text-sm font-medium text-[var(--text-muted,#94a3b8)] opacity-60 shadow-sm"
+        className="flex h-10 w-full cursor-not-allowed items-center justify-center gap-3 rounded-xl border border-[var(--border,rgba(30,64,175,0.1))] bg-[var(--surface,#ffffff)] px-4 text-sm font-medium text-[var(--text-muted,#94a3b8)] opacity-60 shadow-sm"
       >
         <YahooLogo />
         <span>
@@ -65,7 +65,7 @@ export function YahooButton({
       type="button"
       onClick={handleClick}
       disabled={isPending}
-      className="flex w-full items-center justify-center gap-3 rounded-xl border border-[var(--border,rgba(30,64,175,0.1))] bg-[var(--surface,#ffffff)] px-4 py-3 text-sm font-medium text-[var(--text,#0f172a)] shadow-sm transition hover:border-[var(--border-2,rgba(30,64,175,0.16))] hover:bg-[var(--surface-2,#f1f6fd)] disabled:cursor-not-allowed disabled:opacity-60"
+      className="flex h-10 w-full items-center justify-center gap-3 rounded-xl border border-[var(--border,rgba(30,64,175,0.1))] bg-[var(--surface,#ffffff)] px-4 text-sm font-medium text-[var(--text,#0f172a)] shadow-sm transition hover:border-[var(--border-2,rgba(30,64,175,0.16))] hover:bg-[var(--surface-2,#f1f6fd)] disabled:cursor-not-allowed disabled:opacity-60"
     >
       {isPending ? (
         <Loader2 className="h-4 w-4 animate-spin" aria-hidden />
