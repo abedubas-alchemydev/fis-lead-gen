@@ -1,6 +1,6 @@
 "use client";
 
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import type { Route } from "next";
 import {
   type ReadonlyURLSearchParams,
@@ -62,9 +62,23 @@ export function useUrlSyncedState<T extends object>(
 
   const [state, setState] = useState<T>(urlState);
 
+  // Tracks URLs we asked the router to navigate to but whose `searchParams`
+  // update hasn't arrived yet. When rapid edits (e.g. ticking several
+  // multi-select checkboxes) queue multiple `router.replace` calls,
+  // intermediate `urlString` values land *after* later local edits have
+  // already advanced `state`. Without this guard the reconciliation effect
+  // would treat each stale landing as external navigation and clobber the
+  // newer edits — see PR #464 for the original race + repro.
+  const pendingPushesRef = useRef<Set<string>>(new Set());
+
   // External navigation (Back/Forward, share-link) → adopt the URL. Our own
-  // commits serialize back to `urlString`, so this no-ops for them.
+  // commits land here too; we recognise them by membership in
+  // `pendingPushesRef` and skip the state reset.
   useEffect(() => {
+    if (pendingPushesRef.current.has(urlString)) {
+      pendingPushesRef.current.delete(urlString);
+      return;
+    }
     setState((prev) => (build(prev) === urlString ? prev : urlState));
   }, [urlString, urlState, build]);
 
@@ -73,6 +87,7 @@ export function useUrlSyncedState<T extends object>(
   useEffect(() => {
     const nextUrl = build(state);
     if (nextUrl !== urlString) {
+      pendingPushesRef.current.add(nextUrl);
       router.replace(nextUrl as Route, { scroll: false });
     }
   }, [state, urlString, build, router]);
