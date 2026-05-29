@@ -139,6 +139,11 @@ export function AdvisorDetailClient({ advisorId }: { advisorId: string }) {
   const [gapFillError, setGapFillError] = useState<string | null>(null);
   const [gapFillNotice, setGapFillNotice] = useState<string | null>(null);
 
+  // Filings list renders collapsed to the most-recent few; "Show all"
+  // expands the full in-memory list. Reset when switching advisors (the
+  // component instance persists across Prev/Next — only advisorId changes).
+  const [showAllFilings, setShowAllFilings] = useState(false);
+
   // Fetch /profile immediately on mount. Errors surface via setError so
   // a failed first load shows the error page. `reloadProfile` is the
   // re-fetch helper the manual Refresh button calls; it lets the caller
@@ -173,6 +178,11 @@ export function AdvisorDetailClient({ advisorId }: { advisorId: string }) {
     return () => {
       active = false;
     };
+  }, [advisorId]);
+
+  // Collapse the filings list again whenever we navigate to another advisor.
+  useEffect(() => {
+    setShowAllFilings(false);
   }, [advisorId]);
 
   // Manual refresh handler. POST /refresh-all on click, poll the parent
@@ -464,6 +474,11 @@ export function AdvisorDetailClient({ advisorId }: { advisorId: string }) {
   const advisoryActivities = advisor.advisory_activities ?? [];
   const clientTypes = advisor.client_types ?? [];
   const clientCounts = advisor.client_counts ?? null;
+  // Filings render collapsed to the 6 most-recent; the rest expand on demand.
+  const FILINGS_COLLAPSED = 6;
+  const visibleFilings = showAllFilings
+    ? filings
+    : filings.slice(0, FILINGS_COLLAPSED);
 
   // Resolve the firm domain for the inline Find-emails section: prefer the
   // advisor's website, fall back to the first contact email's domain.
@@ -512,6 +527,14 @@ export function AdvisorDetailClient({ advisorId }: { advisorId: string }) {
               entityType="advisor"
               initialFavorited={data.is_favorited}
             />
+            {advisor.files_13f ? (
+              <Pill variant="healthy">13F filer</Pill>
+            ) : null}
+            {advisor.member_agencies.map((code) => (
+              <Pill key={code} variant="member">
+                {agencyLabel(code)} member
+              </Pill>
+            ))}
           </div>
           {advisor.legal_name && advisor.legal_name !== advisor.name ? (
             <p className="mt-1 text-[13px] text-[var(--text-dim,#475569)]">
@@ -588,6 +611,32 @@ export function AdvisorDetailClient({ advisorId }: { advisorId: string }) {
           </div>
         </div>
         <div className="flex shrink-0 items-center gap-2.5">
+          <div className="flex items-center gap-1">
+            <button
+              type="button"
+              disabled={!prevId}
+              onClick={() => prevId && router.push(buildAdjacentHref(prevId))}
+              title="Previous advisor"
+              aria-label="Previous advisor"
+              className="inline-flex h-9 w-9 items-center justify-center rounded-[10px] border border-[var(--border-2,rgba(30,64,175,0.16))] bg-[var(--surface,#ffffff)] text-[var(--text-dim,#475569)] transition hover:bg-[var(--surface-2,#f1f6fd)] hover:text-[var(--text,#0f172a)] disabled:cursor-not-allowed disabled:opacity-45"
+            >
+              <ArrowLeft className="h-4 w-4" strokeWidth={2} aria-hidden />
+            </button>
+            <button
+              type="button"
+              disabled={!nextId}
+              onClick={() => nextId && router.push(buildAdjacentHref(nextId))}
+              title="Next advisor"
+              aria-label="Next advisor"
+              className="inline-flex h-9 w-9 items-center justify-center rounded-[10px] border border-[var(--border-2,rgba(30,64,175,0.16))] bg-[var(--surface,#ffffff)] text-[var(--text-dim,#475569)] transition hover:bg-[var(--surface-2,#f1f6fd)] hover:text-[var(--text,#0f172a)] disabled:cursor-not-allowed disabled:opacity-45"
+            >
+              <ArrowRight className="h-4 w-4" strokeWidth={2} aria-hidden />
+            </button>
+          </div>
+          <span
+            className="h-6 w-px bg-[var(--border-2,rgba(30,64,175,0.16))]"
+            aria-hidden
+          />
           <button
             type="button"
             onClick={() => void runGapFill()}
@@ -636,46 +685,6 @@ export function AdvisorDetailClient({ advisorId }: { advisorId: string }) {
         </div>
       ) : null}
 
-      {/* ── Status pills row ────────────────────────────────────────────── */}
-      {advisor.files_13f || advisor.member_agencies.length > 0 ? (
-        <div className="mb-5 flex flex-wrap items-center gap-2">
-          {advisor.files_13f ? <Pill variant="healthy">13F filer</Pill> : null}
-          {advisor.member_agencies.map((code) => (
-            <Pill key={code} variant="member">
-              {agencyLabel(code)} member
-            </Pill>
-          ))}
-        </div>
-      ) : null}
-
-      {/* ── Prev / Back / Next nav row ──────────────────────────────────── */}
-      <div className="mb-5 flex items-center justify-between gap-3">
-        <button
-          type="button"
-          disabled={!prevId}
-          onClick={() => prevId && router.push(buildAdjacentHref(prevId))}
-          className={SECONDARY_BTN}
-        >
-          <ArrowLeft className="h-4 w-4" strokeWidth={2} aria-hidden />
-          Previous
-        </button>
-        <Link
-          href={backHref}
-          className="text-[12px] uppercase tracking-[0.08em] text-[var(--text-muted,#94a3b8)] transition hover:text-[var(--text,#0f172a)]"
-        >
-          Back to advisors
-        </Link>
-        <button
-          type="button"
-          disabled={!nextId}
-          onClick={() => nextId && router.push(buildAdjacentHref(nextId))}
-          className={SECONDARY_BTN}
-        >
-          Next
-          <ArrowRight className="h-4 w-4" strokeWidth={2} aria-hidden />
-        </button>
-      </div>
-
       {/* ── KPI strip ───────────────────────────────────────────────────── */}
       <div className="mb-4 grid gap-3 sm:grid-cols-2 lg:grid-cols-4">
         <MiniStat
@@ -696,8 +705,9 @@ export function AdvisorDetailClient({ advisorId }: { advisorId: string }) {
         />
       </div>
 
-      {/* ── 2-column section grid ───────────────────────────────────────── */}
-      <div className="grid gap-4 xl:grid-cols-2">
+      {/* ── 2-column section layout — independent flex columns (no height-locking) ───────────────────────────────────────── */}
+      <div className="flex flex-col gap-4 xl:flex-row">
+      <div className="flex min-w-0 flex-1 flex-col gap-4">
         {/* Form ADV details */}
         <SectionPanel
           eyebrow="Form ADV"
@@ -782,44 +792,6 @@ export function AdvisorDetailClient({ advisorId }: { advisorId: string }) {
             <p className="mt-4 text-xs leading-5 text-[var(--text-muted,#94a3b8)]">
               {advisor.firm_operations_text}
             </p>
-          ) : null}
-        </SectionPanel>
-
-        {/* Firm overview */}
-        <SectionPanel eyebrow="Overview" title="Registration & filings">
-          <div className="grid gap-3 md:grid-cols-2">
-            <MiniStat
-              label="Status"
-              value={advisor.status || "—"}
-              compact
-            />
-            <MiniStat
-              label="Registration date"
-              value={formatDate(advisor.registration_date)}
-              compact
-            />
-            {/* Formation date intentionally not rendered: Form ADV doesn't
-                ask for it and the IAPD per-firm payload doesn't carry one,
-                so the column would be "Not available" for nearly every IA.
-                Field remains on the schema/model — re-enable if a corporate-
-                records source (OpenCorporates / state SOS) is ever wired. */}
-            <MiniStat
-              label="Source"
-              value={advisor.matched_source || "—"}
-              compact
-            />
-          </div>
-
-          {advisor.filings_index_url ? (
-            <a
-              href={advisor.filings_index_url}
-              target="_blank"
-              rel="noopener noreferrer"
-              className="mt-4 inline-flex items-center gap-1.5 rounded-[10px] border border-[var(--border-2,rgba(30,64,175,0.16))] bg-[var(--surface,#ffffff)] px-3 py-1.5 text-[12px] font-medium text-[var(--text-dim,#475569)] transition hover:bg-[var(--surface-2,#f1f6fd)] hover:text-[var(--text,#0f172a)]"
-            >
-              <ExternalLink className="h-3.5 w-3.5" strokeWidth={2} />
-              EDGAR filings index
-            </a>
           ) : null}
         </SectionPanel>
 
@@ -940,6 +912,46 @@ export function AdvisorDetailClient({ advisorId }: { advisorId: string }) {
             />
           ) : null}
         </SectionPanel>
+      </div>
+
+      <div className="flex min-w-0 flex-1 flex-col gap-4">
+        {/* Firm overview */}
+        <SectionPanel eyebrow="Overview" title="Registration & filings">
+          <div className="grid gap-3 md:grid-cols-2">
+            <MiniStat
+              label="Status"
+              value={advisor.status || "—"}
+              compact
+            />
+            <MiniStat
+              label="Registration date"
+              value={formatDate(advisor.registration_date)}
+              compact
+            />
+            {/* Formation date intentionally not rendered: Form ADV doesn't
+                ask for it and the IAPD per-firm payload doesn't carry one,
+                so the column would be "Not available" for nearly every IA.
+                Field remains on the schema/model — re-enable if a corporate-
+                records source (OpenCorporates / state SOS) is ever wired. */}
+            <MiniStat
+              label="Source"
+              value={advisor.matched_source || "—"}
+              compact
+            />
+          </div>
+
+          {advisor.filings_index_url ? (
+            <a
+              href={advisor.filings_index_url}
+              target="_blank"
+              rel="noopener noreferrer"
+              className="mt-4 inline-flex items-center gap-1.5 rounded-[10px] border border-[var(--border-2,rgba(30,64,175,0.16))] bg-[var(--surface,#ffffff)] px-3 py-1.5 text-[12px] font-medium text-[var(--text-dim,#475569)] transition hover:bg-[var(--surface-2,#f1f6fd)] hover:text-[var(--text,#0f172a)]"
+            >
+              <ExternalLink className="h-3.5 w-3.5" strokeWidth={2} />
+              EDGAR filings index
+            </a>
+          ) : null}
+        </SectionPanel>
 
         {/* Filings */}
         <SectionPanel eyebrow="Filings" title="Recent regulatory filings">
@@ -949,7 +961,7 @@ export function AdvisorDetailClient({ advisorId }: { advisorId: string }) {
             </div>
           ) : (
             <div className="space-y-2">
-              {filings.map((filing) => (
+              {visibleFilings.map((filing) => (
                 <div
                   key={filing.id}
                   className="rounded-2xl border border-[var(--border,rgba(30,64,175,0.1))] px-4 py-3"
@@ -985,9 +997,21 @@ export function AdvisorDetailClient({ advisorId }: { advisorId: string }) {
                   </div>
                 </div>
               ))}
+              {filings.length > FILINGS_COLLAPSED ? (
+                <button
+                  type="button"
+                  onClick={() => setShowAllFilings((prev) => !prev)}
+                  className="inline-flex items-center gap-1.5 rounded-[10px] border border-[var(--border-2,rgba(30,64,175,0.16))] bg-[var(--surface,#ffffff)] px-3 py-1.5 text-[12px] font-medium text-[var(--text-dim,#475569)] transition hover:bg-[var(--surface-2,#f1f6fd)] hover:text-[var(--text,#0f172a)]"
+                >
+                  {showAllFilings
+                    ? "Show fewer"
+                    : `Show all (${filings.length})`}
+                </button>
+              ) : null}
             </div>
           )}
         </SectionPanel>
+      </div>
       </div>
 
       {/* ── Discovered emails (full width) ── */}
