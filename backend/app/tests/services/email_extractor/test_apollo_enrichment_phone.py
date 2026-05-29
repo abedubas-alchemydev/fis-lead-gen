@@ -12,6 +12,7 @@ the slice of ``AsyncSession`` that ``apollo_enrichment`` actually touches
 
 from __future__ import annotations
 
+import json
 from typing import Any
 
 import httpx
@@ -169,3 +170,130 @@ async def test_enrich_no_match_leaves_phone_null(patch_settings: None) -> None:
 
     assert result.enriched_phone is None
     assert result.enrichment_status == "no_match"
+
+
+# ──────────────────── Reveal payload + email/person-id capture ────────────────────
+
+
+@pytest.fixture
+def patch_reveal_configured(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Apollo key + the async phone-reveal flow both configured."""
+    monkeypatch.setattr(settings, "apollo_api_key", "test-apollo-key")
+    monkeypatch.setattr(settings, "apollo_webhook_secret", "sekret")
+    monkeypatch.setattr(
+        settings, "public_base_url", "https://app.example.com/api/backend"
+    )
+
+
+@pytest.mark.asyncio
+@respx.mock
+async def test_enrich_requests_personal_email_reveal(patch_settings: None) -> None:
+    """The match payload opts into reveal_personal_emails so Apollo surfaces a
+    usable email even when the discovered address is a role inbox."""
+    route = respx.post(_APOLLO_MATCH_URL).mock(
+        return_value=httpx.Response(200, json={"person": {"name": "Jane Doe"}})
+    )
+
+    await apollo_enrichment.enrich_discovered_email(_FakeSession(_seed_row()), 1)
+
+    sent = json.loads(route.calls.last.request.content)
+    assert sent["email"] == "jane@example.com"
+    assert sent["reveal_personal_emails"] is True
+
+
+@pytest.mark.asyncio
+@respx.mock
+async def test_enrich_omits_phone_reveal_when_unconfigured(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """With no webhook secret / base URL the request must not ask for a phone
+    reveal -- no webhook would ever arrive, so it'd just burn an Apollo credit."""
+    monkeypatch.setattr(settings, "apollo_api_key", "test-apollo-key")
+    monkeypatch.setattr(settings, "apollo_webhook_secret", None)
+    monkeypatch.setattr(settings, "public_base_url", None)
+    route = respx.post(_APOLLO_MATCH_URL).mock(
+        return_value=httpx.Response(200, json={"person": {"name": "Jane Doe"}})
+    )
+
+    await apollo_enrichment.enrich_discovered_email(_FakeSession(_seed_row()), 1)
+
+    sent = json.loads(route.calls.last.request.content)
+    assert "reveal_phone_number" not in sent
+    assert "webhook_url" not in sent
+
+
+@pytest.mark.asyncio
+@respx.mock
+async def test_enrich_requests_phone_reveal_when_configured(
+    patch_reveal_configured: None,
+) -> None:
+    """When the reveal flow is configured the payload carries
+    reveal_phone_number + a webhook_url embedding the shared secret."""
+    route = respx.post(_APOLLO_MATCH_URL).mock(
+        return_value=httpx.Response(
+            200, json={"person": {"id": "p1", "name": "Jane Doe"}}
+        )
+    )
+
+    await apollo_enrichment.enrich_discovered_email(_FakeSession(_seed_row()), 1)
+
+    sent = json.loads(route.calls.last.request.content)
+    assert sent["reveal_phone_number"] is True
+    assert sent["webhook_url"] == (
+        "https://app.example.com/api/backend/api/v1/webhooks/apollo/sekret/phone-reveal"
+    )
+
+
+@pytest.mark.asyncio
+@respx.mock
+async def test_enrich_captures_apollo_person_id(patch_settings: None) -> None:
+    """person.id is stamped so the async phone-reveal webhook can correlate the
+    revealed number back to this row."""
+    respx.post(_APOLLO_MATCH_URL).mock(
+        return_value=httpx.Response(
+            200,
+            json={"person": {"id": "587cf802f65125cad923a266", "name": "Jane Doe"}},
+        )
+    )
+
+    result = await apollo_enrichment.enrich_discovered_email(_FakeSession(_seed_row()), 1)
+
+    assert result.apollo_person_id == "587cf802f65125cad923a266"
+
+
+@pytest.mark.asyncio
+@respx.mock
+async def test_enrich_prefers_personal_email_over_work_email(patch_settings: None) -> None:
+    """A revealed personal email wins over the matched work email (which is
+    usually just the discovered address echoed back)."""
+    respx.post(_APOLLO_MATCH_URL).mock(
+        return_value=httpx.Response(
+            200,
+            json={
+                "person": {
+                    "name": "Jane Doe",
+                    "email": "jane@example.com",
+                    "personal_emails": ["jane.personal@gmail.com"],
+                }
+            },
+        )
+    )
+
+    result = await apollo_enrichment.enrich_discovered_email(_FakeSession(_seed_row()), 1)
+
+    assert result.enriched_email == "jane.personal@gmail.com"
+
+
+@pytest.mark.asyncio
+@respx.mock
+async def test_enrich_falls_back_to_work_email_when_no_personal(patch_settings: None) -> None:
+    """No personal_emails → store the matched work email on enriched_email."""
+    respx.post(_APOLLO_MATCH_URL).mock(
+        return_value=httpx.Response(
+            200, json={"person": {"name": "Jane Doe", "email": "jane.doe@firm.com"}}
+        )
+    )
+
+    result = await apollo_enrichment.enrich_discovered_email(_FakeSession(_seed_row()), 1)
+
+    assert result.enriched_email == "jane.doe@firm.com"

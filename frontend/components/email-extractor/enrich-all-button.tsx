@@ -4,7 +4,7 @@ import { Loader2, Sparkles, Square } from "lucide-react";
 import { useCallback, useEffect, useRef, useState } from "react";
 
 import { useToast } from "@/components/ui/use-toast";
-import { apiRequest } from "@/lib/api";
+import { ApiError, apiRequest } from "@/lib/api";
 import {
   cancelEnrichAll,
   enrichAll,
@@ -89,12 +89,16 @@ export function EnrichAllButton({
     let queued: EnrichAllResponse;
     try {
       queued = await enrichAll(scanId);
-    } catch {
+    } catch (err) {
       if (!mountedRef.current) return;
       setIsRunning(false);
       setOptimisticQueued(0);
       setStatusText(null);
-      toast.error("Couldn't start enrichment — please try again.");
+      toast.error(
+        err instanceof ApiError && err.status === 503
+          ? "Apollo enrichment isn't configured — contact an admin."
+          : "Couldn't start enrichment — please try again."
+      );
       return;
     }
 

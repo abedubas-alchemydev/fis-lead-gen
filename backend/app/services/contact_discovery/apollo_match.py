@@ -36,7 +36,10 @@ from typing import Any
 import httpx
 
 from app.core.config import settings
-from app.services.contact_discovery._shared import first_apollo_phone
+from app.services.contact_discovery._shared import (
+    apollo_phone_reveal_fields,
+    first_apollo_phone,
+)
 from app.services.contact_discovery.base import (
     ContactDiscoveryProvider,
     DiscoveryResult,
@@ -105,20 +108,10 @@ class ApolloMatchProvider(ContactDiscoveryProvider):
         if domain:
             payload["domain"] = domain
 
-        # Async phone-reveal opt-in. Apollo's sync response still returns
-        # email/linkedin immediately; phone_numbers arrive minutes later via
-        # POST to webhook_url. Both settings must be configured — when either
-        # is missing the feature stays dormant and we keep the current
-        # behaviour (no reveal request, no callback to fail on).
-        webhook_secret = settings.apollo_webhook_secret
-        base_url = settings.public_base_url
-        reveal_phones = bool(webhook_secret and base_url)
-        if reveal_phones:
-            payload["reveal_phone_number"] = True
-            payload["webhook_url"] = (
-                f"{base_url.rstrip('/')}/api/v1/webhooks/apollo/"
-                f"{webhook_secret}/phone-reveal"
-            )
+        # Async phone-reveal opt-in (no-op unless configured). Apollo's sync
+        # response still returns email/linkedin immediately; phone_numbers
+        # arrive minutes later via POST to the webhook_url.
+        payload.update(apollo_phone_reveal_fields())
 
         person = await self._post_match(api_key, payload, first_name, last_name)
         if person is None:

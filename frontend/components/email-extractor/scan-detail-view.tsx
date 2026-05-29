@@ -5,6 +5,8 @@ import {
   CheckCircle2,
   Linkedin,
   Loader2,
+  Mail,
+  MailPlus,
   Phone,
   Search,
   XCircle,
@@ -15,9 +17,10 @@ import { EmailExtractorErrorCard } from "@/components/email-extractor/email-extr
 import { EmptyScanResultsState } from "@/components/email-extractor/empty-scan-results-state";
 import { EnrichAllButton } from "@/components/email-extractor/enrich-all-button";
 import { ScanResultsLoading } from "@/components/email-extractor/scan-results-loading";
+import { OutreachModal } from "@/components/master-list/outreach-modal";
 import { Pill, type PillVariant } from "@/components/ui/pill";
 import { SectionPanel } from "@/components/ui/section-panel";
-import { useToast } from "@/components/ui/use-toast";
+import { ApiError } from "@/lib/api";
 import { formatDate, formatRelativeTime } from "@/lib/format";
 import {
   enrichEmail,
@@ -80,6 +83,12 @@ const ROW_BTN =
 // Mirrors PEOPLE_TABLE_PAGE_SIZE's pager affordance on the detail pages.
 const RESULTS_PAGE_SIZE = 20;
 
+// After a per-row Enrich that requested a phone reveal, poll for the async
+// number to land (Apollo calls our webhook seconds-to-minutes later). Bounded
+// so we stop when a reveal never resolves rather than polling forever.
+const PHONE_REVEAL_POLL_MS = 3000;
+const PHONE_REVEAL_TIMEOUT_MS = 90_000;
+
 // ── Helpers ──────────────────────────────────────────────────────────────
 
 function formatConfidence(c: number | null): React.ReactNode {
@@ -103,6 +112,24 @@ function latestVerification(
 
 function errorMessage(err: unknown, fallback: string): string {
   return err instanceof Error ? err.message : fallback;
+}
+
+// Per-cause copy for a failed per-row enrich. Mirrors the outreach modal's
+// error mapping so a 503/502/404 reads as something actionable rather than the
+// old blanket "couldn't enrich" toast that hid the real cause.
+function enrichErrorMessage(err: unknown): string {
+  if (err instanceof ApiError) {
+    if (err.status === 503) {
+      return "Apollo enrichment isn't configured — contact an admin.";
+    }
+    if (err.status === 502) {
+      return "Apollo couldn't be reached — try again in a moment.";
+    }
+    if (err.status === 404) {
+      return "This email no longer exists — refresh the scan.";
+    }
+  }
+  return errorMessage(err, "Couldn't enrich — please try again.");
 }
 
 // Map raw BE error strings into per-cause copy so the user gets an
@@ -235,16 +262,32 @@ function VerificationCell({
   );
 }
 
+function EnrichErrorText({ error }: { error: string }): React.ReactElement {
+  return (
+    <span className="text-[11px] text-[var(--pill-red-text,#b91c1c)]">
+      {error}
+    </span>
+  );
+}
+
 function EnrichmentCell({
   row,
   inFlight,
+  error,
   onEnrich,
 }: {
   row: DiscoveredEmailResponse;
   inFlight: boolean;
+  error: string | undefined;
   onEnrich: (emailId: number) => void;
 }): React.ReactElement {
   if (row.enrichment_status === "enriched") {
+    // The discovered address keyed the lookup, so only surface a revealed
+    // email when it's actually a different (e.g. personal) address.
+    const revealedEmail =
+      row.enriched_email && row.enriched_email !== row.email
+        ? row.enriched_email
+        : null;
     return (
       <div className="flex flex-col items-start gap-0.5 text-[12px]">
         {row.enriched_name ? (
@@ -262,6 +305,15 @@ function EnrichmentCell({
             {row.enriched_company}
           </span>
         ) : null}
+        {revealedEmail ? (
+          <a
+            href={`mailto:${revealedEmail}`}
+            className="inline-flex items-center gap-1 text-[var(--text-dim,#475569)] hover:underline"
+          >
+            <Mail className="h-3.5 w-3.5" strokeWidth={2} />
+            {revealedEmail}
+          </a>
+        ) : null}
         {row.enriched_phone ? (
           <a
             href={`tel:${row.enriched_phone}`}
@@ -270,6 +322,11 @@ function EnrichmentCell({
             <Phone className="h-3.5 w-3.5" strokeWidth={2} />
             {row.enriched_phone}
           </a>
+        ) : row.phone_reveal_pending ? (
+          <span className="inline-flex items-center gap-1 text-[var(--text-muted,#94a3b8)]">
+            <Loader2 className="h-3.5 w-3.5 animate-spin" strokeWidth={2} />
+            finding phone…
+          </span>
         ) : null}
         {row.enriched_linkedin_url ? (
           <a
@@ -307,22 +364,64 @@ function EnrichmentCell({
           ) : null}
           Retry
         </button>
+        {error ? <EnrichErrorText error={error} /> : null}
       </div>
     );
   }
 
   return (
-    <button
-      type="button"
-      onClick={() => onEnrich(row.id)}
-      disabled={inFlight}
-      className={ROW_BTN}
-    >
-      {inFlight ? (
-        <Loader2 className="h-3.5 w-3.5 animate-spin" strokeWidth={2} />
+    <div className="flex flex-col items-start gap-1">
+      <button
+        type="button"
+        onClick={() => onEnrich(row.id)}
+        disabled={inFlight}
+        className={ROW_BTN}
+      >
+        {inFlight ? (
+          <Loader2 className="h-3.5 w-3.5 animate-spin" strokeWidth={2} />
+        ) : null}
+        {inFlight ? "Enriching…" : "Enrich"}
+      </button>
+      {error ? <EnrichErrorText error={error} /> : null}
+    </div>
+  );
+}
+
+// Per-row "Outreach" action. A discovered email has no firm/contact record,
+// so it reuses the ad-hoc outreach pipeline (free-form recipient) -- the same
+// path the Form 4 insider feed uses. The discovered address is always the
+// recipient; enrichment just lets the AI draft open with a real name/title.
+function OutreachCell({
+  row,
+}: {
+  row: DiscoveredEmailResponse;
+}): React.ReactElement {
+  const [open, setOpen] = useState(false);
+  return (
+    <>
+      <button
+        type="button"
+        onClick={() => setOpen(true)}
+        className="inline-flex items-center gap-1.5 rounded-md bg-[var(--accent,#6366f1)] px-2.5 py-1 text-[11px] font-semibold text-white transition hover:bg-[var(--accent-2,#8b5cf6)]"
+      >
+        <MailPlus className="h-3.5 w-3.5" strokeWidth={2} aria-hidden />
+        Outreach
+      </button>
+      {open ? (
+        <OutreachModal
+          entityKind="adhoc"
+          entityId={0}
+          entityName=""
+          contact={{
+            id: row.id,
+            name: row.enriched_name ?? "",
+            title: row.enriched_title ?? "",
+            email: row.email,
+          }}
+          onClose={() => setOpen(false)}
+        />
       ) : null}
-      {inFlight ? "Enriching…" : "Enrich"}
-    </button>
+    </>
   );
 }
 
@@ -333,6 +432,7 @@ function ResultsTable({
   verifyErrors,
   onVerify,
   enrichInFlight,
+  enrichErrors,
   onEnrich,
 }: {
   rows: DiscoveredEmailResponse[];
@@ -341,6 +441,7 @@ function ResultsTable({
   verifyErrors: Record<number, string>;
   onVerify: (emailId: number) => void;
   enrichInFlight: Set<number>;
+  enrichErrors: Record<number, string>;
   onEnrich: (emailId: number) => void;
 }): React.ReactElement {
   return (
@@ -360,6 +461,9 @@ function ResultsTable({
             <th className="px-4 py-2.5 text-[11px] font-semibold uppercase tracking-[0.08em] text-[var(--text-muted,#94a3b8)]">
               Verification
             </th>
+            <th className="px-4 py-2.5 text-[11px] font-semibold uppercase tracking-[0.08em] text-[var(--text-muted,#94a3b8)]">
+              Outreach
+            </th>
           </tr>
         </thead>
         <tbody className="divide-y divide-[var(--border,rgba(30,64,175,0.1))]">
@@ -375,6 +479,7 @@ function ResultsTable({
                 <EnrichmentCell
                   row={row}
                   inFlight={enrichInFlight.has(row.id)}
+                  error={enrichErrors[row.id]}
                   onEnrich={onEnrich}
                 />
               </td>
@@ -386,6 +491,9 @@ function ResultsTable({
                   verifyError={verifyErrors[row.id]}
                   onVerify={onVerify}
                 />
+              </td>
+              <td className="px-4 py-3">
+                <OutreachCell row={row} />
               </td>
             </tr>
           ))}
@@ -495,13 +603,17 @@ export function ScanDetailView({
   const [verifyInFlight, setVerifyInFlight] = useState<Set<number>>(new Set());
   const [verifyErrors, setVerifyErrors] = useState<Record<number, string>>({});
   const [enrichInFlight, setEnrichInFlight] = useState<Set<number>>(new Set());
+  const [enrichErrors, setEnrichErrors] = useState<Record<number, string>>({});
   const [searchQuery, setSearchQuery] = useState("");
   const [page, setPage] = useState(0);
-  const toast = useToast();
 
   const pollRef = useRef<ReturnType<typeof setInterval> | null>(null);
   const startedAtRef = useRef<number>(0);
   const verifyPollsRef = useRef<Map<number, ReturnType<typeof setInterval>>>(
+    new Map()
+  );
+  // Per-row phone-reveal polls (post-enrich), keyed by discovered-email id.
+  const enrichPollsRef = useRef<Map<number, ReturnType<typeof setInterval>>>(
     new Map()
   );
 
@@ -532,12 +644,26 @@ export function ScanDetailView({
     verifyPollsRef.current.clear();
   }, []);
 
+  const stopEnrichPoll = useCallback((emailId: number) => {
+    const handle = enrichPollsRef.current.get(emailId);
+    if (handle !== undefined) {
+      clearInterval(handle);
+      enrichPollsRef.current.delete(emailId);
+    }
+  }, []);
+
+  const stopAllEnrichPolls = useCallback(() => {
+    enrichPollsRef.current.forEach((handle) => clearInterval(handle));
+    enrichPollsRef.current.clear();
+  }, []);
+
   useEffect(
     () => () => {
       stopPolling();
       stopAllVerifyPolls();
+      stopAllEnrichPolls();
     },
-    [stopPolling, stopAllVerifyPolls]
+    [stopPolling, stopAllVerifyPolls, stopAllEnrichPolls]
   );
 
   const updateScan = useCallback((next: ScanResponse) => {
@@ -559,9 +685,11 @@ export function ScanDetailView({
     setVerifyInFlight(new Set());
     setVerifyErrors({});
     setEnrichInFlight(new Set());
+    setEnrichErrors({});
     setSearchQuery("");
     setPage(0);
     stopPolling();
+    stopAllEnrichPolls();
 
     let active = true;
 
@@ -599,7 +727,7 @@ export function ScanDetailView({
     return () => {
       active = false;
     };
-  }, [scanId, stopPolling, updateScan]);
+  }, [scanId, stopPolling, stopAllEnrichPolls, updateScan]);
 
   const refetchScan = useCallback(async () => {
     if (!scanId || Number.isNaN(scanId)) return;
@@ -716,11 +844,49 @@ export function ScanDetailView({
     [finishVerify, stopVerifyPoll]
   );
 
+  const startPhoneRevealPoll = useCallback(
+    (emailId: number) => {
+      // Apollo reveals the phone asynchronously (via webhook), so refetch the
+      // scan on a short cadence until the number lands or the row is no longer
+      // pending. Bounded by PHONE_REVEAL_TIMEOUT_MS so it never runs forever.
+      stopEnrichPoll(emailId);
+      const startedAt = Date.now();
+      const handle = setInterval(async () => {
+        if (Date.now() - startedAt > PHONE_REVEAL_TIMEOUT_MS) {
+          stopEnrichPoll(emailId);
+          return;
+        }
+        try {
+          const next = await getScan(scanId);
+          updateScan(next);
+          const row = next.discovered_emails.find((r) => r.id === emailId);
+          if (
+            !row ||
+            row.enriched_phone !== null ||
+            !row.phone_reveal_pending
+          ) {
+            stopEnrichPoll(emailId);
+          }
+        } catch {
+          stopEnrichPoll(emailId);
+        }
+      }, PHONE_REVEAL_POLL_MS);
+      enrichPollsRef.current.set(emailId, handle);
+    },
+    [scanId, updateScan, stopEnrichPoll]
+  );
+
   const handleEnrich = useCallback(
     async (emailId: number) => {
       setEnrichInFlight((prev) => {
         const next = new Set(prev);
         next.add(emailId);
+        return next;
+      });
+      setEnrichErrors((prev) => {
+        if (!(emailId in prev)) return prev;
+        const next = { ...prev };
+        delete next[emailId];
         return next;
       });
 
@@ -737,8 +903,14 @@ export function ScanDetailView({
           onScanLoadedRef.current?.(nextScan);
           return nextScan;
         });
-      } catch {
-        toast.error("Couldn't enrich — please try again.");
+        if (updated.phone_reveal_pending) {
+          startPhoneRevealPoll(emailId);
+        }
+      } catch (err) {
+        setEnrichErrors((prev) => ({
+          ...prev,
+          [emailId]: enrichErrorMessage(err),
+        }));
       } finally {
         setEnrichInFlight((prev) => {
           const next = new Set(prev);
@@ -747,7 +919,7 @@ export function ScanDetailView({
         });
       }
     },
-    [toast]
+    [startPhoneRevealPoll]
   );
 
   // Loading skeleton: pulse cards sized to roughly match the panels they
@@ -953,6 +1125,7 @@ export function ScanDetailView({
                   verifyErrors={verifyErrors}
                   onVerify={handleVerify}
                   enrichInFlight={enrichInFlight}
+                  enrichErrors={enrichErrors}
                   onEnrich={handleEnrich}
                 />
                 {showPager ? (
