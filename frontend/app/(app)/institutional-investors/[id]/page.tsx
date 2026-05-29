@@ -1,17 +1,13 @@
-import { InvestorDetailClient } from "@/components/institutional-investors/investor-detail-client";
-import { FeatureAccessDenied } from "@/components/feature-access-denied";
-import { getRequiredSession } from "@/lib/auth-server";
-import { hasFeature, INSTITUTIONAL_INVESTORS } from "@/lib/feature-permissions";
+import { InvestorRedirectClient } from "@/components/institutional-investors/investor-redirect-client";
 
-export default async function InstitutionalInvestorDetailPage(
-  props: {
-    params: Promise<{ id: string }>;
-  }
-) {
-  const params = await props.params;
-  const session = await getRequiredSession();
-  if (!hasFeature(session.user, INSTITUTIONAL_INVESTORS)) {
-    return <FeatureAccessDenied feature={INSTITUTIONAL_INVESTORS} />;
-  }
-  return <InvestorDetailClient investorId={params.id} />;
+// The Institutional Investors feature was merged into the Investment Advisors
+// list. This detail route now resolves the investor to its linked advisor and
+// forwards there, keeping old `/institutional-investors/<id>` links and Doxie
+// `ii_detail_url` answers working. Permission is enforced on the advisor detail
+// page we land on.
+export default async function InstitutionalInvestorDetailPage(props: {
+  params: Promise<{ id: string }>;
+}) {
+  const { id } = await props.params;
+  return <InvestorRedirectClient investorId={id} />;
 }
