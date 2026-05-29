@@ -48,7 +48,7 @@ const COLUMNS = [
   { key: "state", label: "State" },
   { key: "regulatory_aum", label: "Regulatory AUM" },
   { key: "total_clients", label: "Clients" },
-  { key: "files_13f", label: "13F" },
+  { key: "files_13f", label: "13F", title: "Files SEC Form 13F — institutional investor" },
   { key: "memberships", label: "Memberships" },
   { key: "last_filing_date", label: "Last Filing" },
 ] as const;
@@ -821,6 +821,7 @@ export function AdvisorListWorkspaceClient() {
                   return (
                     <th
                       key={column.key}
+                      title={(column as { title?: string }).title}
                       className="whitespace-nowrap border-b border-[var(--border,rgba(30,64,175,0.1))] bg-[var(--surface-2,#f1f6fd)] px-5 py-3 text-[11px] font-semibold uppercase tracking-[0.08em] text-[var(--text-muted,#94a3b8)]"
                     >
                       <button
