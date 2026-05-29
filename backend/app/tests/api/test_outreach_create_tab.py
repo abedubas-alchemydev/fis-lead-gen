@@ -14,13 +14,16 @@ Integration-marked -- both endpoints touch a real Postgres. Covers:
 
 from __future__ import annotations
 
+import json
 import secrets
 from datetime import datetime
 
 import httpx
 import pytest
+import respx
 from sqlalchemy import delete
 
+from app.core.config import settings
 from app.db.session import SessionLocal
 from app.main import app
 from app.models.advisor_contact import AdvisorContact
@@ -30,6 +33,7 @@ from app.models.executive_contact import ExecutiveContact
 from app.models.institutional_investor import InstitutionalInvestor
 from app.models.investment_advisor import InvestmentAdvisor
 from app.models.investor_contact import InvestorContact
+from app.models.vault_folder import VaultFolder
 from app.schemas.auth import AuthenticatedUser
 from app.services.auth import get_current_user
 
@@ -565,3 +569,166 @@ async def test_favorite_firms_404_on_other_users_list() -> None:
         app.dependency_overrides.clear()
         await _cleanup_favorite(list_id)
         await _cleanup([owner_id, other_id], [], [], [])
+
+
+# ── POST /outreach/adhoc-draft ───────────────────────────────────────────
+
+_VALID_GEMINI_KEY = "AIzaSy" + "a" * 33
+_GEMINI_URL = (
+    "https://generativelanguage.googleapis.com/v1beta/"
+    "models/gemini-2.5-flash:generateContent"
+)
+
+
+async def _seed_vault_folder(user_id: str, name: str, description: str) -> int:
+    async with SessionLocal() as session:
+        folder = VaultFolder(user_id=user_id, name=name, description=description)
+        session.add(folder)
+        await session.commit()
+        await session.refresh(folder)
+        return folder.id
+
+
+async def _cleanup_folder(folder_id: int) -> None:
+    async with SessionLocal() as session:
+        await session.execute(
+            delete(VaultFolder).where(VaultFolder.id == folder_id)
+        )
+        await session.commit()
+
+
+def _stub_gemini_response(*, subject: str, body: str) -> httpx.Response:
+    structured = json.dumps({"subject": subject, "body": body})
+    return httpx.Response(
+        200,
+        json={"candidates": [{"content": {"parts": [{"text": structured}]}}]},
+    )
+
+
+@pytest.fixture
+def _patch_outreach_retrieve_chunks(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Stub RAG so the test doesn't depend on pgvector + OpenAI embeddings.
+
+    The endpoint already tolerates retrieve_chunks failures, but mocking
+    keeps the test deterministic instead of relying on the swallow-error
+    path.
+    """
+
+    async def _empty_retrieve(*, folder_id: int, query: str, db) -> list:  # noqa: ANN001
+        return []
+
+    monkeypatch.setattr(
+        "app.api.v1.endpoints.outreach.retrieve_chunks", _empty_retrieve
+    )
+
+
+@respx.mock
+async def test_adhoc_draft_returns_subject_and_body(
+    monkeypatch: pytest.MonkeyPatch, _patch_outreach_retrieve_chunks
+) -> None:
+    monkeypatch.setattr(settings, "gemini_api_key", _VALID_GEMINI_KEY)
+    monkeypatch.setattr(
+        settings,
+        "gemini_api_base",
+        "https://generativelanguage.googleapis.com/v1beta",
+    )
+    respx.post(_GEMINI_URL).mock(
+        return_value=_stub_gemini_response(
+            subject="Quick intro on stock-loan rebates",
+            body="Hi Sarah,\n\nValue para.\n\n- Sender",
+        )
+    )
+
+    user_id = await _seed_user()
+    folder_id = await _seed_vault_folder(
+        user_id,
+        "Stock Loan",
+        "We offer competitive rebates on hard-to-borrow names.",
+    )
+    app.dependency_overrides[get_current_user] = lambda: _override_user(user_id)
+    try:
+        async with _client() as client:
+            response = await client.post(
+                "/api/v1/outreach/adhoc-draft",
+                json={
+                    "folder_id": folder_id,
+                    "recipient_email": "sarah@example.com",
+                    "recipient_name": "Sarah",
+                },
+            )
+        assert response.status_code == 200, response.text
+        payload = response.json()
+        assert payload["subject"] == "Quick intro on stock-loan rebates"
+        assert payload["body"].startswith("Hi Sarah")
+    finally:
+        app.dependency_overrides.clear()
+        await _cleanup_folder(folder_id)
+        await _cleanup([user_id], [], [], [])
+
+
+async def test_adhoc_draft_404_on_folder_owned_by_other_user(
+    _patch_outreach_retrieve_chunks,
+) -> None:
+    owner_id = await _seed_user()
+    caller_id = await _seed_user()
+    folder_id = await _seed_vault_folder(owner_id, "Owner Service", "Owned by owner.")
+    app.dependency_overrides[get_current_user] = lambda: _override_user(caller_id)
+    try:
+        async with _client() as client:
+            response = await client.post(
+                "/api/v1/outreach/adhoc-draft",
+                json={
+                    "folder_id": folder_id,
+                    "recipient_email": "sarah@example.com",
+                },
+            )
+        assert response.status_code == 404
+        assert response.json()["detail"] == "outreach_inputs_not_found"
+    finally:
+        app.dependency_overrides.clear()
+        await _cleanup_folder(folder_id)
+        await _cleanup([owner_id, caller_id], [], [], [])
+
+
+async def test_adhoc_draft_503_when_gemini_key_missing(
+    monkeypatch: pytest.MonkeyPatch, _patch_outreach_retrieve_chunks
+) -> None:
+    monkeypatch.setattr(settings, "gemini_api_key", None)
+
+    user_id = await _seed_user()
+    folder_id = await _seed_vault_folder(user_id, "Stock Loan", "Service desc.")
+    app.dependency_overrides[get_current_user] = lambda: _override_user(user_id)
+    try:
+        async with _client() as client:
+            response = await client.post(
+                "/api/v1/outreach/adhoc-draft",
+                json={
+                    "folder_id": folder_id,
+                    "recipient_email": "sarah@example.com",
+                },
+            )
+        assert response.status_code == 503
+    finally:
+        app.dependency_overrides.clear()
+        await _cleanup_folder(folder_id)
+        await _cleanup([user_id], [], [], [])
+
+
+async def test_adhoc_draft_422_on_invalid_recipient_email() -> None:
+    user_id = await _seed_user()
+    folder_id = await _seed_vault_folder(user_id, "Stock Loan", "Service desc.")
+    app.dependency_overrides[get_current_user] = lambda: _override_user(user_id)
+    try:
+        async with _client() as client:
+            response = await client.post(
+                "/api/v1/outreach/adhoc-draft",
+                json={
+                    "folder_id": folder_id,
+                    "recipient_email": "not-an-email",
+                },
+            )
+        assert response.status_code == 422
+    finally:
+        app.dependency_overrides.clear()
+        await _cleanup_folder(folder_id)
+        await _cleanup([user_id], [], [], [])

@@ -145,6 +145,22 @@ class Settings(BaseSettings):
     # segment to this setting. When ``apollo_webhook_secret`` is unset,
     # the provider DOES NOT request phone reveal — the feature stays
     # dormant until both this and ``public_base_url`` are configured.
+    # Director LinkedIn fall-through. Apollo's /people/match returns the
+    # person record *projected through the queried firm*. For an outside
+    # board director (e.g. a retired exec who sits on Vanguard's board but
+    # works elsewhere), Apollo confirms identity at the queried firm but
+    # the firm-projected record often has no linkedin_url — the URL lives
+    # on the person's PRIMARY-employer record. When this is on, a confirmed
+    # match (confidence >= threshold) that came back with no LinkedIn
+    # triggers a second /people/match with first+last only (no org/domain
+    # anchor) to surface the primary record's LinkedIn. The fallback URL is
+    # accepted only when Apollo's own person id matches, so a same-name
+    # stranger can't pollute the row. On by default as part of the "use every
+    # resource for contact coverage" directive — the cost is one extra Apollo
+    # call per no-LinkedIn row, and the id-match guard prevents wrong-person
+    # grafts. Yield is firm-dependent (Apollo's name-only match returns sparse
+    # stubs for some cohorts), but when it can recover a URL we take it.
+    apollo_director_linkedin_fallback: bool = True
     apollo_webhook_secret: str | None = None
     # Absolute base URL of the public Cloud Run service, used to construct
     # the ``webhook_url`` we register with Apollo on each /people/match
@@ -176,7 +192,13 @@ class Settings(BaseSettings):
     # no key. Keys (``hunter_api_key``, ``snov_client_id``,
     # ``snov_client_secret``) are declared further down because the existing
     # email-extractor module already depends on them.
-    contact_discovery_chain: str = "pdl,apollo_match,hunter,snov"
+    #
+    # ``linkedin_search`` runs LAST: it recovers a LinkedIn URL via a public
+    # Google search (serper/SerpAPI, ``site:linkedin.com/in``) only for people
+    # the data-broker providers couldn't supply one for. Last position means
+    # the merge's first-non-null ``linkedin_url`` selection prefers a broker's
+    # URL and only falls back to the search hit when all brokers missed.
+    contact_discovery_chain: str = "pdl,apollo_match,hunter,snov,linkedin_search"
     contact_discovery_min_confidence: float = 60.0
     contact_discovery_timeout: float = 10.0
     gemini_api_key: str | None = None

@@ -86,6 +86,12 @@ class SerpResult:
     domain: str
     title: str
     is_high_confidence: bool = False
+    # Result snippet (the grey descriptive text under the title). Empty for
+    # knowledge-graph / answer-box entries that don't carry one. Used by the
+    # LinkedIn-search contact provider to confirm a profile's org affiliation
+    # (the firm name often appears in the snippet but not the URL slug); the
+    # website resolver ignores it.
+    snippet: str = ""
 
 
 class SerpAPIClient:
@@ -234,11 +240,13 @@ class SerpAPIClient:
                 if not domain:
                     continue
                 title = hit.get("title")
+                snippet = hit.get("snippet")
                 results.append(
                     SerpResult(
                         url=url_raw,
                         domain=domain,
                         title=str(title) if isinstance(title, str) else "",
+                        snippet=str(snippet) if isinstance(snippet, str) else "",
                     )
                 )
         return results

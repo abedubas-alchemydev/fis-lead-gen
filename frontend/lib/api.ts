@@ -112,11 +112,12 @@ import type {
   InstitutionalInvestorProfileResponse,
   InvestorEnrichResponse,
   InvestorListResponse,
+  OutreachAdhocDraftRequest,
+  OutreachAdhocSendRequest,
   OutreachAdvisorDraftRequest,
   OutreachAdvisorSendRequest,
   OutreachDraft,
   OutreachDraftRequest,
-  OutreachAdhocSendRequest,
   OutreachInvestorDraftRequest,
   OutreachInvestorSendRequest,
   OutreachSendDetail,
@@ -919,6 +920,20 @@ export async function generateOutreachDraft(
   payload: OutreachDraftRequest
 ): Promise<OutreachDraft> {
   return apiRequest<OutreachDraft>("/api/v1/outreach/draft", {
+    method: "POST",
+    body: JSON.stringify(payload)
+  });
+}
+
+// Adhoc draft path — used by /outreach/sent?tab=create when the
+// recipient is a typed-in email with no contact record. Unlike the
+// contact-keyed draft endpoints, this only requires (folder_id,
+// recipient_email) — Gemini works from the service folder + RAG plus
+// the optional recipient name.
+export async function generateAdhocOutreachDraft(
+  payload: OutreachAdhocDraftRequest
+): Promise<OutreachDraft> {
+  return apiRequest<OutreachDraft>("/api/v1/outreach/adhoc-draft", {
     method: "POST",
     body: JSON.stringify(payload)
   });

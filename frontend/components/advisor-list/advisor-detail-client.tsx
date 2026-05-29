@@ -37,6 +37,7 @@ import { listScansForEntity } from "@/lib/email-extractor";
 import { ListPicker } from "@/components/list-picker/list-picker";
 import { OutreachButton } from "@/components/master-list/outreach-button";
 import { ChannelIconCell } from "@/components/advisor-list/channel-icon-cell";
+import { PeopleTable } from "@/components/master-list/detail/people-table";
 import { Pill } from "@/components/ui/pill";
 import { agencyLabel } from "@/components/master-list/detail/clearing-membership-helpers";
 import { SectionPanel } from "@/components/ui/section-panel";
@@ -139,6 +140,11 @@ export function AdvisorDetailClient({ advisorId }: { advisorId: string }) {
   const [gapFillError, setGapFillError] = useState<string | null>(null);
   const [gapFillNotice, setGapFillNotice] = useState<string | null>(null);
 
+  // Filings list renders collapsed to the most-recent few; "Show all"
+  // expands the full in-memory list. Reset when switching advisors (the
+  // component instance persists across Prev/Next — only advisorId changes).
+  const [showAllFilings, setShowAllFilings] = useState(false);
+
   // Fetch /profile immediately on mount. Errors surface via setError so
   // a failed first load shows the error page. `reloadProfile` is the
   // re-fetch helper the manual Refresh button calls; it lets the caller
@@ -173,6 +179,11 @@ export function AdvisorDetailClient({ advisorId }: { advisorId: string }) {
     return () => {
       active = false;
     };
+  }, [advisorId]);
+
+  // Collapse the filings list again whenever we navigate to another advisor.
+  useEffect(() => {
+    setShowAllFilings(false);
   }, [advisorId]);
 
   // Manual refresh handler. POST /refresh-all on click, poll the parent
@@ -464,6 +475,11 @@ export function AdvisorDetailClient({ advisorId }: { advisorId: string }) {
   const advisoryActivities = advisor.advisory_activities ?? [];
   const clientTypes = advisor.client_types ?? [];
   const clientCounts = advisor.client_counts ?? null;
+  // Filings render collapsed to the 6 most-recent; the rest expand on demand.
+  const FILINGS_COLLAPSED = 6;
+  const visibleFilings = showAllFilings
+    ? filings
+    : filings.slice(0, FILINGS_COLLAPSED);
 
   // Resolve the firm domain for the inline Find-emails section: prefer the
   // advisor's website, fall back to the first contact email's domain.
@@ -512,6 +528,14 @@ export function AdvisorDetailClient({ advisorId }: { advisorId: string }) {
               entityType="advisor"
               initialFavorited={data.is_favorited}
             />
+            {advisor.files_13f ? (
+              <Pill variant="healthy">13F filer</Pill>
+            ) : null}
+            {advisor.member_agencies.map((code) => (
+              <Pill key={code} variant="member">
+                {agencyLabel(code)} member
+              </Pill>
+            ))}
           </div>
           {advisor.legal_name && advisor.legal_name !== advisor.name ? (
             <p className="mt-1 text-[13px] text-[var(--text-dim,#475569)]">
@@ -588,6 +612,32 @@ export function AdvisorDetailClient({ advisorId }: { advisorId: string }) {
           </div>
         </div>
         <div className="flex shrink-0 items-center gap-2.5">
+          <div className="flex items-center gap-1">
+            <button
+              type="button"
+              disabled={!prevId}
+              onClick={() => prevId && router.push(buildAdjacentHref(prevId))}
+              title="Previous advisor"
+              aria-label="Previous advisor"
+              className="inline-flex h-9 w-9 items-center justify-center rounded-[10px] border border-[var(--border-2,rgba(30,64,175,0.16))] bg-[var(--surface,#ffffff)] text-[var(--text-dim,#475569)] transition hover:bg-[var(--surface-2,#f1f6fd)] hover:text-[var(--text,#0f172a)] disabled:cursor-not-allowed disabled:opacity-45"
+            >
+              <ArrowLeft className="h-4 w-4" strokeWidth={2} aria-hidden />
+            </button>
+            <button
+              type="button"
+              disabled={!nextId}
+              onClick={() => nextId && router.push(buildAdjacentHref(nextId))}
+              title="Next advisor"
+              aria-label="Next advisor"
+              className="inline-flex h-9 w-9 items-center justify-center rounded-[10px] border border-[var(--border-2,rgba(30,64,175,0.16))] bg-[var(--surface,#ffffff)] text-[var(--text-dim,#475569)] transition hover:bg-[var(--surface-2,#f1f6fd)] hover:text-[var(--text,#0f172a)] disabled:cursor-not-allowed disabled:opacity-45"
+            >
+              <ArrowRight className="h-4 w-4" strokeWidth={2} aria-hidden />
+            </button>
+          </div>
+          <span
+            className="h-6 w-px bg-[var(--border-2,rgba(30,64,175,0.16))]"
+            aria-hidden
+          />
           <button
             type="button"
             onClick={() => void runGapFill()}
@@ -636,46 +686,6 @@ export function AdvisorDetailClient({ advisorId }: { advisorId: string }) {
         </div>
       ) : null}
 
-      {/* ── Status pills row ────────────────────────────────────────────── */}
-      {advisor.files_13f || advisor.member_agencies.length > 0 ? (
-        <div className="mb-5 flex flex-wrap items-center gap-2">
-          {advisor.files_13f ? <Pill variant="healthy">13F filer</Pill> : null}
-          {advisor.member_agencies.map((code) => (
-            <Pill key={code} variant="member">
-              {agencyLabel(code)} member
-            </Pill>
-          ))}
-        </div>
-      ) : null}
-
-      {/* ── Prev / Back / Next nav row ──────────────────────────────────── */}
-      <div className="mb-5 flex items-center justify-between gap-3">
-        <button
-          type="button"
-          disabled={!prevId}
-          onClick={() => prevId && router.push(buildAdjacentHref(prevId))}
-          className={SECONDARY_BTN}
-        >
-          <ArrowLeft className="h-4 w-4" strokeWidth={2} aria-hidden />
-          Previous
-        </button>
-        <Link
-          href={backHref}
-          className="text-[12px] uppercase tracking-[0.08em] text-[var(--text-muted,#94a3b8)] transition hover:text-[var(--text,#0f172a)]"
-        >
-          Back to advisors
-        </Link>
-        <button
-          type="button"
-          disabled={!nextId}
-          onClick={() => nextId && router.push(buildAdjacentHref(nextId))}
-          className={SECONDARY_BTN}
-        >
-          Next
-          <ArrowRight className="h-4 w-4" strokeWidth={2} aria-hidden />
-        </button>
-      </div>
-
       {/* ── KPI strip ───────────────────────────────────────────────────── */}
       <div className="mb-4 grid gap-3 sm:grid-cols-2 lg:grid-cols-4">
         <MiniStat
@@ -696,8 +706,9 @@ export function AdvisorDetailClient({ advisorId }: { advisorId: string }) {
         />
       </div>
 
-      {/* ── 2-column section grid ───────────────────────────────────────── */}
-      <div className="grid gap-4 xl:grid-cols-2">
+      {/* ── 2-column section layout — independent flex columns (no height-locking) ───────────────────────────────────────── */}
+      <div className="flex flex-col gap-4 xl:flex-row">
+      <div className="flex min-w-0 flex-1 flex-col gap-4">
         {/* Form ADV details */}
         <SectionPanel
           eyebrow="Form ADV"
@@ -785,44 +796,6 @@ export function AdvisorDetailClient({ advisorId }: { advisorId: string }) {
           ) : null}
         </SectionPanel>
 
-        {/* Firm overview */}
-        <SectionPanel eyebrow="Overview" title="Registration & filings">
-          <div className="grid gap-3 md:grid-cols-2">
-            <MiniStat
-              label="Status"
-              value={advisor.status || "—"}
-              compact
-            />
-            <MiniStat
-              label="Registration date"
-              value={formatDate(advisor.registration_date)}
-              compact
-            />
-            {/* Formation date intentionally not rendered: Form ADV doesn't
-                ask for it and the IAPD per-firm payload doesn't carry one,
-                so the column would be "Not available" for nearly every IA.
-                Field remains on the schema/model — re-enable if a corporate-
-                records source (OpenCorporates / state SOS) is ever wired. */}
-            <MiniStat
-              label="Source"
-              value={advisor.matched_source || "—"}
-              compact
-            />
-          </div>
-
-          {advisor.filings_index_url ? (
-            <a
-              href={advisor.filings_index_url}
-              target="_blank"
-              rel="noopener noreferrer"
-              className="mt-4 inline-flex items-center gap-1.5 rounded-[10px] border border-[var(--border-2,rgba(30,64,175,0.16))] bg-[var(--surface,#ffffff)] px-3 py-1.5 text-[12px] font-medium text-[var(--text-dim,#475569)] transition hover:bg-[var(--surface-2,#f1f6fd)] hover:text-[var(--text,#0f172a)]"
-            >
-              <ExternalLink className="h-3.5 w-3.5" strokeWidth={2} />
-              EDGAR filings index
-            </a>
-          ) : null}
-        </SectionPanel>
-
         {/* People */}
         <SectionPanel eyebrow="People" title="Owners, officers, and contacts">
           {directOwners.length === 0 &&
@@ -857,7 +830,49 @@ export function AdvisorDetailClient({ advisorId }: { advisorId: string }) {
             />
           ) : null}
 
-          {executiveOfficers.length > 0 ? (
+          {/* Executive officers — one merged table. When contacts are
+              populated (enrichment chain has run), drive from advisor_contacts
+              so names come out title-cased and the Channels/Outreach columns
+              show. Pre-enrichment, fall back to the raw Form ADV officer
+              list so the page still shows the roster. The two sources are
+              the same 27 people for a fully-enriched advisor; the chain's
+              names-only fallback guarantees parity even when no provider
+              matched a given officer. */}
+          {contacts.length > 0 ? (
+            <PeopleTable
+              title="Executive officers"
+              items={contacts}
+              columns={[
+                {
+                  header: "Name",
+                  cell: (c) => (
+                    <span className="font-semibold text-[var(--text,#0f172a)]">
+                      {c.name}
+                    </span>
+                  ),
+                },
+                { header: "Title", cell: (c) => c.title ?? "—" },
+                {
+                  header: "Channels",
+                  cell: (c) => <ChannelIconCell contact={c} />,
+                  className: "whitespace-nowrap",
+                },
+                {
+                  header: "Outreach",
+                  cell: (c) =>
+                    c.email ? (
+                      <OutreachButton
+                        entityKind="advisor"
+                        entityId={Number(advisorId)}
+                        entityName={advisor.name}
+                        contact={c}
+                      />
+                    ) : null,
+                  className: "whitespace-nowrap",
+                },
+              ]}
+            />
+          ) : executiveOfficers.length > 0 ? (
             <PeopleTable
               title="Executive officers"
               items={executiveOfficers}
@@ -897,41 +912,45 @@ export function AdvisorDetailClient({ advisorId }: { advisorId: string }) {
               ]}
             />
           ) : null}
+        </SectionPanel>
+      </div>
 
-          {contacts.length > 0 ? (
-            <PeopleTable
-              title="Enriched contacts"
-              items={contacts}
-              columns={[
-                {
-                  header: "Name",
-                  cell: (c) => (
-                    <span className="font-semibold text-[var(--text,#0f172a)]">
-                      {c.name}
-                    </span>
-                  ),
-                },
-                { header: "Title", cell: (c) => c.title ?? "—" },
-                {
-                  header: "Channels",
-                  cell: (c) => <ChannelIconCell contact={c} />,
-                  className: "whitespace-nowrap",
-                },
-                {
-                  header: "Outreach",
-                  cell: (c) =>
-                    c.email ? (
-                      <OutreachButton
-                        entityKind="advisor"
-                        entityId={Number(advisorId)}
-                        entityName={advisor.name}
-                        contact={c}
-                      />
-                    ) : null,
-                  className: "whitespace-nowrap",
-                },
-              ]}
+      <div className="flex min-w-0 flex-1 flex-col gap-4">
+        {/* Firm overview */}
+        <SectionPanel eyebrow="Overview" title="Registration & filings">
+          <div className="grid gap-3 md:grid-cols-2">
+            <MiniStat
+              label="Status"
+              value={advisor.status || "—"}
+              compact
             />
+            <MiniStat
+              label="Registration date"
+              value={formatDate(advisor.registration_date)}
+              compact
+            />
+            {/* Formation date intentionally not rendered: Form ADV doesn't
+                ask for it and the IAPD per-firm payload doesn't carry one,
+                so the column would be "Not available" for nearly every IA.
+                Field remains on the schema/model — re-enable if a corporate-
+                records source (OpenCorporates / state SOS) is ever wired. */}
+            <MiniStat
+              label="Source"
+              value={advisor.matched_source || "—"}
+              compact
+            />
+          </div>
+
+          {advisor.filings_index_url ? (
+            <a
+              href={advisor.filings_index_url}
+              target="_blank"
+              rel="noopener noreferrer"
+              className="mt-4 inline-flex items-center gap-1.5 rounded-[10px] border border-[var(--border-2,rgba(30,64,175,0.16))] bg-[var(--surface,#ffffff)] px-3 py-1.5 text-[12px] font-medium text-[var(--text-dim,#475569)] transition hover:bg-[var(--surface-2,#f1f6fd)] hover:text-[var(--text,#0f172a)]"
+            >
+              <ExternalLink className="h-3.5 w-3.5" strokeWidth={2} />
+              EDGAR filings index
+            </a>
           ) : null}
         </SectionPanel>
 
@@ -943,7 +962,7 @@ export function AdvisorDetailClient({ advisorId }: { advisorId: string }) {
             </div>
           ) : (
             <div className="space-y-2">
-              {filings.map((filing) => (
+              {visibleFilings.map((filing) => (
                 <div
                   key={filing.id}
                   className="rounded-2xl border border-[var(--border,rgba(30,64,175,0.1))] px-4 py-3"
@@ -979,9 +998,21 @@ export function AdvisorDetailClient({ advisorId }: { advisorId: string }) {
                   </div>
                 </div>
               ))}
+              {filings.length > FILINGS_COLLAPSED ? (
+                <button
+                  type="button"
+                  onClick={() => setShowAllFilings((prev) => !prev)}
+                  className="inline-flex items-center gap-1.5 rounded-[10px] border border-[var(--border-2,rgba(30,64,175,0.16))] bg-[var(--surface,#ffffff)] px-3 py-1.5 text-[12px] font-medium text-[var(--text-dim,#475569)] transition hover:bg-[var(--surface-2,#f1f6fd)] hover:text-[var(--text,#0f172a)]"
+                >
+                  {showAllFilings
+                    ? "Show fewer"
+                    : `Show all (${filings.length})`}
+                </button>
+              ) : null}
             </div>
           )}
         </SectionPanel>
+      </div>
       </div>
 
       {/* ── Discovered emails (full width) ── */}
@@ -1036,109 +1067,6 @@ function MiniStat({
           {helper}
         </p>
       ) : null}
-    </div>
-  );
-}
-
-// The People panel renders up to four groups (direct owners, executive
-// officers, indirect owners, enriched contacts). For large IAs each group can
-// have dozens of rows (Vanguard: 61 direct owners, 27 officers), so we render
-// each group as its own paginated table. State lives in the table so the
-// surrounding panel doesn't have to track per-group page indices.
-const PEOPLE_TABLE_PAGE_SIZE = 10;
-
-type PeopleColumn<T> = {
-  header: string;
-  cell: (item: T) => React.ReactNode;
-  className?: string;
-};
-
-function PeopleTable<T>({
-  title,
-  items,
-  columns,
-  pageSize = PEOPLE_TABLE_PAGE_SIZE,
-}: {
-  title: string;
-  items: readonly T[];
-  columns: readonly PeopleColumn<T>[];
-  pageSize?: number;
-}) {
-  const [page, setPage] = useState(0);
-  const total = items.length;
-  const totalPages = Math.max(1, Math.ceil(total / pageSize));
-  // ``items`` may shrink on a parent re-render — clamp the active page so we
-  // never slice past the end after the source list got shorter.
-  const safePage = Math.min(page, totalPages - 1);
-  const start = safePage * pageSize;
-  const visible = items.slice(start, start + pageSize);
-  const showPager = total > pageSize;
-
-  return (
-    <div className="mb-5 last:mb-0">
-      <div className="mb-2 flex flex-wrap items-center justify-between gap-3">
-        <p className="text-[13px] font-semibold text-[var(--text,#0f172a)]">
-          {total > 0 ? `${title} (${total})` : title}
-        </p>
-        {showPager ? (
-          <div className="flex items-center gap-2 text-xs text-[var(--text-muted,#94a3b8)]">
-            <button
-              type="button"
-              onClick={() => setPage((p) => Math.max(0, p - 1))}
-              disabled={safePage === 0}
-              className="rounded-md px-2 py-1 hover:bg-[var(--surface-2,#f1f6fd)] disabled:cursor-not-allowed disabled:opacity-40 disabled:hover:bg-transparent"
-              aria-label={`Previous page of ${title}`}
-            >
-              Prev
-            </button>
-            <span aria-live="polite">
-              {start + 1}–{Math.min(start + pageSize, total)} of {total}
-            </span>
-            <button
-              type="button"
-              onClick={() => setPage((p) => Math.min(totalPages - 1, p + 1))}
-              disabled={safePage >= totalPages - 1}
-              className="rounded-md px-2 py-1 hover:bg-[var(--surface-2,#f1f6fd)] disabled:cursor-not-allowed disabled:opacity-40 disabled:hover:bg-transparent"
-              aria-label={`Next page of ${title}`}
-            >
-              Next
-            </button>
-          </div>
-        ) : null}
-      </div>
-      <div className="overflow-hidden rounded-2xl border border-[var(--border,rgba(30,64,175,0.1))]">
-        <table className="w-full text-sm">
-          <thead className="bg-[var(--surface-2,#f1f6fd)] text-left text-xs uppercase tracking-wide text-[var(--text-muted,#94a3b8)]">
-            <tr>
-              {columns.map((c) => (
-                <th
-                  key={c.header}
-                  className={`px-4 py-2 font-semibold ${c.className ?? ""}`}
-                >
-                  {c.header}
-                </th>
-              ))}
-            </tr>
-          </thead>
-          <tbody>
-            {visible.map((item, i) => (
-              <tr
-                key={start + i}
-                className="border-t border-[var(--border,rgba(30,64,175,0.1))] text-[var(--text-dim,#475569)]"
-              >
-                {columns.map((c) => (
-                  <td
-                    key={c.header}
-                    className={`px-4 py-2 align-top ${c.className ?? ""}`}
-                  >
-                    {c.cell(item)}
-                  </td>
-                ))}
-              </tr>
-            ))}
-          </tbody>
-        </table>
-      </div>
     </div>
   );
 }

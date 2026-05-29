@@ -18,7 +18,8 @@ import {
   type LucideIcon,
 } from "lucide-react";
 
-import type { AdvisorContactItem, EmailHit, PhoneHit } from "@/lib/types";
+import { FindPhoneButton } from "@/components/master-list/detail/find-phone-button";
+import type { EmailHit, ExecutiveContactItem, PhoneHit } from "@/lib/types";
 
 // Three fixed icon slots per row (LinkedIn / Email / Phone), always rendered
 // — missing channels show muted/disabled so the row layout stays uniform and
@@ -40,10 +41,30 @@ interface PopoverCoords {
   placement: "top" | "bottom";
 }
 
+// Minimal structural shape the cell needs — satisfied by both
+// AdvisorContactItem (/advisor-list) and ExecutiveContactItem (/master-list),
+// so the same cell drives the Channels column on both detail pages.
+type ChannelContact = {
+  id: number;
+  email: string | null;
+  phone?: string | null;
+  emails?: EmailHit[] | null;
+  phones?: PhoneHit[] | null;
+  linkedin_url: string | null;
+};
+
 export function ChannelIconCell({
   contact,
+  entityKind = "broker-dealer",
+  entityId,
+  onContactUpdated,
 }: {
-  contact: AdvisorContactItem;
+  contact: ChannelContact | null | undefined;
+  // Find-phone is opt-in: only the broker-dealer page passes these, so the
+  // advisor page keeps the read-only icon behavior (no find-phone affordance).
+  entityKind?: "broker-dealer" | "investor";
+  entityId?: number;
+  onContactUpdated?: (updated: ExecutiveContactItem) => void;
 }) {
   const [openChannel, setOpenChannel] = useState<Channel | null>(null);
   const linkedinRef = useRef<HTMLButtonElement>(null);
@@ -54,29 +75,43 @@ export function ChannelIconCell({
   // email/phone onto a one-element array shape so rows from older writes
   // (pre-array merger) still show details on click.
   const emails = useMemo<EmailHit[]>(() => {
-    if (contact.emails && contact.emails.length > 0) return contact.emails;
-    if (contact.email) {
+    if (contact?.emails && contact.emails.length > 0) return contact.emails;
+    if (contact?.email) {
       return [
         { value: contact.email, type: "work", confidence: null, source: "" },
       ];
     }
     return [];
-  }, [contact.emails, contact.email]);
+  }, [contact?.emails, contact?.email]);
 
   const phones = useMemo<PhoneHit[]>(() => {
-    if (contact.phones && contact.phones.length > 0) return contact.phones;
-    if (contact.phone) {
+    if (contact?.phones && contact.phones.length > 0) return contact.phones;
+    if (contact?.phone) {
       return [
         { value: contact.phone, type: "work", confidence: null, source: "" },
       ];
     }
     return [];
-  }, [contact.phones, contact.phone]);
+  }, [contact?.phones, contact?.phone]);
 
-  const linkedinUrl = contact.linkedin_url;
+  const linkedinUrl = contact?.linkedin_url ?? null;
   const hasLinkedIn = !!linkedinUrl;
   const hasEmail = emails.length > 0;
   const hasPhone = phones.length > 0;
+
+  // Show a "Find phone" affordance inside the phone popover when the contact
+  // has an email but no phone yet (mirrors the old ContactRow behavior). Built
+  // as one object so the truthiness checks narrow the optional props for TS.
+  const findPhone =
+    onContactUpdated && entityId && contact && !hasPhone && contact.email
+      ? {
+          entityKind,
+          entityId,
+          contactId: contact.id,
+          onSuccess: onContactUpdated,
+        }
+      : null;
+  const canFindPhone = findPhone !== null;
 
   const toggle = useCallback((channel: Channel) => {
     setOpenChannel((current) => (current === channel ? null : channel));
@@ -117,8 +152,14 @@ export function ChannelIconCell({
       />
       <IconButton
         icon={Phone}
-        present={hasPhone}
-        label={hasPhone ? "Show phone numbers" : "No phone on file"}
+        present={hasPhone || canFindPhone}
+        label={
+          hasPhone
+            ? "Show phone numbers"
+            : canFindPhone
+              ? "Find phone number"
+              : "No phone on file"
+        }
         isActive={openChannel === "phone"}
         onClick={() => toggle("phone")}
         buttonRef={phoneRef}
@@ -129,7 +170,9 @@ export function ChannelIconCell({
             <LinkedInBody url={linkedinUrl} />
           ) : null}
           {openChannel === "mail" ? <EmailBody emails={emails} /> : null}
-          {openChannel === "phone" ? <PhoneBody phones={phones} /> : null}
+          {openChannel === "phone" ? (
+            <PhoneBody phones={phones} findPhone={findPhone} />
+          ) : null}
         </ChannelPopover>
       ) : null}
     </div>
@@ -336,29 +379,54 @@ function EmailBody({ emails }: { emails: EmailHit[] }) {
   );
 }
 
-function PhoneBody({ phones }: { phones: PhoneHit[] }) {
+function PhoneBody({
+  phones,
+  findPhone,
+}: {
+  phones: PhoneHit[];
+  findPhone?: {
+    entityKind: "broker-dealer" | "investor";
+    entityId: number;
+    contactId: number;
+    onSuccess: (updated: ExecutiveContactItem) => void;
+  } | null;
+}) {
   return (
     <div className="flex flex-col gap-1.5 min-w-[180px]">
       <span className="text-[11px] uppercase tracking-[0.08em] text-[var(--text-muted,#94a3b8)]">
         Phone
       </span>
-      <ul className="flex flex-col gap-1">
-        {phones.map((phone, i) => (
-          <li key={`phone-${i}`} className="flex items-center gap-2">
-            <a
-              href={`tel:${phone.value}`}
-              className="text-[12px] text-[var(--text-dim,#475569)] transition hover:underline"
-            >
-              {phone.value}
-            </a>
-            {phone.type !== "work" ? (
-              <span className="rounded-full bg-[var(--surface-2,#f1f6fd)] px-1.5 py-0.5 text-[10px] uppercase tracking-[0.08em] text-[var(--text-muted,#94a3b8)]">
-                {phone.type}
-              </span>
-            ) : null}
-          </li>
-        ))}
-      </ul>
+      {phones.length > 0 ? (
+        <ul className="flex flex-col gap-1">
+          {phones.map((phone, i) => (
+            <li key={`phone-${i}`} className="flex items-center gap-2">
+              <a
+                href={`tel:${phone.value}`}
+                className="text-[12px] text-[var(--text-dim,#475569)] transition hover:underline"
+              >
+                {phone.value}
+              </a>
+              {phone.type !== "work" ? (
+                <span className="rounded-full bg-[var(--surface-2,#f1f6fd)] px-1.5 py-0.5 text-[10px] uppercase tracking-[0.08em] text-[var(--text-muted,#94a3b8)]">
+                  {phone.type}
+                </span>
+              ) : null}
+            </li>
+          ))}
+        </ul>
+      ) : findPhone ? (
+        <div className="flex flex-col items-start gap-2">
+          <span className="text-[12px] italic text-[var(--text-muted,#94a3b8)]">
+            Mobile number not publicly available
+          </span>
+          <FindPhoneButton
+            entityKind={findPhone.entityKind}
+            entityId={findPhone.entityId}
+            contactId={findPhone.contactId}
+            onSuccess={findPhone.onSuccess}
+          />
+        </div>
+      ) : null}
     </div>
   );
 }

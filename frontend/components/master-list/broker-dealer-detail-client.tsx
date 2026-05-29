@@ -12,12 +12,13 @@ import {
   ExternalLink,
   Loader2,
   RefreshCw,
-  Sparkles,
 } from "lucide-react";
 
 import { AlertPriorityBadge } from "@/components/alerts/alert-priority-badge";
 import { ArrangementFields } from "@/components/master-list/detail/arrangement-fields";
-import { ContactRow } from "@/components/master-list/detail/contact-row";
+import { ChannelIconCell } from "@/components/advisor-list/channel-icon-cell";
+import { OutreachButton } from "@/components/master-list/outreach-button";
+import { PeopleTable } from "@/components/master-list/detail/people-table";
 import { EmailScansSection } from "@/components/email-extractor/email-scans-section";
 import { FinancialTrendChart } from "@/components/master-list/detail/financial-trend-chart";
 import { FirmWebsiteLink } from "@/components/master-list/detail/firm-website-link";
@@ -31,11 +32,7 @@ import {
   priorityLabel,
   priorityVariant,
 } from "@/components/master-list/detail/pill-helpers";
-import {
-  dedupOfficers,
-  nameMatches,
-  toOfficerEntity,
-} from "@/components/master-list/detail/name-matching";
+import { nameMatches } from "@/components/master-list/detail/name-matching";
 import { SectionPanel } from "@/components/ui/section-panel";
 import { ListPicker } from "@/components/list-picker/list-picker";
 import { Pill } from "@/components/ui/pill";
@@ -93,8 +90,6 @@ const USER_LIST_WALKER_LIMIT = 100;
 
 // Shared button presets — kept as constants so the page can stay focused on
 // composition rather than re-typing the same Tailwind utility chains.
-const PRIMARY_BTN =
-  "inline-flex items-center justify-center gap-2 rounded-[10px] bg-gradient-to-br from-[#6366f1] to-[#8b5cf6] px-4 py-2 text-[13px] font-semibold text-white shadow-[0_6px_16px_rgba(99,102,241,0.35)] transition hover:brightness-110 disabled:cursor-not-allowed disabled:opacity-60";
 const SECONDARY_BTN =
   "inline-flex items-center justify-center gap-2 rounded-[10px] border border-[var(--border-2,rgba(30,64,175,0.16))] bg-[var(--surface,#ffffff)] px-4 py-2 text-[13px] font-medium text-[var(--text-dim,#475569)] transition hover:bg-[var(--surface-2,#f1f6fd)] hover:text-[var(--text,#0f172a)] disabled:cursor-not-allowed disabled:opacity-45";
 
@@ -168,9 +163,6 @@ export function BrokerDealerDetailClient({ brokerDealerId }: { brokerDealerId: s
 
   const [profile, setProfile] = useState<BrokerDealerProfileResponse | null>(null);
   const [error, setError] = useState<string | null>(null);
-  const [enrichError, setEnrichError] = useState<string | null>(null);
-  const [enrichNotice, setEnrichNotice] = useState<string | null>(null);
-  const [isEnriching, setIsEnriching] = useState(false);
   const [isHealthChecking, setIsHealthChecking] = useState(false);
   const [healthCheckResult, setHealthCheckResult] = useState<string | null>(null);
   const [prevId, setPrevId] = useState<number | null>(null);
@@ -615,43 +607,6 @@ export function BrokerDealerDetailClient({ brokerDealerId }: { brokerDealerId: s
     }
   }
 
-  async function enrichContacts() {
-    setIsEnriching(true);
-    setEnrichError(null);
-    setEnrichNotice(null);
-    try {
-      const directOwners = profile?.broker_dealer.direct_owners ?? [];
-      const executiveOfficers = profile?.broker_dealer.executive_officers ?? [];
-      const officers = dedupOfficers([
-        ...directOwners.map(toOfficerEntity),
-        ...executiveOfficers.map(toOfficerEntity),
-      ]);
-      const previousNames = new Set(
-        (profile?.executive_contacts ?? []).map((c) => c.name.trim().toLowerCase()),
-      );
-      const contacts = await apiRequest<BrokerDealerProfileResponse["executive_contacts"]>(
-        `/api/v1/broker-dealers/${brokerDealerId}/enrich`,
-        { method: "POST", body: JSON.stringify({ officers }) },
-      );
-      setProfile((c) => (c ? { ...c, executive_contacts: contacts } : c));
-      // BE returns the existing list verbatim when the discovery chain
-      // didn't find any new officers (90-day cooldown short-circuits the
-      // company-level Apollo path; per-officer fan-out can also return zero
-      // matches). Without this notice the button just stops spinning and
-      // the panel looks identical, so the click reads as a no-op.
-      const hasNewContact = contacts.some(
-        (c) => !previousNames.has(c.name.trim().toLowerCase()),
-      );
-      if (!hasNewContact) {
-        setEnrichNotice("No new contacts found for these officers.");
-      }
-    } catch (err) {
-      setEnrichError(err instanceof Error ? err.message : "Unable to enrich contacts.");
-    } finally {
-      setIsEnriching(false);
-    }
-  }
-
   // Per-contact updates from the Find-phone button. Replaces the single
   // row in place so the UI reflects the new phone without a full refetch.
   const handleContactUpdated = useCallback((updated: ExecutiveContactItem) => {
@@ -855,8 +810,9 @@ export function BrokerDealerDetailClient({ brokerDealerId }: { brokerDealerId: s
         </button>
       </div>
 
-      {/* ── 2-column section grid ── */}
-      <div className="grid gap-4 xl:grid-cols-2">
+      {/* ── 2-column section layout — independent flex columns (no height-locking) ── */}
+      <div className="flex flex-col gap-4 xl:flex-row">
+      <div className="flex min-w-0 flex-1 flex-col gap-4">
         {/* Financials */}
         <SectionPanel eyebrow="Financials" title="Net capital and trend">
           <div className="mb-4 grid gap-3 md:grid-cols-3">
@@ -1042,86 +998,129 @@ export function BrokerDealerDetailClient({ brokerDealerId }: { brokerDealerId: s
 
           <FocusReportSection brokerDealerId={brokerDealerId} onProfileRefresh={reloadProfile} />
         </SectionPanel>
+      </div>
 
+      <div className="flex min-w-0 flex-1 flex-col gap-4">
         {/* People */}
-        <SectionPanel
-          eyebrow="People"
-          title="Owners, officers, and contacts"
-          headerAction={
-            <button
-              type="button"
-              onClick={() => void enrichContacts()}
-              disabled={isEnriching}
-              className={PRIMARY_BTN}
-            >
-              {isEnriching ? (
-                <Loader2 className="h-4 w-4 animate-spin" strokeWidth={2.5} />
-              ) : (
-                <Sparkles className="h-4 w-4" strokeWidth={2} />
-              )}
-              {isEnriching ? "Generating…" : "Generate More Details"}
-            </button>
-          }
-        >
-          {enrichError ? (
-            <div className="mb-3 rounded-2xl border border-[rgba(245,158,11,0.25)] bg-[rgba(245,158,11,0.08)] px-4 py-3 text-sm text-[var(--pill-amber-text,#b45309)]">
-              {enrichError}
-            </div>
-          ) : null}
-
-          {enrichNotice ? (
-            <div className="mb-3 rounded-2xl border border-[rgba(59,130,246,0.25)] bg-[rgba(59,130,246,0.08)] px-4 py-3 text-sm text-[var(--pill-blue-text,#1d4ed8)]">
-              {enrichNotice}
-            </div>
+        <SectionPanel eyebrow="People" title="Owners, officers, and contacts">
+          {(!bd.direct_owners || bd.direct_owners.length === 0) &&
+          (!bd.executive_officers || bd.executive_officers.length === 0) &&
+          profile.executive_contacts.length === 0 ? (
+            <p className="text-sm text-[var(--text-muted,#94a3b8)]">
+              No owners, officers, or contacts on file yet.
+            </p>
           ) : null}
 
           {bd.direct_owners && bd.direct_owners.length > 0 ? (
-            <PeopleSubGroup title="Direct Owners">
-              {bd.direct_owners.map((owner, i) => (
-                <PersonCard
-                  key={`owner-${i}`}
-                  name={owner.name}
-                  title={owner.title}
-                  extra={owner.ownership_pct ? `Ownership: ${owner.ownership_pct}` : null}
-                  contact={matchForFinra(owner.name)}
-                  brokerDealerId={bd.id}
-                  brokerDealerName={bd.name}
-                  onContactUpdated={handleContactUpdated}
-                />
-              ))}
-            </PeopleSubGroup>
+            <PeopleTable
+              title="Direct Owners"
+              items={bd.direct_owners}
+              columns={[
+                {
+                  header: "Name",
+                  cell: (o) => (
+                    <span className="font-semibold text-[var(--text,#0f172a)]">
+                      {o.name ?? "—"}
+                    </span>
+                  ),
+                },
+                { header: "Title", cell: (o) => o.title ?? "—" },
+                {
+                  header: "Ownership",
+                  cell: (o) => o.ownership_pct ?? "—",
+                  className: "whitespace-nowrap",
+                },
+              ]}
+            />
           ) : null}
 
           {bd.executive_officers && bd.executive_officers.length > 0 ? (
-            <PeopleSubGroup title="Executive Officers">
-              {bd.executive_officers.map((officer, i) => (
-                <PersonCard
-                  key={`officer-${i}`}
-                  name={officer.name}
-                  title={officer.title}
-                  contact={matchForFinra(officer.name)}
-                  brokerDealerId={bd.id}
-                  brokerDealerName={bd.name}
-                  onContactUpdated={handleContactUpdated}
-                />
-              ))}
-            </PeopleSubGroup>
+            <PeopleTable
+              title="Executive Officers"
+              items={bd.executive_officers.map((o) => ({
+                ...o,
+                contact: matchForFinra(o.name),
+              }))}
+              columns={[
+                {
+                  header: "Name",
+                  cell: (o) => (
+                    <span className="font-semibold text-[var(--text,#0f172a)]">
+                      {o.contact?.name ?? o.name ?? "—"}
+                    </span>
+                  ),
+                },
+                { header: "Title", cell: (o) => o.title ?? "—" },
+                {
+                  header: "Channels",
+                  cell: (o) => (
+                    <ChannelIconCell
+                      contact={o.contact}
+                      entityKind="broker-dealer"
+                      entityId={bd.id}
+                      onContactUpdated={handleContactUpdated}
+                    />
+                  ),
+                  className: "whitespace-nowrap",
+                },
+                {
+                  header: "Outreach",
+                  cell: (o) =>
+                    o.contact && o.contact.email ? (
+                      <OutreachButton
+                        entityKind="broker_dealer"
+                        entityId={bd.id}
+                        entityName={bd.name}
+                        contact={o.contact}
+                      />
+                    ) : null,
+                  className: "whitespace-nowrap",
+                },
+              ]}
+            />
           ) : null}
 
           {additionalContacts.length > 0 ? (
-            <PeopleSubGroup title="Additional contacts">
-              {additionalContacts.map((contact) => (
-                <PersonCard
-                  key={`contact-${contact.id}`}
-                  name={contact.name}
-                  title={contact.title}
-                  contact={contact}
-                  brokerDealerId={bd.id}
-                  brokerDealerName={bd.name}
-                  onContactUpdated={handleContactUpdated}
-                />
-              ))}
-            </PeopleSubGroup>
+            <PeopleTable
+              title="Additional contacts"
+              items={additionalContacts}
+              columns={[
+                {
+                  header: "Name",
+                  cell: (c) => (
+                    <span className="font-semibold text-[var(--text,#0f172a)]">
+                      {c.name}
+                    </span>
+                  ),
+                },
+                { header: "Title", cell: (c) => c.title ?? "—" },
+                {
+                  header: "Channels",
+                  cell: (c) => (
+                    <ChannelIconCell
+                      contact={c}
+                      entityKind="broker-dealer"
+                      entityId={bd.id}
+                      onContactUpdated={handleContactUpdated}
+                    />
+                  ),
+                  className: "whitespace-nowrap",
+                },
+                {
+                  header: "Outreach",
+                  cell: (c) =>
+                    c.email ? (
+                      <OutreachButton
+                        entityKind="broker_dealer"
+                        entityId={bd.id}
+                        entityName={bd.name}
+                        contact={c}
+                      />
+                    ) : null,
+                  className: "whitespace-nowrap",
+                },
+              ]}
+            />
           ) : null}
         </SectionPanel>
 
@@ -1322,6 +1321,7 @@ export function BrokerDealerDetailClient({ brokerDealerId }: { brokerDealerId: s
           </div>
         </SectionPanel>
       </div>
+      </div>
 
       {/* ── Filing history (full width) ── */}
       <div className="mt-4">
@@ -1447,63 +1447,6 @@ function MiniStat({
         {value}
       </p>
       {helper ? <p className="mt-1 text-xs text-[var(--text-muted,#94a3b8)]">{helper}</p> : null}
-    </div>
-  );
-}
-
-// Sub-group wrapper inside the People panel so each list (direct owners,
-// executive officers, additional contacts) has the same heading + spacing.
-function PeopleSubGroup({ title, children }: { title: string; children: React.ReactNode }) {
-  return (
-    <div className="mb-4 last:mb-0">
-      <p className="text-[13px] font-semibold text-[var(--text,#0f172a)]">{title}</p>
-      <div className="mt-2 space-y-2">{children}</div>
-    </div>
-  );
-}
-
-// Single owner / officer / contact row used by every PeopleSubGroup. Keeps
-// the Apollo source + enriched_at footer when present. brokerDealerId +
-// brokerDealerName are forwarded to ContactRow → OutreachButton so the
-// cold-email modal knows which firm the recipient belongs to.
-function PersonCard({
-  name,
-  title,
-  extra,
-  contact,
-  source,
-  brokerDealerId,
-  brokerDealerName,
-  onContactUpdated,
-}: {
-  name: string;
-  title: string;
-  extra?: string | null;
-  contact?: ExecutiveContactItem;
-  source?: string;
-  brokerDealerId: number;
-  brokerDealerName: string;
-  onContactUpdated?: (updated: ExecutiveContactItem) => void;
-}) {
-  return (
-    <div className="rounded-2xl bg-[var(--surface-2,#f1f6fd)] px-4 py-3 text-sm text-[var(--text-dim,#475569)]">
-      <p className="font-semibold text-[var(--text,#0f172a)]">{name}</p>
-      {title ? <p className="mt-1">{title}</p> : null}
-      {extra ? <p className="mt-1 text-xs text-[var(--text-muted,#94a3b8)]">{extra}</p> : null}
-      {contact ? (
-        <ContactRow
-          entityKind="broker-dealer"
-          entityId={brokerDealerId}
-          entityName={brokerDealerName}
-          contact={contact}
-          onContactUpdated={onContactUpdated}
-        />
-      ) : null}
-      {source ? (
-        <p className="mt-1 text-[11px] uppercase tracking-[0.08em] text-[var(--text-muted,#94a3b8)]">
-          {source}
-        </p>
-      ) : null}
     </div>
   );
 }
