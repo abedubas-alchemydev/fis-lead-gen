@@ -307,8 +307,8 @@ export function InvestorsClient() {
       if (!result.matched) {
         setError(
           result.skip_reason === "entity_filer"
-            ? "Entity filer — Apollo people-match doesn't apply to organizations."
-            : "No contact match returned by Apollo for this person.",
+            ? "Entity filer — people-match doesn't apply to organizations."
+            : "No contact match returned for this person.",
         );
       }
     } catch (e) {
@@ -902,14 +902,14 @@ function InvestorRow({
             && !row.enriched_linkedin_url
             && !row.is_entity ? (
               <span className="text-[11px] italic text-[var(--text-muted,#94a3b8)]">
-                Apollo returned no match
+                No match returned
               </span>
             ) : null}
           </div>
         ) : null}
         {row.is_entity ? (
           <p className="mt-1.5 text-[11px] italic text-[var(--text-muted,#94a3b8)]">
-            Entity filer — Apollo people-match doesn&apos;t apply to organizations
+            Entity filer — people-match doesn&apos;t apply to organizations
           </p>
         ) : null}
       </div>
@@ -954,7 +954,7 @@ function InvestorRow({
           disabled={enriching || row.is_entity}
           title={
             row.is_entity
-              ? "Entity filer — Apollo people-match doesn't apply to organizations"
+              ? "Entity filer — people-match doesn't apply to organizations"
               : undefined
           }
           className="inline-flex items-center gap-1.5 rounded-md border border-[var(--border-2,rgba(30,64,175,0.16))] bg-transparent px-2.5 py-1 text-[11px] font-semibold text-[var(--text-dim,#475569)] transition hover:bg-[var(--surface-2,#f1f6fd)] hover:text-[var(--text,#0f172a)] disabled:cursor-not-allowed disabled:opacity-50"

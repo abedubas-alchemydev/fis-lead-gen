@@ -178,7 +178,7 @@ export default function EmailExtractorHomePage(): React.ReactElement {
         >
           <p className="mb-4 max-w-2xl text-[13px] leading-5 text-[var(--text-dim,#475569)]">
             Submit a domain and fan out to Hunter, Snov, the in-house site crawler,
-            and theHarvester. Live progress and per-row verification + Apollo
+            and theHarvester. Live progress and per-row verification +
             enrichment open on the scan page. Past scans stay below so you don&apos;t
             need to re-run them.
           </p>

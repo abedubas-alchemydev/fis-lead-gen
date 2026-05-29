@@ -115,7 +115,7 @@ function dynamicScanErrorSubtext(rawMessage: string | null): string {
     return "Rate limited — wait a minute and retry.";
   }
   if (lower.includes("apollo")) {
-    return "Apollo enrichment is unavailable right now — emails were discovered but couldn't be enriched.";
+    return "Enrichment is unavailable right now — emails were discovered but couldn't be enriched.";
   }
   return rawMessage;
 }
