@@ -2,6 +2,8 @@
 
 import { AlertTriangle } from "lucide-react";
 
+import { Button } from "@/components/ui/button";
+
 // Reusable error block for dashboard tiles whose initial fetch fails.
 // Matches the LoadErrorCard pattern shipped on /alerts and /visited-firms
 // — dashed-border surface-2 panel, red medallion, Retry button — so the
@@ -32,13 +34,9 @@ export function DashboardErrorCard({
       <p className="mx-auto mt-2 max-w-sm text-[13px] leading-5 text-[var(--text-dim,#475569)]">
         {message}
       </p>
-      <button
-        type="button"
-        onClick={onRetry}
-        className="mt-5 inline-flex h-[34px] items-center rounded-[10px] border border-[var(--border-2,rgba(30,64,175,0.16))] bg-[var(--surface,#ffffff)] px-4 text-[13px] font-semibold text-[var(--text-dim,#475569)] transition hover:text-[var(--text,#0f172a)]"
-      >
+      <Button variant="outline" size="sm" onClick={onRetry} className="mt-5">
         Retry
-      </button>
+      </Button>
     </div>
   );
 }

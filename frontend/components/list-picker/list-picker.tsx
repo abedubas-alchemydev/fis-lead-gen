@@ -10,7 +10,9 @@ import {
   type FormEvent,
 } from "react";
 import { createPortal } from "react-dom";
+import clsx from "clsx";
 
+import { Button, buttonBase, buttonSizes } from "@/components/ui/button";
 import { useToast } from "@/components/ui/use-toast";
 import {
   ApiError,
@@ -535,20 +537,25 @@ export function ListPicker({
                 className="block w-full rounded-md border border-[var(--border-2,rgba(30,64,175,0.16))] bg-[var(--surface,#ffffff)] px-2.5 py-1.5 text-[13px] text-[var(--text,#0f172a)] placeholder:text-[var(--text-muted,#94a3b8)] focus:border-[var(--accent,#6366f1)] focus:outline-none focus:ring-2 focus:ring-[rgba(99,102,241,0.2)] disabled:opacity-60"
               />
               <div className="flex items-center justify-end gap-1.5">
-                <button
+                <Button
                   type="button"
+                  variant="ghost"
+                  size="sm"
                   onClick={closeNewListForm}
                   disabled={newListSubmitting}
-                  className="inline-flex h-[26px] items-center rounded-md border border-transparent px-2 text-[11px] font-semibold text-[var(--text-dim,#475569)] transition hover:bg-[var(--surface-2,#f1f6fd)] disabled:cursor-not-allowed disabled:opacity-60"
                 >
                   Cancel
-                </button>
+                </Button>
                 <button
                   type="submit"
                   disabled={
                     newListSubmitting || newListValue.trim().length === 0
                   }
-                  className="inline-flex h-[26px] items-center rounded-md border border-[rgba(99,102,241,0.4)] bg-[rgba(99,102,241,0.08)] px-2.5 text-[11px] font-semibold text-[#4338ca] transition hover:bg-[rgba(99,102,241,0.14)] disabled:cursor-not-allowed disabled:opacity-50"
+                  className={clsx(
+                    buttonBase,
+                    buttonSizes.sm,
+                    "border border-[rgba(99,102,241,0.4)] bg-[rgba(99,102,241,0.08)] text-[#4338ca] hover:bg-[rgba(99,102,241,0.14)]",
+                  )}
                 >
                   {newListSubmitting ? "Saving…" : "Save"}
                 </button>

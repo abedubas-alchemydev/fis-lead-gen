@@ -2,7 +2,9 @@
 
 import { useState } from "react";
 import { Loader2, Sparkles } from "lucide-react";
+import clsx from "clsx";
 
+import { buttonBase, buttonSizes } from "@/components/ui/button";
 import { apiRequest } from "@/lib/api";
 import { formatCurrency, formatDate } from "@/lib/format";
 
@@ -83,7 +85,11 @@ export function FocusReportSection({
           type="button"
           onClick={() => void extract()}
           disabled={isExtracting}
-          className="inline-flex shrink-0 items-center gap-2 rounded-[10px] bg-gradient-to-br from-[#6366f1] to-[#8b5cf6] px-4 py-2 text-[13px] font-semibold text-white shadow-[0_6px_16px_rgba(99,102,241,0.35)] transition hover:brightness-110 disabled:cursor-not-allowed disabled:opacity-60"
+          className={clsx(
+            buttonBase,
+            buttonSizes.md,
+            "shrink-0 bg-gradient-to-br from-[#6366f1] to-[#8b5cf6] text-white shadow-[0_6px_16px_rgba(99,102,241,0.35)] hover:brightness-110",
+          )}
         >
           {isExtracting ? (
             <>

@@ -3,6 +3,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import Link from "next/link";
 import type { Route } from "next";
+import clsx from "clsx";
 import { useUrlSyncedState } from "@/lib/use-url-synced-state";
 
 import {
@@ -28,6 +29,7 @@ import {
   type MasterListQueryState,
 } from "@/lib/master-list-state";
 import { STATE_NAMES, stateCodeFromName } from "@/lib/states";
+import { buttonBase, buttonSizes } from "@/components/ui/button";
 import { Combo } from "@/components/ui/combo";
 import { BulkListPicker } from "@/components/list-picker/bulk-list-picker";
 import { ListPicker } from "@/components/list-picker/list-picker";
@@ -1063,7 +1065,11 @@ export function MasterListWorkspaceClient() {
                 onClick={() => setBulkPickerOpen((v) => !v)}
                 aria-haspopup="dialog"
                 aria-expanded={bulkPickerOpen}
-                className="inline-flex items-center gap-1.5 rounded-[8px] border border-[rgba(99,102,241,0.4)] bg-gradient-to-br from-[#6366f1] to-[#8b5cf6] px-3 py-1.5 text-[12px] font-semibold text-white shadow-[0_6px_16px_rgba(99,102,241,0.35)]"
+                className={clsx(
+                  buttonBase,
+                  buttonSizes.sm,
+                  "rounded-[8px] border border-[rgba(99,102,241,0.4)] bg-gradient-to-br from-[#6366f1] to-[#8b5cf6] text-[12px] text-white shadow-[0_6px_16px_rgba(99,102,241,0.35)]",
+                )}
               >
                 <Heart className="h-3.5 w-3.5" strokeWidth={2.5} aria-hidden />
                 Save to list

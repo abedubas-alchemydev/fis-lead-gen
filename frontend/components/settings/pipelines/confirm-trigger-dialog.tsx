@@ -1,6 +1,9 @@
 "use client";
 
 import { useEffect, useRef, useState } from "react";
+import clsx from "clsx";
+
+import { Button, buttonBase, buttonSizes } from "@/components/ui/button";
 
 // Centered confirm dialog for kicking off a long-running pipeline run. We
 // build it locally instead of reusing my-favorites/delete-list-dialog
@@ -88,18 +91,17 @@ export function ConfirmTriggerDialog({
             type="button"
             onClick={onCancel}
             disabled={submitting}
-            className="inline-flex items-center gap-2 rounded-xl border border-[var(--border-2,rgba(30,64,175,0.16))] bg-transparent px-4 py-2 text-sm font-semibold text-[var(--text,#0f172a)] transition hover:bg-[var(--surface-2,#f1f6fd)] disabled:cursor-not-allowed disabled:opacity-60"
+            className={clsx(
+              buttonBase,
+              buttonSizes.md,
+              "border border-[var(--border-2,rgba(30,64,175,0.16))] bg-transparent text-[var(--text,#0f172a)] hover:bg-[var(--surface-2,#f1f6fd)]",
+            )}
           >
             Cancel
           </button>
-          <button
-            type="button"
-            onClick={handleConfirm}
-            disabled={submitting}
-            className="inline-flex items-center gap-2 rounded-xl bg-[var(--accent,#6366f1)] px-4 py-2 text-sm font-semibold text-white shadow-[0_6px_16px_rgba(99,102,241,0.35)] transition hover:brightness-110 disabled:cursor-not-allowed disabled:opacity-60 disabled:shadow-none"
-          >
+          <Button type="button" onClick={handleConfirm} disabled={submitting}>
             {submitting ? "Starting…" : "Run now"}
-          </button>
+          </Button>
         </div>
       </div>
     </div>

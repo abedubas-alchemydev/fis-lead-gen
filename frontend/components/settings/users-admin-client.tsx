@@ -3,6 +3,7 @@
 import { useState, useTransition } from "react";
 import Link from "next/link";
 import { useRouter } from "next/navigation";
+import clsx from "clsx";
 import {
   AlertCircle,
   CheckCircle2,
@@ -19,6 +20,7 @@ import {
   XCircle,
 } from "lucide-react";
 
+import { buttonBase, buttonSizes } from "@/components/ui/button";
 import { FEATURE_LABELS, type FeatureKey } from "@/lib/feature-permissions";
 
 const CARD =
@@ -287,7 +289,11 @@ export function UsersAdminClient({
                               type="button"
                               onClick={() => act(u.id, "approve")}
                               disabled={isActing}
-                              className="inline-flex items-center gap-1.5 rounded-xl bg-emerald-500 px-3 py-2 text-xs font-semibold text-white shadow-[0_6px_16px_rgba(16,185,129,0.35)] transition hover:brightness-110 disabled:cursor-not-allowed disabled:opacity-60 disabled:shadow-none"
+                              className={clsx(
+                                buttonBase,
+                                buttonSizes.sm,
+                                "bg-emerald-500 text-white shadow-[0_6px_16px_rgba(16,185,129,0.35)] hover:brightness-110 disabled:shadow-none",
+                              )}
                             >
                               {isActing ? (
                                 <Loader2 className="h-3.5 w-3.5 animate-spin" aria-hidden />
@@ -300,7 +306,11 @@ export function UsersAdminClient({
                               type="button"
                               onClick={() => act(u.id, "reject")}
                               disabled={isActing}
-                              className="inline-flex items-center gap-1.5 rounded-xl border border-red-500/25 bg-transparent px-3 py-2 text-xs font-semibold text-[var(--pill-red-text,#b91c1c)] transition hover:bg-red-500/10 disabled:cursor-not-allowed disabled:opacity-60"
+                              className={clsx(
+                                buttonBase,
+                                buttonSizes.sm,
+                                "border border-red-500/25 bg-transparent text-[var(--pill-red-text,#b91c1c)] hover:bg-red-500/10",
+                              )}
                             >
                               {isActing ? (
                                 <Loader2 className="h-3.5 w-3.5 animate-spin" aria-hidden />
@@ -415,7 +425,11 @@ export function UsersAdminClient({
                               type="button"
                               onClick={() => handleDeactivate(u)}
                               disabled={isActing}
-                              className="inline-flex items-center gap-1.5 rounded-xl border border-red-500/25 bg-transparent px-3 py-2 text-xs font-semibold text-[var(--pill-red-text,#b91c1c)] transition hover:bg-red-500/10 disabled:cursor-not-allowed disabled:opacity-60"
+                              className={clsx(
+                                buttonBase,
+                                buttonSizes.sm,
+                                "border border-red-500/25 bg-transparent text-[var(--pill-red-text,#b91c1c)] hover:bg-red-500/10",
+                              )}
                             >
                               {isActing ? (
                                 <Loader2 className="h-3.5 w-3.5 animate-spin" aria-hidden />
@@ -558,7 +572,11 @@ export function UsersAdminClient({
                             type="button"
                             onClick={() => handleReactivate(u)}
                             disabled={isActing}
-                            className="inline-flex items-center gap-1.5 rounded-xl bg-emerald-500 px-3 py-2 text-xs font-semibold text-white shadow-[0_6px_16px_rgba(16,185,129,0.35)] transition hover:brightness-110 disabled:cursor-not-allowed disabled:opacity-60 disabled:shadow-none"
+                            className={clsx(
+                              buttonBase,
+                              buttonSizes.sm,
+                              "bg-emerald-500 text-white shadow-[0_6px_16px_rgba(16,185,129,0.35)] hover:brightness-110 disabled:shadow-none",
+                            )}
                           >
                             {isActing ? (
                               <Loader2 className="h-3.5 w-3.5 animate-spin" aria-hidden />
@@ -572,7 +590,11 @@ export function UsersAdminClient({
                             type="button"
                             onClick={() => handleApproveRemoved(u)}
                             disabled={isActing}
-                            className="inline-flex items-center gap-1.5 rounded-xl bg-emerald-500 px-3 py-2 text-xs font-semibold text-white shadow-[0_6px_16px_rgba(16,185,129,0.35)] transition hover:brightness-110 disabled:cursor-not-allowed disabled:opacity-60 disabled:shadow-none"
+                            className={clsx(
+                              buttonBase,
+                              buttonSizes.sm,
+                              "bg-emerald-500 text-white shadow-[0_6px_16px_rgba(16,185,129,0.35)] hover:brightness-110 disabled:shadow-none",
+                            )}
                           >
                             {isActing ? (
                               <Loader2 className="h-3.5 w-3.5 animate-spin" aria-hidden />

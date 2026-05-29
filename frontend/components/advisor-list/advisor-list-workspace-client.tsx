@@ -3,6 +3,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import Link from "next/link";
 import type { Route } from "next";
+import clsx from "clsx";
 import { useUrlSyncedState } from "@/lib/use-url-synced-state";
 
 import { ArrowDown, ArrowUp, ChevronDown, Heart, Info, Search, X } from "lucide-react";
@@ -30,6 +31,7 @@ import { RegulatoryAumRangeFilter } from "@/components/advisor-list/filters/regu
 import { RegistrationDateRangeFilter } from "@/components/master-list/filters/registration-date-range-filter";
 import { BulkListPicker } from "@/components/list-picker/bulk-list-picker";
 import { ListPicker } from "@/components/list-picker/list-picker";
+import { Button, buttonBase, buttonSizes } from "@/components/ui/button";
 import { Combo } from "@/components/ui/combo";
 import { Pill } from "@/components/ui/pill";
 import { agencyLabel } from "@/components/master-list/detail/clearing-membership-helpers";
@@ -399,14 +401,15 @@ export function AdvisorListWorkspaceClient() {
             </h3>
           </div>
           {filtersActive ? (
-            <button
+            <Button
               type="button"
+              variant="outline"
+              size="sm"
               onClick={handleClearFilters}
-              className="inline-flex items-center gap-1.5 rounded-[6px] border border-[var(--border-2,rgba(30,64,175,0.16))] bg-transparent px-2.5 py-1 text-[11px] font-semibold text-[var(--text-dim,#475569)] transition hover:bg-[var(--surface-2,#f1f6fd)] hover:text-[var(--text,#0f172a)]"
             >
               <X aria-hidden className="h-3.5 w-3.5" strokeWidth={2} />
               Clear filters
-            </button>
+            </Button>
           ) : null}
         </div>
 
@@ -744,20 +747,25 @@ export function AdvisorListWorkspaceClient() {
               >
                 {selectedIds.size} selected
               </span>
-              <button
+              <Button
                 type="button"
+                variant="outline"
+                size="sm"
                 onClick={() => setSelectedIds(new Set())}
-                className="rounded-[6px] border border-[var(--border-2,rgba(30,64,175,0.16))] bg-transparent px-2.5 py-1 text-[11px] font-semibold text-[var(--text-dim,#475569)] transition hover:bg-[var(--surface-2,#f1f6fd)]"
               >
                 Clear
-              </button>
+              </Button>
               <button
                 ref={bulkActionTriggerRef}
                 type="button"
                 onClick={() => setBulkPickerOpen((v) => !v)}
                 aria-haspopup="dialog"
                 aria-expanded={bulkPickerOpen}
-                className="inline-flex items-center gap-1.5 rounded-[8px] border border-[rgba(99,102,241,0.4)] bg-gradient-to-br from-[#6366f1] to-[#8b5cf6] px-3 py-1.5 text-[12px] font-semibold text-white shadow-[0_6px_16px_rgba(99,102,241,0.35)]"
+                className={clsx(
+                  buttonBase,
+                  buttonSizes.sm,
+                  "border border-[rgba(99,102,241,0.4)] bg-gradient-to-br from-[#6366f1] to-[#8b5cf6] text-white shadow-[0_6px_16px_rgba(99,102,241,0.35)]",
+                )}
               >
                 <Heart className="h-3.5 w-3.5" strokeWidth={2.5} aria-hidden />
                 Save to list

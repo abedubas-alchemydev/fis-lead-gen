@@ -2,8 +2,10 @@
 
 import { useState } from "react";
 
+import clsx from "clsx";
 import { Sparkles } from "lucide-react";
 
+import { buttonBase, buttonSizes } from "@/components/ui/button";
 import { ApiError, optimizeOutreachInstructions } from "@/lib/api";
 
 import { ExpandableTextarea } from "./expandable-textarea";
@@ -104,7 +106,11 @@ export function VaultInstructionsEditor({
           type="button"
           onClick={() => void handleOptimize()}
           disabled={disabled || optimizing || value.trim().length === 0}
-          className="inline-flex items-center gap-1.5 rounded-lg border border-[var(--border-2,rgba(30,64,175,0.16))] bg-[var(--surface,#ffffff)] px-3 py-1.5 text-xs font-medium text-[var(--accent,#6366f1)] transition hover:bg-[var(--surface-2,#f1f6fd)] disabled:cursor-not-allowed disabled:opacity-60"
+          className={clsx(
+            buttonBase,
+            buttonSizes.sm,
+            "border border-[var(--border-2,rgba(30,64,175,0.16))] bg-[var(--surface,#ffffff)] text-[var(--accent,#6366f1)] hover:bg-[var(--surface-2,#f1f6fd)]"
+          )}
         >
           <Sparkles className="h-3.5 w-3.5" aria-hidden />
           {optimizing ? "Optimizing..." : "Optimize Prompt"}

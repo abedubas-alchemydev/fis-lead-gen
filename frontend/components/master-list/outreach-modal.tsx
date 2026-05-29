@@ -4,7 +4,9 @@ import Link from "next/link";
 import type { Route } from "next";
 import { useEffect, useMemo, useRef, useState } from "react";
 import { createPortal } from "react-dom";
+import clsx from "clsx";
 
+import { Button, buttonBase, buttonSizes } from "@/components/ui/button";
 import {
   ApiError,
   generateAdhocOutreachDraft,
@@ -682,7 +684,11 @@ export function OutreachModal({
                       key={p}
                       type="button"
                       onClick={() => void handleLinkProvider(p)}
-                      className="inline-flex h-8 items-center rounded-xl border border-amber-300 bg-white px-3 text-[11px] font-semibold text-amber-800 transition hover:bg-amber-50"
+                      className={clsx(
+                        buttonBase,
+                        buttonSizes.sm,
+                        "rounded-xl border border-amber-300 bg-white text-[11px] text-amber-800 hover:bg-amber-50",
+                      )}
                     >
                       Connect {PROVIDER_LABEL[p]}
                     </button>
@@ -807,7 +813,11 @@ export function OutreachModal({
                 onClick={() =>
                   void handleLinkProvider(linkActionProvider ?? providerId)
                 }
-                className="mt-2 inline-flex h-8 items-center rounded-xl bg-danger px-3 text-xs font-semibold text-white transition hover:bg-red-700"
+                className={clsx(
+                  buttonBase,
+                  buttonSizes.sm,
+                  "mt-2 rounded-xl bg-danger text-white hover:bg-red-700",
+                )}
               >
                 Grant {PROVIDER_LABEL[linkActionProvider ?? providerId]} access
               </button>
@@ -824,8 +834,9 @@ export function OutreachModal({
 
         <div className="mt-6 flex items-center justify-end gap-3">
           {stage === "draft" ? (
-            <button
+            <Button
               type="button"
+              variant="outline"
               onClick={() => {
                 setSubject("");
                 setBody("");
@@ -833,21 +844,20 @@ export function OutreachModal({
                 setLinkActionNeeded(false);
                 setStage("ready");
               }}
-              className="inline-flex h-10 items-center rounded-xl border border-[var(--border,rgba(30,64,175,0.1))] bg-[var(--surface,#ffffff)] px-4 text-sm font-medium text-[var(--text-dim,#475569)] transition hover:border-[var(--border-2,rgba(30,64,175,0.16))] hover:bg-[var(--surface-2,#f1f6fd)]"
             >
               Regenerate
-            </button>
+            </Button>
           ) : null}
-          <button
+          <Button
             type="button"
+            variant="outline"
             onClick={onClose}
             disabled={stage === "generating" || stage === "sending"}
-            className="inline-flex h-10 items-center rounded-xl border border-[var(--border,rgba(30,64,175,0.1))] bg-[var(--surface,#ffffff)] px-4 text-sm font-medium text-[var(--text-dim,#475569)] transition hover:border-[var(--border-2,rgba(30,64,175,0.16))] hover:bg-[var(--surface-2,#f1f6fd)] disabled:cursor-not-allowed disabled:opacity-60"
           >
             {stage === "draft" || stage === "sent" ? "Done" : "Cancel"}
-          </button>
+          </Button>
           {stage === "ready" || stage === "generating" ? (
-            <button
+            <Button
               type="button"
               onClick={() => void handleGenerate()}
               disabled={
@@ -855,13 +865,12 @@ export function OutreachModal({
                 folders.length === 0 ||
                 folderId === null
               }
-              className="inline-flex h-10 items-center rounded-xl bg-[var(--accent,#6366f1)] px-4 text-sm font-semibold text-white shadow-lg shadow-[var(--accent,#6366f1)]/20 transition hover:bg-[var(--accent-2,#8b5cf6)] disabled:cursor-not-allowed disabled:opacity-60"
             >
               {stage === "generating" ? "Generating..." : "Generate draft"}
-            </button>
+            </Button>
           ) : null}
           {stage === "draft" || stage === "sending" ? (
-            <button
+            <Button
               type="button"
               onClick={() => void handleSend()}
               disabled={
@@ -875,10 +884,9 @@ export function OutreachModal({
                   ? undefined
                   : "No email on file for this contact — drafting only."
               }
-              className="inline-flex h-10 items-center rounded-xl bg-[var(--accent,#6366f1)] px-4 text-sm font-semibold text-white shadow-lg shadow-[var(--accent,#6366f1)]/20 transition hover:bg-[var(--accent-2,#8b5cf6)] disabled:cursor-not-allowed disabled:opacity-60"
             >
               {stage === "sending" ? "Sending..." : "Send"}
-            </button>
+            </Button>
           ) : null}
         </div>
       </div>

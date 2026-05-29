@@ -2,6 +2,7 @@
 
 import { useState } from "react";
 
+import { Button } from "@/components/ui/button";
 import { getVaultFileDownloadPath } from "@/lib/api";
 import type { VaultFolderFile, VaultFolderFileStatus } from "@/lib/types";
 
@@ -60,23 +61,25 @@ export function VaultFileRow({ folderId, file, onRetry, onDelete }: VaultFileRow
         ) : null}
         {confirmingDelete ? (
           <>
-            <button
+            <Button
               type="button"
+              variant="ghost"
+              size="sm"
               onClick={() => setConfirmingDelete(false)}
-              className="text-xs font-medium text-[var(--text-muted,#94a3b8)] underline-offset-4 hover:underline"
             >
               Cancel
-            </button>
-            <button
+            </Button>
+            <Button
               type="button"
+              variant="danger"
+              size="sm"
               onClick={() => {
                 setConfirmingDelete(false);
                 onDelete();
               }}
-              className="inline-flex h-7 items-center rounded-lg bg-danger px-2 text-xs font-semibold text-white transition hover:bg-[#c62a2a]"
             >
               Delete
-            </button>
+            </Button>
           </>
         ) : (
           <button

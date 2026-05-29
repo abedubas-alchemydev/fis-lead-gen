@@ -1,7 +1,9 @@
 "use client";
 
 import { useEffect, useRef, useState } from "react";
+import clsx from "clsx";
 
+import { Button, buttonBase, buttonSizes } from "@/components/ui/button";
 import { ApiError } from "@/lib/api";
 
 // Confirm dialog for destructive list deletion. Renders centered card with
@@ -97,18 +99,23 @@ export function DeleteListDialog({
             type="button"
             onClick={onCancel}
             disabled={submitting}
-            className="inline-flex h-8 items-center rounded-md border border-[var(--border-2,rgba(30,64,175,0.16))] bg-[var(--surface,#ffffff)] px-3 text-[12px] font-semibold text-[var(--text-dim,#475569)] transition hover:bg-[var(--surface-2,#f1f6fd)] disabled:cursor-not-allowed disabled:opacity-60"
+            className={clsx(
+              buttonBase,
+              buttonSizes.sm,
+              "border border-[var(--border-2,rgba(30,64,175,0.16))] bg-[var(--surface,#ffffff)] text-[var(--text-dim,#475569)] hover:bg-[var(--surface-2,#f1f6fd)]",
+            )}
           >
             Cancel
           </button>
-          <button
+          <Button
             type="button"
+            variant="danger"
+            size="sm"
             onClick={handleConfirm}
             disabled={submitting}
-            className="inline-flex h-8 items-center rounded-md border border-[rgba(220,38,38,0.5)] bg-[var(--red,#dc2626)] px-3 text-[12px] font-semibold text-white transition hover:bg-[#b91c1c] disabled:cursor-not-allowed disabled:opacity-60"
           >
             {submitting ? "Deleting…" : "Delete"}
-          </button>
+          </Button>
         </div>
       </div>
     </div>

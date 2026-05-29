@@ -5,6 +5,7 @@ import { useEffect, useRef, useState } from "react";
 
 import { X } from "lucide-react";
 
+import { Button } from "@/components/ui/button";
 import {
   ApiError,
   createVaultFolder,
@@ -142,13 +143,9 @@ export function VaultClient() {
           {folders.length} service{folders.length === 1 ? "" : "s"}
         </p>
         {editState.mode !== "create" ? (
-          <button
-            type="button"
-            onClick={() => setEditState({ mode: "create" })}
-            className="inline-flex h-9 items-center rounded-xl bg-[var(--accent,#6366f1)] px-3 text-xs font-semibold text-white shadow-lg shadow-[var(--accent,#6366f1)]/20 transition hover:bg-[var(--accent-2,#8b5cf6)]"
-          >
+          <Button type="button" onClick={() => setEditState({ mode: "create" })}>
             New service
-          </button>
+          </Button>
         ) : null}
       </div>
 
@@ -217,13 +214,9 @@ function EmptyState({ onCreate }: { onCreate: () => void }) {
         &ldquo;Stock Loan&rdquo;, or &ldquo;Margin Financing&rdquo;. A short
         description helps the AI write more credible cold-email drafts.
       </p>
-      <button
-        type="button"
-        onClick={onCreate}
-        className="mt-6 inline-flex h-10 items-center rounded-xl bg-[var(--accent,#6366f1)] px-4 text-sm font-semibold text-white shadow-lg shadow-[var(--accent,#6366f1)]/20 transition hover:bg-[var(--accent-2,#8b5cf6)]"
-      >
+      <Button type="button" onClick={onCreate} className="mt-6">
         Add your first service
-      </button>
+      </Button>
     </div>
   );
 }
@@ -260,20 +253,12 @@ function FolderCard({
             Delete &ldquo;{folder.name}&rdquo;? This cannot be undone.
           </p>
           <div className="mt-2 flex justify-end gap-2">
-            <button
-              type="button"
-              onClick={onCancelDelete}
-              className="text-xs font-medium text-[var(--text-dim,#475569)] underline-offset-4 hover:underline"
-            >
+            <Button type="button" variant="ghost" size="sm" onClick={onCancelDelete}>
               Cancel
-            </button>
-            <button
-              type="button"
-              onClick={onConfirmDelete}
-              className="inline-flex h-8 items-center rounded-lg bg-danger px-3 text-xs font-semibold text-white transition hover:bg-[#c62a2a]"
-            >
+            </Button>
+            <Button type="button" variant="danger" size="sm" onClick={onConfirmDelete}>
               Delete
-            </button>
+            </Button>
           </div>
         </div>
       ) : (
@@ -525,21 +510,12 @@ function FolderForm({
       ) : null}
 
       <div className="mt-4 flex items-center justify-end gap-3">
-        <button
-          type="button"
-          onClick={onCancel}
-          disabled={busy}
-          className="inline-flex h-10 items-center rounded-xl border border-[var(--border,rgba(30,64,175,0.1))] bg-[var(--surface,#ffffff)] px-4 text-sm font-medium text-[var(--text-dim,#475569)] transition hover:border-[var(--border-2,rgba(30,64,175,0.16))] hover:bg-[var(--surface-2,#f1f6fd)] disabled:cursor-not-allowed disabled:opacity-60"
-        >
+        <Button type="button" variant="outline" onClick={onCancel} disabled={busy}>
           Cancel
-        </button>
-        <button
-          type="submit"
-          disabled={busy}
-          className="inline-flex h-10 items-center rounded-xl bg-[var(--accent,#6366f1)] px-4 text-sm font-semibold text-white shadow-lg shadow-[var(--accent,#6366f1)]/20 transition hover:bg-[var(--accent-2,#8b5cf6)] disabled:cursor-not-allowed disabled:opacity-60"
-        >
+        </Button>
+        <Button type="submit" disabled={busy}>
           {busy ? "Saving..." : mode === "create" ? "Create service" : "Save changes"}
-        </button>
+        </Button>
       </div>
     </form>
   );

@@ -23,6 +23,7 @@ import {
   getPipelineRunStatus,
   refreshAdvisor,
 } from "@/lib/api";
+import { Button } from "@/components/ui/button";
 import { DetailPageSkeleton } from "@/components/ui/detail-page-skeleton";
 import {
   buildAdvisorListUrl,
@@ -45,11 +46,6 @@ import type {
   InvestmentAdvisorListResponse,
   InvestmentAdvisorProfileResponse,
 } from "@/lib/types";
-
-// Secondary button preset — copied from broker-dealer-detail-client.tsx so the
-// Previous/Next nav buttons match the master-list detail page exactly.
-const SECONDARY_BTN =
-  "inline-flex items-center justify-center gap-2 rounded-[10px] border border-[var(--border-2,rgba(30,64,175,0.16))] bg-[var(--surface,#ffffff)] px-4 py-2 text-[13px] font-medium text-[var(--text-dim,#475569)] transition hover:bg-[var(--surface-2,#f1f6fd)] hover:text-[var(--text,#0f172a)] disabled:cursor-not-allowed disabled:opacity-45";
 
 // Compact website display: strip protocol/www/trailing slash and take the
 // first path segment. Mirrors ResolvedLink in firm-website-link.tsx.
@@ -612,12 +608,12 @@ export function AdvisorDetailClient({ advisorId }: { advisorId: string }) {
           </div>
         </div>
         <div className="flex shrink-0 items-center gap-2.5">
-          <button
+          <Button
             type="button"
+            variant="outline"
             onClick={() => void runGapFill()}
             disabled={isGapFilling || isRefreshing}
             title="Re-query contact providers for rows missing LinkedIn, email, or phone (30-day cooldown)"
-            className={SECONDARY_BTN}
           >
             {isGapFilling ? (
               <Loader2 className="h-4 w-4 animate-spin" strokeWidth={2.5} />
@@ -625,12 +621,12 @@ export function AdvisorDetailClient({ advisorId }: { advisorId: string }) {
               <Sparkles className="h-4 w-4" strokeWidth={2} />
             )}
             {isGapFilling ? "Gap-filling…" : "Gap-fill contacts"}
-          </button>
-          <button
+          </Button>
+          <Button
             type="button"
+            variant="outline"
             onClick={() => void runManualRefresh()}
             disabled={isRefreshing || isGapFilling}
-            className={SECONDARY_BTN}
           >
             {isRefreshing ? (
               <Loader2 className="h-4 w-4 animate-spin" strokeWidth={2.5} />
@@ -638,7 +634,7 @@ export function AdvisorDetailClient({ advisorId }: { advisorId: string }) {
               <RefreshCw className="h-4 w-4" strokeWidth={2} />
             )}
             {isRefreshing ? "Refreshing…" : "Refresh"}
-          </button>
+          </Button>
         </div>
       </div>
 
@@ -662,30 +658,30 @@ export function AdvisorDetailClient({ advisorId }: { advisorId: string }) {
 
       {/* ── Adjacent-advisor nav — mirrors the master-list detail page ── */}
       <div className="mb-5 flex items-center justify-between gap-3">
-        <button
+        <Button
           type="button"
+          variant="outline"
           disabled={!prevId}
           onClick={() => prevId && router.push(buildAdjacentHref(prevId))}
-          className={SECONDARY_BTN}
         >
           <ArrowLeft className="h-4 w-4" strokeWidth={2} />
           Previous
-        </button>
+        </Button>
         <Link
           href={backHref}
           className="text-[12px] uppercase tracking-[0.08em] text-[var(--text-muted,#94a3b8)] transition hover:text-[var(--text,#0f172a)]"
         >
           Back to Investment Advisors
         </Link>
-        <button
+        <Button
           type="button"
+          variant="outline"
           disabled={!nextId}
           onClick={() => nextId && router.push(buildAdjacentHref(nextId))}
-          className={SECONDARY_BTN}
         >
           Next
           <ArrowRight className="h-4 w-4" strokeWidth={2} />
-        </button>
+        </Button>
       </div>
 
       {/* ── KPI strip ───────────────────────────────────────────────────── */}
@@ -1000,15 +996,16 @@ export function AdvisorDetailClient({ advisorId }: { advisorId: string }) {
                 </div>
               ))}
               {filings.length > FILINGS_COLLAPSED ? (
-                <button
+                <Button
                   type="button"
+                  variant="outline"
+                  size="sm"
                   onClick={() => setShowAllFilings((prev) => !prev)}
-                  className="inline-flex items-center gap-1.5 rounded-[10px] border border-[var(--border-2,rgba(30,64,175,0.16))] bg-[var(--surface,#ffffff)] px-3 py-1.5 text-[12px] font-medium text-[var(--text-dim,#475569)] transition hover:bg-[var(--surface-2,#f1f6fd)] hover:text-[var(--text,#0f172a)]"
                 >
                   {showAllFilings
                     ? "Show fewer"
                     : `Show all (${filings.length})`}
-                </button>
+                </Button>
               ) : null}
             </div>
           )}

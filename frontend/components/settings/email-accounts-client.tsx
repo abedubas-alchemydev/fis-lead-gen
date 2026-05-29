@@ -1,7 +1,9 @@
 "use client";
 
 import { useCallback, useEffect, useState } from "react";
+import clsx from "clsx";
 
+import { Button, buttonBase, buttonSizes } from "@/components/ui/button";
 import { getLinkedProviders } from "@/lib/api";
 import { authClient } from "@/lib/auth-client";
 import type { EmailProviderId, LinkedProviderItem } from "@/lib/types";
@@ -199,23 +201,28 @@ export function EmailAccountsClient() {
                       type="button"
                       onClick={() => void handleLink(account.provider)}
                       disabled={linkingProvider === account.provider}
-                      className="inline-flex h-9 items-center rounded-xl border border-amber-300 bg-amber-50 px-3 text-xs font-semibold text-amber-800 transition hover:bg-amber-100 disabled:cursor-not-allowed disabled:opacity-60"
+                      className={clsx(
+                        buttonBase,
+                        buttonSizes.sm,
+                        "border border-amber-300 bg-amber-50 text-amber-800 hover:bg-amber-100",
+                      )}
                     >
                       {linkingProvider === account.provider
                         ? "Opening..."
                         : "Grant send access"}
                     </button>
                   )}
-                  <button
+                  <Button
                     type="button"
+                    variant="outline"
+                    size="sm"
                     onClick={() => void handleUnlink(account)}
                     disabled={busyAccountId === account.account_id}
-                    className="inline-flex h-9 items-center rounded-xl border border-[var(--border,rgba(30,64,175,0.1))] bg-white px-3 text-xs font-semibold text-[var(--text-dim,#475569)] transition hover:bg-[var(--surface-2,#f1f6fd)] disabled:cursor-not-allowed disabled:opacity-60"
                   >
                     {busyAccountId === account.account_id
                       ? "Unlinking..."
                       : "Unlink"}
-                  </button>
+                  </Button>
                 </div>
               </li>
             ))}
@@ -236,17 +243,17 @@ export function EmailAccountsClient() {
           {(
             ["google", "microsoft", "yahoo"] as const satisfies readonly EmailProviderId[]
           ).map((provider) => (
-            <button
+            <Button
               key={provider}
               type="button"
+              variant="outline"
               onClick={() => void handleLink(provider)}
               disabled={linkingProvider === provider}
-              className="inline-flex h-10 items-center rounded-xl border border-[var(--border,rgba(30,64,175,0.1))] bg-[var(--surface,#ffffff)] px-4 text-sm font-medium text-[var(--text-dim,#475569)] transition hover:border-[var(--border-2,rgba(30,64,175,0.16))] hover:bg-[var(--surface-2,#f1f6fd)] disabled:cursor-not-allowed disabled:opacity-60"
             >
               {linkingProvider === provider
                 ? `Opening ${PROVIDER_LABEL[provider]}...`
                 : `Connect ${PROVIDER_LABEL[provider]}`}
-            </button>
+            </Button>
           ))}
         </div>
       </section>

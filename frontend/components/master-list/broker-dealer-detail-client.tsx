@@ -1,6 +1,7 @@
 "use client";
 
 import Link from "next/link";
+import clsx from "clsx";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useRouter, useSearchParams } from "next/navigation";
 import type { Route } from "next";
@@ -36,6 +37,7 @@ import {
   priorityVariant,
 } from "@/components/master-list/detail/pill-helpers";
 import { nameMatches } from "@/components/master-list/detail/name-matching";
+import { Button, buttonBase, buttonSizes } from "@/components/ui/button";
 import { SectionPanel } from "@/components/ui/section-panel";
 import { ListPicker } from "@/components/list-picker/list-picker";
 import { Pill } from "@/components/ui/pill";
@@ -90,11 +92,6 @@ const SOURCE_LABELS: Record<DetailSource, { breadcrumb: string; back: string }> 
 // as a no-envelope deep-link). Cross-page walking is omitted on
 // purpose — see plans/fe-favorites-visited-sort-2026-04-29.md.
 const USER_LIST_WALKER_LIMIT = 100;
-
-// Shared button presets — kept as constants so the page can stay focused on
-// composition rather than re-typing the same Tailwind utility chains.
-const SECONDARY_BTN =
-  "inline-flex items-center justify-center gap-2 rounded-[10px] border border-[var(--border-2,rgba(30,64,175,0.16))] bg-[var(--surface,#ffffff)] px-4 py-2 text-[13px] font-medium text-[var(--text-dim,#475569)] transition hover:bg-[var(--surface-2,#f1f6fd)] hover:text-[var(--text,#0f172a)] disabled:cursor-not-allowed disabled:opacity-45";
 
 // Builds the same /api/v1/broker-dealers query the master list emits,
 // from a recovered MasterListQueryState. Mirrors the queryPath useMemo
@@ -769,11 +766,11 @@ export function BrokerDealerDetailClient({ brokerDealerId }: { brokerDealerId: s
           </div>
         </div>
         <div className="flex shrink-0 items-center gap-2.5">
-          <button
+          <Button
+            variant="outline"
             type="button"
             onClick={() => void runHealthCheck()}
             disabled={isHealthChecking}
-            className={SECONDARY_BTN}
           >
             {isHealthChecking ? (
               <Loader2 className="h-4 w-4 animate-spin" strokeWidth={2.5} />
@@ -781,7 +778,7 @@ export function BrokerDealerDetailClient({ brokerDealerId }: { brokerDealerId: s
               <RefreshCw className="h-4 w-4" strokeWidth={2} />
             )}
             {isHealthChecking ? "Checking…" : "Health Check"}
-          </button>
+          </Button>
         </div>
       </div>
 
@@ -824,30 +821,30 @@ export function BrokerDealerDetailClient({ brokerDealerId }: { brokerDealerId: s
 
       {/* ── Adjacent-firm nav ── */}
       <div className="mb-5 flex items-center justify-between gap-3">
-        <button
+        <Button
+          variant="outline"
           type="button"
           disabled={!prevId}
           onClick={() => prevId && router.push(buildAdjacentHref(prevId))}
-          className={SECONDARY_BTN}
         >
           <ArrowLeft className="h-4 w-4" strokeWidth={2} />
           Previous Prospect
-        </button>
+        </Button>
         <Link
           href={sourceListHref}
           className="text-[12px] uppercase tracking-[0.08em] text-[var(--text-muted,#94a3b8)] transition hover:text-[var(--text,#0f172a)]"
         >
           {sourceLabels.back}
         </Link>
-        <button
+        <Button
+          variant="outline"
           type="button"
           disabled={!nextId}
           onClick={() => nextId && router.push(buildAdjacentHref(nextId))}
-          className={SECONDARY_BTN}
         >
           Next Prospect
           <ArrowRight className="h-4 w-4" strokeWidth={2} />
-        </button>
+        </Button>
       </div>
 
       {/* ── 2-column section layout — independent flex columns (no height-locking) ── */}
@@ -943,7 +940,11 @@ export function BrokerDealerDetailClient({ brokerDealerId }: { brokerDealerId: s
               type="button"
               onClick={() => void enrichContacts()}
               disabled={isEnriching}
-              className="inline-flex shrink-0 items-center gap-2 rounded-[10px] bg-gradient-to-br from-[#6366f1] to-[#8b5cf6] px-4 py-2 text-[13px] font-semibold text-white shadow-[0_6px_16px_rgba(99,102,241,0.35)] transition hover:brightness-110 disabled:cursor-not-allowed disabled:opacity-60"
+              className={clsx(
+                buttonBase,
+                buttonSizes.md,
+                "shrink-0 bg-gradient-to-br from-[#6366f1] to-[#8b5cf6] text-white shadow-[0_6px_16px_rgba(99,102,241,0.35)] hover:brightness-110",
+              )}
             >
               {isEnriching ? (
                 <Loader2 className="h-4 w-4 animate-spin" strokeWidth={2.5} />
@@ -1462,24 +1463,24 @@ export function BrokerDealerDetailClient({ brokerDealerId }: { brokerDealerId: s
                     {filingTotal === 1 ? "" : "s"}
                   </span>
                   <div className="flex items-center gap-2">
-                    <button
+                    <Button
+                      variant="outline"
                       type="button"
                       onClick={() => setFilingPage((p) => Math.max(1, p - 1))}
                       disabled={filingPage <= 1 || filingLoading}
-                      className={SECONDARY_BTN}
                     >
                       <ArrowLeft className="h-4 w-4" />
                       Previous
-                    </button>
-                    <button
+                    </Button>
+                    <Button
+                      variant="outline"
                       type="button"
                       onClick={() => setFilingPage((p) => p + 1)}
                       disabled={filingPage >= filingTotalPages || filingLoading}
-                      className={SECONDARY_BTN}
                     >
                       Next
                       <ArrowRight className="h-4 w-4" />
-                    </button>
+                    </Button>
                   </div>
                 </div>
               ) : null}
