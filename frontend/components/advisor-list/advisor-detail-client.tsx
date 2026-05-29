@@ -852,7 +852,11 @@ export function AdvisorDetailClient({ advisorId }: { advisorId: string }) {
                 { header: "Title", cell: (c) => c.title ?? "—" },
                 {
                   header: "Channels",
-                  cell: (c) => <ChannelIconCell contact={c} />,
+                  // forceActiveLook: match the BD People section (PR #636) so
+                  // channel icons read as active for demos instead of greying
+                  // out partially-enriched rows. Empty channels stay inert
+                  // (accent color, no popover) — they don't expose data gaps.
+                  cell: (c) => <ChannelIconCell contact={c} forceActiveLook />,
                   className: "whitespace-nowrap",
                 },
                 {
