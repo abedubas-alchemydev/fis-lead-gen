@@ -447,7 +447,7 @@ export function CreateOutreachTab() {
           </div>
           {isAdhoc ? (
             <p className="mt-2 text-[11px] text-[var(--text-dim,#475569)]">
-              Ad-hoc sends generate a draft from the selected service only
+              One-off sends generate a draft from the selected service only
               (no firm context). Edit before sending.
             </p>
           ) : null}

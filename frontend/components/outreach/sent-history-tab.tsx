@@ -316,7 +316,7 @@ function RowGroup({
           <div className="font-semibold">
             {item.contact_name || item.recipient_name || (
               <span className="text-[var(--text-muted,#94a3b8)]">
-                {item.firm_type === "adhoc" ? "Ad-hoc recipient" : "—"}
+                {item.firm_type === "adhoc" ? "One-off recipient" : "—"}
               </span>
             )}
           </div>
