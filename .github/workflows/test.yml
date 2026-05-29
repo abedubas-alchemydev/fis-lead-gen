@@ -298,6 +298,34 @@ jobs:
             --set-secrets=DATABASE_URL=DATABASE_URL_BACKEND_STAGING:latest,GEMINI_API_KEY=GEMINI_API_KEY:latest,APOLLO_API_KEY=APOLLO_API_KEY:latest,SERPAPI_API_KEY=SERPAPI_API_KEY:latest,HUNTER_API_KEY=HUNTER_API_KEY:latest,SNOV_CLIENT_ID=SNOV_CLIENT_ID:latest,SNOV_CLIENT_SECRET=SNOV_CLIENT_SECRET:latest,PDL_API_KEY=PDL_API_KEY:latest \
             --labels=commit-sha=${{ env.SHORT_SHA }},environment=staging,kind=batch-job
 
+      # Unified backfill driver (scripts/backfill_all.py) — sequences every
+      # phase (P1 BD refresh-all incl. FOCUS financials+clearing, P2 FINRA
+      # clearing reconcile, P3 IA refresh-all incl. Form ADV client_counts,
+      # P5 metered Apollo/PDL phones) so BD + 13F-IA profiles are pre-filled.
+      # Triggered manually (`gcloud run jobs execute fis-backfill-all-staging`)
+      # or by a Cloud Scheduler cron (America/Chicago, see the backfill plan).
+      # Adds APOLLO_WEBHOOK_SECRET + PUBLIC_BASE_URL vs the gap-fill job so the
+      # phone phase requests Apollo reveals whose async callback lands on the
+      # backend webhook. Staging-only by design (no prod job resource).
+      - name: Deploy unified backfill Cloud Run Job (staging)
+        if: env.ENV == 'staging'
+        run: |
+          gcloud run jobs deploy fis-backfill-all-staging \
+            --image=${{ vars.GCP_REGISTRY }}/backend:${{ env.SHORT_SHA }} \
+            --region=${{ vars.GCP_REGION }} \
+            --project=${{ vars.GCP_PROJECT_ID }} \
+            --command=python \
+            --args=scripts/backfill_all.py,--apply \
+            --task-timeout=86400 \
+            --memory=2Gi \
+            --cpu=2 \
+            --max-retries=0 \
+            --parallelism=1 \
+            --tasks=1 \
+            --set-env-vars=PUBLIC_BASE_URL=https://staging-dox.alchemydev.io/api/backend \
+            --set-secrets=DATABASE_URL=DATABASE_URL_BACKEND_STAGING:latest,GEMINI_API_KEY=GEMINI_API_KEY:latest,APOLLO_API_KEY=APOLLO_API_KEY:latest,APOLLO_WEBHOOK_SECRET=APOLLO_WEBHOOK_SECRET:latest,SERPAPI_API_KEY=SERPAPI_API_KEY:latest,HUNTER_API_KEY=HUNTER_API_KEY:latest,SNOV_CLIENT_ID=SNOV_CLIENT_ID:latest,SNOV_CLIENT_SECRET=SNOV_CLIENT_SECRET:latest,PDL_API_KEY=PDL_API_KEY:latest \
+            --labels=commit-sha=${{ env.SHORT_SHA }},environment=staging,kind=batch-job
+
       - name: Deploy frontend to Cloud Run
         run: |
           # Re-establish SMTP env on every staging deploy so an accidental clear can't silently break better-auth emails.

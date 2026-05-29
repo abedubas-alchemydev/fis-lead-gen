@@ -411,6 +411,15 @@ or a FINRA BrokerCheck firm report). Extract the following about THIS firm:
 6. formation_date — the date the firm was formed/organized (YYYY-MM-DD) if stated.
 7. firm_operations_text — a concise (1-3 sentence) plain-English summary of what \
    the firm does, drawn from its described advisory business.
+8. client_counts — Form ADV Item 5.D.(2): the NUMBER of clients in each \
+   category, returned as an object whose keys are EXACTLY these snake_case \
+   names: individuals, high_net_worth_individuals, banking_or_thrift_institutions, \
+   investment_companies, business_development_companies, pooled_investment_vehicles, \
+   pension_and_profit_sharing_plans, charitable_organizations, \
+   state_or_municipal_government_entities, other_investment_advisers, \
+   insurance_companies, sovereign_wealth_funds, other. Use the integer from the \
+   5.D.(2) "Number of Clients" column. Use null for any category the firm does \
+   not serve or does not report a number for. Do NOT invent or estimate counts.
 
 IMPORTANT:
 - A person can be both an owner and an officer; list them under each section \
@@ -669,6 +678,20 @@ async def _apply_adv_extraction(
                 advisor.client_types = [c.strip() for c in extraction.client_types if c and c.strip()]
                 if advisor.client_types:
                     written.append("client types")
+
+            if extraction.client_counts and not advisor.client_counts:
+                # Keep only positive integer counts — Gemini returns null for
+                # categories the firm doesn't serve, and bool is an int subclass
+                # so it's excluded explicitly. Stored snake_case to match the FE
+                # render (key.replace("_", " ")) in advisor-detail-client.tsx.
+                counts = {
+                    key: int(val)
+                    for key, val in extraction.client_counts.items()
+                    if isinstance(val, int) and not isinstance(val, bool) and val > 0
+                }
+                if counts:
+                    advisor.client_counts = counts
+                    written.append("client counts")
 
             if extraction.firm_operations_text and not advisor.firm_operations_text:
                 advisor.firm_operations_text = extraction.firm_operations_text.strip()[:_FIRM_OPERATIONS_MAX_CHARS]

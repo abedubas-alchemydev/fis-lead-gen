@@ -341,6 +341,12 @@ def test_advisor_profile_model_parses_full_payload() -> None:
         "direct_owners": [{"name": "Vanguard Group", "title": "Owner", "ownership": "75% or more"}],
         "indirect_owners": [],
         "client_types": ["Investment companies", "Pooled investment vehicles"],
+        "client_counts": {
+            "investment_companies": 30,
+            "pooled_investment_vehicles": 12,
+            # null is a valid Gemini response for an unserved category and must parse.
+            "sovereign_wealth_funds": None,
+        },
         "registration_date": "1983-05-01",
         "formation_date": None,
         "firm_operations_text": "Manages mutual funds and ETFs.",
@@ -350,8 +356,24 @@ def test_advisor_profile_model_parses_full_payload() -> None:
     parsed = GeminiAdvisorProfileExtraction.model_validate(payload)
     assert parsed.executive_officers[0].name == "Mortimer Buckley"
     assert parsed.client_types == ["Investment companies", "Pooled investment vehicles"]
+    assert parsed.client_counts == {
+        "investment_companies": 30,
+        "pooled_investment_vehicles": 12,
+        "sovereign_wealth_funds": None,
+    }
     assert parsed.indirect_owners == []
     assert parsed.confidence_score == 0.92
+
+
+def test_adv_client_count_keys_cover_form_adv_taxonomy() -> None:
+    """The fixed Gemini schema keys must stay aligned with the 13-row Form ADV
+    Item 5.D table (the canonical list lives in iapd._CLIENT_TYPE_HEADERS)."""
+    from app.services.gemini_responses import _ADV_CLIENT_COUNT_KEYS
+
+    assert len(_ADV_CLIENT_COUNT_KEYS) == 13
+    assert _ADV_CLIENT_COUNT_KEYS[0] == "individuals"
+    assert "high_net_worth_individuals" in _ADV_CLIENT_COUNT_KEYS
+    assert _ADV_CLIENT_COUNT_KEYS[-1] == "other"
 
 
 # ── IAPD summary gate: needs CRD + registration_date empty + cooldown ──────

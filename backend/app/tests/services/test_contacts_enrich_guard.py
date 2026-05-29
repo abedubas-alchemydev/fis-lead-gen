@@ -583,7 +583,8 @@ def test_firm_name_matches_rejects_unrelated_firm() -> None:
 
 def test_firm_name_matches_rejects_when_apollo_org_missing() -> None:
     # Conservative: if Apollo doesn't tell us the org, drop the match
-    # rather than guess.
+    # rather than guess. (The org name is resolved upstream by
+    # _resolve_apollo_org_name; this guards the pure-function boundary.)
     assert not ExecutiveContactService._firm_name_matches(None, "ACME LLC")
     assert not ExecutiveContactService._firm_name_matches("", "ACME LLC")
 
@@ -648,5 +649,157 @@ async def test_apollo_match_at_wrong_firm_is_rejected(
     # Cooldown stamped because the Apollo path was Apollo-owned (no
     # transient errors), even though everything was rejected.
     assert bd.last_enrich_attempt_at is not None
+
+
+# ───────────── Apollo org-name resolution (response-variance fix) ─────────────
+# Apollo's /people/match omits the top-level ``organization`` object on a large
+# share of responses (measured ~60% on a staging sample) even when the match is
+# genuine; the employer is reliably present in ``employment_history``. These
+# tests pin the fallback that resolves the employer from either field so the
+# firm-name guard stops false-rejecting valid matches.
+
+
+def test_resolve_apollo_org_name_prefers_top_level_organization() -> None:
+    person = {"organization": {"name": "Commonwealth Financial Network"}}
+    assert (
+        ExecutiveContactService._resolve_apollo_org_name(person)
+        == "Commonwealth Financial Network"
+    )
+
+
+def test_resolve_apollo_org_name_falls_back_to_current_employment() -> None:
+    # No top-level organization object at all — the exact Patel/Schloemer
+    # shape from the probe. Employer must be read from employment_history.
+    person = {
+        "organization_id": None,
+        "employment_history": [
+            {"organization_name": "OLD FIRM LLC", "current": False},
+            {"organization_name": "WELLS FARGO ADVISORS", "current": True},
+        ],
+    }
+    assert (
+        ExecutiveContactService._resolve_apollo_org_name(person)
+        == "WELLS FARGO ADVISORS"
+    )
+
+
+def test_resolve_apollo_org_name_falls_back_to_first_when_no_current_flag() -> None:
+    person = {
+        "employment_history": [
+            {"organization_name": "NORTHWESTERN MUTUAL INVESTMENT SERVICES"},
+        ]
+    }
+    assert (
+        ExecutiveContactService._resolve_apollo_org_name(person)
+        == "NORTHWESTERN MUTUAL INVESTMENT SERVICES"
+    )
+
+
+def test_resolve_apollo_org_name_returns_none_with_no_signal() -> None:
+    assert ExecutiveContactService._resolve_apollo_org_name({}) is None
+    assert (
+        ExecutiveContactService._resolve_apollo_org_name(
+            {"organization": {"name": ""}, "employment_history": []}
+        )
+        is None
+    )
+
+
+@pytest.mark.asyncio
+@respx.mock
+async def test_match_with_org_only_in_employment_history_lands(
+    patch_settings: None,
+) -> None:
+    """Regression for the BD enrich failure rate: Apollo returns a genuine
+    match with verified email + LinkedIn, but omits the top-level
+    ``organization`` object — the employer is only in ``employment_history``.
+    Before the fix the firm guard dropped this (62% of real matches); now it
+    lands."""
+    bd = _make_bd(
+        last_attempt=None,
+        name="COMMONWEALTH FINANCIAL NETWORK",
+        executive_officers=[{"name": "BOHS, JONATHAN", "title": "PRINCIPAL"}],
+    )
+    session = _FakeSession()
+
+    respx.post(APOLLO_MATCH_URL).mock(
+        return_value=httpx.Response(
+            200,
+            json={
+                "person": {
+                    "first_name": "Jonathan",
+                    "last_name": "Bohs",
+                    "email": "jbohs@commonwealth.com",
+                    "email_status": "verified",
+                    "linkedin_url": "https://linkedin.com/in/jbohs",
+                    "phone_numbers": None,
+                    # No top-level "organization" key — the probe's real shape.
+                    "employment_history": [
+                        {
+                            "organization_name": "COMMONWEALTH FINANCIAL NETWORK",
+                            "current": True,
+                        }
+                    ],
+                }
+            },
+        )
+    )
+
+    service = ExecutiveContactService()
+    await service.enrich_contacts(session, bd)
+
+    assert len(session.added) == 1, (
+        "Genuine match whose org is only in employment_history must land"
+    )
+    assert session.added[0].name == "Jonathan Bohs"
+    assert session.added[0].email == "jbohs@commonwealth.com"
+
+
+@pytest.mark.asyncio
+@respx.mock
+async def test_employment_history_at_wrong_firm_still_rejected(
+    patch_settings: None,
+) -> None:
+    """The cross-firm guard is preserved: when the only employer signal is an
+    employment_history entry at an unrelated firm, the match is still dropped.
+    The fallback resolves a name; the token guard then rejects it."""
+    bd = _make_bd(
+        last_attempt=None,
+        name="MORGAN STANLEY",
+        executive_officers=[{"name": "FLETCHER, PATRICIA", "title": "PRINCIPAL"}],
+    )
+    session = _FakeSession()
+
+    respx.post(APOLLO_MATCH_URL).mock(
+        return_value=httpx.Response(
+            200,
+            json={
+                "person": {
+                    "first_name": "Patricia",
+                    "last_name": "Fletcher",
+                    "email": "pfletcher@atonementfriars.org",
+                    "email_status": "verified",
+                    "linkedin_url": "https://linkedin.com/in/pfletcher",
+                    "phone_numbers": None,
+                    "employment_history": [
+                        {
+                            "organization_name": "Franciscan Friars of the Atonement",
+                            "current": True,
+                        }
+                    ],
+                }
+            },
+        )
+    )
+    respx.post(APOLLO_ORG_URL).mock(
+        return_value=httpx.Response(200, json={"organization": None})
+    )
+
+    service = ExecutiveContactService()
+    await service.enrich_contacts(session, bd)
+
+    assert session.added == [], (
+        "Cross-firm match must stay rejected even via the employment_history path"
+    )
 
 
