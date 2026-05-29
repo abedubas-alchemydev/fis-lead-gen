@@ -223,6 +223,29 @@ class GeminiAdvisorPerson(BaseModel):
     )
 
 
+# Form ADV Item 5.D.(2) per-category client-count keys. Mirrors the canonical
+# snake_case taxonomy in ``app.services.iapd._CLIENT_TYPE_HEADERS`` (the fixed
+# 13-row Form ADV Item 5.D table) — kept in sync by hand to avoid a cross-module
+# import. Enumerated as FIXED schema properties on purpose: Gemini's controlled
+# generation is unreliable with dynamic / additionalProperties keys, so we list
+# every key rather than ask for an open-ended object.
+_ADV_CLIENT_COUNT_KEYS: tuple[str, ...] = (
+    "individuals",
+    "high_net_worth_individuals",
+    "banking_or_thrift_institutions",
+    "investment_companies",
+    "business_development_companies",
+    "pooled_investment_vehicles",
+    "pension_and_profit_sharing_plans",
+    "charitable_organizations",
+    "state_or_municipal_government_entities",
+    "other_investment_advisers",
+    "insurance_companies",
+    "sovereign_wealth_funds",
+    "other",
+)
+
+
 class GeminiAdvisorProfileExtraction(BaseModel):
     """Structured extraction of the investment-advisor profile fields from a
     Form ADV (IAPD) or BrokerCheck PDF. One call fills the People panel
@@ -236,6 +259,12 @@ class GeminiAdvisorProfileExtraction(BaseModel):
     client_types: list[str] = Field(
         default_factory=list,
         description="Form ADV Item 5.D client categories, e.g. 'Investment companies'.",
+    )
+    # Item 5.D.(2) per-category counts. Values may be null (category not served
+    # / not reported); the apply step filters to positive integers before write.
+    client_counts: dict[str, int | None] | None = Field(
+        default=None,
+        description="Form ADV Item 5.D.(2) per-category client counts; snake_case category key -> integer count.",
     )
     registration_date: str | None = Field(default=None, description="ISO date YYYY-MM-DD")
     formation_date: str | None = Field(default=None, description="ISO date YYYY-MM-DD")
@@ -595,6 +624,14 @@ class GeminiResponsesClient:
                 "direct_owners": {"type": "ARRAY", "items": person},
                 "indirect_owners": {"type": "ARRAY", "items": person},
                 "client_types": {"type": "ARRAY", "items": {"type": "STRING"}},
+                "client_counts": {
+                    "type": ["OBJECT", "NULL"],
+                    "properties": {
+                        key: {"type": ["INTEGER", "NULL"]}
+                        for key in _ADV_CLIENT_COUNT_KEYS
+                    },
+                    "propertyOrdering": list(_ADV_CLIENT_COUNT_KEYS),
+                },
                 "registration_date": {"type": ["STRING", "NULL"]},
                 "formation_date": {"type": ["STRING", "NULL"]},
                 "firm_operations_text": {"type": ["STRING", "NULL"]},
@@ -607,6 +644,7 @@ class GeminiResponsesClient:
                 "direct_owners",
                 "indirect_owners",
                 "client_types",
+                "client_counts",
                 "registration_date",
                 "formation_date",
                 "firm_operations_text",
