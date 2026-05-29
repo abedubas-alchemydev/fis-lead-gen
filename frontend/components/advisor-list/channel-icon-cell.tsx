@@ -430,9 +430,6 @@ function PhoneBody({
         </ul>
       ) : findPhone ? (
         <div className="flex flex-col items-start gap-2">
-          <span className="text-[12px] italic text-[var(--text-muted,#94a3b8)]">
-            Mobile number not publicly available
-          </span>
           <FindPhoneButton
             entityKind={findPhone.entityKind}
             entityId={findPhone.entityId}

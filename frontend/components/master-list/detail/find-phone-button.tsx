@@ -5,7 +5,7 @@ import { useState } from "react";
 import clsx from "clsx";
 
 import { buttonBase, buttonSizes } from "@/components/ui/button";
-import { apiRequest, ApiError } from "@/lib/api";
+import { apiRequest } from "@/lib/api";
 import type {
   ExecutiveContactItem,
   InvestorContactItem,
@@ -32,50 +32,25 @@ export function FindPhoneButton<
   onSuccess: (updated: T) => void;
 }) {
   const [inFlight, setInFlight] = useState(false);
-  const [error, setError] = useState<string | null>(null);
-  const [triedEmpty, setTriedEmpty] = useState(false);
 
   const basePath =
     entityKind === "investor" ? "institutional-investors" : "broker-dealers";
 
   async function handleClick() {
     setInFlight(true);
-    setError(null);
-    setTriedEmpty(false);
     try {
       const updated = await apiRequest<T>(
         `/api/v1/${basePath}/${entityId}/contacts/${contactId}/find-phone`,
         { method: "POST" },
       );
       onSuccess(updated);
-      if (!updated.phone) {
-        setTriedEmpty(true);
-      }
-    } catch (e) {
-      if (e instanceof ApiError) {
-        setError(e.detail || `Request failed (${e.status})`);
-      } else {
-        setError(e instanceof Error ? e.message : String(e));
-      }
+    } catch {
+      // CLIENT/DEMO: swallow lookup errors / empty results — no negative
+      // "Tried, no phone found" or red error pill. The button just returns to
+      // its ready state so it can be retried.
     } finally {
       setInFlight(false);
     }
-  }
-
-  if (error) {
-    return (
-      <span className="inline-flex items-center gap-1 rounded-md bg-[var(--pill-red-bg,#fee2e2)] px-2 py-0.5 text-[11px] text-[var(--pill-red-text,#b91c1c)]">
-        {error}
-      </span>
-    );
-  }
-
-  if (triedEmpty) {
-    return (
-      <span className="inline-flex items-center gap-1 text-[var(--text-muted,#94a3b8)] italic">
-        Tried, no phone found
-      </span>
-    );
   }
 
   return (
