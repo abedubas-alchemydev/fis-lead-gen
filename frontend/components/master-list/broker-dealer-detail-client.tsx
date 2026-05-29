@@ -185,6 +185,9 @@ export function BrokerDealerDetailClient({ brokerDealerId }: { brokerDealerId: s
   const [filingTotal, setFilingTotal] = useState(0);
   const [filingTotalPages, setFilingTotalPages] = useState(0);
   const [filingLoading, setFilingLoading] = useState(false);
+  // Filing History is a long, full-width timeline; let users collapse it
+  // to declutter the page. Defaults open so no data is hidden on load.
+  const [filingHistoryOpen, setFilingHistoryOpen] = useState(true);
 
   // Refresh-on-visit gating. We POST /refresh-all on mount so the BE's
   // per-pipeline gates can fill any missing column before we render.
@@ -930,96 +933,6 @@ export function BrokerDealerDetailClient({ brokerDealerId }: { brokerDealerId: s
           <FinancialTrendChart points={chartPoints} />
         </SectionPanel>
 
-        {/* Assessment */}
-        <SectionPanel eyebrow="Assessment" title="Firm profile overview">
-          <div className="grid gap-3 md:grid-cols-2">
-            <MiniStat
-              label="Registration Status"
-              value={profile.registration_compliance.registration_status || "Not available"}
-              compact
-            />
-            <MiniStat
-              label="Registration Date"
-              value={formatDate(profile.registration_compliance.registration_date)}
-              compact
-            />
-            <MiniStat label="Address" value={location || "Not available"} compact />
-            <MiniStat
-              label="Branch Count"
-              value={
-                profile.registration_compliance.branch_count !== null
-                  ? String(profile.registration_compliance.branch_count)
-                  : "Not available"
-              }
-              compact
-            />
-          </div>
-
-          {/* Alternate Names — firm-filed DBAs / historical predecessor names
-              from FINRA's firm_other_names. Hidden when the firm has no
-              alternates so the card stays compact for single-name firms. */}
-          {bd.dba_names && bd.dba_names.length > 0 ? (
-            <div className="mt-4">
-              <div className="flex items-center gap-2">
-                <p className="text-[13px] font-semibold text-[var(--text,#0f172a)]">Alternate Names</p>
-                <Pill variant="info">{bd.dba_names.length} names</Pill>
-              </div>
-              <CollapsiblePillList items={bd.dba_names} />
-            </div>
-          ) : null}
-
-          {/* Types of Business */}
-          <div className="mt-4">
-            <div className="flex items-center gap-2">
-              <p className="text-[13px] font-semibold text-[var(--text,#0f172a)]">Types of Business</p>
-              {bd.types_of_business_total ? (
-                <Pill variant="info">{bd.types_of_business_total} types</Pill>
-              ) : null}
-            </div>
-            {bd.types_of_business && bd.types_of_business.length > 0 ? (
-              <CollapsiblePillList items={bd.types_of_business} />
-            ) : (
-              <p className="mt-2 text-sm text-[var(--text-muted,#94a3b8)]">Not available</p>
-            )}
-            {bd.types_of_business_other ? (
-              <div className="mt-2 rounded-2xl bg-[var(--surface-2,#f1f6fd)] px-4 py-3 text-sm text-[var(--text-dim,#475569)]">
-                <p className="text-[11px] font-semibold uppercase tracking-[0.08em] text-[var(--text-muted,#94a3b8)]">
-                  Other Business Activities
-                </p>
-                <p className="mt-1">{bd.types_of_business_other}</p>
-              </div>
-            ) : null}
-          </div>
-
-          {/* PDF action strip */}
-          <div className="mt-4 flex flex-wrap items-start gap-2">
-            <a
-              href={`/api/backend/api/v1/broker-dealers/${brokerDealerId}/focus-report.pdf`}
-              target="_blank"
-              rel="noopener noreferrer"
-              className="inline-flex items-center gap-1.5 rounded-[10px] border border-[var(--border-2,rgba(30,64,175,0.16))] bg-[var(--surface,#ffffff)] px-3 py-1.5 text-[12px] font-medium text-[var(--text-dim,#475569)] transition hover:bg-[var(--surface-2,#f1f6fd)] hover:text-[var(--text,#0f172a)]"
-            >
-              <Download className="h-3.5 w-3.5" strokeWidth={2} />
-              FOCUS report (PDF)
-            </a>
-            {bd.crd_number ? (
-              <a
-                href={`/api/backend/api/v1/broker-dealers/${brokerDealerId}/brokercheck.pdf`}
-                target="_blank"
-                rel="noopener noreferrer"
-                className="inline-flex items-center gap-1.5 rounded-[10px] border border-[var(--border-2,rgba(30,64,175,0.16))] bg-[var(--surface,#ffffff)] px-3 py-1.5 text-[12px] font-medium text-[var(--text-dim,#475569)] transition hover:bg-[var(--surface-2,#f1f6fd)] hover:text-[var(--text,#0f172a)]"
-              >
-                <ExternalLink className="h-3.5 w-3.5" strokeWidth={2} />
-                FINRA BrokerCheck (PDF)
-              </a>
-            ) : null}
-          </div>
-
-          <FocusReportSection brokerDealerId={brokerDealerId} onProfileRefresh={reloadProfile} />
-        </SectionPanel>
-      </div>
-
-      <div className="flex min-w-0 flex-1 flex-col gap-4">
         {/* People */}
         <SectionPanel eyebrow="People" title="Owners, officers, and contacts">
           <div className="mb-4 flex flex-wrap items-center justify-between gap-3">
@@ -1175,6 +1088,96 @@ export function BrokerDealerDetailClient({ brokerDealerId }: { brokerDealerId: s
               ]}
             />
           ) : null}
+        </SectionPanel>
+      </div>
+
+      <div className="flex min-w-0 flex-1 flex-col gap-4">
+        {/* Assessment */}
+        <SectionPanel eyebrow="Assessment" title="Firm profile overview">
+          <div className="grid gap-3 md:grid-cols-2">
+            <MiniStat
+              label="Registration Status"
+              value={profile.registration_compliance.registration_status || "Not available"}
+              compact
+            />
+            <MiniStat
+              label="Registration Date"
+              value={formatDate(profile.registration_compliance.registration_date)}
+              compact
+            />
+            <MiniStat label="Address" value={location || "Not available"} compact />
+            <MiniStat
+              label="Branch Count"
+              value={
+                profile.registration_compliance.branch_count !== null
+                  ? String(profile.registration_compliance.branch_count)
+                  : "Not available"
+              }
+              compact
+            />
+          </div>
+
+          {/* Alternate Names — firm-filed DBAs / historical predecessor names
+              from FINRA's firm_other_names. Hidden when the firm has no
+              alternates so the card stays compact for single-name firms. */}
+          {bd.dba_names && bd.dba_names.length > 0 ? (
+            <div className="mt-4">
+              <div className="flex items-center gap-2">
+                <p className="text-[13px] font-semibold text-[var(--text,#0f172a)]">Alternate Names</p>
+                <Pill variant="info">{bd.dba_names.length} names</Pill>
+              </div>
+              <CollapsiblePillList items={bd.dba_names} />
+            </div>
+          ) : null}
+
+          {/* Types of Business */}
+          <div className="mt-4">
+            <div className="flex items-center gap-2">
+              <p className="text-[13px] font-semibold text-[var(--text,#0f172a)]">Types of Business</p>
+              {bd.types_of_business_total ? (
+                <Pill variant="info">{bd.types_of_business_total} types</Pill>
+              ) : null}
+            </div>
+            {bd.types_of_business && bd.types_of_business.length > 0 ? (
+              <CollapsiblePillList items={bd.types_of_business} />
+            ) : (
+              <p className="mt-2 text-sm text-[var(--text-muted,#94a3b8)]">Not available</p>
+            )}
+            {bd.types_of_business_other ? (
+              <div className="mt-2 rounded-2xl bg-[var(--surface-2,#f1f6fd)] px-4 py-3 text-sm text-[var(--text-dim,#475569)]">
+                <p className="text-[11px] font-semibold uppercase tracking-[0.08em] text-[var(--text-muted,#94a3b8)]">
+                  Other Business Activities
+                </p>
+                <p className="mt-1">{bd.types_of_business_other}</p>
+              </div>
+            ) : null}
+          </div>
+
+          {/* PDF action strip */}
+          <div className="mt-4 flex flex-wrap items-start gap-2">
+            <a
+              href={`/api/backend/api/v1/broker-dealers/${brokerDealerId}/focus-report.pdf`}
+              target="_blank"
+              rel="noopener noreferrer"
+              className="inline-flex items-center gap-1.5 rounded-[10px] border border-[var(--border-2,rgba(30,64,175,0.16))] bg-[var(--surface,#ffffff)] px-3 py-1.5 text-[12px] font-medium text-[var(--text-dim,#475569)] transition hover:bg-[var(--surface-2,#f1f6fd)] hover:text-[var(--text,#0f172a)]"
+            >
+              <Download className="h-3.5 w-3.5" strokeWidth={2} />
+              FOCUS report (PDF)
+            </a>
+            {bd.crd_number ? (
+              <a
+                href={`/api/backend/api/v1/broker-dealers/${brokerDealerId}/brokercheck.pdf`}
+                target="_blank"
+                rel="noopener noreferrer"
+                className="inline-flex items-center gap-1.5 rounded-[10px] border border-[var(--border-2,rgba(30,64,175,0.16))] bg-[var(--surface,#ffffff)] px-3 py-1.5 text-[12px] font-medium text-[var(--text-dim,#475569)] transition hover:bg-[var(--surface-2,#f1f6fd)] hover:text-[var(--text,#0f172a)]"
+              >
+                <ExternalLink className="h-3.5 w-3.5" strokeWidth={2} />
+                FINRA BrokerCheck (PDF)
+              </a>
+            ) : null}
+          </div>
+
+          <FocusReportSection brokerDealerId={brokerDealerId} onProfileRefresh={reloadProfile} />
         </SectionPanel>
 
         {/* Relationship */}
@@ -1378,75 +1381,97 @@ export function BrokerDealerDetailClient({ brokerDealerId }: { brokerDealerId: s
 
       {/* ── Filing history (full width) ── */}
       <div className="mt-4">
-        <SectionPanel eyebrow="Filing History" title="Chronological filing timeline">
-          <div className="space-y-3">
-            {filingLoading && filingItems.length === 0 ? (
-              <div className="flex items-center justify-center rounded-2xl bg-[var(--surface-2,#f1f6fd)] px-4 py-8 text-sm text-[var(--text-muted,#94a3b8)]">
-                <Loader2 className="mr-2 h-4 w-4 animate-spin" />
-                Loading filings…
-              </div>
-            ) : filingItems.length === 0 ? (
-              <div className="rounded-2xl bg-[var(--surface-2,#f1f6fd)] px-4 py-8 text-center text-sm text-[var(--text-muted,#94a3b8)]">
-                No filing history is available yet.
-              </div>
-            ) : (
-              filingItems.map((item, index) => (
-                <div
-                  key={`${item.label}-${item.filed_at}-${index}`}
-                  className="rounded-2xl border border-[var(--border,rgba(30,64,175,0.1))] px-4 py-4"
-                >
-                  <div className="flex flex-wrap items-start justify-between gap-3">
-                    <div>
-                      <p className="font-semibold text-[var(--text,#0f172a)]">{item.label}</p>
-                      <p className="mt-1 text-sm text-[var(--text-dim,#475569)]">{item.summary}</p>
-                    </div>
-                    {item.priority ? <AlertPriorityBadge priority={item.priority} /> : null}
+        <SectionPanel
+          eyebrow="Filing History"
+          title="Chronological filing timeline"
+          headerAction={
+            <button
+              type="button"
+              onClick={() => setFilingHistoryOpen((open) => !open)}
+              aria-expanded={filingHistoryOpen}
+              className="inline-flex items-center gap-1.5 rounded-[10px] border border-[var(--border-2,rgba(30,64,175,0.16))] bg-[var(--surface,#ffffff)] px-3 py-1.5 text-[12px] font-medium text-[var(--text-dim,#475569)] transition hover:bg-[var(--surface-2,#f1f6fd)] hover:text-[var(--text,#0f172a)]"
+            >
+              {filingHistoryOpen ? "Collapse" : "Expand"}
+              {filingHistoryOpen ? (
+                <ChevronUp className="h-4 w-4" strokeWidth={2} aria-hidden />
+              ) : (
+                <ChevronDown className="h-4 w-4" strokeWidth={2} aria-hidden />
+              )}
+            </button>
+          }
+        >
+          {filingHistoryOpen ? (
+            <>
+              <div className="space-y-3">
+                {filingLoading && filingItems.length === 0 ? (
+                  <div className="flex items-center justify-center rounded-2xl bg-[var(--surface-2,#f1f6fd)] px-4 py-8 text-sm text-[var(--text-muted,#94a3b8)]">
+                    <Loader2 className="mr-2 h-4 w-4 animate-spin" />
+                    Loading filings…
                   </div>
-                  <div className="mt-3 flex flex-wrap items-center gap-4 text-sm text-[var(--text-muted,#94a3b8)]">
-                    <span>{formatDate(item.filed_at)}</span>
-                    {item.source_filing_url ? (
-                      <a
-                        href={viewableFilingUrl(item.source_filing_url) ?? item.source_filing_url}
-                        target="_blank"
-                        rel="noreferrer"
-                        className="inline-flex items-center gap-1 text-[var(--accent,#6366f1)] hover:underline"
-                      >
-                        Open filing
-                        <ExternalLink className="h-3 w-3" strokeWidth={2} />
-                      </a>
-                    ) : null}
+                ) : filingItems.length === 0 ? (
+                  <div className="rounded-2xl bg-[var(--surface-2,#f1f6fd)] px-4 py-8 text-center text-sm text-[var(--text-muted,#94a3b8)]">
+                    No filing history is available yet.
+                  </div>
+                ) : (
+                  filingItems.map((item, index) => (
+                    <div
+                      key={`${item.label}-${item.filed_at}-${index}`}
+                      className="rounded-2xl border border-[var(--border,rgba(30,64,175,0.1))] px-4 py-4"
+                    >
+                      <div className="flex flex-wrap items-start justify-between gap-3">
+                        <div>
+                          <p className="font-semibold text-[var(--text,#0f172a)]">{item.label}</p>
+                          <p className="mt-1 text-sm text-[var(--text-dim,#475569)]">{item.summary}</p>
+                        </div>
+                        {item.priority ? <AlertPriorityBadge priority={item.priority} /> : null}
+                      </div>
+                      <div className="mt-3 flex flex-wrap items-center gap-4 text-sm text-[var(--text-muted,#94a3b8)]">
+                        <span>{formatDate(item.filed_at)}</span>
+                        {item.source_filing_url ? (
+                          <a
+                            href={viewableFilingUrl(item.source_filing_url) ?? item.source_filing_url}
+                            target="_blank"
+                            rel="noreferrer"
+                            className="inline-flex items-center gap-1 text-[var(--accent,#6366f1)] hover:underline"
+                          >
+                            Open filing
+                            <ExternalLink className="h-3 w-3" strokeWidth={2} />
+                          </a>
+                        ) : null}
+                      </div>
+                    </div>
+                  ))
+                )}
+              </div>
+              {filingTotal > 0 ? (
+                <div className="mt-4 flex flex-wrap items-center justify-between gap-3 text-sm text-[var(--text-muted,#94a3b8)]">
+                  <span>
+                    Page {filingPage} of {Math.max(filingTotalPages, 1)} · {filingTotal} total filing
+                    {filingTotal === 1 ? "" : "s"}
+                  </span>
+                  <div className="flex items-center gap-2">
+                    <button
+                      type="button"
+                      onClick={() => setFilingPage((p) => Math.max(1, p - 1))}
+                      disabled={filingPage <= 1 || filingLoading}
+                      className={SECONDARY_BTN}
+                    >
+                      <ArrowLeft className="h-4 w-4" />
+                      Previous
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => setFilingPage((p) => p + 1)}
+                      disabled={filingPage >= filingTotalPages || filingLoading}
+                      className={SECONDARY_BTN}
+                    >
+                      Next
+                      <ArrowRight className="h-4 w-4" />
+                    </button>
                   </div>
                 </div>
-              ))
-            )}
-          </div>
-          {filingTotal > 0 ? (
-            <div className="mt-4 flex flex-wrap items-center justify-between gap-3 text-sm text-[var(--text-muted,#94a3b8)]">
-              <span>
-                Page {filingPage} of {Math.max(filingTotalPages, 1)} · {filingTotal} total filing
-                {filingTotal === 1 ? "" : "s"}
-              </span>
-              <div className="flex items-center gap-2">
-                <button
-                  type="button"
-                  onClick={() => setFilingPage((p) => Math.max(1, p - 1))}
-                  disabled={filingPage <= 1 || filingLoading}
-                  className={SECONDARY_BTN}
-                >
-                  <ArrowLeft className="h-4 w-4" />
-                  Previous
-                </button>
-                <button
-                  type="button"
-                  onClick={() => setFilingPage((p) => p + 1)}
-                  disabled={filingPage >= filingTotalPages || filingLoading}
-                  className={SECONDARY_BTN}
-                >
-                  Next
-                  <ArrowRight className="h-4 w-4" />
-                </button>
-              </div>
-            </div>
+              ) : null}
+            </>
           ) : null}
         </SectionPanel>
       </div>
