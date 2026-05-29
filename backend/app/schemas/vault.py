@@ -128,9 +128,10 @@ class OutreachAdhocSendRequest(BaseModel):
 
     Used by the ``/outreach/sent?tab=create`` workspace when the user
     sends to a free-form email address with no contact / firm record
-    in the system. No firm / contact context, so Gemini draft
-    generation is unavailable on this path -- the FE always provides
-    a hand-written subject + body.
+    in the system. AI draft generation is available via
+    ``POST /outreach/adhoc-draft`` (see ``OutreachAdhocDraftRequest``);
+    the send path itself just accepts whatever subject + body the user
+    submits.
 
     ``folder_id`` is optional metadata: when provided, it lets the
     sent-history table label the service the send was about; when
@@ -145,6 +146,25 @@ class OutreachAdhocSendRequest(BaseModel):
     body: str = Field(..., min_length=1, max_length=100_000)
     sender_account_id: str | None = Field(default=None, max_length=255)
     folder_id: int | None = Field(default=None, gt=0)
+
+
+class OutreachAdhocDraftRequest(BaseModel):
+    """Body for ``POST /outreach/adhoc-draft``.
+
+    Drafts a cold email for the free-form-email path on
+    ``/outreach/sent?tab=create``. Unlike the contact-keyed draft
+    endpoints, this one has no firm / contact context — Gemini works
+    from the service folder's description + RAG excerpts plus the
+    optional recipient name.
+
+    ``folder_id`` is required (unlike on the send path): without a
+    service folder there's nothing concrete for the LLM to pitch, so
+    the FE only enables the Generate button once a service is picked.
+    """
+
+    folder_id: int = Field(..., gt=0)
+    recipient_email: EmailStr
+    recipient_name: str | None = Field(default=None, max_length=255)
 
 
 class RecipientSearchResult(BaseModel):

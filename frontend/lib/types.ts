@@ -819,6 +819,15 @@ export type OutreachAdhocSendRequest = {
   folder_id?: number | null;
 };
 
+// POST /api/v1/outreach/adhoc-draft — drafts a cold email for the
+// free-form-email path on /outreach/sent?tab=create. Folder is required
+// (the FE only enables the Generate button once a Service is picked).
+export type OutreachAdhocDraftRequest = {
+  folder_id: number;
+  recipient_email: string;
+  recipient_name?: string | null;
+};
+
 // GET /api/v1/outreach/linked-providers — used by the Outreach modal to
 // decide whether to render a provider picker (2+ linked), a "Connect"
 // CTA (0 linked), or just use the only linked provider implicitly

@@ -52,6 +52,7 @@ from app.schemas.vault import (
     FirmSearchResult,
     LinkedProviderItem,
     LinkedProvidersResponse,
+    OutreachAdhocDraftRequest,
     OutreachAdhocSendRequest,
     OutreachAdvisorDraftRequest,
     OutreachAdvisorSendRequest,
@@ -251,6 +252,76 @@ async def create_outreach_draft(
         ) from exc
     except OutreachDraftError as exc:
         logger.warning("outreach draft generation failed: %s", exc)
+        raise HTTPException(
+            status_code=status.HTTP_502_BAD_GATEWAY,
+            detail="The drafting service is unavailable. Try again in a moment.",
+        ) from exc
+
+    return OutreachDraftResponse(subject=draft.subject, body=draft.body)
+
+
+@router.post("/adhoc-draft", response_model=OutreachDraftResponse)
+async def create_adhoc_outreach_draft(
+    payload: OutreachAdhocDraftRequest,
+    current_user: AuthenticatedUser = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db_session),
+) -> OutreachDraftResponse:
+    """Generate a cold-email draft for the free-form-email (adhoc) path.
+
+    No firm / contact context — the LLM works from the service folder's
+    description + RAG excerpts plus the optional recipient name. The
+    retrieval query is built from the folder name + description alone
+    (firm-side text isn't available), so chunks lean toward the most
+    general material in the service folder.
+
+    Same error mapping as ``/outreach/draft``: 503 for misconfigured
+    Gemini, 502 for any other provider failure, 404 if the folder
+    doesn't belong to the caller.
+    """
+    folder_stmt = select(VaultFolder).where(
+        VaultFolder.id == payload.folder_id,
+        VaultFolder.user_id == current_user.id,
+    )
+    folder = (await db.execute(folder_stmt)).scalar_one_or_none()
+    if folder is None:
+        raise HTTPException(status_code=404, detail="outreach_inputs_not_found")
+
+    retrieval_query = " ".join(
+        part for part in (folder.name, folder.description or "") if part
+    )
+    retrieved: tuple[str, ...] = ()
+    if folder.description or retrieval_query:
+        try:
+            chunks = await retrieve_chunks(
+                folder_id=folder.id, query=retrieval_query, db=db
+            )
+            retrieved = tuple(chunk.text for chunk in chunks)
+        except Exception as exc:  # noqa: BLE001
+            logger.warning(
+                "outreach: chunk retrieval failed for folder %s: %s",
+                folder.id,
+                exc,
+            )
+
+    service_ctx = ServiceContext(
+        name=folder.name,
+        description=folder.description,
+        instructions=folder.outreach_instructions or "",
+        retrieved_chunks=retrieved,
+    )
+
+    try:
+        draft = await generate_outreach_draft(
+            service=service_ctx, recipient_name=payload.recipient_name
+        )
+    except OutreachConfigurationError as exc:
+        logger.error("outreach adhoc draft configuration error: %s", exc)
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="Outreach drafts are not configured. Contact an administrator.",
+        ) from exc
+    except OutreachDraftError as exc:
+        logger.warning("outreach adhoc draft generation failed: %s", exc)
         raise HTTPException(
             status_code=status.HTTP_502_BAD_GATEWAY,
             detail="The drafting service is unavailable. Try again in a moment.",
