@@ -858,7 +858,7 @@ function InvestorRow({
     : "Find this insider's contact first to enable outreach";
 
   return (
-    <div className="grid gap-3 py-3 md:grid-cols-[minmax(0,1.4fr)_minmax(0,1.2fr)_minmax(0,220px)]">
+    <div className="grid gap-3 py-3 md:grid-cols-[minmax(0,1.4fr)_minmax(0,1.2fr)_minmax(0,264px)]">
       <div className="min-w-0">
         <div className="flex flex-wrap items-center gap-2">
           <span className="text-[14px] font-semibold text-[var(--text,#0f172a)]">
@@ -949,7 +949,7 @@ function InvestorRow({
           </a>
         ) : null}
       </div>
-      <div className="flex flex-wrap items-start justify-end gap-2">
+      <div className="flex flex-nowrap items-center justify-end gap-2">
         <ListPicker
           variant="row-heart"
           entityType="reporting_owner"
@@ -966,7 +966,7 @@ function InvestorRow({
               ? "Entity filer — people-match doesn't apply to organizations"
               : undefined
           }
-          className="inline-flex items-center gap-1.5 rounded-md border border-[var(--border-2,rgba(30,64,175,0.16))] bg-transparent px-2.5 py-1 text-[11px] font-semibold text-[var(--text-dim,#475569)] transition hover:bg-[var(--surface-2,#f1f6fd)] hover:text-[var(--text,#0f172a)] disabled:cursor-not-allowed disabled:opacity-50"
+          className="inline-flex shrink-0 items-center gap-1.5 whitespace-nowrap rounded-md border border-[var(--border-2,rgba(30,64,175,0.16))] bg-transparent px-2.5 py-1 text-[11px] font-semibold text-[var(--text-dim,#475569)] transition hover:bg-[var(--surface-2,#f1f6fd)] hover:text-[var(--text,#0f172a)] disabled:cursor-not-allowed disabled:opacity-50"
         >
           {enriching ? (
             <Loader2 className="h-3.5 w-3.5 animate-spin" strokeWidth={2} />
@@ -978,7 +978,7 @@ function InvestorRow({
           onClick={() => setOutreachOpen(true)}
           disabled={!canOutreach}
           title={canOutreach ? undefined : outreachDisabledTitle}
-          className="inline-flex items-center gap-1.5 rounded-md bg-[var(--accent,#6366f1)] px-2.5 py-1 text-[11px] font-semibold text-white transition hover:bg-[var(--accent-2,#8b5cf6)] disabled:cursor-not-allowed disabled:opacity-50"
+          className="inline-flex shrink-0 items-center gap-1.5 whitespace-nowrap rounded-md bg-[var(--accent,#6366f1)] px-2.5 py-1 text-[11px] font-semibold text-white transition hover:bg-[var(--accent-2,#8b5cf6)] disabled:cursor-not-allowed disabled:opacity-50"
         >
           <MailPlus className="h-3.5 w-3.5" strokeWidth={2} aria-hidden />
           Outreach
