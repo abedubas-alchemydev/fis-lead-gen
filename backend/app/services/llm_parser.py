@@ -46,14 +46,27 @@ class LlmParserService:
             '- "executes and clears"\n'
             '- "prime broker"\n'
             '- "omnibus account"\n\n'
-            "## Special-case rule — firms that do not carry customer accounts\n"
-            "If the firm explicitly states it does not carry customer accounts, does not hold customer "
-            "funds or securities, is limited to M&A advisory or other non-custodial activity, or operates "
-            "under a Section 15(c)(3)-1 (or (k)(2)(i) / (k)(2)(ii)) exemption, return "
-            "clearing_type='self_clearing' with confidence_score >= 0.85. Do NOT return 'unknown' and do "
-            "NOT set clearing_partner to null with low confidence in this case — the firm's regulatory "
-            "status (no customer accounts → no clearing relationship needed) IS the answer. "
-            "clearing_partner should be null because there is no third-party clearing firm to name.\n\n"
+            "## Special-case rule — firms with no clearing relationship\n"
+            "Some firms genuinely have no clearing relationship to extract because they have no customer "
+            "accounts at all. Return clearing_type='self_clearing' with clearing_partner=null and "
+            "confidence_score >= 0.85 if the firm matches ANY of:\n"
+            "- M&A advisory only / business is limited to non-customer activity\n"
+            "- Section 15(c)(3)-1 exemption, or paragraph (k)(1) exemption (mutual-fund-only dealers, "
+            "savings-and-loan-account solicitors, paper-only dealers — firms that promptly transmit all "
+            "funds/securities and never hold them)\n"
+            "- (k)(2)(i) exemption (narrow special-purpose broker-dealers that do not custody assets)\n"
+            "- Filing explicitly states no clearing partner or clearing agreement is mentioned anywhere\n\n"
+            "**Critical exclusion — (k)(2)(ii) is NOT a self-clearing signal.** Rule 15c3-3(k)(2)(ii) is "
+            "the introducing-broker exemption: every firm claiming it clears all customer transactions "
+            "through another broker-dealer on a fully-disclosed basis. If the document cites (k)(2)(ii) "
+            "OR describes the firm as an introducing broker OR says customer transactions are "
+            "cleared/executed through another broker-dealer:\n"
+            "- If the FOCUS text names the clearing partner: return clearing_type='fully_disclosed' with "
+            "that partner name and confidence_score >= 0.9.\n"
+            "- If the FOCUS text describes the relationship but does not name the partner: return "
+            "clearing_type='fully_disclosed' with clearing_partner=null and confidence_score=0.5 — a "
+            "downstream FINRA Form BD reconciliation step will fill in the name.\n"
+            "- Never return self_clearing for a (k)(2)(ii) firm, even when the partner isn't named.\n\n"
             "Return a JSON object with these fields:\n"
             "- clearing_partner: The name of the clearing firm (e.g. 'Pershing LLC', 'Apex Clearing Corporation'). "
             "Use null only if no clearing partner is mentioned or the firm is self-clearing.\n"
@@ -141,19 +154,21 @@ class LlmParserService:
             'self_clearing with null partner per the special-case rule.", "evidence_excerpt": "The '
             "Company's business is limited to mergers-and-acquisitions advisory services. The Company "
             'does not carry accounts of or for customers and does not hold customer funds or securities."}\n\n'
-            "Example 10 — Section 15(c)(3)-1 / (k)(2)(i) exemption report:\n"
-            'Document says: "The Company claims exemption from Rule 15c3-3 under paragraph (k)(2)(i) of '
-            'the Rule, as it does not carry customer accounts and all customer transactions are cleared '
-            'through another broker-dealer on a fully disclosed basis."\n'
+            "Example 10 — (k)(2)(ii) introducing-broker exemption (partner not named in FOCUS):\n"
+            'Document says: "The Company, under Rule 15c3-3(k)(2)(ii), is exempt from the reserve and '
+            "possession or control requirements of Rule 15c3-3 of the SEC. The Company does not carry "
+            "or clear customer accounts. All customer transactions are executed and cleared on behalf "
+            'of the Company by its clearing broker on a fully disclosed basis."\n'
             "Expected output:\n"
-            '{"clearing_partner": null, "clearing_type": "self_clearing", "agreement_date": null, '
-            '"confidence_score": 0.9, "rationale": "Exemption Report cites Rule 15c3-3(k)(2)(i) and the '
-            'firm does not carry customer accounts. The (k)(2)(i) exemption itself IS the regulatory '
-            'answer — return self_clearing with null partner per the special-case rule, even though the '
-            'document mentions transactions are cleared through an unnamed broker-dealer.", '
-            '"evidence_excerpt": "The Company claims exemption from Rule 15c3-3 under paragraph (k)(2)(i) '
-            'of the Rule, as it does not carry customer accounts and all customer transactions are '
-            'cleared through another broker-dealer on a fully disclosed basis."}\n\n'
+            '{"clearing_partner": null, "clearing_type": "fully_disclosed", "agreement_date": null, '
+            '"confidence_score": 0.5, "rationale": "Firm claims the (k)(2)(ii) introducing-broker '
+            "exemption — every (k)(2)(ii) firm has a clearing partner by definition. The FOCUS text "
+            "describes the introducing relationship but does not name the clearing broker, so return "
+            "fully_disclosed with partner=null and lower confidence so a downstream FINRA Form BD "
+            'reconciler can fill in the name. Never return self_clearing for a (k)(2)(ii) firm.", '
+            '"evidence_excerpt": "The Company, under Rule 15c3-3(k)(2)(ii), is exempt ... All customer '
+            "transactions are executed and cleared on behalf of the Company by its clearing broker on "
+            'a fully disclosed basis."}\n\n'
             'Example 11 — "Does not carry customer accounts" boilerplate:\n'
             'Document says: "The Notes to Financial Statements explicitly state that the Company does not '
             'carry customer accounts or hold customer funds or securities. No clearing partner or clearing '
