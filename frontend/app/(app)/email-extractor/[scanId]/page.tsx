@@ -48,8 +48,12 @@ export default function ScanDetailPage(): React.ReactElement {
 
   return (
     <div className="px-7 pb-12 pt-7 lg:px-9">
-      <div className="mb-6 flex flex-wrap items-start gap-4">
-        <div className="min-w-0 flex-1">
+      <div className="mb-6">
+        <Link href={backLink.href} className={`${SECONDARY_BTN} mb-4`}>
+          <ArrowLeft className="h-4 w-4" strokeWidth={2} />
+          {backLink.label}
+        </Link>
+        <div className="min-w-0">
           <p className="text-[12px] uppercase tracking-[0.06em] text-[var(--text-muted,#94a3b8)]">
             Enterprise Dashboard{" "}
             <span className="text-[var(--text-dim,#475569)]">/</span>{" "}
@@ -99,12 +103,6 @@ export default function ScanDetailPage(): React.ReactElement {
               ) : null}
             </div>
           ) : null}
-        </div>
-        <div className="flex shrink-0 items-center gap-2.5">
-          <Link href={backLink.href} className={SECONDARY_BTN}>
-            <ArrowLeft className="h-4 w-4" strokeWidth={2} />
-            {backLink.label}
-          </Link>
         </div>
       </div>
 
