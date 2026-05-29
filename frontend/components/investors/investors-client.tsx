@@ -312,13 +312,10 @@ export function InvestorsClient() {
             : row,
         ),
       );
-      if (!result.matched) {
-        setError(
-          result.skip_reason === "entity_filer"
-            ? "Entity filer — people-match doesn't apply to organizations."
-            : "No contact match returned for this person.",
-        );
-      }
+      // CLIENT REQUEST: every row presents as actionable, so we don't
+      // surface the "no contact match" / "entity filer" outcomes as a
+      // negative banner. A successful match still updates the row in place;
+      // genuine request failures still fall through to the catch below.
     } catch (e) {
       setError(e instanceof Error ? e.message : "Enrichment failed.");
     } finally {
@@ -913,20 +910,7 @@ function InvestorRow({
                 LinkedIn
               </a>
             ) : null}
-            {!row.enriched_phone
-            && !row.enriched_email
-            && !row.enriched_linkedin_url
-            && !row.is_entity ? (
-              <span className="text-[11px] italic text-[var(--text-muted,#94a3b8)]">
-                No match returned
-              </span>
-            ) : null}
           </div>
-        ) : null}
-        {row.is_entity ? (
-          <p className="mt-1.5 text-[11px] italic text-[var(--text-muted,#94a3b8)]">
-            Entity filer — people-match doesn&apos;t apply to organizations
-          </p>
         ) : null}
       </div>
       <div className="min-w-0 text-[12px] text-[var(--text-dim,#475569)]">
@@ -967,18 +951,13 @@ function InvestorRow({
         <button
           type="button"
           onClick={onEnrich}
-          disabled={enriching || row.is_entity}
-          title={
-            row.is_entity
-              ? "Entity filer — people-match doesn't apply to organizations"
-              : undefined
-          }
+          disabled={enriching}
           className="inline-flex shrink-0 items-center gap-1.5 whitespace-nowrap rounded-md border border-[var(--border-2,rgba(30,64,175,0.16))] bg-transparent px-2.5 py-1 text-[11px] font-semibold text-[var(--text-dim,#475569)] transition hover:bg-[var(--surface-2,#f1f6fd)] hover:text-[var(--text,#0f172a)] disabled:cursor-not-allowed disabled:opacity-50"
         >
           {enriching ? (
             <Loader2 className="h-3.5 w-3.5 animate-spin" strokeWidth={2} />
           ) : null}
-          {hasEnrichment ? "Re-enrich" : "Find contact"}
+          Re-enrich
         </button>
         <button
           type="button"
