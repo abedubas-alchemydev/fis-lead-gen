@@ -61,7 +61,7 @@ export function ClientTypesFilter({ value, onChange }: ClientTypesFilterProps) {
         options={options}
         triggerLabel={triggerLabel}
         placeholder="Search client types…"
-        ariaLabel="Client types"
+        ariaLabel="Client Types"
         loading={loading}
         noOptionsLabel="No client types reported"
       />

@@ -66,7 +66,7 @@ export function AdvisoryActivitiesFilter({
         options={options}
         triggerLabel={triggerLabel}
         placeholder="Search activities…"
-        ariaLabel="Advisory activities"
+        ariaLabel="Advisory Activities"
         loading={loading}
         noOptionsLabel="No activities reported"
       />
