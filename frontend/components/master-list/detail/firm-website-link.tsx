@@ -112,7 +112,7 @@ function NoWebsiteNote() {
   return (
     <span
       className="inline-flex items-center gap-1.5 text-[13px] text-[var(--text-dim,#475569)] italic"
-      title="We checked Apollo, Hunter, and Google. Many small broker-dealers don't publish a public website."
+      title="We checked Hunter and Google. Many small broker-dealers don't publish a public website."
     >
       <Globe className="h-3.5 w-3.5 opacity-60" strokeWidth={2} />
       No public website on file

@@ -92,7 +92,7 @@ export function FirmRow({
     ? "Gap-fill already running for this firm."
     : cooldown.active
       ? `Cooldown active. Try again in ${cooldown.daysLeft} day(s).`
-      : "Re-query Apollo / PDL / Hunter / Snov for missing emails, phones, and LinkedIn URLs.";
+      : "Re-query PDL / Hunter / Snov for missing emails, phones, and LinkedIn URLs.";
 
   return (
     <div className="border-t border-[var(--border,rgba(30,64,175,0.1))] py-4 first:border-t-0">
