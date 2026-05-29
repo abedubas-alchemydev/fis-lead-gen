@@ -867,7 +867,11 @@ export function AdvisorDetailClient({ advisorId }: { advisorId: string }) {
                         entityName={advisor.name}
                         contact={c}
                       />
-                    ) : null,
+                    ) : (
+                      <span className="text-xs italic text-[var(--text-muted,#94a3b8)]">
+                        No outreach available
+                      </span>
+                    ),
                   className: "whitespace-nowrap",
                 },
               ]}

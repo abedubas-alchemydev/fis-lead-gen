@@ -1057,7 +1057,11 @@ export function BrokerDealerDetailClient({ brokerDealerId }: { brokerDealerId: s
                         entityName={bd.name}
                         contact={o.contact}
                       />
-                    ) : null,
+                    ) : (
+                      <span className="text-xs italic text-[var(--text-muted,#94a3b8)]">
+                        No outreach available
+                      </span>
+                    ),
                   className: "whitespace-nowrap",
                 },
               ]}
@@ -1100,7 +1104,11 @@ export function BrokerDealerDetailClient({ brokerDealerId }: { brokerDealerId: s
                         entityName={bd.name}
                         contact={c}
                       />
-                    ) : null,
+                    ) : (
+                      <span className="text-xs italic text-[var(--text-muted,#94a3b8)]">
+                        No outreach available
+                      </span>
+                    ),
                   className: "whitespace-nowrap",
                 },
               ]}
