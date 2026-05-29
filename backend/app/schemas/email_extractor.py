@@ -51,9 +51,13 @@ class DiscoveredEmailResponse(BaseModel):
     enriched_title: str | None = None
     enriched_linkedin_url: str | None = None
     enriched_company: str | None = None
+    enriched_email: str | None = None
     enriched_phone: str | None = None
     enriched_at: datetime | None = None
     enrichment_status: str = "not_enriched"
+    # Computed on the model: True while an async phone-reveal callback is still
+    # expected, so the UI can poll for the number without polling forever.
+    phone_reveal_pending: bool = False
     created_at: datetime
     verifications: list[EmailVerificationResponse] = Field(default_factory=list)
 

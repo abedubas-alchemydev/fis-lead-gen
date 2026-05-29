@@ -47,12 +47,40 @@ class DiscoveredEmail(Base):
     enriched_title: Mapped[str | None] = mapped_column(String(255), nullable=True)
     enriched_linkedin_url: Mapped[str | None] = mapped_column(String(512), nullable=True)
     enriched_company: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    # Email surfaced by Apollo enrichment -- the revealed personal email when
+    # reveal_personal_emails is on, else the matched work email. Distinct from
+    # ``email`` (the discovered address that keyed the /people/match lookup).
+    enriched_email: Mapped[str | None] = mapped_column(String(320), nullable=True)
     enriched_phone: Mapped[str | None] = mapped_column(String(64), nullable=True)
     enriched_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     enrichment_status: Mapped[str] = mapped_column(String(32), server_default="not_enriched", nullable=False)
+    # Apollo person id from /people/match, stamped during enrichment so the
+    # async phone-reveal webhook can correlate a revealed number back to this
+    # row (mirrors the contact tables; see endpoints/webhooks_apollo.py).
+    apollo_person_id: Mapped[str | None] = mapped_column(String(64), nullable=True, index=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now(), nullable=False)
 
     run: Mapped[ExtractionRun] = relationship(back_populates="discovered_emails")
     verifications: Mapped[list[EmailVerification]] = relationship(
         back_populates="discovered_email", cascade="all, delete-orphan", lazy="selectin"
     )
+
+    @property
+    def phone_reveal_pending(self) -> bool:
+        """True while an async Apollo phone-reveal callback is still expected.
+
+        The row enriched and captured an ``apollo_person_id`` but has no phone
+        yet, and the reveal flow is configured (so a webhook will arrive). Lets
+        the UI poll for the number without polling forever when reveal isn't
+        wired -- then no callback ever comes and this stays False.
+        """
+        from app.services.contact_discovery._shared import (
+            apollo_phone_reveal_configured,
+        )
+
+        return (
+            self.enrichment_status == "enriched"
+            and self.enriched_phone is None
+            and self.apollo_person_id is not None
+            and apollo_phone_reveal_configured()
+        )

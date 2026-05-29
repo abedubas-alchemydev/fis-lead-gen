@@ -10,6 +10,39 @@ from __future__ import annotations
 
 from typing import Any
 
+from app.core.config import settings
+
+
+def apollo_phone_reveal_configured() -> bool:
+    """True when the async Apollo phone-reveal flow is wired.
+
+    Both the shared webhook secret and a public base URL must be set for
+    Apollo to call us back; when either is missing the feature stays dormant.
+    """
+    return bool(settings.apollo_webhook_secret and settings.public_base_url)
+
+
+def apollo_phone_reveal_fields() -> dict[str, Any]:
+    """Reveal-request fields to merge into an Apollo ``/people/match`` payload.
+
+    Returns ``{"reveal_phone_number": True, "webhook_url": ...}`` when the
+    reveal flow is configured, else ``{}`` -- so callers can write
+    ``payload.update(apollo_phone_reveal_fields())`` and stay dormant when it
+    isn't wired. The phone arrives later via POST to ``webhook_url``; the
+    handler in ``endpoints/webhooks_apollo.py`` correlates it back to the row
+    by ``apollo_person_id``. Single source of truth for the webhook URL shape.
+    """
+    if not apollo_phone_reveal_configured():
+        return {}
+    base_url = settings.public_base_url or ""
+    return {
+        "reveal_phone_number": True,
+        "webhook_url": (
+            f"{base_url.rstrip('/')}/api/v1/webhooks/apollo/"
+            f"{settings.apollo_webhook_secret}/phone-reveal"
+        ),
+    }
+
 
 def first_apollo_phone(phone_numbers: Any) -> str | None:
     """Pick the first usable phone string from Apollo's ``phone_numbers`` field.

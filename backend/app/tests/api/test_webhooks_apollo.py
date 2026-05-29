@@ -25,6 +25,7 @@ from app.core.config import settings
 from app.db.session import get_db_session
 from app.main import app
 from app.models.advisor_contact import AdvisorContact
+from app.models.discovered_email import DiscoveredEmail
 from app.models.executive_contact import ExecutiveContact
 from app.models.investor_contact import InvestorContact
 
@@ -82,11 +83,13 @@ class _FakeSession:
         advisor_rows: list[AdvisorContact] | None = None,
         executive_rows: list[ExecutiveContact] | None = None,
         investor_rows: list[InvestorContact] | None = None,
+        discovered_email_rows: list[DiscoveredEmail] | None = None,
     ) -> None:
         self.tables: dict[type, list[Any]] = {
             AdvisorContact: list(advisor_rows or []),
             ExecutiveContact: list(executive_rows or []),
             InvestorContact: list(investor_rows or []),
+            DiscoveredEmail: list(discovered_email_rows or []),
         }
         self.commit_count = 0
 
@@ -149,6 +152,19 @@ def _make_investor_row(*, apollo_person_id: str | None = None) -> InvestorContac
     row.discovery_source = None
     row.discovery_confidence = None
     row.source = "provider"
+    return row
+
+
+def _make_discovered_email_row(
+    *,
+    apollo_person_id: str | None = None,
+    enriched_phone: str | None = None,
+) -> DiscoveredEmail:
+    row = DiscoveredEmail()
+    row.id = 1
+    row.email = "jane@example.com"
+    row.apollo_person_id = apollo_person_id
+    row.enriched_phone = enriched_phone
     return row
 
 
@@ -453,3 +469,84 @@ async def test_falls_back_to_raw_when_no_sanitized(
     async with _client() as client:
         await client.post(WEBHOOK_URL, json=payload)
     assert row.phones[0]["value"] == "+1 555-111-2222"
+
+
+# ──────────────────── Discovered-email (email-extractor) tests ────────────────────
+
+
+@pytest.mark.asyncio
+async def test_phone_lands_on_discovered_email_row(
+    configure_secret: None, with_session
+) -> None:
+    """A discovered_email row enriched via the email-extractor flow gets its
+    scalar ``enriched_phone`` filled when the reveal callback lands."""
+    row = _make_discovered_email_row(apollo_person_id="apollo-de-1")
+    session = with_session(_FakeSession(discovered_email_rows=[row]))
+
+    payload = {
+        "people": [
+            {
+                "id": "apollo-de-1",
+                "phone_numbers": [
+                    {"sanitized_number": "+15551112222", "type_cd": "mobile", "confidence_cd": "high"}
+                ],
+            }
+        ]
+    }
+    async with _client() as client:
+        response = await client.post(WEBHOOK_URL, json=payload)
+    assert response.json() == {"rows_updated": 1, "phones_added": 1}
+    assert row.enriched_phone == "+15551112222"
+    assert session.commit_count == 1
+
+
+@pytest.mark.asyncio
+async def test_discovered_email_phone_is_set_if_null_only(
+    configure_secret: None, with_session
+) -> None:
+    """Existing ``enriched_phone`` isn't overwritten (set-if-null), so an
+    Apollo retry or a second reveal is a no-op rather than a clobber."""
+    row = _make_discovered_email_row(
+        apollo_person_id="apollo-de-1", enriched_phone="+19998887777"
+    )
+    session = with_session(_FakeSession(discovered_email_rows=[row]))
+
+    payload = {
+        "people": [
+            {
+                "id": "apollo-de-1",
+                "phone_numbers": [{"sanitized_number": "+15551112222", "type_cd": "mobile"}],
+            }
+        ]
+    }
+    async with _client() as client:
+        response = await client.post(WEBHOOK_URL, json=payload)
+    assert response.json() == {"rows_updated": 0, "phones_added": 0}
+    assert row.enriched_phone == "+19998887777"
+    assert session.commit_count == 0
+
+
+@pytest.mark.asyncio
+async def test_discovered_email_picks_highest_confidence_phone(
+    configure_secret: None, with_session
+) -> None:
+    """With multiple revealed numbers, the scalar takes the highest-confidence
+    one (same tiebreak the contact tables use)."""
+    row = _make_discovered_email_row(apollo_person_id="apollo-de-1")
+    with_session(_FakeSession(discovered_email_rows=[row]))
+
+    payload = {
+        "people": [
+            {
+                "id": "apollo-de-1",
+                "phone_numbers": [
+                    {"sanitized_number": "+15551112222", "type_cd": "mobile", "confidence_cd": "low"},
+                    {"sanitized_number": "+15553334444", "type_cd": "work", "confidence_cd": "high"},
+                ],
+            }
+        ]
+    }
+    async with _client() as client:
+        response = await client.post(WEBHOOK_URL, json=payload)
+    assert response.json() == {"rows_updated": 1, "phones_added": 1}
+    assert row.enriched_phone == "+15553334444"

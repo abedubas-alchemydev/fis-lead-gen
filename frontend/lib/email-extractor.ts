@@ -33,9 +33,13 @@ export interface DiscoveredEmailResponse {
   enriched_title: string | null;
   enriched_linkedin_url: string | null;
   enriched_company: string | null;
+  enriched_email: string | null;
   enriched_phone: string | null;
   enriched_at: string | null;
   enrichment_status: EnrichmentStatus;
+  // True while an async Apollo phone-reveal callback is still expected, so the
+  // row UI can poll for the number without polling forever.
+  phone_reveal_pending?: boolean;
   created_at: string;
   verifications: EmailVerificationResponse[];
 }
