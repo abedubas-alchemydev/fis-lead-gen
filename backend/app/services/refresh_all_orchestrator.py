@@ -30,6 +30,13 @@ Sub-pipelines and their gate predicates:
   exist for this BD. Cost: ~2 Apollo + ~1 Hunter via the company-only
   search (no per-officer fan-out — that has its own dedicated FE
   button and stays separate).
+- ``focus-contact``       — runs when the BD has no ExecutiveContact
+  with ``source="focus_report"``. Extracts the X-17A-5 "PERSON TO
+  CONTACT" block (name/title/phone/email) + net capital via Gemini.
+  This is the only automated source of BD filing-contact emails.
+  Opt-in via ``has_focus_contact`` — the bulk backfill enables it; the
+  interactive endpoint and cost-sensitive callers leave it ``None`` so
+  it never fires a per-request Gemini call.
 
 Each child gets its own ``PipelineRun`` row with ``parent_run_id``
 pointing at the orchestrator's parent row. The parent's terminal
@@ -90,6 +97,12 @@ SUB_REFRESH_FILINGS = "broker_dealer_refresh_filings"
 # row). Pre-existing health-check gated on these fields but didn't fill them —
 # this sub-pipeline closes that gap so per-firm gap-fill is truly self-contained.
 SUB_REFRESH_CLEARING = "broker_dealer_refresh_clearing"
+# Per-firm wrapper around FocusCeoExtractionService.extract — pulls the
+# X-17A-5 "PERSON TO CONTACT" block (name/title/phone/email) + net capital
+# and persists an ExecutiveContact(source="focus_report"). Folded into the
+# orchestrator so the bulk backfill owns it after the dedicated detail-page
+# "Extract FOCUS Data" button was retired.
+SUB_FOCUS_CONTACT = "broker_dealer_focus_contact"
 
 # Display labels used in the parent's notes.summary toast string.
 _SUB_LABEL = {
@@ -99,6 +112,7 @@ _SUB_LABEL = {
     SUB_ENRICH: "contacts",
     SUB_REFRESH_FILINGS: "filings",
     SUB_REFRESH_CLEARING: "clearing",
+    SUB_FOCUS_CONTACT: "focus contact",
 }
 
 # Sub-pipelines whose target fields drive a column the user can see in the
@@ -123,6 +137,7 @@ def gap_report_for(
     has_contacts: bool,
     *,
     aggressive: bool = False,
+    has_focus_contact: bool | None = None,
 ) -> dict[str, list[str]]:
     """For each sub-pipeline, return the list of BD column names that
     currently have a gap. Non-empty list = the pipeline should fire.
@@ -238,6 +253,18 @@ def gap_report_for(
     if bool(broker_dealer.cik) and broker_dealer.last_filing_date is None:
         report[SUB_REFRESH_FILINGS].append("last_filing_date")
 
+    # ── focus-contact (X-17A-5 "PERSON TO CONTACT" → ExecutiveContact) ──
+    # Opt-in: only evaluated when the caller supplies the signal. ``None``
+    # (the default) leaves SUB_FOCUS_CONTACT out of the report entirely, so
+    # existing callers — and the interactive refresh-all endpoint — see no
+    # change and never fire an unbudgeted Gemini call. The bulk backfill
+    # passes the real bool so it re-attempts every BD that still lacks a
+    # focus_report contact.
+    if has_focus_contact is not None:
+        report[SUB_FOCUS_CONTACT] = (
+            [] if has_focus_contact else ["focus_report_contact"]
+        )
+
     return report
 
 
@@ -247,6 +274,7 @@ def decide_pipelines(
     scope: RefreshScope = "all",
     *,
     aggressive: bool = False,
+    has_focus_contact: bool | None = None,
 ) -> GateDecision:
     """Inspect the BD and return the (run, skip) split.
 
@@ -265,9 +293,20 @@ def decide_pipelines(
     (``'unknown'`` / ``'needs_review'``) and detail-page-only fields.
     Off by default to preserve the per-firm refresh-all endpoint's
     legacy behavior; the bulk gap-fill script passes ``True``.
+
+    ``has_focus_contact`` opts the FOCUS-contact sub-pipeline in or out.
+    ``None`` (default) keeps ``SUB_FOCUS_CONTACT`` out of the decision
+    entirely — the interactive endpoint and cheap/inspect callers stay on
+    their current six-pipeline behavior. ``False`` opens the gate (no
+    ``focus_report`` contact yet → extract one); ``True`` closes it. Only
+    the bulk backfill passes a real bool, because each fire is a Gemini
+    vision call on the X-17A-5 PDF.
     """
     report = gap_report_for(
-        broker_dealer, has_contacts, aggressive=aggressive
+        broker_dealer,
+        has_contacts,
+        aggressive=aggressive,
+        has_focus_contact=has_focus_contact,
     )
 
     to_run: list[str] = []
@@ -301,6 +340,17 @@ def decide_pipelines(
         SUB_REFRESH_FILINGS
     )
 
+    # focus-contact — detail-page-only, so force-skipped under list_only
+    # exactly like enrich. Opt-in: absent from the decision entirely when
+    # the caller leaves ``has_focus_contact`` at its ``None`` default.
+    if has_focus_contact is not None:
+        if scope == "list_only":
+            to_skip.append(SUB_FOCUS_CONTACT)
+        else:
+            (to_run if report.get(SUB_FOCUS_CONTACT) else to_skip).append(
+                SUB_FOCUS_CONTACT
+            )
+
     return GateDecision(to_run=tuple(to_run), to_skip=tuple(to_skip))
 
 
@@ -311,10 +361,14 @@ def required_provider_keys(pipelines: Iterable[str]) -> list[str]:
     pipelines = set(pipelines)
     missing: list[str] = []
 
-    if SUB_REFRESH_FINANCIALS in pipelines or SUB_REFRESH_CLEARING in pipelines:
-        # Both sub-pipelines drive the X-17A-5 PDF extraction stack and need
-        # whichever LLM provider is configured. Reported once even when
-        # both sub-pipelines need the same key, so the toast doesn't double
+    if (
+        SUB_REFRESH_FINANCIALS in pipelines
+        or SUB_REFRESH_CLEARING in pipelines
+        or SUB_FOCUS_CONTACT in pipelines
+    ):
+        # These sub-pipelines all drive the X-17A-5 PDF extraction stack and
+        # need whichever LLM provider is configured. Reported once even when
+        # several of them need the same key, so the toast doesn't double
         # up on "Gemini" / "OpenAI".
         if settings.llm_provider == "openai":
             if not settings.openai_api_key:
@@ -823,6 +877,87 @@ async def _run_refresh_filings(parent_run_id: int, bd_id: int, trigger_source: s
         return "failed", summary
 
 
+async def _run_focus_contact(parent_run_id: int, bd_id: int, trigger_source: str) -> tuple[str, str]:
+    """Wrap ``FocusCeoExtractionService.extract`` so its work lands as a
+    child of the orchestrator's parent run.
+
+    Pulls the X-17A-5 "PERSON TO CONTACT" block (name/title/phone/email) +
+    net capital off the latest filing and persists an
+    ``ExecutiveContact(source="focus_report")``. This is the only automated
+    source of BD filing-contact emails — it replaces the retired detail-page
+    "Extract FOCUS Data" button.
+    """
+    # Imported lazily (mirrors _run_refresh_clearing) to keep the orchestrator's
+    # import graph flat and avoid pulling the Gemini/PDF stack at module load.
+    from app.services.focus_ceo_extraction import FocusCeoExtractionService
+
+    async with SessionLocal() as db:
+        child_id = await _create_child_run(
+            db,
+            pipeline_name=SUB_FOCUS_CONTACT,
+            parent_run_id=parent_run_id,
+            bd_id=bd_id,
+            trigger_source=trigger_source,
+        )
+
+    try:
+        async with SessionLocal() as run_db:
+            run = await run_db.get(PipelineRun, child_id)
+            if run is not None:
+                run.status = "running"
+                await run_db.commit()
+
+        service = FocusCeoExtractionService()
+        async with SessionLocal() as db:
+            broker_dealer = await db.get(BrokerDealer, bd_id)
+            if broker_dealer is None:
+                raise RuntimeError(f"Broker-dealer {bd_id} not found mid-flight.")
+            result = await service.extract(db, broker_dealer)
+            await db.commit()
+
+        if result.extraction_status == "success":
+            landed = [
+                label
+                for value, label in (
+                    (result.ceo_name, "contact"),
+                    (result.ceo_email, "email"),
+                    (result.ceo_phone, "phone"),
+                )
+                if value
+            ]
+            summary = (
+                f"Extracted FOCUS {', '.join(landed)}."
+                if landed
+                else "FOCUS extraction succeeded (no contact fields)."
+            )
+            await _finalize_child(child_id, status="completed", success=1, failure=0, summary=summary)
+            return "completed", summary
+
+        if result.extraction_status in ("no_pdf", "low_confidence"):
+            # Clean miss, not a hard failure — mirror resolve-website's contract
+            # so the parent toast reads "we tried, found nothing".
+            summary = (
+                "No X-17A-5 PDF on EDGAR."
+                if result.extraction_status == "no_pdf"
+                else "FOCUS extraction below confidence threshold."
+            )
+            await _finalize_child(
+                child_id, status="completed_with_errors", success=0, failure=1, summary=summary
+            )
+            return "completed_with_errors", summary
+
+        # extraction_status == "error" (or any unexpected value).
+        summary = (result.extraction_notes or "FOCUS extraction error.")[:200]
+        await _finalize_child(child_id, status="failed", success=0, failure=1, summary=summary)
+        return "failed", summary
+
+    except Exception as exc:
+        logger.exception("refresh-all/focus-contact failed for bd %s", bd_id)
+        summary = f"{type(exc).__name__}: {str(exc)[:200]}"
+        await _finalize_child(child_id, status="failed", success=0, failure=1, summary=summary)
+        return "failed", summary
+
+
 _RUNNERS = {
     SUB_REFRESH_FINANCIALS: _run_refresh_financials,
     SUB_RESOLVE_WEBSITE: _run_resolve_website,
@@ -830,6 +965,7 @@ _RUNNERS = {
     SUB_ENRICH: _run_enrich,
     SUB_REFRESH_FILINGS: _run_refresh_filings,
     SUB_REFRESH_CLEARING: _run_refresh_clearing,
+    SUB_FOCUS_CONTACT: _run_focus_contact,
 }
 
 
@@ -944,6 +1080,7 @@ __all__ = [
     "REFRESH_ALL_PIPELINE_NAME",
     "RefreshScope",
     "SUB_ENRICH",
+    "SUB_FOCUS_CONTACT",
     "SUB_HEALTH_CHECK",
     "SUB_REFRESH_CLEARING",
     "SUB_REFRESH_FILINGS",
