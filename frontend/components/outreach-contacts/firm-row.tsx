@@ -6,6 +6,8 @@ import {
   Loader2,
   RefreshCcw,
 } from "lucide-react";
+import type { Route } from "next";
+import Link from "next/link";
 import { useCallback, useState } from "react";
 
 import { ContactPersonRow } from "@/components/outreach-contacts/contact-person-row";
@@ -26,6 +28,19 @@ const ENTITY_KIND_LABEL: Record<OutreachContactsFirmRow["entity_kind"], string> 
   advisor: "Investment Advisor",
   institutional_investor: "Institutional Investor",
 };
+
+function firmProfileHref(firm: OutreachContactsFirmRow): Route {
+  switch (firm.entity_kind) {
+    case "broker_dealer":
+      return `/master-list/${firm.entity_id}` as Route;
+    case "advisor":
+      return `/advisor-list/${firm.entity_id}` as Route;
+    case "institutional_investor":
+      // entity_id is the INVESTOR id; this page resolves investor->advisor
+      // server-side and forwards. Do not point straight at /advisor-list.
+      return `/institutional-investors/${firm.entity_id}` as Route;
+  }
+}
 
 function withinCooldown(stamp: string | null): { active: boolean; daysLeft: number } {
   if (!stamp) return { active: false, daysLeft: 0 };
@@ -115,13 +130,12 @@ export function FirmRow({
               <Pill variant="info">Gap-fill running</Pill>
             ) : null}
           </div>
-          <button
-            type="button"
-            onClick={handleToggle}
+          <Link
+            href={firmProfileHref(firm)}
             className="mb-1 block text-left text-[14px] font-semibold text-[var(--text,#0f172a)] transition hover:text-[#6366f1]"
           >
             {firm.name}
-          </button>
+          </Link>
           <p className="text-[12px] leading-5 text-[var(--text-dim,#475569)]">
             <span className="tabular-nums">{firm.contact_count.toLocaleString()}</span>{" "}
             contact{firm.contact_count === 1 ? "" : "s"}
