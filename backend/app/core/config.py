@@ -145,6 +145,19 @@ class Settings(BaseSettings):
     # segment to this setting. When ``apollo_webhook_secret`` is unset,
     # the provider DOES NOT request phone reveal — the feature stays
     # dormant until both this and ``public_base_url`` are configured.
+    # Director LinkedIn fall-through. Apollo's /people/match returns the
+    # person record *projected through the queried firm*. For an outside
+    # board director (e.g. a retired exec who sits on Vanguard's board but
+    # works elsewhere), Apollo confirms identity at the queried firm but
+    # the firm-projected record often has no linkedin_url — the URL lives
+    # on the person's PRIMARY-employer record. When this is on, a confirmed
+    # match (confidence >= threshold) that came back with no LinkedIn
+    # triggers a second /people/match with first+last only (no org/domain
+    # anchor) to surface the primary record's LinkedIn. The fallback URL is
+    # accepted only when Apollo's own person id matches, so a same-name
+    # stranger can't pollute the row. Off by default — doubles the Apollo
+    # call for affected rows, so opt in per-environment after weighing cost.
+    apollo_director_linkedin_fallback: bool = False
     apollo_webhook_secret: str | None = None
     # Absolute base URL of the public Cloud Run service, used to construct
     # the ``webhook_url`` we register with Apollo on each /people/match
