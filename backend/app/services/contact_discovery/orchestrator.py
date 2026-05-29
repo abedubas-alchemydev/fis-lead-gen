@@ -63,6 +63,7 @@ from app.services.contact_discovery.base import (
     PhoneHit,
 )
 from app.services.contact_discovery.hunter import HunterProvider
+from app.services.contact_discovery.linkedin_search import LinkedInSearchProvider
 from app.services.contact_discovery.pdl import PdlProvider
 from app.services.contact_discovery.snov import SnovProvider
 
@@ -77,6 +78,7 @@ _PROVIDERS: dict[str, ContactDiscoveryProvider] = {
     "apollo_match": ApolloMatchProvider(),
     "hunter": HunterProvider(),
     "snov": SnovProvider(),
+    "linkedin_search": LinkedInSearchProvider(),
 }
 
 _CACHE_TTL_DAYS = 90

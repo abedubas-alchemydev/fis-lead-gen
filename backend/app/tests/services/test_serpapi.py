@@ -78,6 +78,7 @@ async def test_happy_path_returns_trimmed_results() -> None:
         url="https://www.pershing.com/",
         domain="www.pershing.com",
         title="Pershing — Clearing & Custody",
+        snippet="ignored",
     )
     assert all(isinstance(r, SerpResult) for r in results)
 
@@ -116,8 +117,9 @@ async def test_429_raises_serpapi_error() -> None:
 
 @respx.mock
 async def test_response_trimming_no_api_key_leak() -> None:
-    """SerpResult must only carry url/domain/title — never the metadata
-    block (which embeds the API key in google_url + search_parameters)."""
+    """SerpResult must only carry url/domain/title/snippet — never the
+    metadata block (which embeds the API key in google_url +
+    search_parameters)."""
     organic = [
         _organic("https://www.pershing.com/", "Pershing — Home"),
     ]
@@ -135,8 +137,9 @@ async def test_response_trimming_no_api_key_leak() -> None:
         "domain",
         "title",
         "is_high_confidence",
+        "snippet",
     }
-    for field_value in (result.url, result.domain, result.title):
+    for field_value in (result.url, result.domain, result.title, result.snippet):
         assert _API_KEY not in field_value
     assert result.is_high_confidence is False
 

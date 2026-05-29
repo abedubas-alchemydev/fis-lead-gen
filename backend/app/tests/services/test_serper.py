@@ -60,6 +60,7 @@ async def test_happy_path_returns_trimmed_results() -> None:
         url="https://www.pershing.com/",
         domain="www.pershing.com",
         title="Pershing — Clearing & Custody",
+        snippet="ignored",
     )
     assert all(isinstance(r, SerpResult) for r in results)
 
