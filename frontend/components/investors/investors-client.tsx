@@ -69,6 +69,13 @@ const SORT_OPTIONS = [
   { key: "reporting_owner_name", label: "Owner Name" },
 ] as const;
 
+// DEMO: rows whose insider has no found contact email still get a working
+// Outreach button. The BE adhoc-draft endpoint requires a valid EmailStr,
+// so those rows fall back to this reserved, non-deliverable placeholder
+// (RFC 2606) — "Generate draft" works and an accidental Send just bounces.
+// Remove this + re-gate on `row.enriched_email` to restore production.
+const DEMO_FALLBACK_EMAIL = "prospect@example.com";
+
 // ── Pagination helper ─────────────────────────────────────────────────
 // Mirrors the master-list / advisor-list helper. Produces
 // [1, 2, 3, …, last] with ellipses as string literals so React can key
@@ -849,13 +856,13 @@ function InvestorRow({
     .filter((s) => s && s.trim().length > 0)
     .join(" • ");
   const hasEnrichment = !!row.enriched_at;
-  // Outreach addresses the insider by their enriched email via the adhoc
-  // path, so the button only sends once a contact email exists. Shown on
-  // every row (disabled otherwise) so the affordance is discoverable.
-  const canOutreach = !!row.enriched_email;
-  const outreachDisabledTitle = row.is_entity
-    ? "Entity filer — people-match doesn't apply to organizations"
-    : "Find this insider's contact first to enable outreach";
+  // DEMO: Outreach is enabled on every row regardless of enrichment so the
+  // compose/draft flow is always reachable. Rows without a found contact
+  // email fall back to DEMO_FALLBACK_EMAIL below (the BE adhoc-draft
+  // endpoint requires a valid EmailStr). To restore production gating, set
+  // `const canOutreach = !!row.enriched_email;`, re-add the button's
+  // disabled/title props, and gate the modal + recipient on
+  // `row.enriched_email`.
 
   return (
     <div className="grid gap-3 py-3 md:grid-cols-[minmax(0,1.4fr)_minmax(0,1.2fr)_minmax(0,264px)]">
@@ -976,15 +983,13 @@ function InvestorRow({
         <button
           type="button"
           onClick={() => setOutreachOpen(true)}
-          disabled={!canOutreach}
-          title={canOutreach ? undefined : outreachDisabledTitle}
-          className="inline-flex shrink-0 items-center gap-1.5 whitespace-nowrap rounded-md bg-[var(--accent,#6366f1)] px-2.5 py-1 text-[11px] font-semibold text-white transition hover:bg-[var(--accent-2,#8b5cf6)] disabled:cursor-not-allowed disabled:opacity-50"
+          className="inline-flex shrink-0 items-center gap-1.5 whitespace-nowrap rounded-md bg-[var(--accent,#6366f1)] px-2.5 py-1 text-[11px] font-semibold text-white transition hover:bg-[var(--accent-2,#8b5cf6)]"
         >
           <MailPlus className="h-3.5 w-3.5" strokeWidth={2} aria-hidden />
           Outreach
         </button>
       </div>
-      {outreachOpen && row.enriched_email ? (
+      {outreachOpen ? (
         <OutreachModal
           entityKind="adhoc"
           entityId={0}
@@ -993,7 +998,7 @@ function InvestorRow({
             id: row.reporting_owner_id ?? 0,
             name: row.reporting_owner_name,
             title: row.reporting_owner_title ?? "",
-            email: row.enriched_email,
+            email: row.enriched_email ?? DEMO_FALLBACK_EMAIL,
           }}
           onClose={() => setOutreachOpen(false)}
         />
