@@ -554,7 +554,7 @@ function DropdownRow({
           <span className="text-[var(--accent,#6366f1)]">{opt.email}</span>
         </span>
         <span className="ml-auto inline-flex rounded-full border border-[var(--border,rgba(30,64,175,0.1))] bg-[var(--surface-2,#f1f6fd)] px-2 py-0.5 text-[10px] font-semibold uppercase tracking-[0.06em] text-[var(--text-dim,#475569)]">
-          Ad-hoc
+          One-off
         </span>
       </div>
       <div className="mt-0.5 text-[11px] text-[var(--text-dim,#475569)]">
@@ -574,7 +574,7 @@ function RecipientChip({ value }: { value: RecipientValue }) {
             {value.email}
           </span>
           <span className="text-[11px] text-[var(--text-muted,#94a3b8)]">
-            Ad-hoc · no firm linked
+            One-off · no firm linked
           </span>
         </div>
       </div>
