@@ -2,6 +2,7 @@
 
 import { useState } from "react";
 
+import { Button } from "@/components/ui/button";
 import { OutreachModal } from "@/components/master-list/outreach-modal";
 import type {
   AdvisorContactItem,
@@ -60,13 +61,9 @@ export function OutreachButton({
 
   return (
     <>
-      <button
-        type="button"
-        onClick={() => setOpen(true)}
-        className="inline-flex items-center gap-1 rounded-full bg-[var(--accent,#6366f1)] px-3 py-1 text-xs font-medium text-white transition hover:bg-[var(--accent-2,#8b5cf6)]"
-      >
+      <Button type="button" size="sm" onClick={() => setOpen(true)}>
         Outreach
-      </button>
+      </Button>
       {open ? (
         <OutreachModal
           entityKind={entityKind}

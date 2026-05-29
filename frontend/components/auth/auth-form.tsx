@@ -5,9 +5,10 @@ import { useState, useTransition } from "react";
 import Link from "next/link";
 import { useRouter } from "next/navigation";
 import { Loader2 } from "lucide-react";
+import clsx from "clsx";
 
 import { Input } from "@/components/ui/input";
-import { Button } from "@/components/ui/button";
+import { Button, buttonClass } from "@/components/ui/button";
 import { PasswordInput } from "@/components/ui/password-input";
 import { GoogleButton } from "@/components/auth/google-button";
 import { MicrosoftButton } from "@/components/auth/microsoft-button";
@@ -170,7 +171,7 @@ export function AuthForm({
           </div>
           <Link
             href="/signup"
-            className="block w-full rounded-xl border border-[var(--border,rgba(30,64,175,0.1))] bg-[var(--surface,#ffffff)] px-4 py-3 text-center text-sm font-medium text-[var(--text,#0f172a)] transition hover:border-[var(--border-2,rgba(30,64,175,0.16))] hover:bg-[var(--surface-2,#f1f6fd)]"
+            className={clsx(buttonClass({ variant: "outline" }), "w-full")}
           >
             Request an invite
           </Link>
