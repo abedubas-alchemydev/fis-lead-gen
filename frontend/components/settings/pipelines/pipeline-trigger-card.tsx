@@ -4,6 +4,7 @@ import { useEffect, useRef, useState } from "react";
 
 import { ApiError } from "@/lib/api";
 import type { PipelineTriggerResponse } from "@/lib/types";
+import { Button } from "@/components/ui/button";
 import { useToast } from "@/components/ui/use-toast";
 
 import { ConfirmTriggerDialog } from "./confirm-trigger-dialog";
@@ -90,14 +91,14 @@ export function PipelineTriggerCard({
             </span>
           </p>
         </div>
-        <button
+        <Button
           type="button"
           onClick={() => setConfirming(true)}
           disabled={cooldown}
-          className="inline-flex w-full items-center justify-center gap-2 rounded-xl bg-[var(--accent,#6366f1)] px-4 py-2.5 text-sm font-semibold text-white shadow-[0_6px_16px_rgba(99,102,241,0.35)] transition hover:brightness-110 disabled:cursor-not-allowed disabled:opacity-60 disabled:shadow-none sm:w-auto"
+          className="w-full sm:w-auto"
         >
           {cooldown ? "Started" : "Run now"}
-        </button>
+        </Button>
       </div>
       {confirming ? (
         <ConfirmTriggerDialog

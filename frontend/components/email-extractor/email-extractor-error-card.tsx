@@ -2,6 +2,8 @@
 
 import { AlertTriangle } from "lucide-react";
 
+import { Button } from "@/components/ui/button";
+
 // Generic error medallion used by both /email-extractor pages — hub
 // (history fetch failed) and detail (scan load failed OR scan.status
 // === "failed"). Mirrors the DashboardErrorCard / LoadErrorCard
@@ -30,13 +32,9 @@ export function EmailExtractorErrorCard({
       <p className="mx-auto mt-2 max-w-sm text-[13px] leading-5 text-[var(--text-dim,#475569)]">
         {message}
       </p>
-      <button
-        type="button"
-        onClick={onRetry}
-        className="mt-5 inline-flex h-[34px] items-center rounded-[10px] border border-[var(--border-2,rgba(30,64,175,0.16))] bg-[var(--surface,#ffffff)] px-4 text-[13px] font-semibold text-[var(--text-dim,#475569)] transition hover:text-[var(--text,#0f172a)]"
-      >
+      <Button variant="outline" size="sm" onClick={onRetry} className="mt-5">
         {retryLabel}
-      </button>
+      </Button>
     </div>
   );
 }

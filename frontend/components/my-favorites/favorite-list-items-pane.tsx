@@ -5,6 +5,7 @@ import type { Route } from "next";
 import { ArrowRight, ChevronLeft, ChevronRight } from "lucide-react";
 import { useEffect, useMemo, useState } from "react";
 
+import { Button } from "@/components/ui/button";
 import { getFavoriteListItems } from "@/lib/api";
 import { formatRelativeTime } from "@/lib/format";
 import {
@@ -264,13 +265,15 @@ function ErrorState({
         Couldn&apos;t load favorites.
       </p>
       <p className="mt-1 text-[12px] text-[var(--text-muted,#94a3b8)]">{message}</p>
-      <button
+      <Button
         type="button"
+        variant="outline"
+        size="sm"
         onClick={onRetry}
-        className="mt-3 inline-flex h-[30px] items-center rounded-md border border-[var(--border-2,rgba(30,64,175,0.16))] bg-[var(--surface,#ffffff)] px-3 text-[12px] font-medium text-[var(--text-dim,#475569)] transition hover:bg-[var(--surface-2,#f1f6fd)]"
+        className="mt-3"
       >
         Retry
-      </button>
+      </Button>
     </div>
   );
 }

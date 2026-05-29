@@ -12,6 +12,7 @@ import {
   RefreshCw,
 } from "lucide-react";
 
+import { Button } from "@/components/ui/button";
 import { apiRequest, buildApiPath } from "@/lib/api";
 import type {
   ClearingArrangementItem,
@@ -241,35 +242,30 @@ export function PipelineAdminClient() {
         <p className={EYEBROW}>Admin Controls</p>
         <h2 className={CARD_TITLE}>Pipeline actions</h2>
         <div className="mt-5 flex flex-wrap gap-3">
-          <button
-            type="button"
-            disabled={isPending}
-            onClick={refreshData}
-            className="inline-flex items-center gap-2 rounded-xl bg-[var(--accent,#6366f1)] px-4 py-2.5 text-sm font-semibold text-white shadow-[0_6px_16px_rgba(99,102,241,0.35)] transition hover:brightness-110 disabled:cursor-not-allowed disabled:opacity-60 disabled:shadow-none"
-          >
+          <Button type="button" disabled={isPending} onClick={refreshData}>
             {isPending ? (
               <Loader2 className="h-4 w-4 animate-spin" aria-hidden />
             ) : (
               <RefreshCw className="h-4 w-4" aria-hidden />
             )}
             Refresh data
-          </button>
-          <button
+          </Button>
+          <Button
             type="button"
+            variant="outline"
             disabled={isPending}
             onClick={() => runAction("/api/v1/settings/refresh-finra-details")}
-            className="inline-flex items-center gap-2 rounded-xl border border-[var(--border-2,rgba(30,64,175,0.16))] bg-transparent px-4 py-2.5 text-sm font-semibold text-[var(--text,#0f172a)] transition hover:bg-[var(--surface-2,#f1f6fd)] disabled:cursor-not-allowed disabled:opacity-60"
           >
             Refresh FINRA details
-          </button>
-          <button
+          </Button>
+          <Button
             type="button"
+            variant="ghost"
             disabled={isPending}
             onClick={() => runAction("/api/v1/pipeline/clearing/retry-failed")}
-            className="inline-flex items-center gap-2 rounded-xl px-4 py-2.5 text-sm font-semibold text-[var(--text-dim,#475569)] transition hover:bg-[var(--surface-2,#f1f6fd)] disabled:cursor-not-allowed disabled:opacity-60"
           >
             Retry failed
-          </button>
+          </Button>
         </div>
         <p className="mt-3 text-xs text-[var(--text-muted,#94a3b8)]">
           &ldquo;Refresh FINRA details&rdquo; re-scans all firms for updated owners, officers, and business types (bi-monthly recommended).
@@ -410,15 +406,14 @@ export function PipelineAdminClient() {
                 </span>
               </div>
 
-              <button
+              <Button
                 type="button"
                 disabled={isPending || totalScoring !== 100}
                 onClick={saveScoring}
-                className="inline-flex items-center gap-2 rounded-xl bg-[var(--accent,#6366f1)] px-4 py-2 text-sm font-semibold text-white shadow-[0_6px_16px_rgba(99,102,241,0.35)] transition hover:brightness-110 disabled:cursor-not-allowed disabled:opacity-60 disabled:shadow-none"
               >
                 {isPending ? <Loader2 className="h-4 w-4 animate-spin" aria-hidden /> : null}
                 Save scoring
-              </button>
+              </Button>
               {totalScoring !== 100 ? (
                 <p className="text-xs text-[var(--pill-red-text,#b91c1c)]">
                   Weights must sum to exactly 100% before saving.
@@ -477,14 +472,14 @@ export function PipelineAdminClient() {
                 className={INPUT_CLASS}
               />
             </FieldLabel>
-            <button
+            <Button
               type="button"
+              variant="outline"
               disabled={isPending || !newCompetitorName.trim()}
               onClick={createCompetitor}
-              className="inline-flex items-center gap-2 rounded-xl border border-[var(--border-2,rgba(30,64,175,0.16))] bg-transparent px-4 py-2 text-sm font-semibold text-[var(--text,#0f172a)] transition hover:bg-[var(--surface-2,#f1f6fd)] disabled:cursor-not-allowed disabled:opacity-60"
             >
               Add competitor
-            </button>
+            </Button>
           </div>
         </div>
       </div>
@@ -643,8 +638,10 @@ function CompetitorEditor({
           onChange={(event) => setPriority(Number(event.target.value))}
           className={INPUT_CLASS}
         />
-        <button
+        <Button
           type="button"
+          variant="outline"
+          size="sm"
           onClick={() =>
             onSave(
               item.id,
@@ -656,10 +653,10 @@ function CompetitorEditor({
               isActive
             )
           }
-          className="inline-flex w-fit items-center gap-2 rounded-xl border border-[var(--border-2,rgba(30,64,175,0.16))] bg-transparent px-3 py-1.5 text-xs font-semibold text-[var(--text,#0f172a)] transition hover:bg-[var(--surface-2,#f1f6fd)]"
+          className="w-fit"
         >
           Save provider
-        </button>
+        </Button>
       </div>
     </div>
   );

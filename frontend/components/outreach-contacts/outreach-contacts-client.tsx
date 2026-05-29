@@ -9,7 +9,9 @@ import {
   useState,
   type ChangeEvent,
 } from "react";
+import clsx from "clsx";
 
+import { buttonBase, buttonSizes } from "@/components/ui/button";
 import { FirmRow } from "@/components/outreach-contacts/firm-row";
 import { TopActions } from "@/components/layout/top-actions";
 import { SectionPanel } from "@/components/ui/section-panel";
@@ -280,7 +282,11 @@ export function OutreachContactsClient(): React.ReactElement {
             type="button"
             onClick={() => void loadFirms()}
             disabled={loading}
-            className="inline-flex items-center gap-1.5 rounded-[6px] border border-[var(--border-2,rgba(30,64,175,0.16))] bg-transparent px-2.5 py-1 text-[11px] font-semibold text-[var(--text-dim,#475569)] transition hover:bg-[var(--surface-2,#f1f6fd)] hover:text-[var(--text,#0f172a)] disabled:cursor-not-allowed disabled:opacity-45"
+            className={clsx(
+              buttonBase,
+              buttonSizes.sm,
+              "border border-[var(--border-2,rgba(30,64,175,0.16))] bg-transparent text-[var(--text-dim,#475569)] hover:bg-[var(--surface-2,#f1f6fd)] hover:text-[var(--text,#0f172a)]",
+            )}
           >
             <RefreshCw
               className={`h-3.5 w-3.5 ${loading ? "animate-spin" : ""}`}

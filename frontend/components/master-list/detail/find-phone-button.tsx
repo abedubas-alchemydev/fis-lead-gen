@@ -2,7 +2,9 @@
 
 import { Loader2, Phone, Sparkles } from "lucide-react";
 import { useState } from "react";
+import clsx from "clsx";
 
+import { buttonBase, buttonSizes } from "@/components/ui/button";
 import { apiRequest, ApiError } from "@/lib/api";
 import type {
   ExecutiveContactItem,
@@ -81,7 +83,11 @@ export function FindPhoneButton<
       type="button"
       onClick={handleClick}
       disabled={inFlight}
-      className="inline-flex items-center gap-1 rounded-md border border-[var(--border,rgba(30,64,175,0.1))] bg-[var(--surface,#ffffff)] px-2 py-0.5 text-[11px] text-[var(--text-dim,#475569)] transition hover:border-[var(--accent,#6366f1)] hover:text-[var(--accent,#6366f1)] disabled:cursor-not-allowed disabled:opacity-60"
+      className={clsx(
+        buttonBase,
+        buttonSizes.sm,
+        "gap-1 rounded-md border border-[var(--border,rgba(30,64,175,0.1))] bg-[var(--surface,#ffffff)] px-2 text-[11px] font-medium text-[var(--text-dim,#475569)] hover:border-[var(--accent,#6366f1)] hover:text-[var(--accent,#6366f1)]",
+      )}
     >
       {inFlight ? (
         <Loader2 className="h-3 w-3 animate-spin" strokeWidth={2} />

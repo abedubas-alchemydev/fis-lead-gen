@@ -18,6 +18,7 @@ import { EmptyScanResultsState } from "@/components/email-extractor/empty-scan-r
 import { EnrichAllButton } from "@/components/email-extractor/enrich-all-button";
 import { ScanResultsLoading } from "@/components/email-extractor/scan-results-loading";
 import { OutreachModal } from "@/components/master-list/outreach-modal";
+import { Button } from "@/components/ui/button";
 import { Pill, type PillVariant } from "@/components/ui/pill";
 import { SectionPanel } from "@/components/ui/section-panel";
 import { ApiError } from "@/lib/api";
@@ -74,9 +75,6 @@ const SMTP_STATUS_STYLES: Record<
   inconclusive: { variant: "warning", Icon: AlertCircle, label: "Inconclusive" },
   blocked: { variant: "unknown", Icon: AlertCircle, label: "Blocked" },
 };
-
-const ROW_BTN =
-  "inline-flex items-center gap-1 rounded-md border border-[var(--border-2,rgba(30,64,175,0.16))] bg-[var(--surface,#ffffff)] px-2.5 py-1 text-[11px] font-semibold text-[var(--text-dim,#475569)] transition hover:bg-[var(--surface-2,#f1f6fd)] hover:text-[var(--text,#0f172a)] disabled:cursor-not-allowed disabled:opacity-50";
 
 // A scan can surface hundreds of discovered emails; page the results table so
 // the DOM stays bounded and the panel doesn't grow into an endless scroll.
@@ -179,17 +177,18 @@ function VerifyButton({
 }): React.ReactElement {
   return (
     <div className="flex flex-col items-start gap-1">
-      <button
+      <Button
         type="button"
+        variant="outline"
+        size="sm"
         onClick={() => onClick(emailId)}
         disabled={inFlight}
-        className={ROW_BTN}
       >
         {inFlight ? (
           <Loader2 className="h-3.5 w-3.5 animate-spin" strokeWidth={2} />
         ) : null}
         {inFlight ? "Verifying…" : "Verify"}
-      </button>
+      </Button>
       {error ? (
         <span className="text-[11px] text-[var(--pill-red-text,#b91c1c)]">
           {error}
@@ -353,17 +352,18 @@ function EnrichmentCell({
         <Pill variant="critical">
           <AlertCircle className="h-3 w-3" strokeWidth={2.5} aria-hidden /> Error
         </Pill>
-        <button
+        <Button
           type="button"
+          variant="outline"
+          size="sm"
           onClick={() => onEnrich(row.id)}
           disabled={inFlight}
-          className={ROW_BTN}
         >
           {inFlight ? (
             <Loader2 className="h-3.5 w-3.5 animate-spin" strokeWidth={2} />
           ) : null}
           Retry
-        </button>
+        </Button>
         {error ? <EnrichErrorText error={error} /> : null}
       </div>
     );
@@ -371,17 +371,18 @@ function EnrichmentCell({
 
   return (
     <div className="flex flex-col items-start gap-1">
-      <button
+      <Button
         type="button"
+        variant="outline"
+        size="sm"
         onClick={() => onEnrich(row.id)}
         disabled={inFlight}
-        className={ROW_BTN}
       >
         {inFlight ? (
           <Loader2 className="h-3.5 w-3.5 animate-spin" strokeWidth={2} />
         ) : null}
         {inFlight ? "Enriching…" : "Enrich"}
-      </button>
+      </Button>
       {error ? <EnrichErrorText error={error} /> : null}
     </div>
   );
@@ -399,14 +400,10 @@ function OutreachCell({
   const [open, setOpen] = useState(false);
   return (
     <>
-      <button
-        type="button"
-        onClick={() => setOpen(true)}
-        className="inline-flex items-center gap-1.5 rounded-md bg-[var(--accent,#6366f1)] px-2.5 py-1 text-[11px] font-semibold text-white transition hover:bg-[var(--accent-2,#8b5cf6)]"
-      >
+      <Button type="button" size="sm" onClick={() => setOpen(true)}>
         <MailPlus className="h-3.5 w-3.5" strokeWidth={2} aria-hidden />
         Outreach
-      </button>
+      </Button>
       {open ? (
         <OutreachModal
           entityKind="adhoc"

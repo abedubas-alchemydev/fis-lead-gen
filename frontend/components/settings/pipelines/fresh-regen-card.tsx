@@ -3,6 +3,8 @@
 import { useState } from "react";
 import { AlertTriangle } from "lucide-react";
 
+import { Button } from "@/components/ui/button";
+
 import { FreshRegenConfirmModal } from "./fresh-regen-confirm-modal";
 
 // Destructive entry surface on /settings/pipelines. Distinct from the
@@ -49,13 +51,14 @@ export function FreshRegenCard({ onSuccess }: FreshRegenCardProps) {
             </p>
           </div>
         </div>
-        <button
+        <Button
           type="button"
+          variant="danger"
           onClick={() => setConfirming(true)}
-          className="inline-flex w-full items-center justify-center gap-2 rounded-xl bg-red-600 px-4 py-2.5 text-sm font-semibold text-white shadow-[0_6px_16px_rgba(220,38,38,0.35)] transition hover:bg-red-700 hover:brightness-110 disabled:cursor-not-allowed disabled:opacity-60 disabled:shadow-none sm:w-auto"
+          className="w-full sm:w-auto"
         >
           Start Fresh Regen
-        </button>
+        </Button>
       </div>
       {confirming ? (
         <FreshRegenConfirmModal

@@ -9,7 +9,9 @@ import {
 import type { Route } from "next";
 import Link from "next/link";
 import { useCallback, useState } from "react";
+import clsx from "clsx";
 
+import { buttonBase, buttonSizes } from "@/components/ui/button";
 import { ContactPersonRow } from "@/components/outreach-contacts/contact-person-row";
 import { Pill } from "@/components/ui/pill";
 import {
@@ -152,7 +154,11 @@ export function FirmRow({
           onClick={() => onEnrich(firm)}
           disabled={enrichDisabled}
           title={buttonTitle}
-          className="inline-flex h-[32px] shrink-0 items-center gap-1.5 rounded-md border border-[rgba(99,102,241,0.3)] bg-[rgba(99,102,241,0.05)] px-3 text-[12px] font-semibold text-[#6366f1] transition hover:bg-[rgba(99,102,241,0.12)] disabled:cursor-not-allowed disabled:opacity-50"
+          className={clsx(
+            buttonBase,
+            buttonSizes.sm,
+            "shrink-0 border border-[rgba(99,102,241,0.3)] bg-[rgba(99,102,241,0.05)] text-[#6366f1] hover:bg-[rgba(99,102,241,0.12)]",
+          )}
         >
           {isEnriching || firm.gap_fill_in_progress ? (
             <Loader2 className="h-3.5 w-3.5 animate-spin" strokeWidth={2} />

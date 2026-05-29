@@ -5,6 +5,7 @@ import type { Route } from "next";
 import { AlertTriangle, Clock } from "lucide-react";
 import { useEffect, useMemo, useState } from "react";
 
+import { Button } from "@/components/ui/button";
 import { Pill, type PillVariant } from "@/components/ui/pill";
 import { SectionPanel } from "@/components/ui/section-panel";
 import { listVisits, type VisitListItem } from "@/lib/favorites";
@@ -207,14 +208,13 @@ export function VisitedFirmsClient() {
 
       {hasMore && !loading && !loadError ? (
         <div className="mt-4 flex justify-center">
-          <button
-            type="button"
+          <Button
+            variant="outline"
             onClick={() => void loadMore()}
             disabled={loadingMore}
-            className="rounded-[10px] border border-[var(--border-2,rgba(30,64,175,0.16))] bg-[var(--surface,#ffffff)] px-4 py-2 text-[13px] font-medium text-[var(--text-dim,#475569)] transition hover:bg-[var(--surface-2,#f1f6fd)] hover:text-[var(--text,#0f172a)] disabled:cursor-not-allowed disabled:opacity-45"
           >
             {loadingMore ? "Loading…" : "Load more"}
-          </button>
+          </Button>
         </div>
       ) : null}
     </>
@@ -334,13 +334,9 @@ function LoadErrorCard({
       <p className="mx-auto mt-2 max-w-sm text-[13px] leading-5 text-[var(--text-dim,#475569)]">
         {message}
       </p>
-      <button
-        type="button"
-        onClick={onRetry}
-        className="mt-5 inline-flex h-[34px] items-center rounded-[10px] border border-[var(--border-2,rgba(30,64,175,0.16))] bg-[var(--surface,#ffffff)] px-4 text-[13px] font-semibold text-[var(--text-dim,#475569)] transition hover:bg-[var(--surface,#ffffff)] hover:text-[var(--text,#0f172a)]"
-      >
+      <Button variant="outline" size="sm" onClick={onRetry} className="mt-5">
         Retry
-      </button>
+      </Button>
     </div>
   );
 }

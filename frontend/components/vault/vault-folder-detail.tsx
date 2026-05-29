@@ -5,6 +5,7 @@ import { useCallback, useEffect, useRef, useState } from "react";
 
 import { ArrowLeft } from "lucide-react";
 
+import { Button } from "@/components/ui/button";
 import {
   ApiError,
   deleteVaultFile,
@@ -335,22 +336,24 @@ function FolderEditor({
         {confirmDelete ? (
           <div className="flex items-center gap-3 text-xs text-danger">
             <span>Delete this service and all its files?</span>
-            <button
+            <Button
               type="button"
+              variant="ghost"
+              size="sm"
               onClick={() => setConfirmDelete(false)}
               disabled={deleting}
-              className="font-medium text-[var(--text-dim,#475569)] underline-offset-4 hover:underline"
             >
               Cancel
-            </button>
-            <button
+            </Button>
+            <Button
               type="button"
+              variant="danger"
+              size="sm"
               onClick={() => void handleDelete()}
               disabled={deleting}
-              className="inline-flex h-8 items-center rounded-lg bg-danger px-3 text-xs font-semibold text-white transition hover:bg-[#c62a2a] disabled:cursor-not-allowed disabled:opacity-60"
             >
               {deleting ? "Deleting..." : "Delete service"}
-            </button>
+            </Button>
           </div>
         ) : (
           <button
@@ -366,14 +369,13 @@ function FolderEditor({
           {savedAt && !dirty ? (
             <span className="text-xs text-emerald-600">Saved.</span>
           ) : null}
-          <button
+          <Button
             type="button"
             onClick={() => void handleSave()}
             disabled={!dirty || saving || !name.trim()}
-            className="inline-flex h-10 items-center rounded-xl bg-[var(--accent,#6366f1)] px-4 text-sm font-semibold text-white shadow-lg shadow-[var(--accent,#6366f1)]/20 transition hover:bg-[var(--accent-2,#8b5cf6)] disabled:cursor-not-allowed disabled:opacity-60"
           >
             {saving ? "Saving..." : "Save changes"}
-          </button>
+          </Button>
         </div>
       </div>
     </section>

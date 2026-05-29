@@ -28,6 +28,7 @@ import {
   hasActiveFilters,
 } from "@/lib/investors-state";
 import { STATE_NAMES, stateCodeFromName } from "@/lib/states";
+import { Button } from "@/components/ui/button";
 import { Combo } from "@/components/ui/combo";
 import { ListPicker } from "@/components/list-picker/list-picker";
 import { OutreachModal } from "@/components/master-list/outreach-modal";
@@ -459,14 +460,15 @@ export function InvestorsClient() {
             </h3>
           </div>
           {filtersActive ? (
-            <button
+            <Button
               type="button"
+              variant="outline"
+              size="sm"
               onClick={handleClearFilters}
-              className="inline-flex items-center gap-1.5 rounded-[6px] border border-[var(--border-2,rgba(30,64,175,0.16))] bg-transparent px-2.5 py-1 text-[11px] font-semibold text-[var(--text-dim,#475569)] transition hover:bg-[var(--surface-2,#f1f6fd)] hover:text-[var(--text,#0f172a)]"
             >
               <X aria-hidden className="h-3.5 w-3.5" strokeWidth={2} />
               Clear filters
-            </button>
+            </Button>
           ) : null}
         </div>
 
@@ -948,25 +950,28 @@ function InvestorRow({
           reportingOwnerCik={row.reporting_owner_cik}
           initialFavorited={row.is_favorited}
         />
-        <button
+        <Button
           type="button"
+          variant="outline"
+          size="sm"
           onClick={onEnrich}
           disabled={enriching}
-          className="inline-flex shrink-0 items-center gap-1.5 whitespace-nowrap rounded-md border border-[var(--border-2,rgba(30,64,175,0.16))] bg-transparent px-2.5 py-1 text-[11px] font-semibold text-[var(--text-dim,#475569)] transition hover:bg-[var(--surface-2,#f1f6fd)] hover:text-[var(--text,#0f172a)] disabled:cursor-not-allowed disabled:opacity-50"
+          className="shrink-0 whitespace-nowrap"
         >
           {enriching ? (
             <Loader2 className="h-3.5 w-3.5 animate-spin" strokeWidth={2} />
           ) : null}
           Re-enrich
-        </button>
-        <button
+        </Button>
+        <Button
           type="button"
+          size="sm"
           onClick={() => setOutreachOpen(true)}
-          className="inline-flex shrink-0 items-center gap-1.5 whitespace-nowrap rounded-md bg-[var(--accent,#6366f1)] px-2.5 py-1 text-[11px] font-semibold text-white transition hover:bg-[var(--accent-2,#8b5cf6)]"
+          className="shrink-0 whitespace-nowrap"
         >
           <MailPlus className="h-3.5 w-3.5" strokeWidth={2} aria-hidden />
           Outreach
-        </button>
+        </Button>
       </div>
       {outreachOpen ? (
         <OutreachModal
@@ -1035,13 +1040,14 @@ function LoadErrorCard({
       <p className="mx-auto mt-2 max-w-sm text-[13px] leading-5 text-[var(--text-dim,#475569)]">
         {message}
       </p>
-      <button
+      <Button
         type="button"
+        variant="outline"
         onClick={onRetry}
-        className="mt-5 inline-flex h-[34px] items-center rounded-[10px] border border-[var(--border-2,rgba(30,64,175,0.16))] bg-[var(--surface,#ffffff)] px-4 text-[13px] font-semibold text-[var(--text-dim,#475569)] transition hover:text-[var(--text,#0f172a)]"
+        className="mt-5"
       >
         Retry
-      </button>
+      </Button>
     </div>
   );
 }

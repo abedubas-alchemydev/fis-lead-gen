@@ -8,7 +8,9 @@ import {
   Loader2,
   Sparkles,
 } from "lucide-react";
+import clsx from "clsx";
 
+import { Button, buttonBase, buttonSizes } from "@/components/ui/button";
 import {
   ApiError,
   generateAdhocOutreachDraft,
@@ -419,13 +421,9 @@ export function CreateOutreachTab() {
             the Sent history tab in a moment.
           </p>
           <div className="mt-2 flex flex-wrap items-center justify-center gap-2">
-            <button
-              type="button"
-              onClick={handleReset}
-              className="inline-flex h-10 items-center rounded-xl bg-[var(--accent,#6366f1)] px-4 text-[13px] font-semibold text-white shadow-lg shadow-[var(--accent,#6366f1)]/20 transition hover:bg-[var(--accent-2,#8b5cf6)]"
-            >
+            <Button type="button" onClick={handleReset}>
               Compose another
-            </button>
+            </Button>
           </div>
         </div>
       </div>
@@ -541,7 +539,11 @@ export function CreateOutreachTab() {
                   ? "Pick a service above to enable AI draft generation."
                   : undefined
               }
-              className="inline-flex h-10 items-center gap-2 rounded-xl border border-[rgba(99,102,241,0.3)] bg-[rgba(99,102,241,0.08)] px-3 text-[13px] font-semibold text-[#4338ca] transition hover:bg-[rgba(99,102,241,0.14)] disabled:cursor-not-allowed disabled:opacity-60"
+              className={clsx(
+                buttonBase,
+                buttonSizes.md,
+                "border border-[rgba(99,102,241,0.3)] bg-[rgba(99,102,241,0.08)] text-[#4338ca] hover:bg-[rgba(99,102,241,0.14)]",
+              )}
             >
               {stage === "generating" ? (
                 <Loader2 className="h-3.5 w-3.5 animate-spin" />
@@ -625,15 +627,16 @@ export function CreateOutreachTab() {
               <span>{error}</span>
               {linkActionProvider ? (
                 <div className="mt-2">
-                  <button
+                  <Button
                     type="button"
+                    variant="danger"
+                    size="sm"
                     onClick={() =>
                       void handleLinkProvider(linkActionProvider)
                     }
-                    className="inline-flex h-8 items-center rounded-xl bg-[var(--pill-red-text,#b91c1c)] px-3 text-[12px] font-semibold text-white transition hover:opacity-90"
                   >
                     Grant {PROVIDER_LABEL[linkActionProvider]} access
-                  </button>
+                  </Button>
                 </div>
               ) : null}
             </div>
@@ -641,25 +644,24 @@ export function CreateOutreachTab() {
         ) : null}
 
         <div className="flex items-center justify-end gap-3">
-          <button
+          <Button
             type="button"
+            variant="outline"
             onClick={handleReset}
             disabled={stage === "generating" || stage === "sending"}
-            className="inline-flex h-10 items-center rounded-xl border border-[var(--border,rgba(30,64,175,0.1))] bg-[var(--surface,#ffffff)] px-4 text-[13px] font-medium text-[var(--text-dim,#475569)] transition hover:bg-[var(--surface-2,#f1f6fd)] disabled:cursor-not-allowed disabled:opacity-60"
           >
             Reset
-          </button>
-          <button
+          </Button>
+          <Button
             type="button"
             onClick={() => void handleSend()}
             disabled={!canSend}
-            className="inline-flex h-10 items-center gap-2 rounded-xl bg-[var(--accent,#6366f1)] px-4 text-[13px] font-semibold text-white shadow-lg shadow-[var(--accent,#6366f1)]/20 transition hover:bg-[var(--accent-2,#8b5cf6)] disabled:cursor-not-allowed disabled:opacity-60"
           >
             {stage === "sending" ? (
               <Loader2 className="h-3.5 w-3.5 animate-spin" />
             ) : null}
             {stage === "sending" ? "Sending…" : "Send"}
-          </button>
+          </Button>
         </div>
       </div>
     </div>

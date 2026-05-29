@@ -4,6 +4,8 @@ import { useEffect, useRef, useState } from "react";
 
 import { Maximize2, X } from "lucide-react";
 
+import { Button } from "@/components/ui/button";
+
 // Inline textarea with an "Expand" affordance that opens a fullscreen
 // modal editor. Edits stream through onChange in both views so the
 // outer form's dirty state and Save button keep working unchanged —
@@ -170,13 +172,9 @@ function ExpandedEditor({
             {helperText ? <>{helperText}{" "}</> : null}
             {value.length.toLocaleString()} / {maxLength.toLocaleString()} characters{helperText ? "." : ""}
           </span>
-          <button
-            type="button"
-            onClick={onClose}
-            className="inline-flex h-9 items-center rounded-lg bg-[var(--accent,#6366f1)] px-4 text-xs font-semibold text-white transition hover:bg-[var(--accent-2,#8b5cf6)]"
-          >
+          <Button type="button" onClick={onClose}>
             Done
-          </button>
+          </Button>
         </footer>
       </div>
     </div>
