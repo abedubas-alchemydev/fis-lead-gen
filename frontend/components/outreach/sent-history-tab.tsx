@@ -415,7 +415,7 @@ function ExpandedBody({
           </a>
         ) : null}
       </div>
-      <div className="rounded-xl border border-[var(--border,rgba(30,64,175,0.1))] bg-white p-4">
+      <div className="rounded-xl border border-[var(--border,rgba(30,64,175,0.1))] bg-[var(--surface,#ffffff)] p-4">
         <div className="text-xs font-semibold text-[var(--text-muted,#94a3b8)]">
           Subject
         </div>
