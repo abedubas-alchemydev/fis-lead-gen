@@ -22,8 +22,9 @@ delivers phones for ~16 of 27 Vanguard officers per gap-fill run.
 | Apollo provider | `backend/app/services/contact_discovery/apollo_match.py` | Adds `reveal_phone_number: true` + `webhook_url` to `/people/match` payload when both `apollo_webhook_secret` and `public_base_url` are configured. Extracts `person.id` from the sync response into `DiscoveryResult.apollo_person_id`. |
 | Merge | `backend/app/services/contact_discovery/orchestrator.py:_merge_discovery_results` | Carries `apollo_person_id` through the chain merge (first non-null in chain order, same shape as `linkedin_url`). |
 | Persistence | `backend/app/models/{advisor,executive,investor}_contact.py` | New `apollo_person_id String(64) nullable indexed` column on all three tables (migration `20260528_0065`). |
-| Webhook | `backend/app/api/v1/endpoints/webhooks_apollo.py` | `POST /api/v1/webhooks/apollo/{secret}/phone-reveal`. Walks all three contact tables by `apollo_person_id`, appends to `phones` JSONB (dedupe by sanitized value), fills NULL scalar `phone` from highest-confidence new hit. Idempotent for Apollo retries. |
+| Webhook | `backend/app/api/v1/endpoints/webhooks_apollo.py` | `POST /api/v1/webhooks/apollo/{secret}/phone-reveal`. Walks the three contact tables (append to `phones` JSONB + fill NULL scalar `phone`), plus `discovered_email` and `form4_transactions` (scalar `enriched_phone`, set-if-null), all by `apollo_person_id`. Idempotent for Apollo retries. |
 | Gap-fill button | `frontend/components/advisor-list/channel-icon-cell.tsx` + `advisor-detail-client.tsx` | "Gap-fill contacts" on `/advisor-list/{id}`. POST `/api/v1/investment-advisors/{id}/gap-fill-contacts`, poll, render. 30-day cooldown on `last_gap_fill_attempt_at`. |
+| Form 4 insiders | `backend/app/services/form4_apollo.py` + `api/v1/endpoints/investors.py` | "Find contact" on `/investors`. **PDL primary** (sync email/LinkedIn); when PDL returns no phone, Apollo `/people/match` runs *with* the reveal flag + `webhook_url` and captures `person.id`. The phone arrives async to the same webhook and lands in `form4_transactions.enriched_phone` for every row of that insider. `apollo_person_id String(64) nullable indexed` column added in migration `20260529_0071`. Note: Apollo's reveal here is **per-click** spend (no 30-day cooldown like gap-fill — it's an on-demand button). |
 
 ## Apollo's webhook contract (per their docs + what we observed)
 
@@ -245,3 +246,6 @@ webhook added the phone later.
 - PR #581 — "Gap-fill contacts" button on advisor detail
 - PR #586 — Apollo reveal flag + webhook handler (the meat)
 - PR #590 — Root logger → stdout so handler INFO lines show in Cloud Run logs
+- Form 4 insiders — Investors "Find contact" wired onto the reveal+webhook flow
+  (`form4_apollo.py` reveal opt-in, `form4_transactions.apollo_person_id` migration
+  `20260529_0071`, webhook `form4_transactions` branch)

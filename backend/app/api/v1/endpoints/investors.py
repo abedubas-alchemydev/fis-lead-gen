@@ -302,6 +302,7 @@ async def enrich_investor(
         phone=match.phone,
         email=match.email,
         linkedin_url=match.linkedin_url,
+        apollo_person_id=match.apollo_person_id,
     )
     return InvestorEnrichResponse(
         txn_id=txn_id,

@@ -27,6 +27,7 @@ from app.main import app
 from app.models.advisor_contact import AdvisorContact
 from app.models.discovered_email import DiscoveredEmail
 from app.models.executive_contact import ExecutiveContact
+from app.models.form4_transaction import Form4Transaction
 from app.models.investor_contact import InvestorContact
 
 
@@ -84,12 +85,14 @@ class _FakeSession:
         executive_rows: list[ExecutiveContact] | None = None,
         investor_rows: list[InvestorContact] | None = None,
         discovered_email_rows: list[DiscoveredEmail] | None = None,
+        form4_rows: list[Form4Transaction] | None = None,
     ) -> None:
         self.tables: dict[type, list[Any]] = {
             AdvisorContact: list(advisor_rows or []),
             ExecutiveContact: list(executive_rows or []),
             InvestorContact: list(investor_rows or []),
             DiscoveredEmail: list(discovered_email_rows or []),
+            Form4Transaction: list(form4_rows or []),
         }
         self.commit_count = 0
 
@@ -163,6 +166,21 @@ def _make_discovered_email_row(
     row = DiscoveredEmail()
     row.id = 1
     row.email = "jane@example.com"
+    row.apollo_person_id = apollo_person_id
+    row.enriched_phone = enriched_phone
+    return row
+
+
+def _make_form4_row(
+    *,
+    txn_id: int = 1,
+    apollo_person_id: str | None = None,
+    enriched_phone: str | None = None,
+) -> Form4Transaction:
+    row = Form4Transaction()
+    row.id = txn_id
+    row.reporting_owner_name = "BARRA MARY T"
+    row.reporting_owner_cik = "0001234567"
     row.apollo_person_id = apollo_person_id
     row.enriched_phone = enriched_phone
     return row
@@ -550,3 +568,56 @@ async def test_discovered_email_picks_highest_confidence_phone(
         response = await client.post(WEBHOOK_URL, json=payload)
     assert response.json() == {"rows_updated": 1, "phones_added": 1}
     assert row.enriched_phone == "+15553334444"
+
+
+# ──────────────────── Form 4 insider ("Find contact") tests ────────────────────
+
+
+@pytest.mark.asyncio
+async def test_phone_lands_on_form4_rows(configure_secret: None, with_session) -> None:
+    """An insider enriched via Investors "Find contact" gets the revealed phone
+    written to every form4_transactions row sharing the apollo_person_id (a
+    person spans many transactions)."""
+    rows = [
+        _make_form4_row(txn_id=1, apollo_person_id="apollo-f4-1"),
+        _make_form4_row(txn_id=2, apollo_person_id="apollo-f4-1"),
+    ]
+    session = with_session(_FakeSession(form4_rows=rows))
+
+    payload = {
+        "people": [
+            {
+                "id": "apollo-f4-1",
+                "phone_numbers": [
+                    {"sanitized_number": "+15551112222", "type_cd": "mobile", "confidence_cd": "high"}
+                ],
+            }
+        ]
+    }
+    async with _client() as client:
+        response = await client.post(WEBHOOK_URL, json=payload)
+    assert response.json() == {"rows_updated": 2, "phones_added": 2}
+    assert rows[0].enriched_phone == "+15551112222"
+    assert rows[1].enriched_phone == "+15551112222"
+    assert session.commit_count == 1
+
+
+@pytest.mark.asyncio
+async def test_form4_phone_is_set_if_null_only(configure_secret: None, with_session) -> None:
+    """Existing enriched_phone isn't overwritten — an Apollo retry is a no-op."""
+    row = _make_form4_row(apollo_person_id="apollo-f4-1", enriched_phone="+19998887777")
+    session = with_session(_FakeSession(form4_rows=[row]))
+
+    payload = {
+        "people": [
+            {
+                "id": "apollo-f4-1",
+                "phone_numbers": [{"sanitized_number": "+15551112222", "type_cd": "mobile"}],
+            }
+        ]
+    }
+    async with _client() as client:
+        response = await client.post(WEBHOOK_URL, json=payload)
+    assert response.json() == {"rows_updated": 0, "phones_added": 0}
+    assert row.enriched_phone == "+19998887777"
+    assert session.commit_count == 0
