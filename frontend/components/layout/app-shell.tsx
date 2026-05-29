@@ -269,7 +269,8 @@ const navSections: ReadonlyArray<NavSection> = [
     items: [
       { href: "/email-extractor", label: "Email Extractor", icon: EmailExtractorIcon, badgeKey: null, permissionKey: "email_extractor" },
       { href: "/outreach/contacts" as Route, label: "Contacts", icon: OutreachContactsIcon, badgeKey: null, permissionKey: "outreach_contacts" },
-      { href: "/outreach/sent" as Route, label: "Outreach", icon: SentOutreachIcon, badgeKey: null, permissionKey: "sent_outreach" }
+      { href: "/outreach/sent" as Route, label: "Outreach", icon: SentOutreachIcon, badgeKey: null, permissionKey: "sent_outreach" },
+      { href: "/vault", label: "Vault", icon: VaultIcon, badgeKey: null, permissionKey: "vault" }
     ]
   },
   {
@@ -286,8 +287,7 @@ const navSections: ReadonlyArray<NavSection> = [
       { href: "/settings/account" as Route, label: "My Account", icon: KeyIcon, badgeKey: null },
       { href: "/settings/email-accounts" as Route, label: "Email Accounts", icon: MailAtIcon, badgeKey: null },
       { href: "/settings/users" as Route, label: "Users", icon: UsersIcon, badgeKey: null, adminOnly: true, permissionKey: "users" },
-      { href: "/settings/clearing-memberships" as Route, label: "Memberships", icon: ShieldCheckIcon, badgeKey: null, adminOnly: true },
-      { href: "/vault", label: "Vault", icon: VaultIcon, badgeKey: null, permissionKey: "vault" }
+      { href: "/settings/clearing-memberships" as Route, label: "Memberships", icon: ShieldCheckIcon, badgeKey: null, adminOnly: true }
     ]
   }
 ];
