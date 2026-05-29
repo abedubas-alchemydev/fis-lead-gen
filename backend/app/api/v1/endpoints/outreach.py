@@ -33,6 +33,7 @@ from app.models.investment_advisor import InvestmentAdvisor
 from app.models.investor_contact import InvestorContact
 from app.models.outreach_send import OutreachSend
 from app.models.pipeline_run import PipelineRun
+from app.models.user_outreach_settings import UserOutreachSettings
 from app.models.vault_folder import VaultFolder
 from app.schemas.auth import AuthenticatedUser
 from app.models.favorite_list import FavoriteList, FavoriteListItem
@@ -65,6 +66,8 @@ from app.schemas.vault import (
     OutreachSendRequest,
     OutreachSendResponse,
     OutreachSendsListResponse,
+    OutreachSignatureResponse,
+    OutreachSignatureUpdate,
     RecipientSearchResponse,
     RecipientSearchResult,
 )
@@ -1782,6 +1785,47 @@ async def get_outreach_send(
     payload = _row_to_item(row, include_sender=include_sender)
     payload["body"] = row[0].body
     return OutreachSendDetailResponse(**payload)
+
+
+@router.get("/signature", response_model=OutreachSignatureResponse)
+async def get_outreach_signature(
+    current_user: AuthenticatedUser = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db_session),
+) -> OutreachSignatureResponse:
+    """The caller's saved outreach signature (footer), or "" if unset.
+
+    Read by the compose surfaces (per-contact Outreach modal + the
+    ``/outreach`` Create tab) to prefill the editable Footer field, and
+    by the account-settings editor. Gated on ``get_current_user`` only —
+    it's the caller's own row, and the settings editor must work for any
+    signed-in user regardless of outreach feature permissions.
+    """
+    row = await db.get(UserOutreachSettings, current_user.id)
+    return OutreachSignatureResponse(
+        signature=row.signature if row and row.signature else ""
+    )
+
+
+@router.put("/signature", response_model=OutreachSignatureResponse)
+async def update_outreach_signature(
+    payload: OutreachSignatureUpdate,
+    current_user: AuthenticatedUser = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db_session),
+) -> OutreachSignatureResponse:
+    """Upsert the caller's outreach signature. Empty string clears it.
+
+    One row per user keyed by ``user_id`` (PK), so this is a get-or-create
+    followed by an in-place update — no race on a unique constraint.
+    """
+    signature = payload.signature.strip()
+    row = await db.get(UserOutreachSettings, current_user.id)
+    if row is None:
+        row = UserOutreachSettings(user_id=current_user.id, signature=signature)
+        db.add(row)
+    else:
+        row.signature = signature
+    await db.commit()
+    return OutreachSignatureResponse(signature=signature)
 
 
 @router.get(

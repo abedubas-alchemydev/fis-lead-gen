@@ -126,6 +126,7 @@ import type {
   OutreachSendStatus,
   OutreachSendsListResponse,
   OutreachSendsScope,
+  OutreachSignature,
   RecipientSearchResponse,
   FirmSearchResponse,
   FirmContactsResponse,
@@ -962,6 +963,23 @@ export async function getLinkedProviders(): Promise<LinkedProvidersResponse> {
   return apiRequest<LinkedProvidersResponse>(
     "/api/v1/outreach/linked-providers"
   );
+}
+
+// The caller's saved outreach signature (footer). Returns { signature: "" }
+// when unset. Read by the compose surfaces to prefill the Footer field and
+// by the account-settings editor.
+export async function getOutreachSignature(): Promise<OutreachSignature> {
+  return apiRequest<OutreachSignature>("/api/v1/outreach/signature");
+}
+
+// Upsert the caller's outreach signature. Empty string clears it.
+export async function updateOutreachSignature(
+  signature: string
+): Promise<OutreachSignature> {
+  return apiRequest<OutreachSignature>("/api/v1/outreach/signature", {
+    method: "PUT",
+    body: JSON.stringify({ signature })
+  });
 }
 
 // List of outreach sends (success + failure). Body is omitted from the

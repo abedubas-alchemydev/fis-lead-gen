@@ -16,6 +16,7 @@ import {
   generateInvestorOutreachDraft,
   generateOutreachDraft,
   getLinkedProviders,
+  getOutreachSignature,
   listVaultFolders,
   sendAdhocOutreach,
   sendAdvisorOutreach,
@@ -114,6 +115,12 @@ export function CreateOutreachTab() {
   const userOverrodeSenderRef = useRef(false);
   const [subject, setSubject] = useState("");
   const [body, setBody] = useState("");
+  const [footer, setFooter] = useState("");
+  // Default footer = the user's saved signature; kept in a ref so Reset
+  // can restore it. userEditedFooterRef guards against a late signature
+  // fetch clobbering an in-progress edit.
+  const defaultSignatureRef = useRef("");
+  const userEditedFooterRef = useRef(false);
   const [stage, setStage] = useState<Stage>("idle");
   const [error, setError] = useState<string | null>(null);
   const [linkActionProvider, setLinkActionProvider] =
@@ -159,6 +166,25 @@ export function CreateOutreachTab() {
         setLinkedProviders(result.items);
       } catch {
         // Swallow -- empty picker, the send 412 path will guide the user.
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+
+  // Signature fetch — prefills the editable Footer field and seeds the
+  // Reset default. Non-fatal on failure: the footer just starts empty.
+  useEffect(() => {
+    let cancelled = false;
+    (async () => {
+      try {
+        const result = await getOutreachSignature();
+        if (cancelled || !isMountedRef.current) return;
+        defaultSignatureRef.current = result.signature;
+        if (!userEditedFooterRef.current) setFooter(result.signature);
+      } catch {
+        // Swallow — empty footer is a fine default.
       }
     })();
     return () => {
@@ -255,6 +281,12 @@ export function CreateOutreachTab() {
   async function handleSend() {
     if (!recipient || !subject.trim() || !body.trim()) return;
     if (folderRequired && folderId === null) return;
+    // Append the (possibly edited) footer beneath the body. Merged on the
+    // client so the BE send contract is unchanged and the audit row
+    // stores exactly what was transmitted.
+    const outgoingBody = footer.trim()
+      ? `${body.trimEnd()}\n\n${footer.trim()}`
+      : body;
     setStage("sending");
     setError(null);
     setLinkActionProvider(null);
@@ -264,7 +296,7 @@ export function CreateOutreachTab() {
           recipient_email: recipient.email,
           recipient_name: recipient.name ?? null,
           subject,
-          body,
+          body: outgoingBody,
           sender_account_id: senderAccountId,
           folder_id: folderId,
         });
@@ -277,7 +309,7 @@ export function CreateOutreachTab() {
             contact_id: result.contact_id,
             folder_id: folderIdSafe,
             subject,
-            body,
+            body: outgoingBody,
             provider: providerId,
             sender_account_id: senderAccountId,
           });
@@ -287,7 +319,7 @@ export function CreateOutreachTab() {
             advisor_contact_id: result.contact_id,
             folder_id: folderIdSafe,
             subject,
-            body,
+            body: outgoingBody,
             provider: providerId,
             sender_account_id: senderAccountId,
           });
@@ -297,7 +329,7 @@ export function CreateOutreachTab() {
             investor_contact_id: result.contact_id,
             folder_id: folderIdSafe,
             subject,
-            body,
+            body: outgoingBody,
             provider: providerId,
             sender_account_id: senderAccountId,
           });
@@ -363,6 +395,8 @@ export function CreateOutreachTab() {
     setRecipient(null);
     setSubject("");
     setBody("");
+    setFooter(defaultSignatureRef.current);
+    userEditedFooterRef.current = false;
     setError(null);
     setLinkActionProvider(null);
     setStage("idle");
@@ -554,6 +588,34 @@ export function CreateOutreachTab() {
             maxLength={100_000}
             className={`${INPUT} resize-y leading-6`}
           />
+        </div>
+
+        <div>
+          <label className={LABEL} htmlFor="create-outreach-footer">
+            Footer
+          </label>
+          <textarea
+            id="create-outreach-footer"
+            value={footer}
+            onChange={(event) => {
+              userEditedFooterRef.current = true;
+              setFooter(event.target.value);
+            }}
+            disabled={stage === "sending" || stage === "generating"}
+            rows={5}
+            maxLength={5000}
+            className={`${INPUT} resize-y leading-6`}
+          />
+          <p className="mt-2 text-[11px] text-[var(--text-dim,#475569)]">
+            Appended beneath the body on send. Prefilled from your{" "}
+            <Link
+              href="/settings/account"
+              className="font-semibold text-[var(--accent,#6366f1)] underline-offset-4 hover:underline"
+            >
+              saved signature
+            </Link>
+            .
+          </p>
         </div>
 
         {error ? (
