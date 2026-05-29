@@ -116,6 +116,8 @@ import type {
   OutreachAdhocSendRequest,
   OutreachAdvisorDraftRequest,
   OutreachAdvisorSendRequest,
+  OptimizeInstructionsRequest,
+  OptimizeInstructionsResponse,
   OutreachDraft,
   OutreachDraftRequest,
   OutreachInvestorDraftRequest,
@@ -924,6 +926,18 @@ export async function generateOutreachDraft(
     method: "POST",
     body: JSON.stringify(payload)
   });
+}
+
+export async function optimizeOutreachInstructions(
+  payload: OptimizeInstructionsRequest
+): Promise<OptimizeInstructionsResponse> {
+  return apiRequest<OptimizeInstructionsResponse>(
+    "/api/v1/outreach/optimize-instructions",
+    {
+      method: "POST",
+      body: JSON.stringify(payload)
+    }
+  );
 }
 
 // Adhoc draft path — used by /outreach/sent?tab=create when the

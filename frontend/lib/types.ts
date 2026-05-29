@@ -650,6 +650,14 @@ export type OutreachDraft = {
   body: string;
 };
 
+export type OptimizeInstructionsRequest = {
+  text: string;
+};
+
+export type OptimizeInstructionsResponse = {
+  optimized_text: string;
+};
+
 export type OutreachSendRequest = {
   broker_dealer_id: number;
   contact_id: number;

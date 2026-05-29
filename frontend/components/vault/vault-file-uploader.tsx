@@ -11,9 +11,14 @@ import type { VaultFolderFile } from "@/lib/types";
 // folder-count cap is enforced predictably without race conditions.
 
 interface VaultFileUploaderProps {
-  folderId: number;
+  folderId?: number;
   disabled?: boolean;
-  onUploaded: (file: VaultFolderFile) => void;
+  onUploaded?: (file: VaultFolderFile) => void;
+  // When provided, selected files are handed back to the parent to stage
+  // (no upload). Used by the Vault create form, which has no folder id to
+  // POST to until the service row exists. When omitted, files upload
+  // immediately to ``folderId`` — the detail-page behavior.
+  onStage?: (files: File[]) => void;
 }
 
 const ACCEPT_LIST = [
@@ -43,7 +48,8 @@ const ACCEPT_LIST = [
 export function VaultFileUploader({
   folderId,
   disabled = false,
-  onUploaded
+  onUploaded,
+  onStage
 }: VaultFileUploaderProps) {
   const [busy, setBusy] = useState(false);
   const [over, setOver] = useState(false);
@@ -53,13 +59,22 @@ export function VaultFileUploader({
   const handleFiles = useCallback(
     async (files: FileList | null) => {
       if (!files || files.length === 0 || disabled) return;
+      // Stage mode (create form): hand the File objects back without
+      // uploading — the parent uploads them after the folder is created.
+      if (onStage) {
+        onStage(Array.from(files));
+        if (inputRef.current) inputRef.current.value = "";
+        return;
+      }
+      // Upload mode (detail page) requires an existing folder.
+      if (folderId === undefined) return;
       setError(null);
       setBusy(true);
       try {
         for (const file of Array.from(files)) {
           try {
             const uploaded = await uploadVaultFile(folderId, file);
-            onUploaded(uploaded);
+            onUploaded?.(uploaded);
           } catch (err) {
             // Show the first failure inline; keep going with the rest
             // so a single bad file doesn't tank an otherwise-OK batch.
@@ -71,7 +86,7 @@ export function VaultFileUploader({
         if (inputRef.current) inputRef.current.value = "";
       }
     },
-    [folderId, disabled, onUploaded]
+    [folderId, disabled, onUploaded, onStage]
   );
 
   const onDrop = useCallback(
