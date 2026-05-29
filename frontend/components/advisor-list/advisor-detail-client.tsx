@@ -861,19 +861,14 @@ export function AdvisorDetailClient({ advisorId }: { advisorId: string }) {
                 },
                 {
                   header: "Outreach",
-                  cell: (c) =>
-                    c.email ? (
-                      <OutreachButton
-                        entityKind="advisor"
-                        entityId={Number(advisorId)}
-                        entityName={advisor.name}
-                        contact={c}
-                      />
-                    ) : (
-                      <span className="text-xs italic text-[var(--text-muted,#94a3b8)]">
-                        No outreach available
-                      </span>
-                    ),
+                  cell: (c) => (
+                    <OutreachButton
+                      entityKind="advisor"
+                      entityId={Number(advisorId)}
+                      entityName={advisor.name}
+                      contact={c}
+                    />
+                  ),
                   className: "whitespace-nowrap",
                 },
               ]}
