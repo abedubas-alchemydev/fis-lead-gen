@@ -21,6 +21,8 @@ from app.services.outreach import (
     OutreachConfigurationError,
     OutreachDraftError,
     ServiceContext,
+    _build_adhoc_prompt,
+    _build_personalized_prompt,
     generate_outreach_draft,
 )
 
@@ -195,3 +197,146 @@ async def test_gemini_returns_empty_body_raises_draft_error(patch_gemini) -> Non
         await generate_outreach_draft(
             firm=_firm(), contact=_contact(), service=_service()
         )
+
+
+# ── Prompt builders ─────────────────────────────────────────────────────────
+
+
+def _service_with_extras() -> ServiceContext:
+    return ServiceContext(
+        name="Stock Loan",
+        description="We offer competitive rebates on hard-to-borrow names.",
+        instructions="Always mention our 24/7 desk.",
+        retrieved_chunks=("Excerpt A about rebates.", "Excerpt B about coverage."),
+    )
+
+
+def test_personalized_prompt_includes_firm_and_contact_blocks() -> None:
+    prompt = _build_personalized_prompt(
+        firm=_firm(), contact=_contact(), service=_service_with_extras()
+    )
+
+    assert "── Recipient ──" in prompt
+    assert "Name: Jane Doe" in prompt
+    assert "Title: Chief Operating Officer" in prompt
+    assert "Firm: Acme Securities LLC" in prompt
+    assert "Location: New York, NY" in prompt
+    assert "They currently use Pershing as their clearing partner." in prompt
+    assert "Firm operations text (raw, possibly noisy): Provides retail brokerage services." in prompt
+    assert "Reference one concrete detail about the recipient's firm" in prompt
+    assert "── Service the user is pitching ──" in prompt
+    assert "Service name: Stock Loan" in prompt
+    assert "Always mention our 24/7 desk." in prompt
+    assert "Excerpt A about rebates." in prompt
+    assert "Excerpt B about coverage." in prompt
+
+
+def test_personalized_prompt_handles_missing_firm_fields() -> None:
+    """No city/state, no clearing partner, no firm_operations_text — fallbacks fire."""
+    firm = FirmContext(
+        name="Lone LLC",
+        city=None,
+        state=None,
+        current_clearing_partner=None,
+        firm_operations_text=None,
+    )
+    prompt = _build_personalized_prompt(
+        firm=firm, contact=_contact(), service=_service()
+    )
+
+    assert "Location: an unspecified location" in prompt
+    assert "Their current clearing partner is unknown." in prompt
+    assert "(no firm operations text on file)" in prompt
+
+
+def test_adhoc_prompt_uses_name_when_provided() -> None:
+    prompt = _build_adhoc_prompt(
+        recipient_name="Sarah", service=_service_with_extras()
+    )
+
+    assert "Name: Sarah" in prompt
+    assert "── Recipient ──" in prompt
+    assert "(No firm context available" in prompt
+
+
+def test_adhoc_prompt_defaults_to_there_without_name() -> None:
+    prompt_none = _build_adhoc_prompt(recipient_name=None, service=_service())
+    prompt_blank = _build_adhoc_prompt(recipient_name="   ", service=_service())
+
+    assert "Name: there" in prompt_none
+    assert "Name: there" in prompt_blank
+
+
+def test_adhoc_prompt_omits_firm_block() -> None:
+    """Adhoc must not surface firm-related fields the LLM could hallucinate from."""
+    prompt = _build_adhoc_prompt(
+        recipient_name="Sarah", service=_service_with_extras()
+    )
+
+    assert "Firm operations text" not in prompt
+    assert "clearing partner" not in prompt
+    assert "Location:" not in prompt
+    assert "Reference one concrete detail" not in prompt
+    assert "Do NOT invent firm details" in prompt
+
+
+def test_adhoc_prompt_includes_rag_chunks_and_service_block() -> None:
+    prompt = _build_adhoc_prompt(
+        recipient_name="Sarah", service=_service_with_extras()
+    )
+
+    assert "── Service the user is pitching ──" in prompt
+    assert "Service name: Stock Loan" in prompt
+    assert "Always mention our 24/7 desk." in prompt
+    assert "Excerpt A about rebates." in prompt
+    assert "Excerpt B about coverage." in prompt
+
+
+# ── Adhoc draft path ────────────────────────────────────────────────────────
+
+
+@respx.mock
+async def test_generate_outreach_draft_adhoc_succeeds_without_firm_or_contact(
+    patch_gemini,
+) -> None:
+    """firm=None, contact=None routes through the adhoc prompt path."""
+    respx.post(_GEMINI_URL).mock(
+        return_value=_gemini_response(
+            subject="Quick intro on stock-loan rebates",
+            body="Hi Sarah,\n\nValue para.\n\n- Sender",
+        )
+    )
+
+    draft = await generate_outreach_draft(
+        service=_service(), recipient_name="Sarah"
+    )
+
+    assert draft.subject == "Quick intro on stock-loan rebates"
+    assert draft.body.startswith("Hi Sarah")
+
+
+@respx.mock
+async def test_generate_outreach_draft_partial_firm_falls_to_adhoc(
+    patch_gemini,
+) -> None:
+    """Partial context (firm but no contact, or vice versa) treated as adhoc.
+
+    Guards against a caller that constructs FirmContext but forgets the
+    ContactContext — without this routing the LLM would see firm details
+    but no recipient and could invent a contact identity.
+    """
+    captured: dict[str, str] = {}
+
+    def _capture(request: httpx.Request) -> httpx.Response:
+        payload = json.loads(request.content)
+        captured["prompt"] = payload["contents"][0]["parts"][0]["text"]
+        return _gemini_response(subject="S", body="B\n\n- Sender")
+
+    respx.post(_GEMINI_URL).mock(side_effect=_capture)
+
+    await generate_outreach_draft(
+        firm=_firm(), contact=None, service=_service()
+    )
+
+    assert "Firm operations text" not in captured["prompt"]
+    assert "Do NOT invent firm details" in captured["prompt"]

@@ -93,27 +93,34 @@ class OutreachDraft:
     body: str
 
 
-def _build_prompt(
-    *, firm: FirmContext, contact: ContactContext, service: ServiceContext
-) -> str:
-    """Compose the inline prompt sent to Gemini.
+_TONE_CONSTRAINTS = (
+    "You are an experienced clearing-and-custody business-development representative writing "
+    "a cold email on behalf of the user. The user's firm offers a service described below; "
+    "you must pitch that specific service to a contact at a broker-dealer. Be specific, "
+    "concise, and credible."
+)
 
-    Truncates ``service.description`` and ``firm.firm_operations_text`` to
-    their respective budgets so a verbose vault description doesn't blow
-    out the token cost. The hard tone constraints (length, no emojis, no
-    "I hope this email finds you well") live here so the FE can't loosen
-    them by passing a different description.
+_OUTPUT_FORMAT = (
+    "Return a single JSON object with exactly two string fields: \"subject\" and \"body\". "
+    "The body must use \"\\n\\n\" between paragraphs and end with a sign-off line."
+)
+
+_LENGTH_AND_STYLE = (
+    "Do not use emojis. Do not open with "
+    "\"I hope this email finds you well\" or any equivalent platitude. Keep the body to 3 "
+    "short paragraphs (greeting, value, ask) totalling 80–140 words. The subject line must "
+    "be under 70 characters and not contain the word \"Re:\"."
+)
+
+
+def _service_block(service: ServiceContext) -> str:
+    """Service description + per-service instructions + RAG excerpts.
+
+    Shared between personalized and adhoc prompt paths. The recipient
+    block above this is what differs between the two — the service-side
+    instructions, description, and retrieved chunks are identical.
     """
-    location_bits = [bit for bit in (firm.city, firm.state) if bit]
-    location = ", ".join(location_bits) if location_bits else "an unspecified location"
-
     description = (service.description or "").strip()[:_DESCRIPTION_BUDGET] or "(no description provided)"
-    firm_ops = (firm.firm_operations_text or "").strip()[:_FIRM_OPS_BUDGET] or "(no firm operations text on file)"
-    partner_line = (
-        f"They currently use {firm.current_clearing_partner} as their clearing partner."
-        if firm.current_clearing_partner
-        else "Their current clearing partner is unknown."
-    )
 
     instructions = (service.instructions or "").strip()[:_INSTRUCTIONS_BUDGET]
     instructions_block = (
@@ -137,14 +144,37 @@ def _build_prompt(
         retrieved_block = ""
 
     return (
-        "You are an experienced clearing-and-custody business-development representative writing "
-        "a cold email on behalf of the user. The user's firm offers a service described below; "
-        "you must pitch that specific service to a contact at a broker-dealer. Be specific, "
-        "concise, and credible. Reference one concrete detail about the recipient's firm if the "
-        "context provides one — never invent facts. Do not use emojis. Do not open with "
-        "\"I hope this email finds you well\" or any equivalent platitude. Keep the body to 3 "
-        "short paragraphs (greeting, value, ask) totalling 80–140 words. The subject line must "
-        "be under 70 characters and not contain the word \"Re:\".\n\n"
+        "── Service the user is pitching ──\n"
+        f"Service name: {service.name}\n"
+        f"Description: {description}\n"
+        f"{instructions_block}"
+        f"{retrieved_block}"
+    )
+
+
+def _build_personalized_prompt(
+    *, firm: FirmContext, contact: ContactContext, service: ServiceContext
+) -> str:
+    """Compose the inline prompt sent to Gemini when firm + contact are known.
+
+    Truncates ``service.description`` and ``firm.firm_operations_text`` to
+    their respective budgets so a verbose vault description doesn't blow
+    out the token cost. The hard tone constraints (length, no emojis, no
+    "I hope this email finds you well") live here so the FE can't loosen
+    them by passing a different description.
+    """
+    location_bits = [bit for bit in (firm.city, firm.state) if bit]
+    location = ", ".join(location_bits) if location_bits else "an unspecified location"
+    firm_ops = (firm.firm_operations_text or "").strip()[:_FIRM_OPS_BUDGET] or "(no firm operations text on file)"
+    partner_line = (
+        f"They currently use {firm.current_clearing_partner} as their clearing partner."
+        if firm.current_clearing_partner
+        else "Their current clearing partner is unknown."
+    )
+
+    return (
+        f"{_TONE_CONSTRAINTS} Reference one concrete detail about the recipient's firm if the "
+        f"context provides one — never invent facts. {_LENGTH_AND_STYLE}\n\n"
         "── Recipient ──\n"
         f"Name: {contact.name}\n"
         f"Title: {contact.title}\n"
@@ -152,13 +182,41 @@ def _build_prompt(
         f"Location: {location}\n"
         f"{partner_line}\n"
         f"Firm operations text (raw, possibly noisy): {firm_ops}\n\n"
-        "── Service the user is pitching ──\n"
-        f"Service name: {service.name}\n"
-        f"Description: {description}\n"
-        f"{instructions_block}"
-        f"{retrieved_block}\n"
-        "Return a single JSON object with exactly two string fields: \"subject\" and \"body\". "
-        "The body must use \"\\n\\n\" between paragraphs and end with a sign-off line."
+        f"{_service_block(service)}\n"
+        f"{_OUTPUT_FORMAT}"
+    )
+
+
+def _build_adhoc_prompt(
+    *, recipient_name: str | None, service: ServiceContext
+) -> str:
+    """Compose the inline prompt for adhoc sends with no firm/contact context.
+
+    Three deliberate departures from the personalized prompt:
+
+    1. No "Recipient firm / location / clearing partner / firm operations"
+       block — we don't have that data and inviting the LLM to fill it
+       guarantees hallucination.
+    2. Greeting uses ``recipient_name`` if provided, else "there". We
+       intentionally do NOT pass the email address — the domain tempts
+       the model to guess a firm name from the TLD.
+    3. The anti-hallucination instruction inverts: instead of "reference
+       one concrete firm detail", it's "do not guess anything about the
+       recipient or their firm — lean entirely on the service description
+       and excerpts below". The service block does all the specificity.
+    """
+    greeting_name = (recipient_name or "").strip() or "there"
+
+    return (
+        f"{_TONE_CONSTRAINTS} You do not have any information about the recipient's firm. "
+        "Do NOT invent firm details, locations, or current vendors. The pitch must stand on "
+        "the service description and reference excerpts below — that's where the specificity "
+        f"comes from. {_LENGTH_AND_STYLE}\n\n"
+        "── Recipient ──\n"
+        f"Name: {greeting_name}\n"
+        "(No firm context available — this is a direct outreach to an individual.)\n\n"
+        f"{_service_block(service)}\n"
+        f"{_OUTPUT_FORMAT}"
     )
 
 
@@ -257,9 +315,29 @@ async def _post_with_retries(payload: dict[str, object]) -> dict[str, object]:
 
 
 async def generate_outreach_draft(
-    *, firm: FirmContext, contact: ContactContext, service: ServiceContext
+    *,
+    service: ServiceContext,
+    firm: FirmContext | None = None,
+    contact: ContactContext | None = None,
+    recipient_name: str | None = None,
 ) -> OutreachDraft:
     """Generate a single ``{subject, body}`` cold-email draft.
+
+    Two modes:
+
+    * **Personalized** (``firm`` and ``contact`` both provided): used by
+      the BD / advisor / investor detail-page flows. The prompt anchors
+      on the firm's location, current clearing partner, and operations
+      text, plus the contact's name + title.
+    * **Adhoc** (``firm=None`` and ``contact=None``): used by the
+      free-form-email path on ``/outreach/sent?tab=create``. The prompt
+      drops the firm block entirely and uses ``recipient_name`` (or
+      "there") as the greeting. The pitch relies on the service
+      description + RAG excerpts.
+
+    Passing one of ``firm``/``contact`` without the other is treated as
+    adhoc — partial firm context invites the LLM to invent the missing
+    half.
 
     Raises ``OutreachConfigurationError`` if ``GEMINI_API_KEY`` is missing
     or has an invalid shape (same 39-char ``^AIzaSy…`` guard the PDF
@@ -276,7 +354,10 @@ async def generate_outreach_draft(
             f"Expected 39 chars matching ^AIzaSy[A-Za-z0-9_-]{{33}}$."
         )
 
-    prompt = _build_prompt(firm=firm, contact=contact, service=service)
+    if firm is not None and contact is not None:
+        prompt = _build_personalized_prompt(firm=firm, contact=contact, service=service)
+    else:
+        prompt = _build_adhoc_prompt(recipient_name=recipient_name, service=service)
     payload = _build_payload(prompt)
     response_payload = await _post_with_retries(payload)
     response_text = _extract_text(response_payload)

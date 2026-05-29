@@ -11,6 +11,7 @@ import {
 
 import {
   ApiError,
+  generateAdhocOutreachDraft,
   generateAdvisorOutreachDraft,
   generateInvestorOutreachDraft,
   generateOutreachDraft,
@@ -191,8 +192,12 @@ export function CreateOutreachTab() {
   // BD/Advisor/Investor sends require folder_id (server validates gt=0).
   // Adhoc sends accept null folder_id.
   const folderRequired = isContact;
+  // AI draft generation needs a Service folder for the RAG context,
+  // regardless of whether the recipient is a known contact or adhoc.
+  // The send path stays unchanged — adhoc sends still don't require a
+  // folder; the gate is on Generate only.
   const canGenerate =
-    isContact &&
+    (isContact || isAdhoc) &&
     folderId !== null &&
     (stage === "idle" || stage === "error");
   const canSend =
@@ -203,32 +208,38 @@ export function CreateOutreachTab() {
     (stage === "idle" || stage === "error");
 
   async function handleGenerate() {
-    if (!recipient || recipient.kind !== "contact" || folderId === null) {
-      return;
-    }
+    if (!recipient || folderId === null) return;
     setStage("generating");
     setError(null);
     try {
-      const { result } = recipient;
       let draft;
-      if (result.entity_kind === "broker_dealer") {
-        draft = await generateOutreachDraft({
-          broker_dealer_id: result.entity_id,
-          contact_id: result.contact_id,
+      if (recipient.kind === "adhoc") {
+        draft = await generateAdhocOutreachDraft({
           folder_id: folderId,
-        });
-      } else if (result.entity_kind === "advisor") {
-        draft = await generateAdvisorOutreachDraft({
-          advisor_id: result.entity_id,
-          advisor_contact_id: result.contact_id,
-          folder_id: folderId,
+          recipient_email: recipient.email,
+          recipient_name: recipient.name ?? null,
         });
       } else {
-        draft = await generateInvestorOutreachDraft({
-          institutional_investor_id: result.entity_id,
-          investor_contact_id: result.contact_id,
-          folder_id: folderId,
-        });
+        const { result } = recipient;
+        if (result.entity_kind === "broker_dealer") {
+          draft = await generateOutreachDraft({
+            broker_dealer_id: result.entity_id,
+            contact_id: result.contact_id,
+            folder_id: folderId,
+          });
+        } else if (result.entity_kind === "advisor") {
+          draft = await generateAdvisorOutreachDraft({
+            advisor_id: result.entity_id,
+            advisor_contact_id: result.contact_id,
+            folder_id: folderId,
+          });
+        } else {
+          draft = await generateInvestorOutreachDraft({
+            institutional_investor_id: result.entity_id,
+            investor_contact_id: result.contact_id,
+            folder_id: folderId,
+          });
+        }
       }
       if (!isMountedRef.current) return;
       setSubject(draft.subject);
@@ -402,8 +413,8 @@ export function CreateOutreachTab() {
           </div>
           {isAdhoc ? (
             <p className="mt-2 text-[11px] text-[var(--text-dim,#475569)]">
-              Ad-hoc sends skip the AI draft (no firm context). Write your
-              subject + body below.
+              Ad-hoc sends generate a draft from the selected service only
+              (no firm context). Edit before sending.
             </p>
           ) : null}
         </div>
@@ -485,7 +496,7 @@ export function CreateOutreachTab() {
           ) : null}
         </div>
 
-        {isContact ? (
+        {isContact || isAdhoc ? (
           <div>
             <button
               type="button"
