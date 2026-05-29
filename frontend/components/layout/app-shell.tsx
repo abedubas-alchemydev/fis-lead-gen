@@ -6,6 +6,7 @@ import type { ReactNode } from "react";
 import { Fragment, useEffect, useMemo, useState } from "react";
 import { usePathname, useRouter, useSearchParams } from "next/navigation";
 
+import { GlobalBackButton } from "@/components/layout/global-back-button";
 import { apiRequest } from "@/lib/api";
 import { authClient } from "@/lib/auth-client";
 
@@ -600,7 +601,10 @@ export function AppShell({
           {/* Scrollable content area — each page renders its own topbar row
               (crumbs + title + TopActions) matching the mockup's `.topbar`
               inside `.main`. */}
-          <main className="min-w-0 flex-1 overflow-auto">{children}</main>
+          <main className="min-w-0 flex-1 overflow-auto">
+            <GlobalBackButton />
+            {children}
+          </main>
         </div>
       </div>
     </div>

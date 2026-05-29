@@ -1,45 +1,17 @@
 "use client";
 
-import { ArrowLeft } from "lucide-react";
 import Link from "next/link";
-import { useParams, useSearchParams } from "next/navigation";
+import { useParams } from "next/navigation";
 import type { Route } from "next";
-import { useMemo, useState } from "react";
+import { useState } from "react";
 
 import { ScanDetailView } from "@/components/email-extractor/scan-detail-view";
 import { type ScanResponse } from "@/lib/email-extractor";
 import { formatRelativeTime } from "@/lib/format";
-import { buildMasterListUrl, parseReturnParam } from "@/lib/master-list-state";
-
-const SECONDARY_BTN =
-  "inline-flex items-center justify-center gap-2 rounded-[10px] border border-[var(--border-2,rgba(30,64,175,0.16))] bg-[var(--surface,#ffffff)] px-3 py-1.5 text-[12px] font-medium text-[var(--text-dim,#475569)] transition hover:bg-[var(--surface-2,#f1f6fd)] hover:text-[var(--text,#0f172a)] disabled:cursor-not-allowed disabled:opacity-45";
 
 export default function ScanDetailPage(): React.ReactElement {
   const params = useParams<{ scanId: string }>();
   const scanId = Number(params?.scanId);
-
-  // When a `return` envelope is present (the user reached this scan via
-  // "Find emails" on a firm-detail page that was itself entered from the
-  // master list), wire the right-rail back-link to land them on the same
-  // paginated/filtered/sorted master-list view they left. Direct visits /
-  // bookmarks fall back to the email-extractor hub.
-  const searchParams = useSearchParams();
-  const returnState = useMemo(
-    () => parseReturnParam(searchParams.get("return")),
-    [searchParams]
-  );
-  const backLink = useMemo<{ href: Route; label: string }>(() => {
-    if (returnState) {
-      return {
-        href: buildMasterListUrl(returnState) as Route,
-        label: "Back to Master List",
-      };
-    }
-    return {
-      href: "/email-extractor" as Route,
-      label: "Back to Email Extractor",
-    };
-  }, [returnState]);
 
   // ScanDetailView owns the polling fetch; it surfaces the loaded scan up
   // here so the page can render the live h1 + meta line without
@@ -49,10 +21,6 @@ export default function ScanDetailPage(): React.ReactElement {
   return (
     <div className="px-7 pb-12 pt-7 lg:px-9">
       <div className="mb-6">
-        <Link href={backLink.href} className={`${SECONDARY_BTN} mb-4`}>
-          <ArrowLeft className="h-4 w-4" strokeWidth={2} />
-          {backLink.label}
-        </Link>
         <div className="min-w-0">
           <p className="text-[12px] uppercase tracking-[0.06em] text-[var(--text-muted,#94a3b8)]">
             Enterprise Dashboard{" "}
