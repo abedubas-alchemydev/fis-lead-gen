@@ -3,6 +3,7 @@
 import Link from "next/link";
 import type { Route } from "next";
 import { useEffect, useMemo, useRef, useState } from "react";
+import { createPortal } from "react-dom";
 
 import {
   ApiError,
@@ -186,6 +187,16 @@ export function OutreachModal({
   // session -- prevents folder changes from clobbering their choice.
   const userOverrodeSenderRef = useRef(false);
   const session = authClient.useSession();
+
+  // Portal gate. We render the dialog into ``document.body`` (see the
+  // ``createPortal`` at the bottom) so its ``position: fixed`` is sized
+  // by the viewport, not by the firm-detail container — that wrapper
+  // keeps a ``transform`` from its ``animate-fade-in`` (fill-mode both),
+  // which would otherwise become the fixed positioning context and
+  // strand the modal in the middle of the (very tall) page. ``mounted``
+  // defers the portal to the client so SSR/first paint match.
+  const [mounted, setMounted] = useState(false);
+  useEffect(() => setMounted(true), []);
 
   const isMountedRef = useRef(true);
   useEffect(() => {
@@ -443,7 +454,7 @@ export function OutreachModal({
     }
   }
 
-  return (
+  const modal = (
     <div
       role="dialog"
       aria-modal="true"
@@ -457,7 +468,7 @@ export function OutreachModal({
         }}
         className="absolute inset-0 bg-[rgba(15,23,42,0.55)] backdrop-blur-sm"
       />
-      <div className="relative w-full max-w-[640px] rounded-2xl border border-[var(--border,rgba(30,64,175,0.1))] bg-[var(--surface,#ffffff)] p-6 shadow-[0_24px_48px_-16px_rgba(15,23,42,0.45)]">
+      <div className="relative w-full max-w-[960px] max-h-[90vh] overflow-y-auto rounded-2xl border border-[var(--border,rgba(30,64,175,0.1))] bg-[var(--surface,#ffffff)] p-6 shadow-[0_24px_48px_-16px_rgba(15,23,42,0.45)]">
         <div className="flex items-start justify-between gap-4">
           <div>
             <p className="text-[11px] uppercase tracking-[0.18em] text-[var(--text-muted,#94a3b8)]">
@@ -773,6 +784,8 @@ export function OutreachModal({
       </div>
     </div>
   );
+
+  return mounted ? createPortal(modal, document.body) : null;
 }
 
 function errorMessage(error: unknown): string {
