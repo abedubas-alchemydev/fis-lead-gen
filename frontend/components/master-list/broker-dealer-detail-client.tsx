@@ -855,8 +855,9 @@ export function BrokerDealerDetailClient({ brokerDealerId }: { brokerDealerId: s
         </button>
       </div>
 
-      {/* ── 2-column section grid ── */}
-      <div className="grid gap-4 xl:grid-cols-2">
+      {/* ── 2-column section layout — independent flex columns (no height-locking) ── */}
+      <div className="flex flex-col gap-4 xl:flex-row">
+      <div className="flex min-w-0 flex-1 flex-col gap-4">
         {/* Financials */}
         <SectionPanel eyebrow="Financials" title="Net capital and trend">
           <div className="mb-4 grid gap-3 md:grid-cols-3">
@@ -1042,7 +1043,9 @@ export function BrokerDealerDetailClient({ brokerDealerId }: { brokerDealerId: s
 
           <FocusReportSection brokerDealerId={brokerDealerId} onProfileRefresh={reloadProfile} />
         </SectionPanel>
+      </div>
 
+      <div className="flex min-w-0 flex-1 flex-col gap-4">
         {/* People */}
         <SectionPanel
           eyebrow="People"
@@ -1321,6 +1324,7 @@ export function BrokerDealerDetailClient({ brokerDealerId }: { brokerDealerId: s
             )}
           </div>
         </SectionPanel>
+      </div>
       </div>
 
       {/* ── Filing history (full width) ── */}
