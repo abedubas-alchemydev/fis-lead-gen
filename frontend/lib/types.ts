@@ -827,7 +827,10 @@ export type OutreachAdhocSendRequest = {
 // (the FE only enables the Generate button once a Service is picked).
 export type OutreachAdhocDraftRequest = {
   folder_id: number;
-  recipient_email: string;
+  // Optional: the draft never reads the address (folder + name only), so
+  // the firm-detail People section can draft for contacts with no email
+  // yet. The send path still requires a real address.
+  recipient_email?: string | null;
   recipient_name?: string | null;
 };
 

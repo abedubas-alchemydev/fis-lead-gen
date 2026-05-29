@@ -58,6 +58,7 @@ export function ChannelIconCell({
   entityKind = "broker-dealer",
   entityId,
   onContactUpdated,
+  forceActiveLook = false,
 }: {
   contact: ChannelContact | null | undefined;
   // Find-phone is opt-in: only the broker-dealer page passes these, so the
@@ -65,6 +66,10 @@ export function ChannelIconCell({
   entityKind?: "broker-dealer" | "investor";
   entityId?: number;
   onContactUpdated?: (updated: ExecutiveContactItem) => void;
+  // Render every icon in the accent color even when the channel has no data
+  // (the icon stays inert — no popover — but doesn't grey out). Used on the
+  // broker-dealer People section so the row reads as "active" for demos.
+  forceActiveLook?: boolean;
 }) {
   const [openChannel, setOpenChannel] = useState<Channel | null>(null);
   const linkedinRef = useRef<HTMLButtonElement>(null);
@@ -133,6 +138,7 @@ export function ChannelIconCell({
       <IconButton
         icon={Linkedin}
         present={hasLinkedIn}
+        forceActiveLook={forceActiveLook}
         label={
           hasLinkedIn
             ? "Show LinkedIn profile"
@@ -145,6 +151,7 @@ export function ChannelIconCell({
       <IconButton
         icon={Mail}
         present={hasEmail}
+        forceActiveLook={forceActiveLook}
         label={hasEmail ? "Show email addresses" : "No email on file"}
         isActive={openChannel === "mail"}
         onClick={() => toggle("mail")}
@@ -153,6 +160,7 @@ export function ChannelIconCell({
       <IconButton
         icon={Phone}
         present={hasPhone || canFindPhone}
+        forceActiveLook={forceActiveLook}
         label={
           hasPhone
             ? "Show phone numbers"
@@ -186,6 +194,7 @@ interface IconButtonProps {
   isActive: boolean;
   onClick: () => void;
   buttonRef: React.RefObject<HTMLButtonElement>;
+  forceActiveLook?: boolean;
 }
 
 function IconButton({
@@ -195,12 +204,17 @@ function IconButton({
   isActive,
   onClick,
   buttonRef,
+  forceActiveLook = false,
 }: IconButtonProps) {
   // Present: themed accent + hover background, full opacity.
   // Absent: muted + opacity 40 + cursor-not-allowed, click is a no-op.
+  // forceActiveLook keeps the accent color when absent (still inert — the
+  // button stays disabled so there's no empty popover) for a fuller-looking row.
   const toneClass = present
     ? "text-[var(--accent,#6366f1)] hover:bg-[var(--surface-2,#f1f6fd)] cursor-pointer"
-    : "text-[var(--text-muted,#94a3b8)] opacity-40 cursor-not-allowed";
+    : forceActiveLook
+      ? "text-[var(--accent,#6366f1)] opacity-90 cursor-default"
+      : "text-[var(--text-muted,#94a3b8)] opacity-40 cursor-not-allowed";
   const activeClass = isActive
     ? "bg-[var(--surface-2,#f1f6fd)] ring-1 ring-[var(--accent,#6366f1)]"
     : "";

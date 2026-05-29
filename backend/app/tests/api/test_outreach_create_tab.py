@@ -732,3 +732,44 @@ async def test_adhoc_draft_422_on_invalid_recipient_email() -> None:
         app.dependency_overrides.clear()
         await _cleanup_folder(folder_id)
         await _cleanup([user_id], [], [], [])
+
+
+@respx.mock
+async def test_adhoc_draft_succeeds_without_recipient_email(
+    monkeypatch: pytest.MonkeyPatch, _patch_outreach_retrieve_chunks
+) -> None:
+    """recipient_email is optional — the draft is built from folder + name
+    only, so the firm-detail People section can draft for officers with no
+    email on file. Omitting the field must still 200, not 422."""
+    monkeypatch.setattr(settings, "gemini_api_key", _VALID_GEMINI_KEY)
+    monkeypatch.setattr(
+        settings,
+        "gemini_api_base",
+        "https://generativelanguage.googleapis.com/v1beta",
+    )
+    respx.post(_GEMINI_URL).mock(
+        return_value=_stub_gemini_response(
+            subject="Quick intro on custody",
+            body="Hi there,\n\nValue para.\n\n- Sender",
+        )
+    )
+
+    user_id = await _seed_user()
+    folder_id = await _seed_vault_folder(user_id, "Custody", "Service desc.")
+    app.dependency_overrides[get_current_user] = lambda: _override_user(user_id)
+    try:
+        async with _client() as client:
+            response = await client.post(
+                "/api/v1/outreach/adhoc-draft",
+                json={
+                    "folder_id": folder_id,
+                    "recipient_name": "Jordan",
+                },
+            )
+        assert response.status_code == 200, response.text
+        payload = response.json()
+        assert payload["subject"] == "Quick intro on custody"
+    finally:
+        app.dependency_overrides.clear()
+        await _cleanup_folder(folder_id)
+        await _cleanup([user_id], [], [], [])
