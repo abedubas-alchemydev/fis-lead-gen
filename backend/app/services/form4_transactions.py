@@ -329,6 +329,7 @@ class Form4TransactionRepository:
         phone: str | None,
         email: str | None,
         linkedin_url: str | None,
+        apollo_person_id: str | None = None,
     ) -> tuple[int, datetime]:
         """Apply Apollo enrichment to every ``form4_transactions`` row for a person.
 
@@ -340,18 +341,27 @@ class Form4TransactionRepository:
         "never enriched" from "enriched, came back empty" without
         re-firing Apollo.
 
+        ``apollo_person_id`` is stamped (when present) so the async
+        phone-reveal webhook can find this person's rows and fill
+        ``enriched_phone`` when Apollo POSTs the number back minutes later.
+
         Returns ``(rowcount, enriched_at)``.
         """
         enriched_at = datetime.now(timezone.utc)
+        values: dict[str, object | None] = {
+            "enriched_phone": phone,
+            "enriched_email": email,
+            "enriched_linkedin_url": linkedin_url,
+            "enriched_at": enriched_at,
+        }
+        # Only overwrite the id when we have one -- a later PDL-only re-enrich
+        # (no Apollo call) shouldn't wipe an id an earlier reveal stamped.
+        if apollo_person_id:
+            values["apollo_person_id"] = apollo_person_id
         stmt = (
             update(Form4Transaction)
             .where(Form4Transaction.reporting_owner_cik == reporting_owner_cik)
-            .values(
-                enriched_phone=phone,
-                enriched_email=email,
-                enriched_linkedin_url=linkedin_url,
-                enriched_at=enriched_at,
-            )
+            .values(**values)
         )
         result = await db.execute(stmt)
         await db.commit()

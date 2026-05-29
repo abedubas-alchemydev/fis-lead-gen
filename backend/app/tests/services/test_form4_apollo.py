@@ -315,27 +315,32 @@ async def test_person_name_still_calls_providers(patch_pdl_and_apollo: None) -> 
 
 @pytest.mark.asyncio
 @respx.mock
-async def test_pdl_linkedin_only_still_counts_as_match(
+async def test_pdl_match_without_phone_falls_through_to_apollo(
     patch_pdl_and_apollo: None,
 ) -> None:
-    """PDL returns only a LinkedIn URL (no email/phone) -> matched=True.
+    """PDL matched (LinkedIn, no phone) -> Apollo IS now called to chase the
+    phone, and PDL's LinkedIn is preserved.
 
-    Defends the ``matched = email OR phone OR linkedin_url`` rule. A
-    LinkedIn-only hit is still a usable contact handle, so the FE
-    should not render "Apollo returned no match" copy for it.
+    PDL almost never returns phones for Form 4 insiders, so a PDL match that
+    lacks a phone no longer short-circuits: we fall through to Apollo (which,
+    when the webhook is configured, requests an async phone-reveal). PDL's
+    higher-quality email/LinkedIn still win the merge.
     """
     respx.post(pdl.PERSON_ENRICH_URL).mock(
         return_value=httpx.Response(
             200,
             json={
                 "likelihood": 8,
-                "data": {
-                    "linkedin_url": "linkedin.com/in/janedoe",
-                },
+                "data": {"linkedin_url": "linkedin.com/in/janedoe"},
             },
         )
     )
-    apollo_route = respx.post(_APOLLO_MATCH_URL).mock(return_value=httpx.Response(200))
+    # Apollo returns a person record (id only here) — no sync phone.
+    apollo_route = respx.post(_APOLLO_MATCH_URL).mock(
+        return_value=httpx.Response(
+            200, json={"person": {"id": "abc123", "phone_numbers": []}}
+        )
+    )
 
     match = await match_form4_person(
         full_name="DOE JANE",
@@ -343,10 +348,96 @@ async def test_pdl_linkedin_only_still_counts_as_match(
     )
 
     assert match.matched is True
-    assert match.email is None
-    assert match.phone is None
-    assert match.linkedin_url == "https://linkedin.com/in/janedoe"
+    assert match.phone is None  # arrives async via the reveal webhook
+    assert match.linkedin_url == "https://linkedin.com/in/janedoe"  # PDL's, preserved
+    assert match.apollo_person_id == "abc123"
+    assert apollo_route.called  # changed: PDL-no-phone now chases Apollo
+
+
+@pytest.mark.asyncio
+@respx.mock
+async def test_pdl_with_phone_short_circuits_apollo(
+    patch_pdl_and_apollo: None,
+) -> None:
+    """PDL returns a phone -> done, Apollo not called (no reveal needed)."""
+    respx.post(pdl.PERSON_ENRICH_URL).mock(
+        return_value=httpx.Response(
+            200,
+            json={
+                "likelihood": 9,
+                "data": {
+                    "mobile_phone": "+15551112222",
+                    "linkedin_url": "linkedin.com/in/janedoe",
+                },
+            },
+        )
+    )
+    apollo_route = respx.post(_APOLLO_MATCH_URL).mock(return_value=httpx.Response(200))
+
+    match = await match_form4_person(full_name="DOE JANE", issuer_name="Example Corp")
+
+    assert match.phone == "+15551112222"
+    assert match.apollo_person_id is None
     assert not apollo_route.called
+
+
+@pytest.mark.asyncio
+@respx.mock
+async def test_apollo_requests_phone_reveal_when_webhook_configured(
+    patch_pdl_and_apollo: None, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """With apollo_webhook_secret + public_base_url set, the Apollo call carries
+    reveal_phone_number + the webhook_url; person.id is captured."""
+    monkeypatch.setattr(settings, "apollo_webhook_secret", "s3cret")
+    monkeypatch.setattr(settings, "public_base_url", "https://staging-dox.example/api/backend")
+    respx.post(pdl.PERSON_ENRICH_URL).mock(return_value=httpx.Response(404))
+
+    captured: dict = {}
+
+    def _capture(request: httpx.Request) -> httpx.Response:
+        import json as _json
+        captured.update(_json.loads(request.content.decode()))
+        return httpx.Response(
+            200,
+            json={"person": {"id": "pid-789", "email": "j@x.com", "phone_numbers": []}},
+        )
+
+    respx.post(_APOLLO_MATCH_URL).mock(side_effect=_capture)
+
+    match = await match_form4_person(full_name="DOE JANE", issuer_name="Example Corp")
+
+    assert captured.get("reveal_phone_number") is True
+    assert captured.get("webhook_url") == (
+        "https://staging-dox.example/api/backend/api/v1/webhooks/apollo/s3cret/phone-reveal"
+    )
+    assert match.apollo_person_id == "pid-789"
+    assert match.email == "j@x.com"
+
+
+@pytest.mark.asyncio
+@respx.mock
+async def test_apollo_no_reveal_when_webhook_unconfigured(
+    patch_pdl_and_apollo: None, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Without the webhook secret / base url, no reveal flag is sent (dormant,
+    same as the pre-reveal behavior)."""
+    monkeypatch.setattr(settings, "apollo_webhook_secret", None)
+    monkeypatch.setattr(settings, "public_base_url", None)
+    respx.post(pdl.PERSON_ENRICH_URL).mock(return_value=httpx.Response(404))
+
+    captured: dict = {}
+
+    def _capture(request: httpx.Request) -> httpx.Response:
+        import json as _json
+        captured.update(_json.loads(request.content.decode()))
+        return httpx.Response(200, json={"person": {"email": "j@x.com", "phone_numbers": []}})
+
+    respx.post(_APOLLO_MATCH_URL).mock(side_effect=_capture)
+
+    await match_form4_person(full_name="DOE JANE", issuer_name="Example Corp")
+
+    assert "reveal_phone_number" not in captured
+    assert "webhook_url" not in captured
 
 
 @pytest.mark.asyncio

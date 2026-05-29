@@ -41,12 +41,13 @@ Payload (from Apollo's docs, verbatim shape):
       ]
     }
 
-The handler scans all three contact tables (``advisor_contacts``,
+The handler scans the three contact tables (``advisor_contacts``,
 ``executive_contacts``, ``investor_contacts``) plus ``discovered_email``
-(email-extractor enrichment) for rows whose ``apollo_person_id`` matches each
-person in the payload, then merges their phones in. Unknown person ids are
-logged and skipped (not an error — Apollo may send late callbacks for rows
-we've since deleted).
+(email-extractor enrichment) and ``form4_transactions`` (Investors "Find
+contact") for rows whose ``apollo_person_id`` matches each person in the
+payload, then merges their phones in. Unknown person ids are logged and
+skipped (not an error — Apollo may send late callbacks for rows we've since
+deleted).
 """
 
 from __future__ import annotations
@@ -66,6 +67,7 @@ from app.db.session import get_db_session
 from app.models.advisor_contact import AdvisorContact
 from app.models.discovered_email import DiscoveredEmail
 from app.models.executive_contact import ExecutiveContact
+from app.models.form4_transaction import Form4Transaction
 from app.models.investor_contact import InvestorContact
 from app.services.contact_discovery.base import PhoneHit
 
@@ -211,6 +213,28 @@ def _merge_phone_into_discovered_email(
     return 1
 
 
+def _merge_phone_into_form4(
+    row: Form4Transaction,
+    new_hits: list[PhoneHit],
+) -> int:
+    """Fill the scalar ``enriched_phone`` on a form4_transactions row from the
+    highest-confidence revealed hit, when currently empty. Returns 1 if written.
+
+    Like discovered_email, Form 4 rows keep a single scalar phone (no ``phones``
+    JSONB), so this is set-if-null. A reporting person spans many transaction
+    rows; the loop below calls this for every row sharing the matched
+    ``apollo_person_id``. ``enriched_at`` was stamped by the sync "Find contact"
+    enrich, so it's left as-is."""
+    if row.enriched_phone is not None or not new_hits:
+        return 0
+    best = max(
+        new_hits,
+        key=lambda h: h.confidence if h.confidence is not None else 0.0,
+    )
+    row.enriched_phone = best.value
+    return 1
+
+
 def _require_apollo_webhook_secret(secret: str) -> None:
     """Constant-time-compare the path segment to the configured secret.
 
@@ -300,6 +324,18 @@ async def apollo_phone_reveal(
         )
         for de_row in (await db.execute(de_stmt)).scalars().all():
             appended = _merge_phone_into_discovered_email(de_row, hits)
+            if appended:
+                total_rows_updated += 1
+                total_phones_added += appended
+
+        # Form 4 insiders (Investors "Find contact") ride the same reveal flow
+        # with a scalar phone. A reporting person spans many transaction rows,
+        # so fill every still-empty enriched_phone for the matched person id.
+        f4_stmt = select(Form4Transaction).where(
+            Form4Transaction.apollo_person_id == person_id
+        )
+        for f4_row in (await db.execute(f4_stmt)).scalars().all():
+            appended = _merge_phone_into_form4(f4_row, hits)
             if appended:
                 total_rows_updated += 1
                 total_phones_added += appended
