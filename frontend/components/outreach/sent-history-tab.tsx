@@ -11,10 +11,16 @@ import {
   Mail,
   MailX,
   Send,
+  Trash2,
   XCircle,
 } from "lucide-react";
 
-import { ApiError, getOutreachSend, listOutreachSends } from "@/lib/api";
+import {
+  ApiError,
+  deleteOutreachSend,
+  getOutreachSend,
+  listOutreachSends,
+} from "@/lib/api";
 import type {
   OutreachSendDetail,
   OutreachSendItem,
@@ -23,6 +29,8 @@ import type {
   OutreachSendsScope,
 } from "@/lib/types";
 import { Segmented, type SegmentedItem } from "@/components/ui/segmented";
+import { useToast } from "@/components/ui/use-toast";
+import { DeleteSendDialog } from "./delete-send-dialog";
 
 const CARD =
   "rounded-2xl border border-[var(--border,rgba(30,64,175,0.1))] bg-[var(--surface,#ffffff)] p-6 shadow-[var(--shadow-card,0_1px_2px_rgba(15,23,42,0.04),0_4px_14px_rgba(15,23,42,0.05))]";
@@ -48,7 +56,14 @@ const SCOPE_ITEMS: ReadonlyArray<SegmentedItem> = [
   { value: "all", label: "All users" },
 ];
 
-export function SentHistoryTab({ isAdmin = false }: { isAdmin?: boolean }) {
+export function SentHistoryTab({
+  isAdmin = false,
+  currentUserId,
+}: {
+  isAdmin?: boolean;
+  currentUserId: string;
+}) {
+  const toast = useToast();
   const [data, setData] = useState<OutreachSendsListResponse | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
@@ -63,6 +78,9 @@ export function SentHistoryTab({ isAdmin = false }: { isAdmin?: boolean }) {
   >({});
   const [detailLoading, setDetailLoading] = useState<number | null>(null);
   const [detailError, setDetailError] = useState<string | null>(null);
+  const [pendingDelete, setPendingDelete] = useState<OutreachSendItem | null>(
+    null,
+  );
 
   const load = useCallback(async () => {
     setLoading(true);
@@ -119,6 +137,43 @@ export function SentHistoryTab({ isAdmin = false }: { isAdmin?: boolean }) {
       setDetailLoading(null);
     }
   }
+
+  // Owner-only delete: in the cross-user admin view a row is deletable only
+  // if it's the caller's own send (item.user_id is populated only on the
+  // admin scope="all" payload). In the default "mine" view every row is the
+  // caller's, so the control always shows.
+  const canDelete = useCallback(
+    (item: OutreachSendItem) =>
+      scope !== "all" || item.user_id === currentUserId,
+    [scope, currentUserId],
+  );
+
+  const confirmDelete = useCallback(
+    async (item: OutreachSendItem) => {
+      // Throws on failure -> DeleteSendDialog surfaces the reason inline and
+      // stays open. On success we drop the row locally and close the dialog.
+      await deleteOutreachSend(item.id);
+      const wasLastOnPage = (data?.items.length ?? 0) <= 1;
+      setData((current) =>
+        current
+          ? {
+              ...current,
+              items: current.items.filter((i) => i.id !== item.id),
+              total: Math.max(0, current.total - 1),
+            }
+          : current,
+      );
+      setExpandedId((current) => (current === item.id ? null : current));
+      if (wasLastOnPage && offset > 0) {
+        // Stepping back re-runs load() (an effect dep) so we land on the
+        // now-correct previous page instead of a blank one.
+        setOffset((current) => Math.max(0, current - PAGE_SIZE));
+      }
+      toast.success("Deleted from Sent history.");
+      setPendingDelete(null);
+    },
+    [data, offset, toast],
+  );
 
   const total = data?.total ?? 0;
   const pageCount = data?.items.length ?? 0;
@@ -205,6 +260,9 @@ export function SentHistoryTab({ isAdmin = false }: { isAdmin?: boolean }) {
                   <th className="px-5 py-3">Service</th>
                   <th className="px-5 py-3">Subject</th>
                   <th className="px-5 py-3">Status</th>
+                  <th className="px-5 py-3 text-right">
+                    <span className="sr-only">Actions</span>
+                  </th>
                 </tr>
               </thead>
               <tbody className="divide-y divide-[var(--border,rgba(30,64,175,0.1))]">
@@ -220,6 +278,8 @@ export function SentHistoryTab({ isAdmin = false }: { isAdmin?: boolean }) {
                       detailError={isExpanded ? detailError : null}
                       onToggle={() => void handleExpand(item)}
                       showSender={showSenderColumn}
+                      canDelete={canDelete(item)}
+                      onRequestDelete={() => setPendingDelete(item)}
                     />
                   );
                 })}
@@ -263,6 +323,14 @@ export function SentHistoryTab({ isAdmin = false }: { isAdmin?: boolean }) {
           </div>
         ) : null}
       </div>
+
+      {pendingDelete ? (
+        <DeleteSendDialog
+          item={pendingDelete}
+          onCancel={() => setPendingDelete(null)}
+          onConfirm={() => confirmDelete(pendingDelete)}
+        />
+      ) : null}
     </div>
   );
 }
@@ -275,6 +343,8 @@ function RowGroup({
   detailError,
   onToggle,
   showSender,
+  canDelete,
+  onRequestDelete,
 }: {
   item: OutreachSendItem;
   isExpanded: boolean;
@@ -283,6 +353,8 @@ function RowGroup({
   detailError: string | null;
   onToggle: () => void;
   showSender: boolean;
+  canDelete: boolean;
+  onRequestDelete: () => void;
 }) {
   const sentAt = useMemo(() => new Date(item.sent_at), [item.sent_at]);
   return (
@@ -353,10 +425,26 @@ function RowGroup({
         <td className="px-5 py-4">
           <StatusPill status={item.status} error={item.error} />
         </td>
+        <td className="px-5 py-4 text-right">
+          {canDelete ? (
+            <button
+              type="button"
+              onClick={(event) => {
+                event.stopPropagation();
+                onRequestDelete();
+              }}
+              aria-label="Delete this send"
+              title="Delete"
+              className="inline-flex items-center justify-center rounded-md p-1.5 text-[var(--text-muted,#94a3b8)] transition hover:bg-red-500/10 hover:text-[var(--pill-red-text,#b91c1c)]"
+            >
+              <Trash2 className="h-4 w-4" aria-hidden />
+            </button>
+          ) : null}
+        </td>
       </tr>
       {isExpanded ? (
         <tr className="bg-[var(--surface-2,#f1f6fd)]/40">
-          <td colSpan={showSender ? 7 : 6} className="px-5 py-5">
+          <td colSpan={showSender ? 8 : 7} className="px-5 py-5">
             <ExpandedBody
               item={item}
               detail={detail}

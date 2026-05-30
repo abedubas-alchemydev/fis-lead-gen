@@ -8,7 +8,10 @@ export default async function OutreachSentPage() {
 
   return (
     <div className="px-7 pb-12 pt-7 lg:px-9">
-      <OutreachWorkspaceClient isAdmin={session.user.role === "admin"} />
+      <OutreachWorkspaceClient
+        isAdmin={session.user.role === "admin"}
+        currentUserId={session.user.id}
+      />
     </div>
   );
 }
