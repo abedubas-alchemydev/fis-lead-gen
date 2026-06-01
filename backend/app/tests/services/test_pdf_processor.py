@@ -140,7 +140,7 @@ async def test_text_rich_pdf_skips_ocr_and_runs_legacy_path(
     result = await service.process_downloaded_pdf(pdf_record)
 
     assert result is text_rich_extraction
-    legacy_call.assert_awaited_once_with(pdf_record)
+    legacy_call.assert_awaited_once_with(pdf_record, signals_text=None)
     ocr_call.assert_not_awaited()
     vision_call.assert_not_called()
 
@@ -295,5 +295,5 @@ async def test_pdf_record_without_bytes_falls_through_to_legacy_handler(
     result = await service.process_downloaded_pdf(record)
 
     assert result is text_rich_extraction
-    legacy_call.assert_awaited_once_with(record)
+    legacy_call.assert_awaited_once_with(record, signals_text=None)
     vision_call.assert_not_called()

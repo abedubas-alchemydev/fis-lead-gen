@@ -53,7 +53,7 @@ from app.services.openai_responses import (
 
 logger = logging.getLogger(__name__)
 
-CANONICAL_VALUES = frozenset({"fully_disclosed", "self_clearing", "omnibus", "unknown"})
+CANONICAL_VALUES = frozenset({"fully_disclosed", "self_clearing", "omnibus", "non_carrying", "unknown"})
 
 
 @dataclass(frozen=True, slots=True)

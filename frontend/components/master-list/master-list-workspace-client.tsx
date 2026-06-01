@@ -96,6 +96,7 @@ const CLEARING_TYPE_OPTS = [
   { value: "fully_disclosed", label: "Fully Disclosed" },
   { value: "self_clearing", label: "Self-Clearing" },
   { value: "omnibus", label: "Omnibus" },
+  { value: "non_carrying", label: "Non-Carrying" },
   { value: "unknown", label: "Unknown" },
 ] as const;
 
@@ -129,6 +130,7 @@ function clearingTypeVariant(value: string | null): PillVariant {
   if (value === "fully_disclosed") return "fd";
   if (value === "self_clearing") return "self";
   if (value === "omnibus") return "omni";
+  if (value === "non_carrying") return "noncarry";
   return "unknown";
 }
 
@@ -136,6 +138,7 @@ function clearingTypeLabel(value: string | null): string {
   if (value === "fully_disclosed") return "Fully Disclosed";
   if (value === "self_clearing") return "Self-Clearing";
   if (value === "omnibus") return "Omnibus";
+  if (value === "non_carrying") return "Non-Carrying";
   return "Not classified";
 }
 
@@ -1267,7 +1270,8 @@ export function MasterListWorkspaceClient() {
                             >
                               {item.current_clearing_partner}
                             </span>
-                          ) : item.current_clearing_type === "self_clearing" ? (
+                          ) : item.current_clearing_type === "self_clearing" ||
+                            item.current_clearing_type === "non_carrying" ? (
                             <span className="text-[var(--text-muted,#94a3b8)]">—</span>
                           ) : (
                             <UnknownCell
