@@ -136,3 +136,10 @@ class OutreachSend(Base):
         nullable=False,
         server_default=func.now(),
     )
+    # Soft-delete tombstone. NULL = live; a timestamp means the user
+    # deleted the row from /outreach/sent. The list + detail read paths
+    # filter ``deleted_at IS NULL`` so deleted rows vanish from the UI,
+    # but the row stays on disk so the send audit trail isn't lost.
+    deleted_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )

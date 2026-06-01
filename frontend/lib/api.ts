@@ -1026,6 +1026,15 @@ export async function getOutreachSend(
   );
 }
 
+// Soft-deletes one of the caller's own sends (owner-only on the backend;
+// the audit row is tombstoned, not dropped). 404 if the id isn't the
+// caller's own / already gone.
+export async function deleteOutreachSend(sendId: number): Promise<void> {
+  await apiRequest<void>(`/api/v1/outreach/sends/${sendId}`, {
+    method: "DELETE"
+  });
+}
+
 // ── /outreach/sent?tab=create surface ─────────────────────────────────
 // Backs the recipient combobox (search across all three contact tables)
 // and the free-form-email send path for the new Create Outreach tab.
