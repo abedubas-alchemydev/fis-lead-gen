@@ -17,17 +17,19 @@ DEFERRED: do not run against staging until the masterlist data fill completes
 and Deshorn has spot-checked a sample (>=27/30). Use ``--limit 30`` first to
 produce the spot-check CSV.
 
-Model selection — the deterministic validator owns the headline correctness
-(the sub-$250k demotions), so Flash is safe for the bulk; Pro mainly reduces
-the ``needs_review`` pile on ambiguous filings:
-  * ``--model flash``  -- cheap/fast bulk (no Pro daily-quota wall).
-  * ``--model pro``    -- best accuracy everywhere (Pro quota ~1,000/day;
-                          chunk a full run with ``--offset``).
-  * ``--model flash --reverify-changed`` -- HYBRID (recommended): Flash bulk,
-                          then re-run only the changed / needs_review firms on
-                          gemini-2.5-pro. Pro-grade accuracy where it matters
-                          at ~Flash cost/time.
-Default model is whatever ``GEMINI_PDF_MODEL`` is configured to.
+Model selection — defaults to ``gemini-2.5-pro`` for best accuracy (the "use
+Gemini as much as possible" mandate). The deterministic validator owns the
+headline correctness regardless of model, so the cheaper paths stay safe:
+  * ``--model pro``  (default) -- best accuracy everywhere. Pro quota is
+                       ~1,000/day, so chunk a full run with ``--offset`` (the
+                       run is deferred + background anyway, so this is fine).
+  * ``--model flash`` -- cheap/fast bulk, no quota wall. The validator still
+                       fixes the sub-$250k demotions; Flash only widens the
+                       ``needs_review`` pile on genuinely ambiguous filings.
+  * ``--model flash --reverify-uncertain`` -- quota-saving HYBRID: Flash bulk,
+                       then re-run only the ``needs_review`` rows on
+                       gemini-2.5-pro. Use only if the Pro quota wall is a
+                       problem; the deterministic demotions are not re-read.
 
 A change CSV is written for review (one row per firm per pass):
     bd_id, name, crd, old_type, new_type, old_classification,
@@ -35,9 +37,10 @@ A change CSV is written for review (one row per firm per pass):
     finra_partner, confidence, status, notes, pass, model
 
 Usage:
-    python -m scripts.run_clearing_reclassification_backfill --limit 30 --model pro
-    python -m scripts.run_clearing_reclassification_backfill --model flash --reverify-changed
-    python -m scripts.run_clearing_reclassification_backfill --offset 1000 --limit 1000 --model pro
+    python -m scripts.run_clearing_reclassification_backfill --limit 30   # Pro spot-check
+    python -m scripts.run_clearing_reclassification_backfill              # full Pro run
+    python -m scripts.run_clearing_reclassification_backfill --offset 1000 --limit 1000
+    python -m scripts.run_clearing_reclassification_backfill --model flash --reverify-uncertain
 """
 
 from __future__ import annotations
@@ -78,8 +81,8 @@ BATCH_SIZE = 8  # smaller than the text-only classifier batch: each firm does a
 # PDF fetch + Gemini PDF call, so 8 concurrent keeps provider load sane.
 SLEEP_BETWEEN_BATCHES_SECONDS = 2.0
 
-# --model maps the friendly name to the API model id. The reverify pass always
-# escalates to Pro regardless of the bulk model.
+# --model maps the friendly name to the API model id. The --reverify-uncertain
+# pass always escalates to Pro regardless of the bulk model.
 MODEL_IDS = {"flash": "gemini-2.5-flash", "pro": "gemini-2.5-pro"}
 VERIFY_MODEL = "gemini-2.5-pro"
 
@@ -232,11 +235,14 @@ async def _run_pass(
     return rows_out
 
 
-def _is_changed_or_review(row: dict) -> bool:
+def _needs_pro_reverify(row: dict) -> bool:
+    # Only the genuinely uncertain rows benefit from a Pro re-read. The
+    # capital/membership corrections are deterministic (the validator gives the
+    # same answer regardless of model), so re-verifying merely-"changed" rows
+    # would burn Pro quota for no change.
     return (
-        row["old_type"] != row["new_type"]
+        row["status"] == "needs_review"
         or row["new_classification"] == "needs_review"
-        or row["status"] == "needs_review"
     )
 
 
@@ -244,12 +250,11 @@ async def main(
     limit: int | None,
     offset: int,
     out_path: Path,
-    model: str | None,
-    reverify_changed: bool,
+    model: str,
+    reverify_uncertain: bool,
 ) -> None:
     started_at = time.monotonic()
-    if model is not None:
-        settings.gemini_pdf_model = MODEL_IDS[model]
+    settings.gemini_pdf_model = MODEL_IDS[model]
 
     service = ClearingPipelineService()
     reconciler = FinraClearingReconciler()
@@ -273,7 +278,7 @@ async def main(
     run_id = await _create_backfill_run()
     print(f"Re-classifying {total} firms (offset={offset}, run_id={run_id})")
     print(f"  model: {settings.gemini_pdf_model}")
-    print(f"  reverify-changed: {reverify_changed}")
+    print(f"  reverify-uncertain: {reverify_uncertain}")
     print(f"  change CSV -> {out_path}")
 
     out_path.parent.mkdir(parents=True, exist_ok=True)
@@ -287,11 +292,11 @@ async def main(
         )
 
         pass2: list[dict] = []
-        if reverify_changed:
-            reverify_ids = [r["bd_id"] for r in pass1 if _is_changed_or_review(r)]
+        if reverify_uncertain:
+            reverify_ids = [r["bd_id"] for r in pass1 if _needs_pro_reverify(r)]
             settings.gemini_pdf_model = VERIFY_MODEL
             print(
-                f"Re-verifying {len(reverify_ids)} changed/needs_review firms "
+                f"Re-verifying {len(reverify_ids)} needs_review firms "
                 f"on {settings.gemini_pdf_model}"
             )
             pass2 = await _run_pass(
@@ -337,15 +342,15 @@ def _parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--model",
         choices=["flash", "pro"],
-        default=None,
-        help="Override the extraction model for the main pass "
-        "(default: GEMINI_PDF_MODEL env).",
+        default="pro",
+        help="Extraction model for the main pass (default: pro -- best accuracy).",
     )
     parser.add_argument(
-        "--reverify-changed",
+        "--reverify-uncertain",
         action="store_true",
-        help="HYBRID: after the main pass, re-run changed / needs_review firms "
-        "on gemini-2.5-pro.",
+        help="Quota-saving HYBRID: after a Flash main pass, re-run only the "
+        "needs_review rows on gemini-2.5-pro (deterministic demotions are not "
+        "re-read).",
     )
     parser.add_argument(
         "--out",
@@ -368,6 +373,6 @@ if __name__ == "__main__":
         with asyncio.Runner(
             loop_factory=lambda: asyncio.SelectorEventLoop(selectors.SelectSelector())
         ) as runner:
-            runner.run(main(args.limit, args.offset, out, args.model, args.reverify_changed))
+            runner.run(main(args.limit, args.offset, out, args.model, args.reverify_uncertain))
     else:
-        asyncio.run(main(args.limit, args.offset, out, args.model, args.reverify_changed))
+        asyncio.run(main(args.limit, args.offset, out, args.model, args.reverify_uncertain))
