@@ -11,10 +11,16 @@ import {
   Mail,
   MailX,
   Send,
+  Trash2,
   XCircle,
 } from "lucide-react";
 
-import { ApiError, getOutreachSend, listOutreachSends } from "@/lib/api";
+import {
+  ApiError,
+  deleteOutreachSend,
+  getOutreachSend,
+  listOutreachSends,
+} from "@/lib/api";
 import type {
   OutreachSendDetail,
   OutreachSendItem,
@@ -63,10 +69,19 @@ export function SentHistoryTab({ isAdmin = false }: { isAdmin?: boolean }) {
   >({});
   const [detailLoading, setDetailLoading] = useState<number | null>(null);
   const [detailError, setDetailError] = useState<string | null>(null);
+  // Per-row delete: which row is showing the inline confirm, which row's
+  // delete is in flight, and the last delete failure.
+  const [confirmingId, setConfirmingId] = useState<number | null>(null);
+  const [deletingId, setDeletingId] = useState<number | null>(null);
+  const [actionError, setActionError] = useState<string | null>(null);
 
   const load = useCallback(async () => {
     setLoading(true);
     setError(null);
+    // A reload (filter / scope / page change, or a post-delete refetch)
+    // drops any lingering confirm prompt or stale delete error.
+    setConfirmingId(null);
+    setActionError(null);
     try {
       const result = await listOutreachSends({
         limit: PAGE_SIZE,
@@ -120,6 +135,35 @@ export function SentHistoryTab({ isAdmin = false }: { isAdmin?: boolean }) {
     }
   }
 
+  async function handleDelete(id: number) {
+    setDeletingId(id);
+    setActionError(null);
+    try {
+      await deleteOutreachSend(id);
+      setConfirmingId(null);
+      // Collapse + drop the cached body if the deleted row was open.
+      setExpandedId((cur) => (cur === id ? null : cur));
+      setDetailCache((prev) => {
+        if (!(id in prev)) return prev;
+        const next = { ...prev };
+        delete next[id];
+        return next;
+      });
+      // Refetch so total + pagination stay accurate.
+      await load();
+    } catch (err) {
+      setActionError(
+        err instanceof ApiError
+          ? err.detail || err.message
+          : err instanceof Error
+            ? err.message
+            : "Failed to delete this message."
+      );
+    } finally {
+      setDeletingId(null);
+    }
+  }
+
   const total = data?.total ?? 0;
   const pageCount = data?.items.length ?? 0;
   const page = Math.floor(offset / PAGE_SIZE) + 1;
@@ -127,6 +171,10 @@ export function SentHistoryTab({ isAdmin = false }: { isAdmin?: boolean }) {
   const canPrev = offset > 0;
   const canNext = offset + PAGE_SIZE < total;
   const showSenderColumn = isAdmin && scope === "all";
+  // Delete is owner-only. The admin "all users" scope is read-only, so the
+  // Actions column / button only appear when every visible row is the
+  // caller's own (i.e. not the all-users view).
+  const canDelete = !showSenderColumn;
 
   return (
     <div className="space-y-6">
@@ -134,6 +182,13 @@ export function SentHistoryTab({ isAdmin = false }: { isAdmin?: boolean }) {
         <div className="flex items-start gap-2 rounded-xl border border-red-500/25 bg-red-500/12 px-4 py-3 text-sm text-[var(--pill-red-text,#b91c1c)]">
           <AlertCircle className="mt-0.5 h-4 w-4 shrink-0" aria-hidden />
           <span>{error}</span>
+        </div>
+      ) : null}
+
+      {actionError ? (
+        <div className="flex items-start gap-2 rounded-xl border border-red-500/25 bg-red-500/12 px-4 py-3 text-sm text-[var(--pill-red-text,#b91c1c)]">
+          <AlertCircle className="mt-0.5 h-4 w-4 shrink-0" aria-hidden />
+          <span>{actionError}</span>
         </div>
       ) : null}
 
@@ -205,6 +260,9 @@ export function SentHistoryTab({ isAdmin = false }: { isAdmin?: boolean }) {
                   <th className="px-5 py-3">Service</th>
                   <th className="px-5 py-3">Subject</th>
                   <th className="px-5 py-3">Status</th>
+                  {canDelete ? (
+                    <th className="px-5 py-3 text-right">Actions</th>
+                  ) : null}
                 </tr>
               </thead>
               <tbody className="divide-y divide-[var(--border,rgba(30,64,175,0.1))]">
@@ -220,6 +278,15 @@ export function SentHistoryTab({ isAdmin = false }: { isAdmin?: boolean }) {
                       detailError={isExpanded ? detailError : null}
                       onToggle={() => void handleExpand(item)}
                       showSender={showSenderColumn}
+                      showActions={canDelete}
+                      confirming={confirmingId === item.id}
+                      deleting={deletingId === item.id}
+                      onRequestDelete={() => {
+                        setConfirmingId(item.id);
+                        setActionError(null);
+                      }}
+                      onConfirmDelete={() => void handleDelete(item.id)}
+                      onCancelDelete={() => setConfirmingId(null)}
                     />
                   );
                 })}
@@ -275,6 +342,12 @@ function RowGroup({
   detailError,
   onToggle,
   showSender,
+  showActions,
+  confirming,
+  deleting,
+  onRequestDelete,
+  onConfirmDelete,
+  onCancelDelete,
 }: {
   item: OutreachSendItem;
   isExpanded: boolean;
@@ -283,6 +356,12 @@ function RowGroup({
   detailError: string | null;
   onToggle: () => void;
   showSender: boolean;
+  showActions: boolean;
+  confirming: boolean;
+  deleting: boolean;
+  onRequestDelete: () => void;
+  onConfirmDelete: () => void;
+  onCancelDelete: () => void;
 }) {
   const sentAt = useMemo(() => new Date(item.sent_at), [item.sent_at]);
   return (
@@ -353,10 +432,27 @@ function RowGroup({
         <td className="px-5 py-4">
           <StatusPill status={item.status} error={item.error} />
         </td>
+        {showActions ? (
+          <td
+            className="px-5 py-4 text-right"
+            onClick={(e) => e.stopPropagation()}
+          >
+            <DeleteCell
+              confirming={confirming}
+              deleting={deleting}
+              onRequestDelete={onRequestDelete}
+              onConfirmDelete={onConfirmDelete}
+              onCancelDelete={onCancelDelete}
+            />
+          </td>
+        ) : null}
       </tr>
       {isExpanded ? (
         <tr className="bg-[var(--surface-2,#f1f6fd)]/40">
-          <td colSpan={showSender ? 7 : 6} className="px-5 py-5">
+          <td
+            colSpan={6 + (showSender ? 1 : 0) + (showActions ? 1 : 0)}
+            className="px-5 py-5"
+          >
             <ExpandedBody
               item={item}
               detail={detail}
@@ -436,6 +532,60 @@ function ExpandedBody({
         </div>
       ) : null}
     </div>
+  );
+}
+
+function DeleteCell({
+  confirming,
+  deleting,
+  onRequestDelete,
+  onConfirmDelete,
+  onCancelDelete,
+}: {
+  confirming: boolean;
+  deleting: boolean;
+  onRequestDelete: () => void;
+  onConfirmDelete: () => void;
+  onCancelDelete: () => void;
+}) {
+  if (deleting) {
+    return (
+      <span className="inline-flex items-center gap-1.5 text-xs text-[var(--text-dim,#475569)]">
+        <Loader2 className="h-3.5 w-3.5 animate-spin" aria-hidden />
+        Deleting...
+      </span>
+    );
+  }
+  if (confirming) {
+    return (
+      <span className="inline-flex items-center justify-end gap-1.5">
+        <button
+          type="button"
+          onClick={onConfirmDelete}
+          className="rounded-[7px] border border-red-500/30 bg-red-500/12 px-2.5 py-1 text-[11px] font-semibold text-[var(--pill-red-text,#b91c1c)] transition hover:bg-red-500/20"
+        >
+          Delete
+        </button>
+        <button
+          type="button"
+          onClick={onCancelDelete}
+          className="rounded-[7px] border border-[var(--border-2,rgba(30,64,175,0.16))] bg-[var(--surface,#ffffff)] px-2.5 py-1 text-[11px] font-medium text-[var(--text-dim,#475569)] transition hover:bg-[var(--surface-2,#f1f6fd)]"
+        >
+          Cancel
+        </button>
+      </span>
+    );
+  }
+  return (
+    <button
+      type="button"
+      onClick={onRequestDelete}
+      aria-label="Delete message"
+      title="Delete"
+      className="inline-grid h-8 w-8 place-items-center rounded-[8px] border border-transparent text-[var(--text-muted,#94a3b8)] transition hover:border-red-500/25 hover:bg-red-500/10 hover:text-[var(--pill-red-text,#b91c1c)]"
+    >
+      <Trash2 className="h-4 w-4" aria-hidden />
+    </button>
   );
 }
 

@@ -20,7 +20,7 @@ from datetime import datetime, timedelta, timezone
 from typing import Literal
 
 from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, Query, Response, status
-from sqlalchemy import func, or_, select
+from sqlalchemy import func, or_, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.db.session import get_db_session
@@ -749,6 +749,10 @@ def _base_send_select(*, include_sender: bool):
     )
     if include_sender:
         stmt = stmt.outerjoin(AuthUser, AuthUser.id == OutreachSend.user_id)
+    # Soft-deleted rows are tombstoned for audit but never shown: both
+    # the list and the detail endpoint build off this select, so the
+    # filter lives here once.
+    stmt = stmt.where(OutreachSend.deleted_at.is_(None))
     return stmt
 
 
@@ -1819,6 +1823,39 @@ async def get_outreach_send(
     payload = _row_to_item(row, include_sender=include_sender)
     payload["body"] = row[0].body
     return OutreachSendDetailResponse(**payload)
+
+
+@router.delete("/sends/{send_id}", status_code=status.HTTP_204_NO_CONTENT)
+async def delete_outreach_send(
+    send_id: int,
+    current_user: AuthenticatedUser = Depends(_require_sent_outreach),
+    db: AsyncSession = Depends(get_db_session),
+) -> Response:
+    """Soft-delete one of the caller's own sends from /outreach/sent.
+
+    Owner-only by design: the WHERE clause pins ``user_id`` to the
+    caller, so a user (admin included — the admin "all users" scope is
+    read-only) can only delete rows they sent. Soft delete stamps
+    ``deleted_at`` rather than dropping the row, preserving the audit
+    trail while hiding it from the list + detail read paths.
+
+    404 for a missing id, another user's id, or an already-deleted id —
+    same opaque response as ``GET /sends/{id}`` so a leaked id can't
+    confirm cross-user existence.
+    """
+    result = await db.execute(
+        update(OutreachSend)
+        .where(
+            OutreachSend.id == send_id,
+            OutreachSend.user_id == current_user.id,
+            OutreachSend.deleted_at.is_(None),
+        )
+        .values(deleted_at=func.now())
+    )
+    if result.rowcount == 0:
+        raise HTTPException(status_code=404, detail="outreach_send_not_found")
+    await db.commit()
+    return Response(status_code=status.HTTP_204_NO_CONTENT)
 
 
 @router.get("/signature", response_model=OutreachSignatureResponse)
