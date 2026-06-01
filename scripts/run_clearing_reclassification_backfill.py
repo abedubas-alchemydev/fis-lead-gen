@@ -15,19 +15,29 @@ the membership-confirmed megabanks stay ``self_clearing``.
 
 DEFERRED: do not run against staging until the masterlist data fill completes
 and Deshorn has spot-checked a sample (>=27/30). Use ``--limit 30`` first to
-produce the spot-check CSV. Run with ``GEMINI_PDF_MODEL=gemini-2.5-pro`` for
-best accuracy; the Pro quota (~1,000/day) means chunk a full run with
-``--offset``.
+produce the spot-check CSV.
 
-A change CSV is written for review:
+Model selection — the deterministic validator owns the headline correctness
+(the sub-$250k demotions), so Flash is safe for the bulk; Pro mainly reduces
+the ``needs_review`` pile on ambiguous filings:
+  * ``--model flash``  -- cheap/fast bulk (no Pro daily-quota wall).
+  * ``--model pro``    -- best accuracy everywhere (Pro quota ~1,000/day;
+                          chunk a full run with ``--offset``).
+  * ``--model flash --reverify-changed`` -- HYBRID (recommended): Flash bulk,
+                          then re-run only the changed / needs_review firms on
+                          gemini-2.5-pro. Pro-grade accuracy where it matters
+                          at ~Flash cost/time.
+Default model is whatever ``GEMINI_PDF_MODEL`` is configured to.
+
+A change CSV is written for review (one row per firm per pass):
     bd_id, name, crd, old_type, new_type, old_classification,
     new_classification, partner, required_min_capital, memberships,
-    finra_partner, confidence, status, notes
+    finra_partner, confidence, status, notes, pass, model
 
 Usage:
-    python -m scripts.run_clearing_reclassification_backfill --limit 30
-    python -m scripts.run_clearing_reclassification_backfill --offset 0 --limit 1000
-    python -m scripts.run_clearing_reclassification_backfill            # full run
+    python -m scripts.run_clearing_reclassification_backfill --limit 30 --model pro
+    python -m scripts.run_clearing_reclassification_backfill --model flash --reverify-changed
+    python -m scripts.run_clearing_reclassification_backfill --offset 1000 --limit 1000 --model pro
 """
 
 from __future__ import annotations
@@ -54,6 +64,7 @@ if sys.platform == "win32" and sys.version_info < (3, 14):
 
 from sqlalchemy import select  # noqa: E402
 
+from app.core.config import settings  # noqa: E402
 from app.db.session import SessionLocal  # noqa: E402
 from app.models.broker_dealer import BrokerDealer  # noqa: E402
 from app.models.pipeline_run import PipelineRun  # noqa: E402
@@ -66,6 +77,11 @@ logger = logging.getLogger(__name__)
 BATCH_SIZE = 8  # smaller than the text-only classifier batch: each firm does a
 # PDF fetch + Gemini PDF call, so 8 concurrent keeps provider load sane.
 SLEEP_BETWEEN_BATCHES_SECONDS = 2.0
+
+# --model maps the friendly name to the API model id. The reverify pass always
+# escalates to Pro regardless of the bulk model.
+MODEL_IDS = {"flash": "gemini-2.5-flash", "pro": "gemini-2.5-pro"}
+VERIFY_MODEL = "gemini-2.5-pro"
 
 CSV_FIELDS = [
     "bd_id",
@@ -82,6 +98,8 @@ CSV_FIELDS = [
     "confidence",
     "status",
     "notes",
+    "pass",
+    "model",
 ]
 
 
@@ -167,8 +185,72 @@ async def _reclassify_one(
     }
 
 
-async def main(limit: int | None, offset: int, out_path: Path) -> None:
+async def _run_pass(
+    fh,
+    writer: "csv.DictWriter",
+    service: ClearingPipelineService,
+    reconciler: FinraClearingReconciler,
+    run_id: int,
+    competitors: list,
+    bd_ids: list[int],
+    *,
+    pass_num: int,
+    started_at: float,
+) -> list[dict]:
+    """Process ``bd_ids`` in concurrent batches, stream each result row (tagged
+    with the pass number + active model) to the CSV, and return the rows."""
+    total = len(bd_ids)
+    rows_out: list[dict] = []
+    processed = 0
+    for batch_start in range(0, total, BATCH_SIZE):
+        batch = bd_ids[batch_start : batch_start + BATCH_SIZE]
+        rows = await asyncio.gather(
+            *(
+                _reclassify_one(service, reconciler, run_id, competitors, bd_id)
+                for bd_id in batch
+            ),
+            return_exceptions=True,
+        )
+        for bd_id, row in zip(batch, rows):
+            if isinstance(row, Exception):
+                logger.error("reclassify failed for bd %s: %r", bd_id, row)
+                continue
+            if row is None:
+                continue
+            row["pass"] = pass_num
+            row["model"] = settings.gemini_pdf_model
+            writer.writerow(row)
+            rows_out.append(row)
+            processed += 1
+        fh.flush()
+
+        elapsed = time.monotonic() - started_at
+        rate = processed / elapsed if elapsed > 0 else 0.0
+        print(f"  pass {pass_num}: {processed}/{total} ({rate:.2f} firms/s)")
+        if batch_start + BATCH_SIZE < total:
+            await asyncio.sleep(SLEEP_BETWEEN_BATCHES_SECONDS)
+    return rows_out
+
+
+def _is_changed_or_review(row: dict) -> bool:
+    return (
+        row["old_type"] != row["new_type"]
+        or row["new_classification"] == "needs_review"
+        or row["status"] == "needs_review"
+    )
+
+
+async def main(
+    limit: int | None,
+    offset: int,
+    out_path: Path,
+    model: str | None,
+    reverify_changed: bool,
+) -> None:
     started_at = time.monotonic()
+    if model is not None:
+        settings.gemini_pdf_model = MODEL_IDS[model]
+
     service = ClearingPipelineService()
     reconciler = FinraClearingReconciler()
 
@@ -190,56 +272,54 @@ async def main(limit: int | None, offset: int, out_path: Path) -> None:
 
     run_id = await _create_backfill_run()
     print(f"Re-classifying {total} firms (offset={offset}, run_id={run_id})")
+    print(f"  model: {settings.gemini_pdf_model}")
+    print(f"  reverify-changed: {reverify_changed}")
     print(f"  change CSV -> {out_path}")
 
     out_path.parent.mkdir(parents=True, exist_ok=True)
-    processed = 0
-    changed = 0
-    transitions: dict[str, int] = {}
-
     with out_path.open("w", encoding="utf-8", newline="") as fh:
         writer = csv.DictWriter(fh, fieldnames=CSV_FIELDS)
         writer.writeheader()
 
-        for batch_start in range(0, total, BATCH_SIZE):
-            batch = bd_ids[batch_start : batch_start + BATCH_SIZE]
-            rows = await asyncio.gather(
-                *(
-                    _reclassify_one(service, reconciler, run_id, competitors, bd_id)
-                    for bd_id in batch
-                ),
-                return_exceptions=True,
-            )
-            for bd_id, row in zip(batch, rows):
-                if isinstance(row, Exception):
-                    logger.error("reclassify failed for bd %s: %r", bd_id, row)
-                    continue
-                if row is None:
-                    continue
-                writer.writerow(row)
-                processed += 1
-                if row["old_type"] != row["new_type"]:
-                    changed += 1
-                    key = f"{row['old_type']} -> {row['new_type']}"
-                    transitions[key] = transitions.get(key, 0) + 1
-            fh.flush()
+        pass1 = await _run_pass(
+            fh, writer, service, reconciler, run_id, competitors, bd_ids,
+            pass_num=1, started_at=started_at,
+        )
 
-            elapsed = time.monotonic() - started_at
-            rate = processed / elapsed if elapsed > 0 else 0.0
-            print(f"  ... {processed}/{total} (changed={changed}, {rate:.2f} firms/s)")
-            if batch_start + BATCH_SIZE < total:
-                await asyncio.sleep(SLEEP_BETWEEN_BATCHES_SECONDS)
+        pass2: list[dict] = []
+        if reverify_changed:
+            reverify_ids = [r["bd_id"] for r in pass1 if _is_changed_or_review(r)]
+            settings.gemini_pdf_model = VERIFY_MODEL
+            print(
+                f"Re-verifying {len(reverify_ids)} changed/needs_review firms "
+                f"on {settings.gemini_pdf_model}"
+            )
+            pass2 = await _run_pass(
+                fh, writer, service, reconciler, run_id, competitors, reverify_ids,
+                pass_num=2, started_at=started_at,
+            )
+
+    transitions: dict[str, int] = {}
+    changed = 0
+    for r in pass1:
+        if r["old_type"] != r["new_type"]:
+            changed += 1
+            key = f"{r['old_type']} -> {r['new_type']}"
+            transitions[key] = transitions.get(key, 0) + 1
 
     async with SessionLocal() as db:
         run = await db.get(PipelineRun, run_id)
         if run is not None:
             run.status = "completed"
-            run.processed_items = processed
+            run.processed_items = len(pass1)
             await db.commit()
 
     elapsed = time.monotonic() - started_at
-    print(f"Done. Processed {processed}/{total} in {elapsed:.1f}s; {changed} changed.")
-    print("  top transitions:")
+    print(
+        f"Done in {elapsed:.1f}s. Pass 1: {len(pass1)} firms, {changed} changed. "
+        f"Pass 2 (Pro re-verify): {len(pass2)} firms."
+    )
+    print("  top transitions (pass 1):")
     for key, count in sorted(transitions.items(), key=lambda kv: -kv[1])[:15]:
         print(f"    {key}: {count}")
 
@@ -253,6 +333,19 @@ def _parse_args() -> argparse.Namespace:
     )
     parser.add_argument(
         "--offset", type=int, default=0, help="Skip the first N firms (chunking)."
+    )
+    parser.add_argument(
+        "--model",
+        choices=["flash", "pro"],
+        default=None,
+        help="Override the extraction model for the main pass "
+        "(default: GEMINI_PDF_MODEL env).",
+    )
+    parser.add_argument(
+        "--reverify-changed",
+        action="store_true",
+        help="HYBRID: after the main pass, re-run changed / needs_review firms "
+        "on gemini-2.5-pro.",
     )
     parser.add_argument(
         "--out",
@@ -275,6 +368,6 @@ if __name__ == "__main__":
         with asyncio.Runner(
             loop_factory=lambda: asyncio.SelectorEventLoop(selectors.SelectSelector())
         ) as runner:
-            runner.run(main(args.limit, args.offset, out))
+            runner.run(main(args.limit, args.offset, out, args.model, args.reverify_changed))
     else:
-        asyncio.run(main(args.limit, args.offset, out))
+        asyncio.run(main(args.limit, args.offset, out, args.model, args.reverify_changed))
