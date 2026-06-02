@@ -1448,7 +1448,12 @@ async def _run_gap_fill_contacts(
                             )
                         )
                         names_only += 1
-                await db.commit()
+                    # Commit each row as we go so its apollo_person_id is
+                    # persisted within seconds of the reveal request — before
+                    # Apollo's async phone-reveal callback races in. The webhook
+                    # 200s on a no-match and Apollo won't retry, so a row
+                    # committed late permanently loses its revealed phone.
+                    await db.commit()
 
         # PHASE 2 — gap-fill the PRE-EXISTING rows that are missing a channel.
         # Rows discovered above came straight from the chain, so they're not
@@ -1456,18 +1461,14 @@ async def _run_gap_fill_contacts(
         gap_rows = [r for r in rows if _is_gap_row(r)]
         filled = 0
         if gap_rows:
+            # Snapshot (id, name) up front so we never touch an ORM object that
+            # a prior per-row commit expired (expire_on_commit). Each row is
+            # re-fetched and committed individually below — same reveal-race
+            # reasoning as Phase 1.
+            gap_targets = [(r.id, r.name) for r in gap_rows]
             async with SessionLocal() as db:
-                # Re-load the rows in this session so the in-place mutations
-                # commit; the earlier read session is closed.
-                row_ids = [r.id for r in gap_rows]
-                db_rows_stmt = (
-                    select(AdvisorContact)
-                    .where(AdvisorContact.id.in_(row_ids))
-                    .order_by(AdvisorContact.id.asc())
-                )
-                db_rows = list((await db.execute(db_rows_stmt)).scalars().all())
-                for row in db_rows:
-                    split = _split_officer_name(row.name)
+                for row_id, row_name in gap_targets:
+                    split = _split_officer_name(row_name)
                     if split is None:
                         continue
                     first_name, last_name = split
@@ -1475,17 +1476,19 @@ async def _run_gap_fill_contacts(
                         "person",
                         first_name=first_name,
                         last_name=last_name,
-                        org_name=chain_org_name or row.name,
+                        org_name=chain_org_name or row_name,
                         domain=domain,
-                        cache_name=row.name,
+                        cache_name=row_name,
                     )
                     if merged is None:
+                        continue
+                    row = await db.get(AdvisorContact, row_id)
+                    if row is None:
                         continue
                     if _apply_gap_fill(row, merged):
                         row.enriched_at = datetime.now(timezone.utc)
                         filled += 1
-                if filled:
-                    await db.commit()
+                        await db.commit()
 
         await _stamp_gap_fill_attempt(advisor_id)
         new_rows = discovered + names_only
