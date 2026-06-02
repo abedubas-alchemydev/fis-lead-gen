@@ -326,6 +326,9 @@ class FinraClearingReconciler:
         # Re-derive the BD rollup from the row we just wrote.
         bd.current_clearing_partner = partner_name
         bd.current_clearing_type = "fully_disclosed"
+        # Unify: the reconciler is authoritative for introducing firms, so keep
+        # the clearing_classification column in lock-step with the rollup type.
+        bd.clearing_classification = "fully_disclosed"
         bd.current_clearing_is_competitor = is_competitor
         if latest.report_date is not None:
             bd.last_audit_report_date = latest.report_date

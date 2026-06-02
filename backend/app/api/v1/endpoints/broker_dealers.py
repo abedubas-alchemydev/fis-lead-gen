@@ -1086,13 +1086,12 @@ async def trigger_health_check(
                 broker_dealer.types_of_business_other = enriched_record.types_of_business_other
                 changes.append("types_of_business_other")
 
-    # Re-apply classification logic
-    from app.services.classification import determine_clearing_classification, classify_niche_restricted
-
-    new_classification = determine_clearing_classification(broker_dealer.firm_operations_text)
-    if broker_dealer.clearing_classification != new_classification:
-        broker_dealer.clearing_classification = new_classification
-        changes.append("clearing_classification")
+    # Re-apply the niche-restricted flag only. clearing_classification is NOT
+    # derived here anymore: the old determine_clearing_classification() regex
+    # was inverted and only returned "needs_review", clobbering good labels on
+    # every refresh. The clearing label is owned by the FOCUS-extraction +
+    # clearing_validator path and the batch classifier.
+    from app.services.classification import classify_niche_restricted
 
     new_niche = classify_niche_restricted(broker_dealer.types_of_business)
     if broker_dealer.is_niche_restricted != new_niche:

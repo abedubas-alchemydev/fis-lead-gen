@@ -46,10 +46,11 @@ class LlmParserService:
             '- "executes and clears"\n'
             '- "prime broker"\n'
             '- "omnibus account"\n\n'
-            "## Special-case rule — firms with no clearing relationship\n"
+            "## Special-case rule — non-carrying firms (no customer accounts)\n"
             "Some firms genuinely have no clearing relationship to extract because they have no customer "
-            "accounts at all. Return clearing_type='self_clearing' with clearing_partner=null and "
-            "confidence_score >= 0.85 if the firm matches ANY of:\n"
+            "accounts at all — they are NON-CARRYING, which is distinct from self-clearing (a firm that "
+            "holds/maintains securities for other broker-dealers). Return clearing_type='non_carrying' "
+            "with clearing_partner=null and confidence_score >= 0.85 if the firm matches ANY of:\n"
             "- M&A advisory only / business is limited to non-customer activity\n"
             "- Section 15(c)(3)-1 exemption, or paragraph (k)(1) exemption (mutual-fund-only dealers, "
             "savings-and-loan-account solicitors, paper-only dealers — firms that promptly transmit all "
@@ -69,8 +70,10 @@ class LlmParserService:
             "- Never return self_clearing for a (k)(2)(ii) firm, even when the partner isn't named.\n\n"
             "Return a JSON object with these fields:\n"
             "- clearing_partner: The name of the clearing firm (e.g. 'Pershing LLC', 'Apex Clearing Corporation'). "
-            "Use null only if no clearing partner is mentioned or the firm is self-clearing.\n"
-            "- clearing_type: One of 'fully_disclosed', 'self_clearing', 'omnibus', or 'unknown'.\n"
+            "Use null if no clearing partner is mentioned, or the firm is self-clearing or non-carrying.\n"
+            "- clearing_type: One of 'fully_disclosed', 'self_clearing', 'omnibus', 'non_carrying', or "
+            "'unknown'. Use 'non_carrying' for firms with no customer accounts at all (M&A advisory, "
+            "private placement, (k)(1)/(k)(2)(i) exempt) — these are NOT self_clearing.\n"
             "- agreement_date: The date of the clearing agreement in YYYY-MM-DD format, only if explicitly stated. "
             "Use null if not explicitly present.\n"
             "- confidence_score: A number between 0 and 1 reflecting your certainty.\n"
@@ -148,10 +151,10 @@ class LlmParserService:
             "services. The Company does not carry accounts of or for customers and does not hold customer "
             'funds or securities."\n'
             "Expected output:\n"
-            '{"clearing_partner": null, "clearing_type": "self_clearing", "agreement_date": null, '
+            '{"clearing_partner": null, "clearing_type": "non_carrying", "agreement_date": null, '
             '"confidence_score": 0.95, "rationale": "Firm is limited to M&A advisory and explicitly does '
             'not carry customer accounts, so no clearing relationship is required — treat as '
-            'self_clearing with null partner per the special-case rule.", "evidence_excerpt": "The '
+            'non_carrying with null partner per the special-case rule.", "evidence_excerpt": "The '
             "Company's business is limited to mergers-and-acquisitions advisory services. The Company "
             'does not carry accounts of or for customers and does not hold customer funds or securities."}\n\n'
             "Example 10 — (k)(2)(ii) introducing-broker exemption (partner not named in FOCUS):\n"
@@ -174,9 +177,9 @@ class LlmParserService:
             'carry customer accounts or hold customer funds or securities. No clearing partner or clearing '
             'agreement is mentioned anywhere in the filing."\n'
             "Expected output:\n"
-            '{"clearing_partner": null, "clearing_type": "self_clearing", "agreement_date": null, '
+            '{"clearing_partner": null, "clearing_type": "non_carrying", "agreement_date": null, '
             '"confidence_score": 0.85, "rationale": "Firm explicitly does not carry customer accounts and '
-            'does not hold customer funds — no clearing relationship is required. Return self_clearing '
+            'does not hold customer funds — no clearing relationship is required. Return non_carrying '
             'with null partner per the special-case rule rather than unknown.", "evidence_excerpt": "The '
             'Company does not carry customer accounts or hold customer funds or securities."}\n\n'
             "Now analyze the attached PDF and extract the clearing arrangement data. Use only evidence from "
@@ -211,12 +214,24 @@ class LlmParserService:
             f"{base_prompt}"
         )
 
+    @staticmethod
+    def _prepend_signals(prompt: str, signals_text: str | None) -> str:
+        """Prepend the deterministic regulatory-signal block to a base prompt so
+        Gemini reasons over the FOCUS PDF AND the hard priors in a single call."""
+        if signals_text and signals_text.strip():
+            return f"{signals_text.strip()}\n\n{prompt}"
+        return prompt
+
+    def build_prompt_with_signals(self, signals_text: str | None) -> str:
+        return self._prepend_signals(self.build_prompt(), signals_text)
+
     async def extract_structured_data_with_ocr_text(
         self,
         pdf_record: DownloadedPdfRecord,
         *,
         ocr_text: str,
         pdf_bytes_base64: str,
+        signals_text: str | None = None,
     ) -> ClearingExtractionResult:
         """Run clearing extraction with OCR'd text augmenting the prompt.
 
@@ -231,7 +246,9 @@ class LlmParserService:
         the bytes off ``local_document_path`` once for both the OCR call
         and this LLM call, so the disk hit is paid only once per filing.
         """
-        prompt = self.build_prompt_with_ocr_text(ocr_text)
+        prompt = self._prepend_signals(
+            self.build_prompt_with_ocr_text(ocr_text), signals_text
+        )
 
         if settings.llm_provider == "gemini":
             try:
@@ -263,7 +280,11 @@ class LlmParserService:
             notes = f"{notes} Evidence: {extraction.evidence_excerpt}"
 
         status = "parsed"
-        partner_required = extraction.clearing_type != "self_clearing"
+        # Only partner-naming types (fully_disclosed/omnibus) require a partner.
+        # self_clearing and non_carrying are partnerless by nature, so a missing
+        # partner must not flag them for review; the Phase-3 capital/membership
+        # validator owns the "is this self_clearing actually legitimate" check.
+        partner_required = extraction.clearing_type in ("fully_disclosed", "omnibus")
         if (
             extraction.confidence_score < settings.clearing_extraction_min_confidence
             or (partner_required and not extraction.clearing_partner)
@@ -288,12 +309,15 @@ class LlmParserService:
             clearing_statement_text=extraction.evidence_excerpt,
         )
 
-    async def extract_structured_data(self, pdf_record: DownloadedPdfRecord) -> ClearingExtractionResult:
+    async def extract_structured_data(
+        self, pdf_record: DownloadedPdfRecord, *, signals_text: str | None = None
+    ) -> ClearingExtractionResult:
+        prompt = self.build_prompt_with_signals(signals_text)
         if settings.llm_provider == "gemini":
             try:
                 extraction = await self.gemini_client.extract_clearing_data(
                     pdf_bytes_base64=pdf_record.bytes_base64,
-                    prompt=self.build_prompt(),
+                    prompt=prompt,
                 )
             except (GeminiConfigurationError, GeminiExtractionError) as exc:
                 return self._error_result(pdf_record, status="provider_error", note=str(exc))
@@ -302,7 +326,7 @@ class LlmParserService:
                 extraction = await self.openai_client.extract_clearing_data(
                     pdf_bytes_base64=pdf_record.bytes_base64,
                     filename=self._build_filename(pdf_record),
-                    prompt=self.build_prompt(),
+                    prompt=prompt,
                 )
             except (OpenAIConfigurationError, OpenAIExtractionError) as exc:
                 return self._error_result(pdf_record, status="provider_error", note=str(exc))
@@ -319,7 +343,11 @@ class LlmParserService:
             notes = f"{notes} Evidence: {extraction.evidence_excerpt}"
 
         status = "parsed"
-        partner_required = extraction.clearing_type != "self_clearing"
+        # Only partner-naming types (fully_disclosed/omnibus) require a partner.
+        # self_clearing and non_carrying are partnerless by nature, so a missing
+        # partner must not flag them for review; the Phase-3 capital/membership
+        # validator owns the "is this self_clearing actually legitimate" check.
+        partner_required = extraction.clearing_type in ("fully_disclosed", "omnibus")
         if (
             extraction.confidence_score < settings.clearing_extraction_min_confidence
             or (partner_required and not extraction.clearing_partner)

@@ -12,8 +12,18 @@ from app.db.session import SessionLocal
 from app.models.broker_dealer import BrokerDealer
 from app.models.clearing_arrangement import ClearingArrangement
 from app.models.pipeline_run import PipelineRun
-from app.services.broker_dealers import BrokerDealerRepository
+from app.services.broker_dealers import (
+    BrokerDealerRepository,
+    apply_clearing_rollup,
+    pick_authoritative_arrangement,
+)
 from app.services.classification import apply_classification_to_all
+from app.services.clearing_validator import (
+    ClearingSignals,
+    format_signals_for_prompt,
+    load_clearing_signals,
+    validate_clearing,
+)
 from app.services.competitors import CompetitorProviderService
 from app.services.extraction_status import classify_pipeline_exception
 from app.services.pdf_downloader import PdfDownloaderService, pdf_tempdir
@@ -149,6 +159,8 @@ class ClearingPipelineService:
         broker_dealer: BrokerDealer,
         pipeline_run_id: int,
         competitors: list,
+        *,
+        signals: ClearingSignals | None = None,
     ) -> dict[str, object]:
         """Run clearing extraction for a single BD and return an upsert-ready
         dict. Always returns a dict — failures land as ``missing_pdf`` /
@@ -183,7 +195,43 @@ class ClearingPipelineService:
                         "clearing_statement_text": None,
                     }
 
-                parsed = await self.processor.process_downloaded_pdf(pdf_record)
+                signals_text = (
+                    format_signals_for_prompt(signals) if signals is not None else None
+                )
+                parsed = await self.processor.process_downloaded_pdf(
+                    pdf_record, signals_text=signals_text
+                )
+
+                clearing_type = parsed.clearing_type
+                clearing_partner = parsed.clearing_partner
+                extraction_status = parsed.extraction_status
+                extraction_notes = parsed.extraction_notes
+                is_verified = False
+                # Deterministic guardrail: reconcile Gemini's label against the
+                # 15c3-1 capital tier + clearing-agency membership + FINRA
+                # partner. Confident corrections are stamped is_verified so the
+                # rollup won't clobber them; unresolved contradictions go to
+                # needs_review.
+                if signals is not None and clearing_type:
+                    decision = validate_clearing(
+                        clearing_type=clearing_type,
+                        clearing_partner=clearing_partner,
+                        confidence=float(parsed.extraction_confidence or 0.0),
+                        signals=signals,
+                    )
+                    if decision.action != "pass":
+                        clearing_type = decision.clearing_type
+                        clearing_partner = decision.clearing_partner
+                        extraction_notes = (
+                            f"[clearing_validator:{decision.action}] "
+                            f"{decision.rationale} | {extraction_notes or ''}"
+                        ).strip()
+                        if decision.corrected:
+                            is_verified = True
+                            extraction_status = "parsed"
+                        elif decision.needs_review:
+                            extraction_status = "needs_review"
+
                 return {
                     "bd_id": parsed.bd_id,
                     "pipeline_run_id": pipeline_run_id,
@@ -192,15 +240,15 @@ class ClearingPipelineService:
                     "source_filing_url": parsed.source_filing_url,
                     "source_pdf_url": parsed.source_pdf_url,
                     "local_document_path": parsed.local_document_path,
-                    "clearing_partner": parsed.clearing_partner,
-                    "normalized_partner": self.repository.normalize_partner_name(parsed.clearing_partner),
-                    "clearing_type": parsed.clearing_type,
+                    "clearing_partner": clearing_partner,
+                    "normalized_partner": self.repository.normalize_partner_name(clearing_partner),
+                    "clearing_type": clearing_type,
                     "agreement_date": parsed.agreement_date,
                     "extraction_confidence": parsed.extraction_confidence,
-                    "extraction_status": parsed.extraction_status,
-                    "extraction_notes": parsed.extraction_notes,
-                    "is_competitor": self.repository.match_competitor(parsed.clearing_partner, competitors),
-                    "is_verified": False,
+                    "extraction_status": extraction_status,
+                    "extraction_notes": extraction_notes,
+                    "is_competitor": self.repository.match_competitor(clearing_partner, competitors),
+                    "is_verified": is_verified,
                     "extracted_at": parsed.extracted_at,
                     "clearing_statement_text": parsed.clearing_statement_text,
                 }
@@ -278,8 +326,11 @@ class ClearingPipelineService:
                 return
             await self.competitors.seed_defaults(db)
             competitors = await self.competitors.list_active(db)
+            signals = await load_clearing_signals(db, bd)
 
-        extraction_result = await self._extract_one_bd(bd, pipeline_run_id, competitors)
+        extraction_result = await self._extract_one_bd(
+            bd, pipeline_run_id, competitors, signals=signals
+        )
 
         async with SessionLocal() as write_db:
             await self.repository.upsert_clearing_arrangements(
@@ -288,6 +339,19 @@ class ClearingPipelineService:
             await write_db.commit()
             await self._refresh_clearing_rollup_for_bd(write_db, bd_id)
             await write_db.commit()
+
+            # Unify: keep the clearing_classification column in lock-step with
+            # the validated current_clearing_type so the two columns stop
+            # disagreeing (unknown/missing -> needs_review).
+            bd_row = await write_db.get(BrokerDealer, bd_id)
+            if bd_row is not None:
+                ctype_final = bd_row.current_clearing_type
+                bd_row.clearing_classification = (
+                    ctype_final
+                    if ctype_final and ctype_final != "unknown"
+                    else "needs_review"
+                )
+                await write_db.commit()
 
             run = await write_db.get(PipelineRun, pipeline_run_id)
             if run is None:
@@ -336,38 +400,22 @@ class ClearingPipelineService:
         """Per-BD version of ``BrokerDealerRepository.refresh_clearing_rollups``.
 
         The repository's method scans every BD + every clearing_arrangement —
-        wasteful for a single-firm refresh. This picks the latest arrangement
-        for ``bd_id`` (filing_year DESC) and updates that one BD's
-        ``current_clearing_*`` fields.
+        wasteful for a single-firm refresh. This picks the authoritative
+        arrangement for ``bd_id`` (verified-preferred, then most-recent) and
+        updates that one BD's ``current_clearing_*`` fields.
         """
         bd = await db.get(BrokerDealer, bd_id)
         if bd is None:
             return
-        latest_stmt = (
-            select(ClearingArrangement)
-            .where(ClearingArrangement.bd_id == bd_id)
-            .order_by(ClearingArrangement.filing_year.desc())
-            .limit(1)
-        )
-        latest = (await db.execute(latest_stmt)).scalar_one_or_none()
-        if latest is None:
-            bd.current_clearing_partner = None
-            bd.current_clearing_type = None
-            bd.current_clearing_is_competitor = False
-            bd.current_clearing_source_filing_url = None
-            bd.current_clearing_extraction_confidence = None
-            bd.last_audit_report_date = None
-        else:
-            bd.current_clearing_partner = latest.clearing_partner
-            bd.current_clearing_type = latest.clearing_type
-            bd.current_clearing_is_competitor = bool(latest.is_competitor)
-            bd.current_clearing_source_filing_url = latest.source_filing_url
-            bd.current_clearing_extraction_confidence = (
-                float(latest.extraction_confidence)
-                if latest.extraction_confidence is not None
-                else None
+        rows = (
+            await db.execute(
+                select(ClearingArrangement).where(ClearingArrangement.bd_id == bd_id)
             )
-            bd.last_audit_report_date = latest.report_date
+        ).scalars().all()
+        # Verified-preferred, most-recent pick (shared with the batch rollup in
+        # broker_dealers.py) so a fresh unverified re-extraction can't clobber a
+        # FINRA-reconciled or validator-confirmed label.
+        apply_clearing_rollup(bd, pick_authoritative_arrangement(rows))
         await db.flush()
 
     async def _select_null_partner_targets(self, db: AsyncSession) -> list[BrokerDealer]:

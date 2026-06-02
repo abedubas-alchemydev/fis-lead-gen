@@ -565,10 +565,7 @@ async def _run_health_check(parent_run_id: int, bd_id: int, trigger_source: str)
                 run.status = "running"
                 await run_db.commit()
 
-        from app.services.classification import (
-            classify_niche_restricted,
-            determine_clearing_classification,
-        )
+        from app.services.classification import classify_niche_restricted
 
         finra_service = FinraService()
         async with SessionLocal() as db:
@@ -657,11 +654,12 @@ async def _run_health_check(parent_run_id: int, bd_id: int, trigger_source: str)
                         broker_dealer.business_type = new_business_type
                         changes.append("business_type")
 
-            new_classification = determine_clearing_classification(broker_dealer.firm_operations_text)
-            if broker_dealer.clearing_classification != new_classification:
-                broker_dealer.clearing_classification = new_classification
-                changes.append("clearing_classification")
-
+            # clearing_classification is intentionally NOT derived here. The old
+            # determine_clearing_classification() regex was inverted and only
+            # returned "needs_review", clobbering good labels on every refresh.
+            # The clearing label is now owned by the FOCUS-extraction +
+            # clearing_validator path and the batch classifier; the per-firm
+            # clearing refresh runs via SUB_REFRESH_CLEARING.
             new_niche = classify_niche_restricted(broker_dealer.types_of_business)
             if broker_dealer.is_niche_restricted != new_niche:
                 broker_dealer.is_niche_restricted = new_niche
@@ -768,6 +766,7 @@ async def _run_refresh_clearing(parent_run_id: int, bd_id: int, trigger_source: 
     so its self-managed PipelineRun row becomes a child of the
     orchestrator's parent. Mirror of ``_run_refresh_financials``.
     """
+    from app.services.finra_reconciler import FinraClearingReconciler
     from app.services.pipeline import ClearingPipelineService
 
     async with SessionLocal() as db:
@@ -789,6 +788,18 @@ async def _run_refresh_clearing(parent_run_id: int, bd_id: int, trigger_source: 
     except Exception as exc:
         logger.exception("refresh-all/refresh-clearing failed for bd %s", bd_id)
         return "failed", f"{type(exc).__name__}: {str(exc)[:200]}"
+
+    # FINRA Form BD reconciliation runs AFTER the FOCUS extraction has committed
+    # — it owns the *current* clearing-partner identity from Item 12 and
+    # re-derives the rollup itself. Sequenced here (never as a parallel gather
+    # sibling) so it can't race the extraction it depends on. Best-effort: it
+    # no-ops when the BD has no CRD, and a FINRA fetch failure must not fail a
+    # clearing refresh that already succeeded.
+    try:
+        async with SessionLocal() as recon_db:
+            await FinraClearingReconciler().reconcile_for_broker_dealer(recon_db, bd_id)
+    except Exception:
+        logger.exception("refresh-all/finra-reconcile failed for bd %s", bd_id)
 
     async with SessionLocal() as db:
         child = await db.get(PipelineRun, child_id)

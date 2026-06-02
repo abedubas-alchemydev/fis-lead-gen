@@ -26,6 +26,8 @@ export function clearingTypeVariant(value: string | null): PillVariant {
   if (value === "fully_disclosed") return "fd";
   if (value === "self_clearing") return "self";
   if (value === "omnibus") return "omni";
+  if (value === "non_carrying") return "noncarry";
+  if (value === "Identifying") return "warm";
   return "unknown";
 }
 
@@ -33,6 +35,8 @@ export function clearingTypeLabel(value: string | null): string {
   if (value === "fully_disclosed") return "Fully Disclosed";
   if (value === "self_clearing") return "Self-Clearing";
   if (value === "omnibus") return "Omnibus";
+  if (value === "non_carrying") return "Non-Carrying";
+  if (value === "Identifying") return "Identifying";
   return "Not classified";
 }
 
