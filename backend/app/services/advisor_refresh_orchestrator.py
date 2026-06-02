@@ -1366,6 +1366,7 @@ async def _run_gap_fill_contacts(
             firm_name = advisor.name
             domain = _canonicalize_domain(_domain_from_website(advisor.website))
             chain_org_name = _normalize_org_name(firm_name)
+            executive_officers = advisor.executive_officers
 
             rows_stmt = (
                 select(AdvisorContact)
@@ -1374,60 +1375,123 @@ async def _run_gap_fill_contacts(
             )
             rows = list((await db.execute(rows_stmt)).scalars().all())
 
-        gap_rows = [r for r in rows if _is_gap_row(r)]
-        if not rows:
-            summary = "No contacts on file; nothing to gap-fill."
-            await _stamp_gap_fill_attempt(advisor_id)
-            await _finalize_gap_fill_run(
-                run_id, status="completed", success=1, failure=0, summary=summary
-            )
-            return
-        if not gap_rows:
-            summary = f"All {len(rows)} contact(s) already complete."[:180]
-            await _stamp_gap_fill_attempt(advisor_id)
-            await _finalize_gap_fill_run(
-                run_id, status="completed", success=1, failure=0, summary=summary
-            )
-            return
+        # PHASE 1 — seed discovery from the officer roster. Discover any officer
+        # that doesn't already have a contact row (true parity with the BD
+        # "Generate More Details" button, so the action also works on advisors
+        # with no contacts yet, and picks up officers added since the last
+        # Refresh). Dedupe against existing rows by (first, last) lowercased.
+        existing_keys: set[tuple[str, str]] = set()
+        for r in rows:
+            split = _split_officer_name(r.name)
+            if split is not None:
+                existing_keys.add((split[0].lower(), split[1].lower()))
 
-        filled = 0
-        chain_hits = 0
-        async with SessionLocal() as db:
-            # Re-load the rows in this session so the in-place mutations
-            # commit; the earlier read session is closed.
-            row_ids = [r.id for r in gap_rows]
-            db_rows_stmt = (
-                select(AdvisorContact)
-                .where(AdvisorContact.id.in_(row_ids))
-                .order_by(AdvisorContact.id.asc())
+        officer_list = executive_officers if isinstance(executive_officers, list) else []
+        officer_work: list[dict[str, str]] = []
+        seen_keys: set[tuple[str, str]] = set()
+        for officer in officer_list:
+            if not isinstance(officer, dict):
+                continue
+            display_name = str(officer.get("name") or "").strip()
+            split = _split_officer_name(display_name)
+            if split is None:
+                continue
+            key = (split[0].lower(), split[1].lower())
+            if key in existing_keys or key in seen_keys:
+                continue
+            seen_keys.add(key)
+            title = str(officer.get("title") or "").strip() or "Executive Officer"
+            officer_work.append(
+                {
+                    "display_name": display_name,
+                    "first_name": split[0],
+                    "last_name": split[1],
+                    "title": title,
+                }
             )
-            db_rows = list((await db.execute(db_rows_stmt)).scalars().all())
-            for row in db_rows:
-                split = _split_officer_name(row.name)
-                if split is None:
-                    continue
-                first_name, last_name = split
-                merged = await _walk_chain(
-                    "person",
-                    first_name=first_name,
-                    last_name=last_name,
-                    org_name=chain_org_name or row.name,
-                    domain=domain,
-                    cache_name=row.name,
-                )
-                if merged is None:
-                    continue
-                chain_hits += 1
-                if _apply_gap_fill(row, merged):
-                    row.enriched_at = datetime.now(timezone.utc)
-                    filled += 1
-            if filled:
+            if len(officer_work) >= _MAX_OFFICERS_TO_ENRICH:
+                break
+
+        discovered = 0
+        names_only = 0
+        if officer_work:
+            now = datetime.now(timezone.utc)
+            async with SessionLocal() as db:
+                for entry in officer_work:
+                    entity = {
+                        "type": "person",
+                        "first_name": entry["first_name"],
+                        "last_name": entry["last_name"],
+                        "org_name": chain_org_name,
+                        "domain": domain,
+                        "title": entry["title"],
+                    }
+                    row = await discover_advisor_contact(
+                        entity, advisor_id=advisor_id, session=db
+                    )
+                    if row is not None:
+                        discovered += 1
+                    else:
+                        # Chain miss — still surface the person as a names-only
+                        # row so the panel shows the full roster; a later run
+                        # can gap-fill them if a provider learns their channels.
+                        db.add(
+                            AdvisorContact(
+                                advisor_id=advisor_id,
+                                name=entry["display_name"][:255],
+                                title=entry["title"][:255],
+                                email=None,
+                                phone=None,
+                                linkedin_url=None,
+                                source="adv",
+                                enriched_at=now,
+                            )
+                        )
+                        names_only += 1
                 await db.commit()
 
+        # PHASE 2 — gap-fill the PRE-EXISTING rows that are missing a channel.
+        # Rows discovered above came straight from the chain, so they're not
+        # re-queried here.
+        gap_rows = [r for r in rows if _is_gap_row(r)]
+        filled = 0
+        if gap_rows:
+            async with SessionLocal() as db:
+                # Re-load the rows in this session so the in-place mutations
+                # commit; the earlier read session is closed.
+                row_ids = [r.id for r in gap_rows]
+                db_rows_stmt = (
+                    select(AdvisorContact)
+                    .where(AdvisorContact.id.in_(row_ids))
+                    .order_by(AdvisorContact.id.asc())
+                )
+                db_rows = list((await db.execute(db_rows_stmt)).scalars().all())
+                for row in db_rows:
+                    split = _split_officer_name(row.name)
+                    if split is None:
+                        continue
+                    first_name, last_name = split
+                    merged = await _walk_chain(
+                        "person",
+                        first_name=first_name,
+                        last_name=last_name,
+                        org_name=chain_org_name or row.name,
+                        domain=domain,
+                        cache_name=row.name,
+                    )
+                    if merged is None:
+                        continue
+                    if _apply_gap_fill(row, merged):
+                        row.enriched_at = datetime.now(timezone.utc)
+                        filled += 1
+                if filled:
+                    await db.commit()
+
         await _stamp_gap_fill_attempt(advisor_id)
+        new_rows = discovered + names_only
         summary = (
-            f"Gap-filled {filled} of {len(gap_rows)} contact(s) "
-            f"({chain_hits} chain hit(s), {len(rows)} total on file)."
+            f"Discovered {new_rows} new officer(s) ({discovered} with channels); "
+            f"gap-filled {filled} of {len(gap_rows)} existing contact(s)."
         )[:180]
         await _finalize_gap_fill_run(
             run_id, status="completed", success=1, failure=0, summary=summary
