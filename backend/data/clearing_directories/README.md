@@ -12,10 +12,17 @@ fetches (HTTP 403) and publish their lists as gated, varied-format exports. So
 an operator downloads the official exports, normalizes them to the CSV shape
 below, and drops them here. Refresh = replace the file and re-run the importer.
 
-> The committed files are **small illustrative starter samples** with blank
-> member numbers. Replace them with the full official exports before the labels
-> are treated as authoritative. Provenance (`source_file`, `source_version` =
-> content hash) is recorded on every membership row.
+> **`dtc_participants.csv`, `nscc_members.csv`, `ficc_gov_members.csv` and
+> `ficc_mbs_members.csv` are the full official exports** (refreshed 2026-06-02
+> from the DTCC client-center directories linked above — DTC 2026-05-29, NSCC
+> 2026-05-01, FICC-GOV 2026-05-22, FICC-MBS 2026-04-27). Sub-account / omnibus
+> rows (member names containing `/`) and the title/preamble rows are stripped;
+> one row per primary member firm.
+>
+> **`occ_members.csv` is still a small starter sample** — theocc.com blocks
+> automated downloads (HTTP 403), so OCC needs a manual export drop. Provenance
+> (`source_file`, `source_version` = content hash) is recorded on every
+> membership row.
 
 ## Files → agency
 
