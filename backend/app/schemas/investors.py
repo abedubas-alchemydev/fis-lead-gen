@@ -48,6 +48,13 @@ class InvestorItem(BaseModel):
     enriched_linkedin_url: str | None = None
     enriched_at: datetime | None
 
+    # True when an Apollo phone-reveal was requested for this insider
+    # (apollo_person_id stamped) but the number hasn't landed via the async
+    # webhook yet. Lets the FE show a "phone arriving" hint in place of a
+    # blank slot. Always False once a phone is present or when no reveal was
+    # ever requested (PDL-only match, total miss, or entity filer).
+    phone_pending: bool = False
+
     source_filing_url: str | None
     filed_at: datetime
 
@@ -100,6 +107,11 @@ class InvestorEnrichResponse(BaseModel):
     enriched_at: datetime | None
     matched: bool
     skip_reason: str | None = None
+    # True when Apollo returned a record and an async phone-reveal was
+    # requested but the number isn't in the sync response — the FE merges
+    # this into the row so the "phone arriving" hint shows immediately after
+    # a click, not just on the next list load.
+    phone_pending: bool = False
 
 
 class InvestorPipelineRunResponse(BaseModel):

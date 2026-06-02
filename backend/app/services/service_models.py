@@ -312,6 +312,13 @@ class ConsolidatedPersonRow:
     reporting_owner_id: int | None
     is_favorited: bool
 
+    # Apollo person id stamped when an async phone-reveal was requested for
+    # this insider (Apollo had a record but the number arrives later via the
+    # webhook). Carried through so the endpoint can derive ``phone_pending``;
+    # not surfaced to the FE directly. Defaulted so non-list constructors
+    # (tests, other call sites) don't have to pass it.
+    apollo_person_id: str | None = None
+
 
 @dataclass(slots=True)
 class DownloadedPdfRecord:

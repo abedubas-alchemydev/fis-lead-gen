@@ -246,6 +246,10 @@ export type InvestorItem = {
   enriched_email: string | null;
   enriched_linkedin_url: string | null;
   enriched_at: string | null;
+  // True when an Apollo phone-reveal was requested but the number hasn't
+  // landed via the async webhook yet. Drives the "Phone arriving…" hint;
+  // always false once a phone is present or no reveal was ever requested.
+  phone_pending: boolean;
 
   source_filing_url: string | null;
   filed_at: string;
@@ -285,6 +289,10 @@ export type InvestorEnrichResponse = {
   // Non-null only for deliberate short-circuits. Today the only value is
   // "entity_filer" — name looks like an org so we never hit Apollo/PDL.
   skip_reason: string | null;
+  // True when Apollo returned a record + a reveal was requested but no
+  // number came back in the sync body — merged into the row so the
+  // "Phone arriving…" hint shows immediately after a click.
+  phone_pending: boolean;
 };
 
 export type AlertsBulkReadResponse = {
