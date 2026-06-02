@@ -102,6 +102,10 @@ def _item_from_consolidated(row: ConsolidatedPersonRow) -> InvestorItem:
         enriched_email=row.enriched_email,
         enriched_linkedin_url=row.enriched_linkedin_url,
         enriched_at=row.enriched_at,
+        # An Apollo reveal is in flight when we have a person id but no
+        # number yet; the FE gates the "phone arriving" hint on a freshness
+        # window so a reveal that never delivers stops showing eventually.
+        phone_pending=bool(row.apollo_person_id) and not row.enriched_phone,
         source_filing_url=row.source_filing_url,
         filed_at=row.filed_at,
         reporting_owner_id=row.reporting_owner_id,
@@ -311,4 +315,8 @@ async def enrich_investor(
         enriched_linkedin_url=match.linkedin_url,
         enriched_at=enriched_at,
         matched=match.matched,
+        # Apollo had a record and a reveal was requested, but no number in
+        # the sync body — it'll arrive via the webhook. Drives the FE's
+        # "phone arriving" hint right after the click.
+        phone_pending=bool(match.apollo_person_id) and not match.phone,
     )

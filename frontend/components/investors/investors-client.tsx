@@ -8,6 +8,8 @@ import { useRouter, useSearchParams } from "next/navigation";
 import {
   AlertTriangle,
   ArrowUpRight,
+  Check,
+  Clock,
   Linkedin,
   Loader2,
   MailPlus,
@@ -309,6 +311,7 @@ export function InvestorsClient() {
                 enriched_email: result.enriched_email,
                 enriched_linkedin_url: result.enriched_linkedin_url,
                 enriched_at: result.enriched_at,
+                phone_pending: result.phone_pending,
               }
             : row,
         ),
@@ -855,6 +858,18 @@ function InvestorRow({
     .filter((s) => s && s.trim().length > 0)
     .join(" • ");
   const hasEnrichment = !!row.enriched_at;
+  // "Phone arriving…" hint. The BE sets phone_pending when an Apollo
+  // reveal was requested (it has a person id) but the number hasn't landed
+  // via the async webhook. Gate on a freshness window so a reveal that
+  // never delivers stops showing "arriving…" after an hour instead of
+  // nagging forever — a phone that does arrive replaces the hint on the
+  // next list load (phone_pending flips false once a number is present).
+  const PHONE_PENDING_WINDOW_MS = 60 * 60 * 1000;
+  const recentlyEnriched =
+    !!row.enriched_at &&
+    Date.now() - Date.parse(row.enriched_at) < PHONE_PENDING_WINDOW_MS;
+  const phonePending =
+    row.phone_pending && !row.enriched_phone && recentlyEnriched;
   // DEMO: Outreach is enabled on every row regardless of enrichment so the
   // compose/draft flow is always reachable. Rows without a found contact
   // email fall back to DEMO_FALLBACK_EMAIL below (the BE adhoc-draft
@@ -880,6 +895,15 @@ function InvestorRow({
           >
             {adLabel}
           </span>
+          {hasEnrichment ? (
+            <span
+              className="inline-flex items-center gap-1 rounded-md border border-[var(--border,rgba(30,64,175,0.1))] bg-[var(--surface-2,#f1f6fd)] px-1.5 py-0.5 text-[10px] font-medium text-[var(--text-dim,#475569)]"
+              title={`Contact lookup run on ${formatDate(row.enriched_at)}`}
+            >
+              <Check className="h-3 w-3" strokeWidth={2.5} aria-hidden />
+              Enriched · {formatDate(row.enriched_at)}
+            </span>
+          ) : null}
         </div>
         <p className="mt-1 text-[12px] text-[var(--text-muted,#94a3b8)]">
           {address || "No address on filing"}
@@ -890,6 +914,14 @@ function InvestorRow({
               <span className="inline-flex items-center gap-1">
                 <Phone className="h-3.5 w-3.5" strokeWidth={2} aria-hidden />
                 {row.enriched_phone}
+              </span>
+            ) : phonePending ? (
+              <span
+                className="inline-flex items-center gap-1 text-[var(--text-muted,#94a3b8)]"
+                title="Apollo phone reveal requested — the number lands via webhook shortly"
+              >
+                <Clock className="h-3.5 w-3.5 animate-pulse" strokeWidth={2} aria-hidden />
+                Phone arriving…
               </span>
             ) : null}
             {row.enriched_email ? (

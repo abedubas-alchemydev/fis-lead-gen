@@ -54,6 +54,10 @@ def _base_mapping(**overrides) -> dict:
         # caller's lists).
         "reporting_owner_id": None,
         "is_favorited": False,
+        # Stamped when an async Apollo phone-reveal was requested for this
+        # insider; the endpoint derives phone_pending from it. The real
+        # query always selects the column (select(Form4Transaction)).
+        "apollo_person_id": None,
     }
     mapping.update(overrides)
     return mapping
@@ -98,3 +102,14 @@ def test_consolidated_row_handles_null_aggregates() -> None:
     assert row.shares is None
     assert row.transaction_value is None
     assert row.price_per_share is None
+
+
+def test_consolidated_row_passes_through_apollo_person_id() -> None:
+    # Present when an async Apollo phone-reveal was requested → the endpoint
+    # uses it (with no phone) to flag phone_pending for the FE.
+    assert (
+        _row_to_consolidated(_base_mapping(apollo_person_id="abc123")).apollo_person_id
+        == "abc123"
+    )
+    # Absent (PDL-only match or total miss) → None passes through.
+    assert _row_to_consolidated(_base_mapping()).apollo_person_id is None

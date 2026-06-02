@@ -420,4 +420,5 @@ def _row_to_consolidated(mapping) -> ConsolidatedPersonRow:
         filed_at=mapping["filed_at"],
         reporting_owner_id=mapping["reporting_owner_id"],
         is_favorited=bool(mapping["is_favorited"]),
+        apollo_person_id=mapping["apollo_person_id"],
     )
