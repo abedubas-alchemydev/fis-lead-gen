@@ -227,6 +227,10 @@ class TestAuditorPartnerGuard:
         assert decision.action == "partner_guard"
 
     def test_membership_overrides_auditor_partner(self) -> None:
+        # A confirmed DTC/OCC member with a (spurious) audit-firm partner is
+        # resolved to self_clearing by the MEMBERSHIP-OVERRIDE rule, which runs
+        # before the auditor guard — so the action is "promote", not
+        # "partner_guard". Either path keeps the auditor name from sticking.
         signals = ClearingSignals(
             memberships=frozenset({"DTC", "NSCC"}), membership_checked=True
         )
@@ -234,7 +238,7 @@ class TestAuditorPartnerGuard:
             "fully_disclosed", signals, partner="Deloitte & Touche LLP"
         )
         assert decision.clearing_type == "self_clearing"
-        assert decision.action == "partner_guard"
+        assert decision.action == "promote"
         assert decision.corrected is True
 
     def test_real_finra_partner_replaces_auditor_partner(self) -> None:
