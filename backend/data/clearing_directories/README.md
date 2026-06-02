@@ -19,10 +19,12 @@ below, and drops them here. Refresh = replace the file and re-run the importer.
 > rows (member names containing `/`) and the title/preamble rows are stripped;
 > one row per primary member firm.
 >
-> **`occ_members.csv` is still a small starter sample** — theocc.com blocks
-> automated downloads (HTTP 403), so OCC needs a manual export drop. Provenance
-> (`source_file`, `source_version` = content hash) is recorded on every
-> membership row.
+> **`occ_members.csv`** is the full OCC clearing-member directory (105 members,
+> refreshed 2026-06-02). theocc.com 403-blocks `curl`/automated fetch, so it was
+> captured from the live member-directory grid in a real browser
+> (theocc.com/company-information/member-directory) rather than a scripted
+> download. Provenance (`source_file`, `source_version` = content hash) is
+> recorded on every membership row.
 
 ## Files → agency
 
