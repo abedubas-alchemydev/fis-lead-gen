@@ -177,14 +177,14 @@ def validate_clearing(
             ),
         )
 
-    # 2) PROMOTION — a confirmed self-clearer Gemini under-called. Only a
-    #    positive membership (DTC/NSCC/OCC) is conclusive enough to promote;
-    #    capital-only contradictions fall through to consistency review.
-    if (
-        ct in ("unknown", "non_carrying")
-        and signals.has_self_clearing_membership
-        and not signals.finra_introducing_partner
-    ):
+    # 2) MEMBERSHIP OVERRIDE — a confirmed DTC/OCC clearing member carries and
+    #    settles in-house BY DEFINITION, so it cannot be fully_disclosed /
+    #    non_carrying / unknown no matter what the filing (or a FINRA Form BD
+    #    introducing arrangement) says. Membership is the authoritative carrying
+    #    signal -> self_clearing; an already self_clearing/omnibus label is left
+    #    untouched. This is the durable form of the JPM/Goldman/Citi
+    #    reconciliation (a Form BD partner must not demote a confirmed carrier).
+    if signals.has_self_clearing_membership and ct not in ("self_clearing", "omnibus"):
         return ClearingDecision(
             clearing_type="self_clearing",
             clearing_partner=None,
@@ -192,18 +192,17 @@ def validate_clearing(
             needs_review=False,
             action="promote",
             rationale=(
-                "promoted to self_clearing: active "
+                "confirmed "
                 f"{', '.join(sorted(signals.memberships & _SELF_CLEARING_AGENCIES))} "
-                "membership and no FINRA introducing partner."
+                "clearing-agency membership -> the firm carries/settles in-house; "
+                "membership overrides the proposed non-carrying label."
             ),
         )
 
-    # 3) CONSISTENCY — non_carrying contradicted by carrying-tier capital or a
-    #    clearing-agency membership we couldn't promote on (e.g. a FINRA partner
-    #    is also present). Not conclusive which way -> needs_review.
-    if ct == "non_carrying" and (
-        signals.is_at_or_above_carrying_floor or signals.has_self_clearing_membership
-    ):
+    # 3) CONSISTENCY — non_carrying contradicted by carrying-tier capital (a
+    #    confirmed member would already have been promoted in rule 2). Not
+    #    conclusive which way -> needs_review.
+    if ct == "non_carrying" and signals.is_at_or_above_carrying_floor:
         return ClearingDecision(
             clearing_type="unknown",
             clearing_partner=clearing_partner,

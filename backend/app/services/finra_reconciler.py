@@ -48,6 +48,7 @@ from sqlalchemy import delete, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.models.broker_dealer import BrokerDealer
+from app.models.clearing_agency_membership import ClearingAgencyMembership
 from app.models.clearing_arrangement import ClearingArrangement
 from app.models.competitor_provider import CompetitorProvider
 from app.models.introducing_arrangement import IntroducingArrangement
@@ -70,6 +71,10 @@ STATUS_FINRA_EMPTY = "finra_empty"
 STATUS_MATCH = "match"
 STATUS_RECONCILED = "reconciled"
 STATUS_BD_NOT_FOUND = "bd_not_found"
+# The firm holds an active DTC/OCC clearing membership: it carries in-house, so
+# a Form BD introducing arrangement is recorded but NOT applied as
+# fully_disclosed (membership is authoritative — see clearing_validator).
+STATUS_CARRIER_KEPT = "carrier_kept"
 
 
 @dataclass(frozen=True)
@@ -121,7 +126,10 @@ def names_match(a: Optional[str], b: Optional[str]) -> bool:
 
 
 def decide_reconciliation(
-    our_partner: Optional[str], finra_partners: list[str]
+    our_partner: Optional[str],
+    finra_partners: list[str],
+    *,
+    is_confirmed_carrier: bool = False,
 ) -> ReconcileDecision:
     """Pure reconciliation decision (DB-free, unit-tested like
     ``decide_pipelines``).
@@ -130,11 +138,21 @@ def decide_reconciliation(
     names, primary first (caller orders by effective_date desc). Category
     sentinels in ``our_partner`` ("Self-Clearing" / "Multiple Partners") never
     fuzzy-match a real firm name, so they correctly fall through to reconcile.
+
+    ``is_confirmed_carrier`` is True when the firm holds an active DTC/OCC
+    clearing-agency membership. Such a firm carries and settles in-house, so a
+    Form BD introducing arrangement is a *secondary* relationship and must NOT
+    demote it to fully_disclosed -> ``STATUS_CARRIER_KEPT`` (record the
+    arrangement, keep the carrying label). This is what stopped firms like
+    J.P. Morgan Securities (a DTC/OCC member that lists Pershing in Form BD
+    Item 12) from being flipped to fully_disclosed on every refresh.
     """
     names = [p for p in finra_partners if p and p.strip()]
     if not names:
         return ReconcileDecision(STATUS_FINRA_EMPTY, None)
     primary = names[0]
+    if is_confirmed_carrier:
+        return ReconcileDecision(STATUS_CARRIER_KEPT, primary)
     if our_partner and any(names_match(our_partner, n) for n in names):
         return ReconcileDecision(STATUS_MATCH, primary)
     return ReconcileDecision(STATUS_RECONCILED, primary)
@@ -213,15 +231,23 @@ class FinraClearingReconciler:
         rows_written = len(ordered)
 
         partner_names = [rec.business_name for rec in ordered]
-        decision = decide_reconciliation(bd.current_clearing_partner, partner_names)
+        is_carrier = await self._is_confirmed_carrier(db, bd_id)
+        decision = decide_reconciliation(
+            bd.current_clearing_partner, partner_names, is_confirmed_carrier=is_carrier
+        )
 
-        if decision.action in (STATUS_FINRA_EMPTY, STATUS_MATCH):
+        if decision.action in (STATUS_FINRA_EMPTY, STATUS_MATCH, STATUS_CARRIER_KEPT):
             await db.commit()
-            detail_msg = (
-                "FINRA shows no introducing arrangement."
-                if decision.action == STATUS_FINRA_EMPTY
-                else f"FINRA agrees: {bd.current_clearing_partner}."
-            )
+            if decision.action == STATUS_FINRA_EMPTY:
+                detail_msg = "FINRA shows no introducing arrangement."
+            elif decision.action == STATUS_CARRIER_KEPT:
+                detail_msg = (
+                    "Confirmed DTC/OCC clearing member — kept carrying label; FINRA "
+                    f"introducing arrangement ({decision.primary_partner}) recorded for "
+                    "reference, not applied as fully_disclosed."
+                )
+            else:
+                detail_msg = f"FINRA agrees: {bd.current_clearing_partner}."
             return ReconcileResult(
                 bd_id,
                 decision.action,
@@ -260,6 +286,26 @@ class FinraClearingReconciler:
             introducing_rows_written=rows_written,
             detail=f"Reconciled {previous_partner or 'Self-Clearing'} -> {primary_name} (FINRA effective {primary.effective_date or 'unknown'}).",
         )
+
+    async def _is_confirmed_carrier(self, db: AsyncSession, bd_id: int) -> bool:
+        """True iff the firm holds an active DTC or OCC clearing-agency
+        membership. A depository (DTC) / options-clearing (OCC) member carries
+        and settles in-house, so a Form BD introducing arrangement does not make
+        it fully_disclosed. NSCC alone is excluded — it is often Fund/SERV
+        (mutual-fund distribution), not securities self-clearing.
+        """
+        row = (
+            await db.execute(
+                select(ClearingAgencyMembership.id)
+                .where(
+                    ClearingAgencyMembership.broker_dealer_id == bd_id,
+                    ClearingAgencyMembership.status == "active",
+                    ClearingAgencyMembership.agency.in_(("DTC", "OCC")),
+                )
+                .limit(1)
+            )
+        ).first()
+        return row is not None
 
     async def _apply_partner(
         self,
@@ -342,6 +388,7 @@ __all__ = [
     "decide_reconciliation",
     "names_match",
     "STATUS_BD_NOT_FOUND",
+    "STATUS_CARRIER_KEPT",
     "STATUS_ERROR",
     "STATUS_FINRA_EMPTY",
     "STATUS_MATCH",
