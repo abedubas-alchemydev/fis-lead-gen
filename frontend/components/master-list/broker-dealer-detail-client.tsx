@@ -53,7 +53,11 @@ import { DetailPageSkeleton } from "@/components/ui/detail-page-skeleton";
 import { RefreshingIndicator } from "@/components/ui/refreshing-indicator";
 import { joinPipelineLabels } from "@/lib/refresh-pipeline-labels";
 import { parseArrangementBlob } from "@/lib/arrangements";
-import { listScansForBrokerDealer } from "@/lib/email-extractor";
+import {
+  listScansForBrokerDealer,
+  pickHydratableScan,
+  SCAN_HYDRATION_LIMIT,
+} from "@/lib/email-extractor";
 import {
   recordVisit,
   type FavoriteListResponse,
@@ -495,8 +499,10 @@ export function BrokerDealerDetailClient({ brokerDealerId }: { brokerDealerId: s
   // precedence order:
   //   1. `?scanId=` in the URL — wins, so deep-links and post-Find-Emails
   //      refreshes re-open the same scan.
-  //   2. Most-recent scan for this BD via list-scans-by-bd_id — so the
-  //      user sees prior emails on first load without re-running.
+  //   2. Most-recent scan *with emails* for this BD (via pickHydratableScan)
+  //      — so the user sees prior emails on first load without re-running,
+  //      and a newer empty/failed retry never masks an older run that has
+  //      results.
   // Reads `window.location.search` directly so this effect doesn't have
   // to depend on the reactive `searchParams` (the URL-sync effect below
   // would otherwise feed back into this and re-fetch on every change).
@@ -522,11 +528,12 @@ export function BrokerDealerDetailClient({ brokerDealerId }: { brokerDealerId: s
     let active = true;
     setIsHydratingScan(true);
     setCurrentScanId(null);
-    listScansForBrokerDealer(numericId, 1)
+    listScansForBrokerDealer(numericId, SCAN_HYDRATION_LIMIT)
       .then((scans) => {
         if (!active) return;
-        if (scans.length > 0) {
-          setCurrentScanId(scans[0].id);
+        const preferred = pickHydratableScan(scans);
+        if (preferred) {
+          setCurrentScanId(preferred.id);
         }
       })
       .catch(() => {
