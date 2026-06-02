@@ -15,7 +15,6 @@ from app.models.broker_dealer import BrokerDealer
 from app.models.executive_contact import ExecutiveContact
 from app.services.contact_discovery import pdl
 from app.services.contact_discovery._shared import (
-    apollo_phone_reveal_configured,
     apollo_phone_reveal_fields,
     first_apollo_phone,
 )
@@ -359,15 +358,19 @@ class ExecutiveContactService:
                 str(pid_raw).strip()[:64] if isinstance(pid_raw, (str, int)) else None
             )
             # Apollo /people/match can return an "I think this is the person"
-            # match with no email/linkedin/phone (just name + title). Skip
-            # those — they would just be empty rows that fail the
-            # ContactRow render guard (no contact channel = no row shown).
-            # Exception: when phone-reveal is configured, a match carrying an
-            # apollo_person_id is worth keeping even with no sync channel —
-            # the phone lands later via the webhook.
+            # match with no email/linkedin/phone (just name + title). Drop
+            # those — the ContactRow render guard hides zero-channel rows
+            # anyway. We used to keep them when phone-reveal was configured,
+            # betting the webhook would fill the phone later; in practice
+            # Apollo mints an *ephemeral* person id for these thin matches
+            # (it has no stable record for the officer), and that id never
+            # reappears in the async reveal callback — so the row stays
+            # permanently contactless while burning a phone-reveal credit.
+            # Matches that DO carry a sync channel still opt into the reveal
+            # (apollo_phone_reveal_fields() in _apollo_people_match), so a
+            # phone can still land on a row that already renders.
             if not email_clean and not linkedin_clean and not phone:
-                if not (apollo_phone_reveal_configured() and apollo_person_id):
-                    continue
+                continue
             display_name = f"{officer['first']} {officer['last']}"
             contacts.append(
                 ExecutiveContact(
