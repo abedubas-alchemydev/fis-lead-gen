@@ -47,6 +47,9 @@ def patch_settings(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(settings, "contact_discovery_chain", "apollo_match,hunter,snov")
     monkeypatch.setattr(settings, "contact_discovery_min_confidence", 60.0)
     monkeypatch.setattr(settings, "contact_discovery_timeout", 2.0)
+    monkeypatch.setattr(settings, "snov_request_timeout", 2.0)
+    # Snov's finder polls until "complete"; kill the inter-poll sleep in tests.
+    monkeypatch.setattr(snov, "_SNOV_POLL_INTERVAL_SECONDS", 0.0)
 
 
 @pytest.fixture(autouse=True)
@@ -247,7 +250,10 @@ async def test_snov_person_happy_path(patch_settings: None) -> None:
     respx.post(snov.EMAIL_FINDER_URL).mock(
         return_value=httpx.Response(
             200,
-            json={"data": {"email": "bryan@example.com", "probability": 82}},
+            json={
+                "data": {"emails": [{"email": "bryan@example.com", "emailStatus": "valid"}]},
+                "status": {"identifier": "complete"},
+            },
         )
     )
 
@@ -256,7 +262,7 @@ async def test_snov_person_happy_path(patch_settings: None) -> None:
 
     assert result is not None
     assert result.email == "bryan@example.com"
-    assert result.confidence == 82.0
+    assert result.confidence == 85.0
 
 
 @pytest.mark.asyncio
@@ -272,7 +278,10 @@ async def test_snov_token_refresh_on_401(patch_settings: None) -> None:
     search_route = respx.post(snov.EMAIL_FINDER_URL).mock(
         side_effect=[
             httpx.Response(401),
-            httpx.Response(200, json={"data": {"email": "bryan@example.com", "probability": 91}}),
+            httpx.Response(200, json={
+                "data": {"emails": [{"email": "bryan@example.com", "emailStatus": "valid"}]},
+                "status": {"identifier": "complete"},
+            }),
         ]
     )
 
@@ -281,8 +290,38 @@ async def test_snov_token_refresh_on_401(patch_settings: None) -> None:
 
     assert result is not None
     assert result.email == "bryan@example.com"
-    assert result.confidence == 91.0
+    assert result.confidence == 85.0
     assert oauth_route.call_count == 2
+    assert search_route.call_count == 2
+
+
+@pytest.mark.asyncio
+@respx.mock
+async def test_snov_person_polls_until_complete(patch_settings: None) -> None:
+    """The finder is async: the first call is ``in_progress`` with no emails,
+    so ``find_person`` re-POSTs the same search until it completes."""
+    respx.post(snov.OAUTH_URL).mock(
+        return_value=httpx.Response(200, json={"access_token": "snov-token", "expires_in": 3600})
+    )
+    search_route = respx.post(snov.EMAIL_FINDER_URL).mock(
+        side_effect=[
+            httpx.Response(200, json={"data": {"emails": []}, "status": {"identifier": "in_progress"}}),
+            httpx.Response(
+                200,
+                json={
+                    "data": {"emails": [{"email": "bryan@example.com", "emailStatus": "valid"}]},
+                    "status": {"identifier": "complete"},
+                },
+            ),
+        ]
+    )
+
+    provider = SnovProvider()
+    result = await provider.find_person("Bryan", "Halpert", "Example LLC", "example.com")
+
+    assert result is not None
+    assert result.email == "bryan@example.com"
+    assert result.confidence == 85.0
     assert search_route.call_count == 2
 
 

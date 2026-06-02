@@ -213,12 +213,12 @@ class Settings(BaseSettings):
     contact_discovery_chain: str = "apollo_match,hunter,snov"
     contact_discovery_min_confidence: float = 60.0
     contact_discovery_timeout: float = 10.0
-    # Snov's name->email finder holds the connection while it resolves, so the
-    # shared 10s discovery timeout severed it mid-flight on every call (logged
-    # as an empty-message httpx error -> 0 contributions). Give Snov its own,
-    # longer client timeout. If staging logs still show a timeout at this
-    # ceiling, the finder is fully async and needs the v2 task+poll flow.
-    snov_request_timeout: float = 20.0
+    # Snov's name->email finder (`get-emails-from-names`) is asynchronous: the
+    # first call returns "in_progress" and the result lands on a later poll
+    # (see snov.py). This is the overall budget for that poll loop AND the
+    # per-request httpx timeout -- once it elapses Snov is skipped so a slow
+    # search can't stall the parallel discovery fan-out.
+    snov_request_timeout: float = 12.0
     gemini_api_key: str | None = None
     gemini_api_base: str = "https://generativelanguage.googleapis.com/v1beta"
     # Production default for the structured-PDF extraction path
