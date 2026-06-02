@@ -1,8 +1,106 @@
-member_name,member_number,city,state
-"Goldman Sachs & Co. LLC",,New York,NY
-"Morgan Stanley & Co. LLC",,New York,NY
-"Charles Schwab & Co., Inc.",,San Francisco,CA
-"Wells Fargo Securities, LLC",,New York,NY
-"Merrill Lynch, Pierce, Fenner & Smith Incorporated",,New York,NY
-"J.P. Morgan Securities LLC",,New York,NY
-"Citigroup Global Markets Inc.",,New York,NY
+member_name,member_number
+"ADM Investor Services, Inc.",001
+"Goldman Sachs & Co. LLC",005
+"X-Change Financial Access, LLC",007
+"ABN AMRO Clearing USA LLC",008
+"Sanford C. Bernstein & Co., LLC",013
+"Morgan Stanley Smith Barney LLC",015
+"Interactive Brokers LLC",017
+"Jefferies LLC",019
+"Alpaca Securities, LLC",021
+"Canaccord Genuity Corp.",028
+"Natixis Securities Americas LLC",031
+"Jump Trading, LLC",036
+"RBC Capital Markets, LLC",038
+"Mirae Asset Securities (USA), Inc.",043
+"BMO Capital Markets Corp.",045
+"Phillip Capital Inc.",046
+"Morgan Stanley & Co. LLC",050
+"Axos Clearing LLC",052
+"Vanguard Marketing Corporation",062
+"Virtu Americas LLC",063
+"Instinet, LLC",067
+"LPL Financial LLC",075
+"MUFG Securities Americas Inc.",076
+"Advantage Futures LLC",079
+"National Bank Financial Inc.",080
+"R.J. O'Brien & Associates, LLC",082
+"Questrade Inc.",084
+"Velox Clearing LLC",088
+"Mizuho Securities USA LLC",089
+"Deutsche Bank Securities Inc.",094
+"Wedbush Securities Inc.",103
+"Apex Clearing Corporation",111
+"Ingalls & Snyder LLC",124
+"Clear Street LLC",132
+"Wells Fargo Clearing Services, LLC",141
+"TP ICAP Global Markets Americas LLC",148
+"Lucid Capital Markets, LLC",154
+"StoneX Financial Inc.",159
+"BofA Securities, Inc.",161
+"Charles Schwab & Co., Inc.",164
+"Nomura Securities International, Inc.",180
+"Scotia Capital Inc.",186
+"Cantor Fitzgerald & Co.",197
+"RBC Dominion Securities Inc.",198
+"BMO Nesbitt Burns, Inc.",209
+"Scotia Capital (USA) Inc.",212
+"UBS Financial Services Inc.",221
+"National Financial Services LLC",226
+"CI Investment Services Inc.",228
+"BNP Paribas Securities Corp.",230
+"RQD* Clearing, LLC",233
+"Wells Fargo Securities, LLC",250
+"Barclays Capital Inc.",255
+"State Street Bank and Trust Company",262
+"ING Financial Markets LLC",270
+"TradeStation Securities, Inc.",271
+"Futu Clearing Inc.",272
+"Hilltop Securities Inc.",279
+"SG Americas Securities, LLC",286
+"TradeUP Securities Inc.",287
+"Velocity Clearing, LLC",294
+"HSBC Securities (USA) Inc.",323
+"DriveWealth LLC",327
+"Dash Financial Technologies LLC",333
+"J.P. Morgan Securities LLC",352
+"National Bank of Canada Financial Inc.",353
+"Altruist Financial LLC",357
+"Curvature Securities LLC",358
+"Citadel Securities LLC",360
+"Marex Capital Markets Inc.",364
+"Wolverine Execution Services, LLC",365
+"Merrill Lynch, Pierce, Fenner & Smith Inc.",369
+"Tradition Securities and Derivatives LLC",370
+"Janney Montgomery Scott LLC",374
+"BUCKLER Securities LLC",392
+"Citadel Clearing LLC",395
+"Straits Financial LLC",407
+"Santander US Capital Markets LLC",413
+"Velocity Capital LLC",424
+"Archipelago Securities, L.L.C.",436
+"CIBC World Markets Corp.",438
+"HRT Financial LP",442
+"Pershing LLC",443
+"Muriel Siebert & Co., LLC.",445
+"Safra Securities LLC",457
+"IBKR Securities Services LLC",477
+"CIBC World Markets Inc.",503
+"Wealthsimple Investments Inc.",504
+"Citigroup Global Markets Inc.",505
+"Nasdaq Execution Services, LLC",520
+"Robert W. Baird & Co. Incorporated",547
+"Oppenheimer & Co. Inc.",571
+"TD Securities (USA) LLC",577
+"Vision Financial Markets LLC",595
+"SAL Equity Trading, GP",609
+"TD Waterhouse Canada Inc.",615
+"UBS Securities LLC",641
+"Daiwa Capital Markets America Inc.",647
+"M1 Finance LLC",654
+"CF Secured, LLC",694
+"Raymond James & Associates, Inc.",724
+"American Enterprise Investment Services, Inc.",756
+"Robinhood Securities, LLC",769
+"MBX Clearing LLC",776
+"Stifel, Nicolaus & Company, Incorporated",793

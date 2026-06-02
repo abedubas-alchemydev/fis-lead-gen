@@ -28,6 +28,7 @@ from app.services.brokercheck_pdf import (
     _parse_introducing_arrangements,
 )
 from app.services.finra_reconciler import (
+    STATUS_CARRIER_KEPT,
     STATUS_FINRA_EMPTY,
     STATUS_MATCH,
     STATUS_RECONCILED,
@@ -196,6 +197,28 @@ class TestDecideReconciliation:
 
     def test_blank_finra_names_treated_as_empty(self) -> None:
         d = decide_reconciliation("Self-Clearing", ["", "  "])
+        assert d.action == STATUS_FINRA_EMPTY
+
+    def test_confirmed_carrier_keeps_label(self) -> None:
+        # JPM class: a DTC/OCC member whose Form BD lists an introducing partner
+        # (Pershing) must NOT be demoted to fully_disclosed — record, keep carrier.
+        d = decide_reconciliation(
+            "Self-Clearing", ["PERSHING LLC"], is_confirmed_carrier=True
+        )
+        assert d.action == STATUS_CARRIER_KEPT
+        assert d.primary_partner == "PERSHING LLC"
+
+    def test_non_carrier_with_same_inputs_still_reconciles(self) -> None:
+        # Same inputs, NOT a confirmed carrier -> normal reconcile to the partner.
+        d = decide_reconciliation(
+            "Self-Clearing", ["PERSHING LLC"], is_confirmed_carrier=False
+        )
+        assert d.action == STATUS_RECONCILED
+        assert d.primary_partner == "PERSHING LLC"
+
+    def test_carrier_with_no_finra_partner_is_empty(self) -> None:
+        # No Form BD arrangement at all -> nothing to keep or apply.
+        d = decide_reconciliation(None, [], is_confirmed_carrier=True)
         assert d.action == STATUS_FINRA_EMPTY
 
 

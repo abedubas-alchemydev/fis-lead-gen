@@ -11,6 +11,7 @@ from app.services.clearing_validator import (
     ClearingSignals,
     format_signals_for_prompt,
     indicates_no_customer_accounts,
+    looks_like_audit_firm,
     validate_clearing,
 )
 
@@ -114,6 +115,18 @@ class TestPromote:
         assert decision.clearing_type == "self_clearing"
         assert decision.action == "promote"
 
+    def test_nscc_only_does_not_promote(self) -> None:
+        """NSCC-alone is Fund/SERV (mutual-fund distribution), not self-clearing,
+        so a confirmed NSCC-only member must NOT be promoted (the 260 fund
+        distributors that surfaced in the staging audit)."""
+        signals = ClearingSignals(
+            memberships=frozenset({"NSCC"}),
+            membership_checked=True,
+        )
+        decision = _validate("unknown", signals)
+        assert decision.clearing_type == "unknown"
+        assert decision.action == "pass"
+
     def test_no_promotion_when_membership_unchecked(self) -> None:
         """Never act on absence of data: unchecked membership must not promote
         even at carrying-tier capital."""
@@ -125,16 +138,34 @@ class TestPromote:
         assert decision.clearing_type == "unknown"
         assert decision.action == "pass"
 
-    def test_no_promotion_when_finra_partner_present(self) -> None:
+    def test_member_overrides_finra_partner(self) -> None:
+        """A confirmed DTC/OCC member carries in-house, so a Form BD introducing
+        partner does NOT block the carrying label — membership wins (the durable
+        JPM/Goldman fix: a Form BD partner must not demote a confirmed carrier)."""
         signals = ClearingSignals(
             memberships=frozenset({"DTC"}),
             membership_checked=True,
             finra_introducing_partner="Pershing LLC",
         )
         decision = _validate("non_carrying", signals)
-        # Conflicting signals (member + introduces) -> review, not promote.
-        assert decision.action == "consistency"
-        assert decision.needs_review is True
+        assert decision.clearing_type == "self_clearing"
+        assert decision.action == "promote"
+        assert decision.corrected is True
+
+    def test_fully_disclosed_member_promoted_to_self_clearing(self) -> None:
+        """The JPM class: the filing/Form BD said fully_disclosed but the firm
+        is a confirmed DTC/OCC member -> membership overrides -> self_clearing,
+        and the contradictory partner is cleared."""
+        signals = ClearingSignals(
+            required_min_capital=6_600_000_000,
+            memberships=frozenset({"DTC", "OCC"}),
+            membership_checked=True,
+            finra_introducing_partner="Pershing LLC",
+        )
+        decision = _validate("fully_disclosed", signals, partner="Pershing LLC")
+        assert decision.clearing_type == "self_clearing"
+        assert decision.clearing_partner is None
+        assert decision.action == "promote"
 
 
 # ─────────────────────────── CONSISTENCY ────────────────────────────
@@ -175,6 +206,126 @@ class TestPassThrough:
         assert decision.action == "pass"
 
 
+# ─────────────────── Auditor-as-partner guard ───────────────────────
+
+
+class TestAuditorPartnerGuard:
+    """Regression for the Wells Fargo Clearing bug: the X-17A-5 independent
+    auditor (Deloitte & Touche) was mis-extracted as a clearing partner and
+    normalized to the registered BD 'Deloitte Corporate Finance LLC', flipping a
+    $107M carrying firm to fully_disclosed at confidence 1.0."""
+
+    def test_wells_fargo_case_capital_overrides_auditor_partner(self) -> None:
+        signals = ClearingSignals(required_min_capital=107_031_000)
+        decision = _validate(
+            "fully_disclosed", signals, partner="DELOITTE CORPORATE FINANCE LLC"
+        )
+        assert decision.clearing_type == "self_clearing"
+        assert decision.clearing_partner is None
+        assert decision.corrected is True
+        assert decision.needs_review is False
+        assert decision.action == "partner_guard"
+
+    def test_membership_overrides_auditor_partner(self) -> None:
+        # A confirmed DTC/OCC member with a (spurious) audit-firm partner is
+        # resolved to self_clearing by the MEMBERSHIP-OVERRIDE rule, which runs
+        # before the auditor guard — so the action is "promote", not
+        # "partner_guard". Either path keeps the auditor name from sticking.
+        signals = ClearingSignals(
+            memberships=frozenset({"DTC", "NSCC"}), membership_checked=True
+        )
+        decision = _validate(
+            "fully_disclosed", signals, partner="Deloitte & Touche LLP"
+        )
+        assert decision.clearing_type == "self_clearing"
+        assert decision.action == "promote"
+        assert decision.corrected is True
+
+    def test_real_finra_partner_replaces_auditor_partner(self) -> None:
+        signals = ClearingSignals(
+            required_min_capital=5000, finra_introducing_partner="Pershing LLC"
+        )
+        decision = _validate(
+            "fully_disclosed", signals, partner="KPMG Corporate Finance LLC"
+        )
+        assert decision.clearing_type == "fully_disclosed"
+        assert decision.clearing_partner == "Pershing LLC"
+        assert decision.action == "partner_guard"
+        assert decision.corrected is True
+
+    def test_auditor_partner_no_resolving_signal_routes_to_review(self) -> None:
+        signals = ClearingSignals(required_min_capital=5000)  # below floor, no partner
+        decision = _validate(
+            "fully_disclosed", signals, partner="Ernst & Young Capital Advisors"
+        )
+        assert decision.clearing_type == "unknown"
+        assert decision.clearing_partner is None
+        assert decision.needs_review is True
+        assert decision.action == "review"
+
+    def test_omnibus_with_auditor_partner_also_guarded(self) -> None:
+        signals = ClearingSignals(required_min_capital=1_000_000)
+        decision = _validate("omnibus", signals, partner="BDO USA LLP")
+        assert decision.clearing_type == "self_clearing"
+        assert decision.action == "partner_guard"
+
+    def test_real_clearing_partner_is_not_guarded(self) -> None:
+        """The guard must not over-fire: a genuine clearing broker passes."""
+        signals = ClearingSignals(
+            required_min_capital=5000, finra_introducing_partner="Pershing LLC"
+        )
+        for real in (
+            "Pershing LLC",
+            "National Financial Services LLC",
+            "RBC Capital Markets, LLC",
+            "Apex Clearing Corporation",
+        ):
+            decision = _validate("fully_disclosed", signals, partner=real)
+            assert decision.action == "pass", real
+            assert decision.clearing_type == "fully_disclosed"
+
+    def test_self_clearing_with_auditor_partner_is_untouched_by_guard(self) -> None:
+        """Guard only applies to fully_disclosed/omnibus; a self_clearing row
+        with high capital still passes (it never claimed an introducing
+        partner)."""
+        signals = ClearingSignals(required_min_capital=6_000_000_000)
+        decision = _validate(
+            "self_clearing", signals, partner="Deloitte Corporate Finance LLC"
+        )
+        assert decision.clearing_type == "self_clearing"
+        assert decision.action == "pass"
+
+
+class TestLooksLikeAuditFirm:
+    def test_audit_firm_names_match(self) -> None:
+        for name in (
+            "DELOITTE CORPORATE FINANCE LLC",
+            "Deloitte & Touche LLP",
+            "Ernst & Young Capital Advisors LLC",
+            "KPMG Corporate Finance LLC",
+            "PricewaterhouseCoopers LLP",
+            "PwC",
+            "Grant Thornton LLP",
+            "RSM US LLP",
+            "BDO USA, LLP",
+            "Marcum LLP",
+        ):
+            assert looks_like_audit_firm(name), name
+
+    def test_real_clearing_brokers_do_not_match(self) -> None:
+        for name in (
+            "Pershing LLC",
+            "National Financial Services LLC",
+            "RBC Capital Markets, LLC",
+            "Apex Clearing Corporation",
+            "Hilltop Securities Inc.",
+            "BOK Financial Securities",
+            None,
+            "",
+        ):
+            assert not looks_like_audit_firm(name), name
+
+
 # ──────────────────────── Signals + helpers ─────────────────────────
 
 
@@ -188,8 +339,16 @@ class TestSignalProperties:
         assert not ClearingSignals(required_min_capital=None).is_below_carrying_floor
 
     def test_self_clearing_membership_property(self) -> None:
-        assert ClearingSignals(
+        # DTC (depository) or OCC (options clearing) conclusively => carrying.
+        assert ClearingSignals(memberships=frozenset({"DTC"})).has_self_clearing_membership
+        assert ClearingSignals(memberships=frozenset({"OCC"})).has_self_clearing_membership
+        # NSCC ALONE is Fund/SERV (mutual-fund distribution), NOT self-clearing.
+        assert not ClearingSignals(
             memberships=frozenset({"NSCC"})
+        ).has_self_clearing_membership
+        # NSCC alongside DTC is a genuine self-clearer.
+        assert ClearingSignals(
+            memberships=frozenset({"NSCC", "DTC"})
         ).has_self_clearing_membership
         assert not ClearingSignals(
             memberships=frozenset({"FICC-GOV"})

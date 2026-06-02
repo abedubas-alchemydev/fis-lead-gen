@@ -53,6 +53,28 @@ def test_same_key_two_firms_routes_both_to_review() -> None:
     assert all(r.confidence == AMBIGUOUS_CONFIDENCE for r in results)
 
 
+def test_exact_name_beats_alias_collision() -> None:
+    # Regression (Pershing): "PERSHING LLC" must attach to the firm literally
+    # named Pershing LLC (exact_normalized), not to a firm that only carries
+    # "Pershing LLC" as a resolver alias. Weaker-method collisions are dropped,
+    # so this is a clean single active match — not a needs_review tie.
+    index = _index(
+        (22280, [("Pershing LLC", "exact_normalized")]),
+        (
+            24228,
+            [
+                ("Pershing Advisor Solutions LLC", "exact_normalized"),
+                ("Pershing LLC", "alias"),
+            ],
+        ),
+    )
+    results = match_name(index, "PERSHING LLC")
+    assert len(results) == 1
+    assert results[0].firm_id == 22280
+    assert results[0].status == "active"
+    assert results[0].method == "exact_normalized"
+
+
 def test_dba_and_alias_methods_carry_confidence() -> None:
     index = _index((2, [("Acme Securities", "exact_normalized"), ("Acme Trading", "dba")]))
     dba_hit = match_name(index, "Acme Trading")

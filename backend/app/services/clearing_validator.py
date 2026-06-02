@@ -39,9 +39,14 @@ from app.models.introducing_arrangement import IntroducingArrangement
 # Below this floor a firm is non-carrying and cannot legitimately self-clear.
 CARRYING_CAPITAL_FLOOR = 250_000
 
-# Memberships whose presence positively indicates the firm clears/settles
-# in-house (i.e. it is genuinely self-clearing / omnibus).
-_SELF_CLEARING_AGENCIES = frozenset({"DTC", "NSCC", "OCC"})
+# Memberships whose presence CONCLUSIVELY indicates the firm carries/settles
+# in-house: DTC (securities depository/custody) and OCC (options clearing).
+# NSCC is deliberately EXCLUDED — NSCC membership alone is most often Fund/SERV
+# (mutual-fund distribution), which a non-carrying distributor holds without
+# self-clearing. A genuine equities self-clearer is also a DTC participant
+# (CNS settlement requires the depository), so DTC/OCC already captures it
+# without sweeping in the fund distributors.
+_SELF_CLEARING_AGENCIES = frozenset({"DTC", "OCC"})
 
 # Boilerplate that indicates the firm carries no customer accounts at all
 # (M&A advisory, private placement, (k)(1)/(k)(2)(i) exempt).
@@ -49,6 +54,34 @@ _NO_CUSTOMER_ACCOUNTS_RE = re.compile(
     r"does\s+not\s+(?:carry|hold\s+or\s+maintain|hold|maintain)",
     re.IGNORECASE,
 )
+
+# Audit / advisory firms that are NOT clearing brokers but whose names sit on
+# the X-17A-5 (the independent auditor signs the audited report) and collide
+# with registered broker-dealer affiliates — e.g. the auditor "Deloitte &
+# Touche" vs. the registered BD "Deloitte Corporate Finance LLC". An
+# introducing firm never clears through its auditor, so such a name as a
+# *clearing partner* is spurious. Lookarounds (not ``\b``) so a token touching
+# punctuation still matches; whole-token only so we don't clip real broker
+# names. Covers the Big Four + the next-tier audit firms that register BD arms.
+_AUDIT_FIRM_PARTNER_RE = re.compile(
+    r"(?<!\w)(?:"
+    r"deloitte|touche|ernst|kpmg|pricewaterhouse(?:coopers)?|pwc|"
+    r"grant\s+thornton|marcum|mazars|baker\s+tilly|bdo|rsm|crowe"
+    r")(?!\w)",
+    re.IGNORECASE,
+)
+
+
+def looks_like_audit_firm(partner: Optional[str]) -> bool:
+    """True when a *clearing partner* name is actually an audit/advisory firm.
+
+    These never clear trades; their appearance as a clearing partner means the
+    extractor latched onto the X-17A-5's independent auditor (or an advisory
+    affiliate) instead of a real carrying broker.
+    """
+    if not partner:
+        return False
+    return bool(_AUDIT_FIRM_PARTNER_RE.search(partner))
 
 
 @dataclass(frozen=True, slots=True)
@@ -105,7 +138,7 @@ class ClearingDecision:
     # Validator could not conclusively resolve a contradiction: the caller sets
     # the row's ``extraction_status`` to ``needs_review``.
     needs_review: bool
-    action: str  # "pass" | "demote" | "promote" | "consistency" | "review"
+    action: str  # "pass" | "demote" | "promote" | "consistency" | "partner_guard" | "review"
     rationale: str
 
 
@@ -172,14 +205,14 @@ def validate_clearing(
             ),
         )
 
-    # 2) PROMOTION — a confirmed self-clearer Gemini under-called. Only a
-    #    positive membership (DTC/NSCC/OCC) is conclusive enough to promote;
-    #    capital-only contradictions fall through to consistency review.
-    if (
-        ct in ("unknown", "non_carrying")
-        and signals.has_self_clearing_membership
-        and not signals.finra_introducing_partner
-    ):
+    # 2) MEMBERSHIP OVERRIDE — a confirmed DTC/OCC clearing member carries and
+    #    settles in-house BY DEFINITION, so it cannot be fully_disclosed /
+    #    non_carrying / unknown no matter what the filing (or a FINRA Form BD
+    #    introducing arrangement) says. Membership is the authoritative carrying
+    #    signal -> self_clearing; an already self_clearing/omnibus label is left
+    #    untouched. This is the durable form of the JPM/Goldman/Citi
+    #    reconciliation (a Form BD partner must not demote a confirmed carrier).
+    if signals.has_self_clearing_membership and ct not in ("self_clearing", "omnibus"):
         return ClearingDecision(
             clearing_type="self_clearing",
             clearing_partner=None,
@@ -187,18 +220,17 @@ def validate_clearing(
             needs_review=False,
             action="promote",
             rationale=(
-                "promoted to self_clearing: active "
+                "confirmed "
                 f"{', '.join(sorted(signals.memberships & _SELF_CLEARING_AGENCIES))} "
-                "membership and no FINRA introducing partner."
+                "clearing-agency membership -> the firm carries/settles in-house; "
+                "membership overrides the proposed non-carrying label."
             ),
         )
 
-    # 3) CONSISTENCY — non_carrying contradicted by carrying-tier capital or a
-    #    clearing-agency membership we couldn't promote on (e.g. a FINRA partner
-    #    is also present). Not conclusive which way -> needs_review.
-    if ct == "non_carrying" and (
-        signals.is_at_or_above_carrying_floor or signals.has_self_clearing_membership
-    ):
+    # 3) CONSISTENCY — non_carrying contradicted by carrying-tier capital (a
+    #    confirmed member would already have been promoted in rule 2). Not
+    #    conclusive which way -> needs_review.
+    if ct == "non_carrying" and signals.is_at_or_above_carrying_floor:
         return ClearingDecision(
             clearing_type="unknown",
             clearing_partner=clearing_partner,
@@ -211,7 +243,70 @@ def validate_clearing(
             ),
         )
 
-    # 4) PASS-THROUGH — no conclusive contradiction; keep Gemini's label and let
+    # 4) AUDITOR-AS-PARTNER GUARD — a fully_disclosed/omnibus label whose named
+    #    clearing partner is actually an audit/advisory firm (e.g. the X-17A-5's
+    #    independent auditor "Deloitte & Touche" normalized to the registered BD
+    #    "Deloitte Corporate Finance LLC"). An introducing firm never clears
+    #    through its auditor, so the partner is spurious; resolve the real label
+    #    from the hard signals, strongest first, and only flag review when none
+    #    of them speak.
+    if ct in ("fully_disclosed", "omnibus") and looks_like_audit_firm(clearing_partner):
+        if signals.has_self_clearing_membership:
+            return ClearingDecision(
+                clearing_type="self_clearing",
+                clearing_partner=None,
+                corrected=True,
+                needs_review=False,
+                action="partner_guard",
+                rationale=(
+                    f"clearing partner '{clearing_partner}' is an audit/advisory firm, "
+                    "not a clearing broker (likely the X-17A-5 independent auditor); "
+                    "active "
+                    f"{', '.join(sorted(signals.memberships & _SELF_CLEARING_AGENCIES))} "
+                    "membership confirms in-house clearing -> self_clearing."
+                ),
+            )
+        if signals.finra_introducing_partner:
+            return ClearingDecision(
+                clearing_type="fully_disclosed",
+                clearing_partner=signals.finra_introducing_partner,
+                corrected=True,
+                needs_review=False,
+                action="partner_guard",
+                rationale=(
+                    f"clearing partner '{clearing_partner}' is an audit/advisory firm, "
+                    "not a clearing broker; FINRA Form BD names the real introducing "
+                    f"partner '{signals.finra_introducing_partner}' -> fully_disclosed."
+                ),
+            )
+        if signals.is_at_or_above_carrying_floor:
+            return ClearingDecision(
+                clearing_type="self_clearing",
+                clearing_partner=None,
+                corrected=True,
+                needs_review=False,
+                action="partner_guard",
+                rationale=(
+                    f"clearing partner '{clearing_partner}' is an audit/advisory firm, "
+                    "not a clearing broker (likely the X-17A-5 independent auditor); "
+                    "carrying-tier capital and no real introducing partner -> "
+                    "self_clearing."
+                ),
+            )
+        return ClearingDecision(
+            clearing_type="unknown",
+            clearing_partner=None,
+            corrected=False,
+            needs_review=True,
+            action="review",
+            rationale=(
+                f"clearing partner '{clearing_partner}' is an audit/advisory firm, not a "
+                "clearing broker (likely the X-17A-5 independent auditor), and no carrying "
+                "signal or FINRA partner resolves the real label -> needs_review."
+            ),
+        )
+
+    # 5) PASS-THROUGH — no conclusive contradiction; keep Gemini's label and let
     #    the normal confidence gate decide the row's status.
     return ClearingDecision(
         clearing_type=ct,
@@ -257,11 +352,20 @@ def format_signals_for_prompt(signals: ClearingSignals) -> str:
 
     if signals.membership_checked:
         if signals.memberships:
-            lines.append(
-                f"- Clearing-agency membership: ACTIVE member of "
-                f"{', '.join(sorted(signals.memberships))} -> strongly indicates "
-                "self_clearing/omnibus (the firm settles in-house)."
-            )
+            members = ", ".join(sorted(signals.memberships))
+            if signals.has_self_clearing_membership:
+                lines.append(
+                    f"- Clearing-agency membership: ACTIVE member of {members} "
+                    "(incl. DTC/OCC) -> strongly indicates self_clearing/omnibus "
+                    "(the firm settles securities/options in-house)."
+                )
+            else:
+                lines.append(
+                    f"- Clearing-agency membership: ACTIVE member of {members} only. "
+                    "NOTE: NSCC membership alone is typically Fund/SERV (mutual-fund "
+                    "distribution), NOT securities self-clearing — do not infer "
+                    "self_clearing from it without DTC/OCC."
+                )
         else:
             lines.append(
                 "- Clearing-agency membership: evaluated, NOT a member -> the firm does "
@@ -328,5 +432,6 @@ __all__ = [
     "format_signals_for_prompt",
     "indicates_no_customer_accounts",
     "load_clearing_signals",
+    "looks_like_audit_firm",
     "validate_clearing",
 ]
