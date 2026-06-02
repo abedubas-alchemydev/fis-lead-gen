@@ -1,6 +1,6 @@
 "use client";
 
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import clsx from "clsx";
 import Link from "next/link";
 import type { Route } from "next";
@@ -140,6 +140,10 @@ export function AdvisorDetailClient({ advisorId }: { advisorId: string }) {
   const [isGapFilling, setIsGapFilling] = useState(false);
   const [gapFillError, setGapFillError] = useState<string | null>(null);
   const [gapFillNotice, setGapFillNotice] = useState<string | null>(null);
+  // Apollo phone reveals land asynchronously (~1-3 min after a gap-fill run);
+  // this timer drives a few extra /profile re-fetches so they appear without a
+  // manual reload. Cleared on advisor switch / unmount.
+  const latePhonePollRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
   // Filings list renders collapsed to the most-recent few; "Show all"
   // expands the full in-memory list. Reset when switching advisors (the
@@ -189,6 +193,12 @@ export function AdvisorDetailClient({ advisorId }: { advisorId: string }) {
     setShowAllFilings(false);
     setGapFillNotice(null);
     setGapFillError(null);
+    return () => {
+      if (latePhonePollRef.current) {
+        clearTimeout(latePhonePollRef.current);
+        latePhonePollRef.current = null;
+      }
+    };
   }, [advisorId]);
 
   // Manual refresh handler. POST /refresh-all on click, poll the parent
@@ -280,6 +290,25 @@ export function AdvisorDetailClient({ advisorId }: { advisorId: string }) {
         setGapFillNotice(result.reason ?? "Gap-fill skipped.");
       }
       await reloadProfile();
+      // Apollo phone reveals arrive async (~1-3 min) via the webhook; re-fetch
+      // the profile a few more times so the numbers appear without a manual
+      // reload. Non-blocking — the button is already done at this point.
+      if (latePhonePollRef.current) clearTimeout(latePhonePollRef.current);
+      let phonePollAttempts = 0;
+      const pollLatePhones = () => {
+        latePhonePollRef.current = setTimeout(() => {
+          phonePollAttempts += 1;
+          void reloadProfile().catch(() => {
+            /* transient — keep polling */
+          });
+          if (phonePollAttempts < 5) {
+            pollLatePhones();
+          } else {
+            latePhonePollRef.current = null;
+          }
+        }, 30_000);
+      };
+      pollLatePhones();
     } catch (err) {
       setGapFillError(
         err instanceof Error ? err.message : "Gap-fill failed.",

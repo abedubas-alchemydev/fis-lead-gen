@@ -172,6 +172,17 @@ export function BrokerDealerDetailClient({ brokerDealerId }: { brokerDealerId: s
   const [isEnriching, setIsEnriching] = useState(false);
   const [enrichError, setEnrichError] = useState<string | null>(null);
   const [enrichNotice, setEnrichNotice] = useState<string | null>(null);
+  // Apollo phone reveals land asynchronously (~1-3 min after enrich); this timer
+  // drives a few extra /profile re-fetches so they appear without a reload.
+  const latePhonePollRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  useEffect(() => {
+    return () => {
+      if (latePhonePollRef.current) {
+        clearTimeout(latePhonePollRef.current);
+        latePhonePollRef.current = null;
+      }
+    };
+  }, [brokerDealerId]);
   const [prevId, setPrevId] = useState<number | null>(null);
   const [nextId, setNextId] = useState<number | null>(null);
   // Inline "Discovered Emails" section state. `currentScanId` is the
@@ -735,6 +746,25 @@ export function BrokerDealerDetailClient({ brokerDealerId }: { brokerDealerId: s
         },
       );
       setProfile((c) => (c ? { ...c, executive_contacts: contacts } : c));
+      // Apollo phone reveals arrive async (~1-3 min) via the webhook; re-fetch
+      // the profile a few more times so the numbers appear without a manual
+      // reload.
+      if (latePhonePollRef.current) clearTimeout(latePhonePollRef.current);
+      let phonePollAttempts = 0;
+      const pollLatePhones = () => {
+        latePhonePollRef.current = setTimeout(() => {
+          phonePollAttempts += 1;
+          void reloadProfile().catch(() => {
+            /* transient — keep polling */
+          });
+          if (phonePollAttempts < 5) {
+            pollLatePhones();
+          } else {
+            latePhonePollRef.current = null;
+          }
+        }, 30_000);
+      };
+      pollLatePhones();
       const hasNewContact = contacts.some(
         (c) => !previousNames.has(c.name.trim().toLowerCase()),
       );

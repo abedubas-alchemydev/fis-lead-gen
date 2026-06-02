@@ -1161,6 +1161,11 @@ async def _run_enrich_contacts(
                     if row is not None:
                         resolved_names.add(entry["display_name"])
                         with_channels += 1
+                    # Commit each discovered row immediately so its
+                    # apollo_person_id is persisted before Apollo's async
+                    # phone-reveal callback races in (the webhook 200s on a
+                    # no-match and Apollo won't retry).
+                    await db.commit()
 
                 # Backfill: any officer the chain couldn't resolve still gets a
                 # names-only row so the People panel shows the full roster. Skip

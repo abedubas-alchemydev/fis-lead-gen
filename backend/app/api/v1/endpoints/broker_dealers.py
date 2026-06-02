@@ -582,10 +582,15 @@ async def enrich_broker_dealer_contacts(
                 entity, bd_id=broker_dealer.id, session=db, use_cache=not force
             )
             if row is not None:
+                # Commit immediately so the row's apollo_person_id is persisted
+                # before Apollo's async phone-reveal callback races in (the
+                # webhook 200s on a no-match and Apollo won't retry). Use the
+                # entity cache_name (== row.name) so we don't touch the
+                # commit-expired ORM object.
+                await db.commit()
                 discovered += 1
-                existing_names.add(_normalise_name(row.name))
+                existing_names.add(_normalise_name(entity["cache_name"]))
         if discovered:
-            await db.commit()
             contacts = await contact_service.list_contacts(db, broker_dealer.id)
 
     return [ExecutiveContactItem.model_validate(item) for item in contacts]
