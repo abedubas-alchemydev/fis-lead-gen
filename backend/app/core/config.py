@@ -183,22 +183,32 @@ class Settings(BaseSettings):
     # that already clear our threshold — a too-low value would return
     # billed-but-useless matches.
     pdl_min_likelihood: int = 6
-    # Multi-provider contact discovery chain used by the "Generate More Details"
-    # button on the firm detail page. The orchestrator walks providers in the
-    # comma-separated order below; the first result with ``confidence >=
-    # contact_discovery_min_confidence`` wins. PDL leads because it's the
-    # only provider that returns multi-value emails + phones; Apollo / Hunter
-    # / Snov stay as fallbacks (cheap, pay-as-you-go) when PDL misses or has
-    # no key. Keys (``hunter_api_key``, ``snov_client_id``,
-    # ``snov_client_secret``) are declared further down because the existing
-    # email-extractor module already depends on them.
-    #
-    # ``linkedin_search`` runs LAST: it recovers a LinkedIn URL via a public
-    # Google search (serper/SerpAPI, ``site:linkedin.com/in``) only for people
-    # the data-broker providers couldn't supply one for. Last position means
-    # the merge's first-non-null ``linkedin_url`` selection prefers a broker's
-    # URL and only falls back to the search hit when all brokers missed.
-    contact_discovery_chain: str = "pdl,apollo_match,hunter,snov,linkedin_search"
+    # Contact-discovery chain for the "Generate More Details" button on the
+    # firm detail page. The orchestrator runs every provider below
+    # CONCURRENTLY (``asyncio.gather``) and merges the hits that clear
+    # ``contact_discovery_min_confidence`` -- ``linkedin_url`` and the scalar
+    # email/phone take the first non-null in chain order, so order still
+    # decides ties. Because the fan-out calls *every* listed provider on every
+    # officer, a provider that rarely wins is pure cost. The default is
+    # therefore trimmed to the two providers that actually fit this cohort
+    # (staging audit 2026-06-02):
+    #   * ``apollo_match`` -- backbone. Matches by name + company (no domain
+    #     needed), supplies phone + LinkedIn at high coverage plus some email,
+    #     and carries the async phone-reveal + director-LinkedIn fallback.
+    #   * ``hunter`` -- email supplement (domain-gated). The one email finder
+    #     that performs on this data; only bills when a firm domain exists.
+    # Dropped from the default but still registered in
+    # ``orchestrator._PROVIDERS`` -- re-add any to ``CONTACT_DISCOVERY_CHAIN``
+    # (env) to re-enable with no code change:
+    #   * ``pdl`` -- near-zero match rate on small broker-dealers despite being
+    #     billed per call (6 contact rows total at audit).
+    #   * ``snov`` -- was failing on 100% of calls (transport-level error) and,
+    #     even healthy, only duplicates Hunter's domain-based email niche.
+    #   * ``linkedin_search`` -- costs a serper/SerpAPI call per officer in the
+    #     parallel fan-out while Apollo already supplies LinkedIn for ~97% of
+    #     its matches, so it won 0 rows. Re-add (with ``SERPER_API_KEY``) only
+    #     if a LinkedIn-recovery gap reappears.
+    contact_discovery_chain: str = "apollo_match,hunter"
     contact_discovery_min_confidence: float = 60.0
     contact_discovery_timeout: float = 10.0
     gemini_api_key: str | None = None
