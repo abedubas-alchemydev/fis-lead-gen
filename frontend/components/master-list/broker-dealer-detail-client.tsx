@@ -644,21 +644,6 @@ export function BrokerDealerDetailClient({ brokerDealerId }: { brokerDealerId: s
     }
   }
 
-  // Per-contact updates from the Find-phone button. Replaces the single
-  // row in place so the UI reflects the new phone without a full refetch.
-  const handleContactUpdated = useCallback((updated: ExecutiveContactItem) => {
-    setProfile((c) =>
-      c
-        ? {
-            ...c,
-            executive_contacts: c.executive_contacts.map((row) =>
-              row.id === updated.id ? updated : row,
-            ),
-          }
-        : c,
-    );
-  }, []);
-
   const chartPoints = useMemo(() => {
     if (!profile) return [] as Array<{ label: string; value: number }>;
     return profile.financials
@@ -1073,12 +1058,7 @@ export function BrokerDealerDetailClient({ brokerDealerId }: { brokerDealerId: s
                 {
                   header: "Channels",
                   cell: (o) => (
-                    <ChannelIconCell
-                      contact={o.contact}
-                      entityKind="broker-dealer"
-                      entityId={bd.id}
-                      onContactUpdated={handleContactUpdated}
-                    />
+                    <ChannelIconCell contact={o.contact} />
                   ),
                   className: "whitespace-nowrap",
                 },
@@ -1133,12 +1113,7 @@ export function BrokerDealerDetailClient({ brokerDealerId }: { brokerDealerId: s
                 {
                   header: "Channels",
                   cell: (c) => (
-                    <ChannelIconCell
-                      contact={c}
-                      entityKind="broker-dealer"
-                      entityId={bd.id}
-                      onContactUpdated={handleContactUpdated}
-                    />
+                    <ChannelIconCell contact={c} />
                   ),
                   className: "whitespace-nowrap",
                 },
