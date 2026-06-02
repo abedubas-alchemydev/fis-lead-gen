@@ -23,11 +23,15 @@ Live progress + crash recovery:
     BEFORE it is processed, so the master list shows live which firms are being
     corrected right now (up to ``--concurrency`` at a time). The real label
     overwrites it when the firm finishes.
-  * Every completed ``bd_id`` is appended to the checkpoint file the moment its
-    real label is written. ``--resume`` skips everything already in the
-    checkpoint and appends to the CSV, so a crash resumes exactly where it
-    stopped. A firm left on 'Identifying' (killed mid-flight, or a per-firm
-    error) is NOT checkpointed, so it is re-done on the next run / --resume.
+  * Every completed ``bd_id`` is appended to the checkpoint the moment its real
+    label is written. ``--resume`` skips everything already in the checkpoint
+    and appends to the CSV, so a crash resumes exactly where it stopped. A firm
+    left on 'Identifying' (killed mid-flight, or a per-firm error) is NOT
+    checkpointed, so it is re-done on the next run / --resume.
+  * ``--out`` / ``--checkpoint`` accept ``gs://`` URIs. Because the Cloud Run
+    container FS is ephemeral, the script streams to a local working file and
+    pushes it to GCS every few firms + at the end (and pulls it back on
+    ``--resume``), so the CSV survives the container and is retrievable.
 
 Best + efficient + fast, without sacrificing quality:
   * DEFAULT = ``--model pro --concurrency 8`` -- every firm read by the best
@@ -35,8 +39,7 @@ Best + efficient + fast, without sacrificing quality:
     quota allows. The quota (~1,000/day on Tier 1) is the only wall; raise the
     tier or chunk with ``--offset`` if 3 days is too slow.
   * ``--concurrency 1`` -- strict one-firm-at-a-time (single 'Identifying').
-  * Quota-wall fallback (small, known quality residual on confident-but-wrong
-    high-cap reads): ``--model flash --concurrency 8`` for the bulk, then
+  * Quota-wall fallback: ``--model flash --concurrency 8`` for the bulk, then
     ``--model pro --only-needs-review`` to re-read just the uncertain rows.
 
 CSV columns: bd_id, name, crd, old_type, new_type, old_classification,
@@ -47,8 +50,8 @@ Usage:
     python -m scripts.run_clearing_reclassification_backfill --limit 30   # Pro spot-check
     python -m scripts.run_clearing_reclassification_backfill              # full Pro, 8-wide
     python -m scripts.run_clearing_reclassification_backfill --resume     # after a crash
-    python -m scripts.run_clearing_reclassification_backfill --model flash --concurrency 8
-    python -m scripts.run_clearing_reclassification_backfill --model pro --only-needs-review
+    python -m scripts.run_clearing_reclassification_backfill --out gs://bucket/out.csv \
+        --checkpoint gs://bucket/ckpt.txt   # Cloud Run (durable output)
 """
 
 from __future__ import annotations
@@ -59,6 +62,7 @@ import csv
 import logging
 import selectors
 import sys
+import tempfile
 import time
 from pathlib import Path
 
@@ -92,6 +96,11 @@ IN_PROGRESS_MARKER = "Identifying"
 
 MODEL_IDS = {"flash": "gemini-2.5-flash", "pro": "gemini-2.5-pro"}
 
+# How often (in completed firms) to push the CSV + checkpoint to GCS when the
+# output paths are gs:// URIs. A crash loses at most this many firms of
+# checkpoint -> they're reprocessed on --resume (idempotent).
+GCS_SYNC_EVERY = 25
+
 CSV_FIELDS = [
     "bd_id",
     "name",
@@ -109,6 +118,37 @@ CSV_FIELDS = [
     "notes",
     "model",
 ]
+
+
+def _is_gcs(uri: str) -> bool:
+    return str(uri).startswith("gs://")
+
+
+def _gcs_name(uri: str) -> str:
+    return uri.rstrip("/").rsplit("/", 1)[-1]
+
+
+def _gcs_split(uri: str) -> tuple[str, str]:
+    bucket, _, key = uri[len("gs://"):].partition("/")
+    return bucket, key
+
+
+def _gcs_upload(local: Path, uri: str) -> None:
+    from google.cloud import storage  # lazy: only needed for gs:// outputs
+
+    bucket, key = _gcs_split(uri)
+    storage.Client().bucket(bucket).blob(key).upload_from_filename(str(local))
+
+
+def _gcs_download(uri: str, local: Path) -> bool:
+    from google.cloud import storage
+
+    bucket, key = _gcs_split(uri)
+    blob = storage.Client().bucket(bucket).blob(key)
+    if not blob.exists():
+        return False
+    blob.download_to_filename(str(local))
+    return True
 
 
 def _load_checkpoint(path: Path) -> set[int]:
@@ -223,8 +263,8 @@ async def _reclassify_one(
 async def main(
     limit: int | None,
     offset: int,
-    out_path: Path,
-    checkpoint_path: Path,
+    out: str,
+    checkpoint: str,
     model: str,
     concurrency: int,
     only_needs_review: bool,
@@ -251,6 +291,24 @@ async def main(
     if limit is not None:
         bd_ids = bd_ids[:limit]
 
+    # Resolve gs:// outputs to a local working copy + a GCS destination. On
+    # Cloud Run the container FS is ephemeral, so we stream to a local file and
+    # periodically push it to GCS (durable + retrievable for review).
+    out_gcs = out if _is_gcs(out) else None
+    ckpt_gcs = checkpoint if _is_gcs(checkpoint) else None
+    work_dir = Path(tempfile.gettempdir())
+    out_path = (work_dir / _gcs_name(out)) if out_gcs else Path(out)
+    checkpoint_path = (work_dir / _gcs_name(checkpoint)) if ckpt_gcs else Path(checkpoint)
+
+    out_path.parent.mkdir(parents=True, exist_ok=True)
+    checkpoint_path.parent.mkdir(parents=True, exist_ok=True)
+
+    # On --resume, pull the prior checkpoint (and CSV) back from GCS first.
+    if resume and ckpt_gcs:
+        _gcs_download(ckpt_gcs, checkpoint_path)
+    if resume and out_gcs:
+        _gcs_download(out_gcs, out_path)
+
     completed = _load_checkpoint(checkpoint_path) if resume else set()
     pending = [b for b in bd_ids if b not in completed]
     total = len(pending)
@@ -260,11 +318,9 @@ async def main(
     print(f"  model: {settings.gemini_pdf_model} | concurrency: {concurrency}")
     print(f"  only_needs_review: {only_needs_review} | resume: {resume} "
           f"({len(completed)} already checkpointed)")
-    print(f"  change CSV  -> {out_path}")
-    print(f"  checkpoint  -> {checkpoint_path}")
+    print(f"  change CSV  -> {out}")
+    print(f"  checkpoint  -> {checkpoint}")
 
-    out_path.parent.mkdir(parents=True, exist_ok=True)
-    checkpoint_path.parent.mkdir(parents=True, exist_ok=True)
     csv_mode = "a" if (resume and out_path.exists()) else "w"
     ckpt_mode = "a" if resume else "w"
 
@@ -290,38 +346,50 @@ async def main(
                 logger.exception("reclassify failed for bd %s", bd_id)
                 return bd_id, None, False
 
+    def _sync_gcs() -> None:
+        if out_gcs:
+            _gcs_upload(out_path, out_gcs)
+        if ckpt_gcs:
+            _gcs_upload(checkpoint_path, ckpt_gcs)
+
     processed = 0
     changed = 0
     transitions: dict[str, int] = {}
 
-    with out_path.open(csv_mode, encoding="utf-8", newline="") as fh, \
-            checkpoint_path.open(ckpt_mode, encoding="utf-8") as ckpt:
-        writer = csv.DictWriter(fh, fieldnames=CSV_FIELDS)
-        if csv_mode == "w":
-            writer.writeheader()
-            fh.flush()
-
-        # Up to ``concurrency`` firms in flight; each marks 'Identifying',
-        # corrects, and is written + checkpointed the instant it finishes
-        # (streamed via as_completed, so no batch barrier).
-        tasks = [asyncio.create_task(_process(b)) for b in pending]
-        for fut in asyncio.as_completed(tasks):
-            bd_id, row, do_checkpoint = await fut
-            if row is not None:
-                writer.writerow(row)
+    try:
+        with out_path.open(csv_mode, encoding="utf-8", newline="") as fh, \
+                checkpoint_path.open(ckpt_mode, encoding="utf-8") as ckpt:
+            writer = csv.DictWriter(fh, fieldnames=CSV_FIELDS)
+            if csv_mode == "w":
+                writer.writeheader()
                 fh.flush()
-                if row["old_type"] != row["new_type"]:
-                    changed += 1
-                    key = f"{row['old_type']} -> {row['new_type']}"
-                    transitions[key] = transitions.get(key, 0) + 1
-            if do_checkpoint:
-                ckpt.write(f"{bd_id}\n")
-                ckpt.flush()
-            processed += 1
-            elapsed = time.monotonic() - started_at
-            rate = processed / elapsed if elapsed > 0 else 0.0
-            last = row["new_type"] if row else "skipped/failed"
-            print(f"  {processed}/{total} done: bd {bd_id} -> {last} ({rate:.2f}/s)")
+
+            # Up to ``concurrency`` firms in flight; each marks 'Identifying',
+            # corrects, and is written + checkpointed the instant it finishes
+            # (streamed via as_completed, so no batch barrier).
+            tasks = [asyncio.create_task(_process(b)) for b in pending]
+            for fut in asyncio.as_completed(tasks):
+                bd_id, row, do_checkpoint = await fut
+                if row is not None:
+                    writer.writerow(row)
+                    fh.flush()
+                    if row["old_type"] != row["new_type"]:
+                        changed += 1
+                        key = f"{row['old_type']} -> {row['new_type']}"
+                        transitions[key] = transitions.get(key, 0) + 1
+                if do_checkpoint:
+                    ckpt.write(f"{bd_id}\n")
+                    ckpt.flush()
+                processed += 1
+                if (out_gcs or ckpt_gcs) and processed % GCS_SYNC_EVERY == 0:
+                    await asyncio.to_thread(_sync_gcs)
+                elapsed = time.monotonic() - started_at
+                rate = processed / elapsed if elapsed > 0 else 0.0
+                last = row["new_type"] if row else "skipped/failed"
+                print(f"  {processed}/{total} done: bd {bd_id} -> {last} ({rate:.2f}/s)")
+    finally:
+        if out_gcs or ckpt_gcs:
+            await asyncio.to_thread(_sync_gcs)
 
     async with SessionLocal() as db:
         run = await db.get(PipelineRun, run_id)
@@ -368,19 +436,19 @@ def _parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--resume",
         action="store_true",
-        help="Skip firms already in the checkpoint file and append to the CSV.",
+        help="Skip firms already in the checkpoint and append to the CSV.",
     )
     parser.add_argument(
         "--out",
         type=str,
         default=str(ROOT / "reports" / "clearing_reclass_backfill.csv"),
-        help="Change-CSV output path.",
+        help="Change-CSV output path (local path or gs:// URI).",
     )
     parser.add_argument(
         "--checkpoint",
         type=str,
         default=str(ROOT / "reports" / "clearing_reclass_checkpoint.txt"),
-        help="Checkpoint file of completed bd_ids (for --resume).",
+        help="Checkpoint of completed bd_ids for --resume (local path or gs:// URI).",
     )
     return parser.parse_args()
 
@@ -393,7 +461,7 @@ if __name__ == "__main__":
         stream=sys.stderr,
     )
     coro = main(
-        args.limit, args.offset, Path(args.out), Path(args.checkpoint), args.model,
+        args.limit, args.offset, args.out, args.checkpoint, args.model,
         args.concurrency, args.only_needs_review, args.resume,
     )
     if sys.platform == "win32" and sys.version_info >= (3, 14):
