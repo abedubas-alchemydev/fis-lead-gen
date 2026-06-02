@@ -186,6 +186,37 @@ export function BrokerDealerDetailClient({ brokerDealerId }: { brokerDealerId: s
   // to declutter the page. Defaults open so no data is hidden on load.
   const [filingHistoryOpen, setFilingHistoryOpen] = useState(true);
 
+  // People (left column) and Filing History (right column) sit in independent
+  // flex columns, so no CSS alone can make the two cards equal height. Instead
+  // we measure the People card and mirror its exact height onto the Filing
+  // History card, scrolling the timeline internally past the overflow. Only at
+  // xl+, where the two-column layout actually applies — below that the panels
+  // stack full-width and a forced height would just be a cramped scroll box.
+  const [peopleHeight, setPeopleHeight] = useState<number | null>(null);
+  const [isXl, setIsXl] = useState(false);
+  const peopleResizeObserver = useRef<ResizeObserver | null>(null);
+  // Callback ref so the observer attaches whenever the People card mounts
+  // (it renders only after the profile loads, past the skeleton gate).
+  const measurePeopleCard = useCallback((node: HTMLDivElement | null) => {
+    peopleResizeObserver.current?.disconnect();
+    peopleResizeObserver.current = null;
+    if (!node) return;
+    const sync = () => setPeopleHeight(node.offsetHeight);
+    sync();
+    const observer = new ResizeObserver(sync);
+    observer.observe(node);
+    peopleResizeObserver.current = observer;
+  }, []);
+  // Track the xl breakpoint (Tailwind xl = 1280px); height-matching only makes
+  // sense once the side-by-side column layout kicks in.
+  useEffect(() => {
+    const mq = window.matchMedia("(min-width: 1280px)");
+    const sync = () => setIsXl(mq.matches);
+    sync();
+    mq.addEventListener("change", sync);
+    return () => mq.removeEventListener("change", sync);
+  }, []);
+
   // Refresh-on-visit gating. We POST /refresh-all on mount so the BE's
   // per-pipeline gates can fill any missing column before we render.
   // The /profile fetch below is gated on `refreshState.phase === "ready"`
@@ -730,6 +761,10 @@ export function BrokerDealerDetailClient({ brokerDealerId }: { brokerDealerId: s
     (c) => !matchedContactIds.has(c.id),
   );
 
+  // Mirror People's measured height onto Filing History only when it's expanded
+  // and the side-by-side layout is active (xl+) and we have a measurement.
+  const matchFilingHeight = isXl && filingHistoryOpen && peopleHeight !== null;
+
   return (
     <div className="px-7 pb-12 pt-7 animate-fade-in lg:px-9">
       {/* ── Topbar: breadcrumbs + h1 + meta + right rail ── */}
@@ -945,7 +980,10 @@ export function BrokerDealerDetailClient({ brokerDealerId }: { brokerDealerId: s
           <FinancialTrendChart points={chartPoints} />
         </SectionPanel>
 
-        {/* People */}
+        {/* People — wrapped in a measured div so the Filing History card can
+            mirror its exact height (the two live in independent columns, so CSS
+            alone can't equalize them; see measurePeopleCard). */}
+        <div ref={measurePeopleCard}>
         <SectionPanel eyebrow="People" title="Owners, officers, and contacts">
           <div className="mb-4 flex flex-wrap items-center justify-between gap-3">
             <p className="text-xs text-[var(--text-muted,#94a3b8)]">
@@ -1120,6 +1158,7 @@ export function BrokerDealerDetailClient({ brokerDealerId }: { brokerDealerId: s
             />
           ) : null}
         </SectionPanel>
+        </div>
       </div>
 
       <div className="flex min-w-0 flex-1 flex-col gap-4">
@@ -1412,6 +1451,9 @@ export function BrokerDealerDetailClient({ brokerDealerId }: { brokerDealerId: s
         <SectionPanel
           eyebrow="Filing History"
           title="Chronological filing timeline"
+          className={matchFilingHeight ? "flex flex-col" : undefined}
+          style={matchFilingHeight ? { height: peopleHeight ?? undefined } : undefined}
+          bodyClassName={matchFilingHeight ? "flex min-h-0 flex-1 flex-col" : undefined}
           headerAction={
             <button
               type="button"
@@ -1430,7 +1472,13 @@ export function BrokerDealerDetailClient({ brokerDealerId }: { brokerDealerId: s
         >
           {filingHistoryOpen ? (
             <>
-              <div className="space-y-3">
+              <div
+                className={
+                  matchFilingHeight
+                    ? "min-h-0 flex-1 space-y-3 overflow-y-auto pr-1"
+                    : "space-y-3"
+                }
+              >
                 {filingLoading && filingItems.length === 0 ? (
                   <div className="flex items-center justify-center rounded-2xl bg-[var(--surface-2,#f1f6fd)] px-4 py-8 text-sm text-[var(--text-muted,#94a3b8)]">
                     <Loader2 className="mr-2 h-4 w-4 animate-spin" />
