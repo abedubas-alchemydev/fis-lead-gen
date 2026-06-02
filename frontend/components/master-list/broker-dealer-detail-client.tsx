@@ -190,6 +190,58 @@ export function BrokerDealerDetailClient({ brokerDealerId }: { brokerDealerId: s
   // to declutter the page. Defaults open so no data is hidden on load.
   const [filingHistoryOpen, setFilingHistoryOpen] = useState(true);
 
+  // xl+ only: cap the right column (Filing History) to the People column's
+  // content height so Filing History scrolls internally and the two columns
+  // bottom-align — instead of align-items:stretch padding the shorter People
+  // column with empty space below it. This is measured on purpose: pure CSS
+  // can't size a content-driven flex column to match a sibling. `flex-1`'s
+  // flex-basis:0% collapses to the *content* height when the column's own
+  // height is indefinite, so the Filing column always wins and pads People.
+  // We read the People card's bottom relative to its column top (stable under
+  // the stretch) and pin the right column to it, but only when Filing History
+  // would still get a usable height — so a sparse People column never clips
+  // the Assessment/Relationship cards above Filing History.
+  const leftColRef = useRef<HTMLDivElement | null>(null);
+  const rightColRef = useRef<HTMLDivElement | null>(null);
+  useEffect(() => {
+    const left = leftColRef.current;
+    const right = rightColRef.current;
+    if (!profile || !left || !right) return;
+
+    const mql = window.matchMedia("(min-width: 1280px)");
+    const MIN_FILING_PX = 160;
+
+    const apply = () => {
+      if (!mql.matches || !filingHistoryOpen) {
+        right.style.height = "";
+        return;
+      }
+      const peopleCard = left.lastElementChild as HTMLElement | null;
+      const filingCard = right.lastElementChild as HTMLElement | null;
+      if (!peopleCard || !filingCard) return;
+      const target = Math.round(
+        peopleCard.getBoundingClientRect().bottom - left.getBoundingClientRect().top,
+      );
+      const filingTop = Math.round(
+        filingCard.getBoundingClientRect().top - right.getBoundingClientRect().top,
+      );
+      const next = target - filingTop >= MIN_FILING_PX ? `${target}px` : "";
+      if (right.style.height !== next) right.style.height = next;
+    };
+
+    apply();
+    const observer = new ResizeObserver(apply);
+    observer.observe(left);
+    window.addEventListener("resize", apply);
+    mql.addEventListener("change", apply);
+    return () => {
+      observer.disconnect();
+      window.removeEventListener("resize", apply);
+      mql.removeEventListener("change", apply);
+      right.style.height = "";
+    };
+  }, [filingHistoryOpen, profile]);
+
   // Refresh-on-visit gating. We POST /refresh-all on mount so the BE's
   // per-pipeline gates can fill any missing column before we render.
   // The /profile fetch below is gated on `refreshState.phase === "ready"`
@@ -854,9 +906,11 @@ export function BrokerDealerDetailClient({ brokerDealerId }: { brokerDealerId: s
         </Button>
       </div>
 
-      {/* ── 2-column section layout — independent flex columns (no height-locking) ── */}
+      {/* ── 2-column section layout. At xl the right column is JS-capped to the
+          People column's content height (see leftColRef/rightColRef effect) so
+          Filing History scrolls internally and both columns bottom-align. ── */}
       <div className="flex flex-col gap-4 xl:flex-row">
-      <div className="flex min-w-0 flex-1 flex-col gap-4">
+      <div ref={leftColRef} className="flex min-w-0 flex-1 flex-col gap-4">
         {/* Financials */}
         <SectionPanel eyebrow="Financials" title="Net capital and trend">
           <div className="mb-4 grid gap-3 md:grid-cols-3">
@@ -1097,7 +1151,7 @@ export function BrokerDealerDetailClient({ brokerDealerId }: { brokerDealerId: s
         </SectionPanel>
       </div>
 
-      <div className="flex min-w-0 flex-1 flex-col gap-4">
+      <div ref={rightColRef} className="flex min-w-0 flex-1 flex-col gap-4">
         {/* Assessment */}
         <SectionPanel eyebrow="Assessment" title="Firm profile overview">
           <div className="grid gap-3 md:grid-cols-2">
