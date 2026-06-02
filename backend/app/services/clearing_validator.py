@@ -55,6 +55,34 @@ _NO_CUSTOMER_ACCOUNTS_RE = re.compile(
     re.IGNORECASE,
 )
 
+# Audit / advisory firms that are NOT clearing brokers but whose names sit on
+# the X-17A-5 (the independent auditor signs the audited report) and collide
+# with registered broker-dealer affiliates — e.g. the auditor "Deloitte &
+# Touche" vs. the registered BD "Deloitte Corporate Finance LLC". An
+# introducing firm never clears through its auditor, so such a name as a
+# *clearing partner* is spurious. Lookarounds (not ``\b``) so a token touching
+# punctuation still matches; whole-token only so we don't clip real broker
+# names. Covers the Big Four + the next-tier audit firms that register BD arms.
+_AUDIT_FIRM_PARTNER_RE = re.compile(
+    r"(?<!\w)(?:"
+    r"deloitte|touche|ernst|kpmg|pricewaterhouse(?:coopers)?|pwc|"
+    r"grant\s+thornton|marcum|mazars|baker\s+tilly|bdo|rsm|crowe"
+    r")(?!\w)",
+    re.IGNORECASE,
+)
+
+
+def looks_like_audit_firm(partner: Optional[str]) -> bool:
+    """True when a *clearing partner* name is actually an audit/advisory firm.
+
+    These never clear trades; their appearance as a clearing partner means the
+    extractor latched onto the X-17A-5's independent auditor (or an advisory
+    affiliate) instead of a real carrying broker.
+    """
+    if not partner:
+        return False
+    return bool(_AUDIT_FIRM_PARTNER_RE.search(partner))
+
 
 @dataclass(frozen=True, slots=True)
 class ClearingSignals:
@@ -110,7 +138,7 @@ class ClearingDecision:
     # Validator could not conclusively resolve a contradiction: the caller sets
     # the row's ``extraction_status`` to ``needs_review``.
     needs_review: bool
-    action: str  # "pass" | "demote" | "promote" | "consistency" | "review"
+    action: str  # "pass" | "demote" | "promote" | "consistency" | "partner_guard" | "review"
     rationale: str
 
 
@@ -215,7 +243,70 @@ def validate_clearing(
             ),
         )
 
-    # 4) PASS-THROUGH — no conclusive contradiction; keep Gemini's label and let
+    # 4) AUDITOR-AS-PARTNER GUARD — a fully_disclosed/omnibus label whose named
+    #    clearing partner is actually an audit/advisory firm (e.g. the X-17A-5's
+    #    independent auditor "Deloitte & Touche" normalized to the registered BD
+    #    "Deloitte Corporate Finance LLC"). An introducing firm never clears
+    #    through its auditor, so the partner is spurious; resolve the real label
+    #    from the hard signals, strongest first, and only flag review when none
+    #    of them speak.
+    if ct in ("fully_disclosed", "omnibus") and looks_like_audit_firm(clearing_partner):
+        if signals.has_self_clearing_membership:
+            return ClearingDecision(
+                clearing_type="self_clearing",
+                clearing_partner=None,
+                corrected=True,
+                needs_review=False,
+                action="partner_guard",
+                rationale=(
+                    f"clearing partner '{clearing_partner}' is an audit/advisory firm, "
+                    "not a clearing broker (likely the X-17A-5 independent auditor); "
+                    "active "
+                    f"{', '.join(sorted(signals.memberships & _SELF_CLEARING_AGENCIES))} "
+                    "membership confirms in-house clearing -> self_clearing."
+                ),
+            )
+        if signals.finra_introducing_partner:
+            return ClearingDecision(
+                clearing_type="fully_disclosed",
+                clearing_partner=signals.finra_introducing_partner,
+                corrected=True,
+                needs_review=False,
+                action="partner_guard",
+                rationale=(
+                    f"clearing partner '{clearing_partner}' is an audit/advisory firm, "
+                    "not a clearing broker; FINRA Form BD names the real introducing "
+                    f"partner '{signals.finra_introducing_partner}' -> fully_disclosed."
+                ),
+            )
+        if signals.is_at_or_above_carrying_floor:
+            return ClearingDecision(
+                clearing_type="self_clearing",
+                clearing_partner=None,
+                corrected=True,
+                needs_review=False,
+                action="partner_guard",
+                rationale=(
+                    f"clearing partner '{clearing_partner}' is an audit/advisory firm, "
+                    "not a clearing broker (likely the X-17A-5 independent auditor); "
+                    "carrying-tier capital and no real introducing partner -> "
+                    "self_clearing."
+                ),
+            )
+        return ClearingDecision(
+            clearing_type="unknown",
+            clearing_partner=None,
+            corrected=False,
+            needs_review=True,
+            action="review",
+            rationale=(
+                f"clearing partner '{clearing_partner}' is an audit/advisory firm, not a "
+                "clearing broker (likely the X-17A-5 independent auditor), and no carrying "
+                "signal or FINRA partner resolves the real label -> needs_review."
+            ),
+        )
+
+    # 5) PASS-THROUGH — no conclusive contradiction; keep Gemini's label and let
     #    the normal confidence gate decide the row's status.
     return ClearingDecision(
         clearing_type=ct,
@@ -341,5 +432,6 @@ __all__ = [
     "format_signals_for_prompt",
     "indicates_no_customer_accounts",
     "load_clearing_signals",
+    "looks_like_audit_firm",
     "validate_clearing",
 ]

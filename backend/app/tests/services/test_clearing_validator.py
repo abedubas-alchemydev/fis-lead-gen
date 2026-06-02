@@ -11,6 +11,7 @@ from app.services.clearing_validator import (
     ClearingSignals,
     format_signals_for_prompt,
     indicates_no_customer_accounts,
+    looks_like_audit_firm,
     validate_clearing,
 )
 
@@ -203,6 +204,122 @@ class TestPassThrough:
         decision = _validate("unknown", ClearingSignals())
         assert decision.clearing_type == "unknown"
         assert decision.action == "pass"
+
+
+# ─────────────────── Auditor-as-partner guard ───────────────────────
+
+
+class TestAuditorPartnerGuard:
+    """Regression for the Wells Fargo Clearing bug: the X-17A-5 independent
+    auditor (Deloitte & Touche) was mis-extracted as a clearing partner and
+    normalized to the registered BD 'Deloitte Corporate Finance LLC', flipping a
+    $107M carrying firm to fully_disclosed at confidence 1.0."""
+
+    def test_wells_fargo_case_capital_overrides_auditor_partner(self) -> None:
+        signals = ClearingSignals(required_min_capital=107_031_000)
+        decision = _validate(
+            "fully_disclosed", signals, partner="DELOITTE CORPORATE FINANCE LLC"
+        )
+        assert decision.clearing_type == "self_clearing"
+        assert decision.clearing_partner is None
+        assert decision.corrected is True
+        assert decision.needs_review is False
+        assert decision.action == "partner_guard"
+
+    def test_membership_overrides_auditor_partner(self) -> None:
+        signals = ClearingSignals(
+            memberships=frozenset({"DTC", "NSCC"}), membership_checked=True
+        )
+        decision = _validate(
+            "fully_disclosed", signals, partner="Deloitte & Touche LLP"
+        )
+        assert decision.clearing_type == "self_clearing"
+        assert decision.action == "partner_guard"
+        assert decision.corrected is True
+
+    def test_real_finra_partner_replaces_auditor_partner(self) -> None:
+        signals = ClearingSignals(
+            required_min_capital=5000, finra_introducing_partner="Pershing LLC"
+        )
+        decision = _validate(
+            "fully_disclosed", signals, partner="KPMG Corporate Finance LLC"
+        )
+        assert decision.clearing_type == "fully_disclosed"
+        assert decision.clearing_partner == "Pershing LLC"
+        assert decision.action == "partner_guard"
+        assert decision.corrected is True
+
+    def test_auditor_partner_no_resolving_signal_routes_to_review(self) -> None:
+        signals = ClearingSignals(required_min_capital=5000)  # below floor, no partner
+        decision = _validate(
+            "fully_disclosed", signals, partner="Ernst & Young Capital Advisors"
+        )
+        assert decision.clearing_type == "unknown"
+        assert decision.clearing_partner is None
+        assert decision.needs_review is True
+        assert decision.action == "review"
+
+    def test_omnibus_with_auditor_partner_also_guarded(self) -> None:
+        signals = ClearingSignals(required_min_capital=1_000_000)
+        decision = _validate("omnibus", signals, partner="BDO USA LLP")
+        assert decision.clearing_type == "self_clearing"
+        assert decision.action == "partner_guard"
+
+    def test_real_clearing_partner_is_not_guarded(self) -> None:
+        """The guard must not over-fire: a genuine clearing broker passes."""
+        signals = ClearingSignals(
+            required_min_capital=5000, finra_introducing_partner="Pershing LLC"
+        )
+        for real in (
+            "Pershing LLC",
+            "National Financial Services LLC",
+            "RBC Capital Markets, LLC",
+            "Apex Clearing Corporation",
+        ):
+            decision = _validate("fully_disclosed", signals, partner=real)
+            assert decision.action == "pass", real
+            assert decision.clearing_type == "fully_disclosed"
+
+    def test_self_clearing_with_auditor_partner_is_untouched_by_guard(self) -> None:
+        """Guard only applies to fully_disclosed/omnibus; a self_clearing row
+        with high capital still passes (it never claimed an introducing
+        partner)."""
+        signals = ClearingSignals(required_min_capital=6_000_000_000)
+        decision = _validate(
+            "self_clearing", signals, partner="Deloitte Corporate Finance LLC"
+        )
+        assert decision.clearing_type == "self_clearing"
+        assert decision.action == "pass"
+
+
+class TestLooksLikeAuditFirm:
+    def test_audit_firm_names_match(self) -> None:
+        for name in (
+            "DELOITTE CORPORATE FINANCE LLC",
+            "Deloitte & Touche LLP",
+            "Ernst & Young Capital Advisors LLC",
+            "KPMG Corporate Finance LLC",
+            "PricewaterhouseCoopers LLP",
+            "PwC",
+            "Grant Thornton LLP",
+            "RSM US LLP",
+            "BDO USA, LLP",
+            "Marcum LLP",
+        ):
+            assert looks_like_audit_firm(name), name
+
+    def test_real_clearing_brokers_do_not_match(self) -> None:
+        for name in (
+            "Pershing LLC",
+            "National Financial Services LLC",
+            "RBC Capital Markets, LLC",
+            "Apex Clearing Corporation",
+            "Hilltop Securities Inc.",
+            "BOK Financial Securities",
+            None,
+            "",
+        ):
+            assert not looks_like_audit_firm(name), name
 
 
 # ──────────────────────── Signals + helpers ─────────────────────────
