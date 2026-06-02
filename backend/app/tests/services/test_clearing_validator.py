@@ -114,6 +114,18 @@ class TestPromote:
         assert decision.clearing_type == "self_clearing"
         assert decision.action == "promote"
 
+    def test_nscc_only_does_not_promote(self) -> None:
+        """NSCC-alone is Fund/SERV (mutual-fund distribution), not self-clearing,
+        so a confirmed NSCC-only member must NOT be promoted (the 260 fund
+        distributors that surfaced in the staging audit)."""
+        signals = ClearingSignals(
+            memberships=frozenset({"NSCC"}),
+            membership_checked=True,
+        )
+        decision = _validate("unknown", signals)
+        assert decision.clearing_type == "unknown"
+        assert decision.action == "pass"
+
     def test_no_promotion_when_membership_unchecked(self) -> None:
         """Never act on absence of data: unchecked membership must not promote
         even at carrying-tier capital."""
@@ -188,8 +200,16 @@ class TestSignalProperties:
         assert not ClearingSignals(required_min_capital=None).is_below_carrying_floor
 
     def test_self_clearing_membership_property(self) -> None:
-        assert ClearingSignals(
+        # DTC (depository) or OCC (options clearing) conclusively => carrying.
+        assert ClearingSignals(memberships=frozenset({"DTC"})).has_self_clearing_membership
+        assert ClearingSignals(memberships=frozenset({"OCC"})).has_self_clearing_membership
+        # NSCC ALONE is Fund/SERV (mutual-fund distribution), NOT self-clearing.
+        assert not ClearingSignals(
             memberships=frozenset({"NSCC"})
+        ).has_self_clearing_membership
+        # NSCC alongside DTC is a genuine self-clearer.
+        assert ClearingSignals(
+            memberships=frozenset({"NSCC", "DTC"})
         ).has_self_clearing_membership
         assert not ClearingSignals(
             memberships=frozenset({"FICC-GOV"})

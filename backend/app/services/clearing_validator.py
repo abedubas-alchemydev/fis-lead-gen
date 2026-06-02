@@ -39,9 +39,14 @@ from app.models.introducing_arrangement import IntroducingArrangement
 # Below this floor a firm is non-carrying and cannot legitimately self-clear.
 CARRYING_CAPITAL_FLOOR = 250_000
 
-# Memberships whose presence positively indicates the firm clears/settles
-# in-house (i.e. it is genuinely self-clearing / omnibus).
-_SELF_CLEARING_AGENCIES = frozenset({"DTC", "NSCC", "OCC"})
+# Memberships whose presence CONCLUSIVELY indicates the firm carries/settles
+# in-house: DTC (securities depository/custody) and OCC (options clearing).
+# NSCC is deliberately EXCLUDED — NSCC membership alone is most often Fund/SERV
+# (mutual-fund distribution), which a non-carrying distributor holds without
+# self-clearing. A genuine equities self-clearer is also a DTC participant
+# (CNS settlement requires the depository), so DTC/OCC already captures it
+# without sweeping in the fund distributors.
+_SELF_CLEARING_AGENCIES = frozenset({"DTC", "OCC"})
 
 # Boilerplate that indicates the firm carries no customer accounts at all
 # (M&A advisory, private placement, (k)(1)/(k)(2)(i) exempt).
@@ -257,11 +262,20 @@ def format_signals_for_prompt(signals: ClearingSignals) -> str:
 
     if signals.membership_checked:
         if signals.memberships:
-            lines.append(
-                f"- Clearing-agency membership: ACTIVE member of "
-                f"{', '.join(sorted(signals.memberships))} -> strongly indicates "
-                "self_clearing/omnibus (the firm settles in-house)."
-            )
+            members = ", ".join(sorted(signals.memberships))
+            if signals.has_self_clearing_membership:
+                lines.append(
+                    f"- Clearing-agency membership: ACTIVE member of {members} "
+                    "(incl. DTC/OCC) -> strongly indicates self_clearing/omnibus "
+                    "(the firm settles securities/options in-house)."
+                )
+            else:
+                lines.append(
+                    f"- Clearing-agency membership: ACTIVE member of {members} only. "
+                    "NOTE: NSCC membership alone is typically Fund/SERV (mutual-fund "
+                    "distribution), NOT securities self-clearing — do not infer "
+                    "self_clearing from it without DTC/OCC."
+                )
         else:
             lines.append(
                 "- Clearing-agency membership: evaluated, NOT a member -> the firm does "
