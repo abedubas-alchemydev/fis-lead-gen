@@ -136,21 +136,71 @@ class ExecutiveContactService:
         if apollo_errored:
             return existing
 
-        # Apollo-owned outcome (success or no-result). Wipe stale non-FOCUS
-        # rows, add any new contacts, stamp the cooldown timestamp, and
-        # commit atomically. FOCUS-extracted CEO data is preserved so the
-        # two sources continue to coexist.
-        await db.execute(
-            delete(ExecutiveContact).where(
-                ExecutiveContact.bd_id == broker_dealer.id,
-                ExecutiveContact.source != "focus_report",
+        # Apollo-owned outcome (success or no-result). A forced re-run must
+        # refresh contacts WITHOUT destroying good data: Apollo's per-officer
+        # match is flaky (~75-80% miss) and #670 drops contactless matches, so
+        # a thin re-run that simply wiped-and-replaced would delete emails a
+        # prior run had found. Instead, preserve FOCUS rows and every non-FOCUS
+        # row that still carries a channel; only stale contactless rows are
+        # wiped, and fresh contacts that duplicate a preserved name are skipped.
+        # Then stamp the cooldown and commit atomically.
+        preserved_names, stale_ids = self._classify_existing_for_refresh(existing)
+        if stale_ids:
+            await db.execute(
+                delete(ExecutiveContact).where(ExecutiveContact.id.in_(stale_ids))
             )
-        )
-        if contacts:
-            db.add_all(contacts)
+        new_contacts = [
+            contact
+            for contact in contacts
+            if self._norm_contact_name(contact.name) not in preserved_names
+        ]
+        if new_contacts:
+            db.add_all(new_contacts)
         broker_dealer.last_enrich_attempt_at = datetime.now(timezone.utc)
         await db.commit()
         return await self.list_contacts(db, broker_dealer.id)
+
+    @staticmethod
+    def _has_contact_channel(contact: ExecutiveContact) -> bool:
+        """True when a contact carries at least one channel (email / phone /
+        LinkedIn, scalar or in the ``emails``/``phones`` JSONB arrays). Mirrors
+        the frontend ContactRow render guard: zero-channel rows don't show."""
+        if contact.email or contact.phone or contact.linkedin_url:
+            return True
+        for array in (contact.emails, contact.phones):
+            if isinstance(array, list) and any(
+                isinstance(entry, dict) and entry.get("value") for entry in array
+            ):
+                return True
+        return False
+
+    @staticmethod
+    def _norm_contact_name(name: str | None) -> str:
+        return (name or "").strip().lower()
+
+    @classmethod
+    def _classify_existing_for_refresh(
+        cls, existing: list[ExecutiveContact]
+    ) -> tuple[set[str], list[int]]:
+        """Split a firm's current contacts for a forced refresh into
+        ``(preserved_names, stale_ids)``.
+
+        FOCUS rows are always preserved (kept out of both sets). A non-FOCUS row
+        that still carries a channel is PRESERVED -- a flaky Apollo re-run that
+        returns fewer matches must never destroy a previously found
+        email/phone/LinkedIn -- and its normalised name guards against a
+        duplicate re-add. Channel-less non-FOCUS rows are stale and get deleted.
+        """
+        preserved_names: set[str] = set()
+        stale_ids: list[int] = []
+        for row in existing:
+            if row.source == "focus_report":
+                continue
+            if cls._has_contact_channel(row):
+                preserved_names.add(cls._norm_contact_name(row.name))
+            else:
+                stale_ids.append(row.id)
+        return preserved_names, stale_ids
 
     async def _enrich_via_apollo(
         self, broker_dealer: BrokerDealer

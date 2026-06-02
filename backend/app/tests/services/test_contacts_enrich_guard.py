@@ -509,6 +509,78 @@ async def test_match_returns_no_channels_is_dropped(patch_settings: None) -> Non
     )
 
 
+# ───────── Forced re-run preserves channel-bearing contacts (data-loss fix) ─────────
+# Regression: "Generate More Details" (force=True) used to wipe every non-FOCUS
+# row and replace it with the current Apollo run. Apollo's per-officer match is
+# flaky, so a thin re-run permanently deleted emails a prior run had found.
+# enrich_contacts now keeps any row that still carries a channel.
+
+
+def _contact(
+    *, name: str, source: str = "apollo", email: str | None = None,
+    phone: str | None = None, linkedin_url: str | None = None,
+    emails: list | None = None, phones: list | None = None, id: int | None = None,
+) -> ExecutiveContact:
+    c = ExecutiveContact(
+        bd_id=1, name=name, source=source, email=email, phone=phone,
+        linkedin_url=linkedin_url, emails=emails, phones=phones,
+    )
+    if id is not None:
+        c.id = id
+    return c
+
+
+def test_has_contact_channel() -> None:
+    has = ExecutiveContactService._has_contact_channel
+    assert has(_contact(name="A", email="a@x.com"))
+    assert has(_contact(name="B", phone="+15550100"))
+    assert has(_contact(name="C", linkedin_url="https://linkedin.com/in/c"))
+    assert has(_contact(name="D", emails=[{"value": "d@x.com", "type": "work"}]))
+    assert not has(_contact(name="E"))  # no channel at all
+    assert not has(_contact(name="F", emails=[], phones=[]))
+
+
+def test_classify_existing_preserves_channel_bearing_and_wipes_contactless() -> None:
+    existing = [
+        _contact(name="Robert Eide", email="reide@aegiscap.com", id=10),  # keep (channel)
+        _contact(name="Empty Person", id=11),                              # wipe (contactless)
+        _contact(name="Focus CEO", source="focus_report", id=12),          # keep (FOCUS)
+    ]
+    preserved, stale = ExecutiveContactService._classify_existing_for_refresh(existing)
+    assert "robert eide" in preserved
+    assert stale == [11], "only the contactless non-FOCUS row is deleted"
+    assert 10 not in stale and 12 not in stale
+
+
+@pytest.mark.asyncio
+@respx.mock
+async def test_forced_rerun_does_not_wipe_emailed_contact(patch_settings: None) -> None:
+    """force=True + an existing emailed contact + a thin Apollo re-run: the
+    emailed row is preserved (never scheduled for deletion) and the dropped
+    thin match isn't re-added."""
+    bd = _make_bd(last_attempt=None, executive_officers=[{"name": "EIDE, ROBERT", "title": "CEO"}])
+    existing = [_contact(name="Robert Eide", email="reide@aegiscap.com", id=10)]
+    session = _FakeSession(existing_contacts=existing)
+
+    # Apollo re-run returns the same person but contactless (thin match → dropped).
+    respx.post(APOLLO_MATCH_URL).mock(
+        return_value=httpx.Response(200, json=_apollo_response({
+            "first_name": "Robert", "last_name": "Eide",
+            "email": None, "email_status": None,
+            "linkedin_url": None, "phone_numbers": None,
+        }))
+    )
+    respx.post(APOLLO_ORG_URL).mock(return_value=httpx.Response(200, json={"organization": None}))
+
+    service = ExecutiveContactService()
+    await service.enrich_contacts(session, bd, force=True)
+
+    _, stale = ExecutiveContactService._classify_existing_for_refresh(existing)
+    assert stale == [], "channel-bearing row must never be wiped"
+    assert session.added == [], "thin/duplicate match must not be re-added"
+    assert session.commit_count == 1
+
+
 # ───────────────────── FINRA name parser unit tests ─────────────────────
 
 
