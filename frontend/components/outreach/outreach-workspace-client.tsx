@@ -41,8 +41,10 @@ const TABS: ReadonlyArray<{ value: OutreachTab; label: string }> = [
 
 export function OutreachWorkspaceClient({
   isAdmin = false,
+  currentUserId,
 }: {
   isAdmin?: boolean;
+  currentUserId: string;
 }) {
   const { state, updateState } = useUrlSyncedState(parseUrl, buildUrl);
   const tab = state.tab;
@@ -96,7 +98,7 @@ export function OutreachWorkspaceClient({
       {tab === "create" ? (
         <CreateOutreachTab />
       ) : (
-        <SentHistoryTab isAdmin={isAdmin} />
+        <SentHistoryTab isAdmin={isAdmin} currentUserId={currentUserId} />
       )}
     </section>
   );

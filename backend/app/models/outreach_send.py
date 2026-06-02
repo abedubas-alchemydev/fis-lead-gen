@@ -136,3 +136,13 @@ class OutreachSend(Base):
         nullable=False,
         server_default=func.now(),
     )
+    # Soft-delete marker for the Sent-history list. NULL = live, a
+    # timestamp = the owner deleted it from their history. Rows are
+    # retained (never hard-deleted) so admin audits / compliance keep the
+    # record; every read path filters ``archived_at IS NULL``. Mirrors the
+    # ``ChatbotConversation.archived_at`` convention. The hot-path partial
+    # index ``WHERE archived_at IS NULL`` lives in the alembic migration.
+    archived_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True),
+        nullable=True,
+    )

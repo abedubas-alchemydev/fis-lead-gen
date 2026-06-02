@@ -746,6 +746,10 @@ def _base_send_select(*, include_sender: bool):
             InvestorContact, InvestorContact.id == OutreachSend.investor_contact_id
         )
         .outerjoin(VaultFolder, VaultFolder.id == OutreachSend.folder_id)
+        # Hide soft-deleted sends from every read path: the list items,
+        # the total count (its subquery is built from this select), and
+        # the single-row detail lookup all derive from this builder.
+        .where(OutreachSend.archived_at.is_(None))
     )
     if include_sender:
         stmt = stmt.outerjoin(AuthUser, AuthUser.id == OutreachSend.user_id)
@@ -1819,6 +1823,43 @@ async def get_outreach_send(
     payload = _row_to_item(row, include_sender=include_sender)
     payload["body"] = row[0].body
     return OutreachSendDetailResponse(**payload)
+
+
+@router.delete("/sends/{send_id}", status_code=status.HTTP_204_NO_CONTENT)
+async def delete_outreach_send(
+    send_id: int,
+    current_user: AuthenticatedUser = Depends(_require_sent_outreach),
+    db: AsyncSession = Depends(get_db_session),
+) -> Response:
+    """Soft-delete one of the caller's OWN sends (stamps ``archived_at``).
+
+    Owner-only: even an admin can only delete rows they sent — there is no
+    ``scope=all`` override here (unlike the read endpoints). Returns 404 for
+    both "id does not exist" and "id belongs to another user" so a leaked id
+    can't confirm cross-user existence. The row is retained for audit; every
+    read path filters ``archived_at IS NULL``, so it just disappears from the
+    Sent-history list. Re-deleting an already-archived row is idempotent (204).
+
+    Uses a plain ``select(OutreachSend)`` rather than ``_base_send_select``
+    (which now hides archived rows) so a repeat delete can still find the row
+    to no-op on.
+    """
+    send = (
+        await db.execute(
+            select(OutreachSend).where(
+                OutreachSend.id == send_id,
+                OutreachSend.user_id == current_user.id,
+            )
+        )
+    ).scalar_one_or_none()
+    if send is None:
+        raise HTTPException(status_code=404, detail="outreach_send_not_found")
+
+    if send.archived_at is None:
+        send.archived_at = datetime.now(timezone.utc)
+        await db.commit()
+
+    return Response(status_code=status.HTTP_204_NO_CONTENT)
 
 
 @router.get("/signature", response_model=OutreachSignatureResponse)
