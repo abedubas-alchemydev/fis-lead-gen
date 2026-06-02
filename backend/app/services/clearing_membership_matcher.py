@@ -68,12 +68,17 @@ def index_firm(index: FirmIndex, firm_id: int, named: list[tuple[str | None, str
 def match_name(index: FirmIndex, member_name: str | None) -> list[MatchResult]:
     """Match a directory member name against a firm index.
 
-    Returns one ``MatchResult`` per candidate firm:
+    Resolution prefers the *strongest matching method*: a directory listing
+    "PERSHING LLC" should attach to the firm literally named Pershing LLC
+    (``exact_normalized``), not to a firm that merely carries "Pershing" as a
+    DBA or resolver alias. So:
 
     * 0 firms for the key -> ``[]`` (the firm isn't in this directory).
-    * exactly 1 firm      -> a single ``active`` result.
-    * >1 distinct firms   -> a ``needs_review`` result per firm; never
-      auto-applied, because we can't tell which firm the directory meant.
+    * a single firm with the strongest method -> one ``active`` result.
+    * a TIE at the strongest method (>=2 firms whose *same-strength* names
+      collide) -> a ``needs_review`` result per tied firm; we genuinely can't
+      tell which the directory meant. Firms that matched the key only via a
+      weaker method are dropped — they're alias coincidences, not candidates.
     """
     key = normalize_entity_name(member_name)
     if not key:
@@ -81,13 +86,12 @@ def match_name(index: FirmIndex, member_name: str | None) -> list[MatchResult]:
     bucket = index.get(key)
     if not bucket:
         return []
-    ambiguous = len(bucket) > 1
-    results: list[MatchResult] = []
-    for firm_id, method in bucket.items():
-        if ambiguous:
-            results.append(MatchResult(firm_id, method, "needs_review", AMBIGUOUS_CONFIDENCE))
-        else:
-            results.append(
-                MatchResult(firm_id, method, "active", CONFIDENCE_BY_METHOD[method])
-            )
-    return results
+    top_rank = max(_METHOD_RANK[method] for method in bucket.values())
+    top = [(fid, method) for fid, method in bucket.items() if _METHOD_RANK[method] == top_rank]
+    if len(top) == 1:
+        firm_id, method = top[0]
+        return [MatchResult(firm_id, method, "active", CONFIDENCE_BY_METHOD[method])]
+    return [
+        MatchResult(firm_id, method, "needs_review", AMBIGUOUS_CONFIDENCE)
+        for firm_id, method in top
+    ]

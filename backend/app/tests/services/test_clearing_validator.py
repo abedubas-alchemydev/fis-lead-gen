@@ -114,6 +114,18 @@ class TestPromote:
         assert decision.clearing_type == "self_clearing"
         assert decision.action == "promote"
 
+    def test_nscc_only_does_not_promote(self) -> None:
+        """NSCC-alone is Fund/SERV (mutual-fund distribution), not self-clearing,
+        so a confirmed NSCC-only member must NOT be promoted (the 260 fund
+        distributors that surfaced in the staging audit)."""
+        signals = ClearingSignals(
+            memberships=frozenset({"NSCC"}),
+            membership_checked=True,
+        )
+        decision = _validate("unknown", signals)
+        assert decision.clearing_type == "unknown"
+        assert decision.action == "pass"
+
     def test_no_promotion_when_membership_unchecked(self) -> None:
         """Never act on absence of data: unchecked membership must not promote
         even at carrying-tier capital."""
@@ -125,16 +137,34 @@ class TestPromote:
         assert decision.clearing_type == "unknown"
         assert decision.action == "pass"
 
-    def test_no_promotion_when_finra_partner_present(self) -> None:
+    def test_member_overrides_finra_partner(self) -> None:
+        """A confirmed DTC/OCC member carries in-house, so a Form BD introducing
+        partner does NOT block the carrying label — membership wins (the durable
+        JPM/Goldman fix: a Form BD partner must not demote a confirmed carrier)."""
         signals = ClearingSignals(
             memberships=frozenset({"DTC"}),
             membership_checked=True,
             finra_introducing_partner="Pershing LLC",
         )
         decision = _validate("non_carrying", signals)
-        # Conflicting signals (member + introduces) -> review, not promote.
-        assert decision.action == "consistency"
-        assert decision.needs_review is True
+        assert decision.clearing_type == "self_clearing"
+        assert decision.action == "promote"
+        assert decision.corrected is True
+
+    def test_fully_disclosed_member_promoted_to_self_clearing(self) -> None:
+        """The JPM class: the filing/Form BD said fully_disclosed but the firm
+        is a confirmed DTC/OCC member -> membership overrides -> self_clearing,
+        and the contradictory partner is cleared."""
+        signals = ClearingSignals(
+            required_min_capital=6_600_000_000,
+            memberships=frozenset({"DTC", "OCC"}),
+            membership_checked=True,
+            finra_introducing_partner="Pershing LLC",
+        )
+        decision = _validate("fully_disclosed", signals, partner="Pershing LLC")
+        assert decision.clearing_type == "self_clearing"
+        assert decision.clearing_partner is None
+        assert decision.action == "promote"
 
 
 # ─────────────────────────── CONSISTENCY ────────────────────────────
@@ -188,8 +218,16 @@ class TestSignalProperties:
         assert not ClearingSignals(required_min_capital=None).is_below_carrying_floor
 
     def test_self_clearing_membership_property(self) -> None:
-        assert ClearingSignals(
+        # DTC (depository) or OCC (options clearing) conclusively => carrying.
+        assert ClearingSignals(memberships=frozenset({"DTC"})).has_self_clearing_membership
+        assert ClearingSignals(memberships=frozenset({"OCC"})).has_self_clearing_membership
+        # NSCC ALONE is Fund/SERV (mutual-fund distribution), NOT self-clearing.
+        assert not ClearingSignals(
             memberships=frozenset({"NSCC"})
+        ).has_self_clearing_membership
+        # NSCC alongside DTC is a genuine self-clearer.
+        assert ClearingSignals(
+            memberships=frozenset({"NSCC", "DTC"})
         ).has_self_clearing_membership
         assert not ClearingSignals(
             memberships=frozenset({"FICC-GOV"})
