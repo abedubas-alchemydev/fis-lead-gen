@@ -1,6 +1,6 @@
 "use client";
 
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useState } from "react";
 import clsx from "clsx";
 import Link from "next/link";
 import type { Route } from "next";
@@ -146,15 +146,6 @@ export function AdvisorDetailClient({ advisorId }: { advisorId: string }) {
   // component instance persists across Prev/Next — only advisorId changes).
   const [showAllFilings, setShowAllFilings] = useState(false);
 
-  // "Generate More Details" — placeholder CTA mirroring the BD detail page's
-  // People-panel button. No advisor /enrich endpoint exists yet, so the click
-  // runs a short processing simulation (see generateMoreDetails below) rather
-  // than calling the backend. enrichTimerRef holds the pending sim timer so it
-  // can be cancelled on advisor-switch / unmount.
-  const [isEnriching, setIsEnriching] = useState(false);
-  const [enrichNotice, setEnrichNotice] = useState<string | null>(null);
-  const enrichTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
-
   // Fetch /profile immediately on mount. Errors surface via setError so
   // a failed first load shows the error page. `reloadProfile` is the
   // re-fetch helper the manual Refresh button calls; it lets the caller
@@ -191,20 +182,13 @@ export function AdvisorDetailClient({ advisorId }: { advisorId: string }) {
     };
   }, [advisorId]);
 
-  // Collapse the filings list — and cancel any in-flight "Generate More
-  // Details" simulation — whenever we navigate to another advisor (the
-  // instance may persist across Prev/Next, so reset rather than rely on
-  // remount). The cleanup also clears the timer on unmount.
+  // Collapse the filings list and clear any gap-fill notice/error whenever we
+  // navigate to another advisor (the instance may persist across Prev/Next, so
+  // reset rather than rely on remount).
   useEffect(() => {
     setShowAllFilings(false);
-    setIsEnriching(false);
-    setEnrichNotice(null);
-    return () => {
-      if (enrichTimerRef.current) {
-        clearTimeout(enrichTimerRef.current);
-        enrichTimerRef.current = null;
-      }
-    };
+    setGapFillNotice(null);
+    setGapFillError(null);
   }, [advisorId]);
 
   // Manual refresh handler. POST /refresh-all on click, poll the parent
@@ -245,11 +229,12 @@ export function AdvisorDetailClient({ advisorId }: { advisorId: string }) {
     }
   }, [advisorId, reloadProfile]);
 
-  // Gap-fill handler. POST /gap-fill-contacts on click, poll the run until
-  // terminal (180s deadline — same as refresh-all; the chain fan-out is
-  // bounded by the per-firm officer cap), then reload /profile so the new
-  // emails/phones/LinkedIn URLs land in the icon popovers. Error/notice
-  // strings show inline; the 429 cooldown comes through as a plain message.
+  // "Generate More Details" handler. POST /gap-fill-contacts with force (the
+  // user-facing button always re-runs past the cost cooldown, matching the BD
+  // enrich button), poll the run until terminal (180s deadline; the chain
+  // fan-out is bounded by the per-firm officer cap), then reload /profile so
+  // the new emails/phones/LinkedIn URLs land in the icon popovers. Error /
+  // notice strings show inline in the People panel.
   const runGapFill = useCallback(async () => {
     const numericId = Number(advisorId);
     if (!Number.isFinite(numericId)) return;
@@ -257,7 +242,7 @@ export function AdvisorDetailClient({ advisorId }: { advisorId: string }) {
     setGapFillError(null);
     setGapFillNotice(null);
     try {
-      const result = await gapFillAdvisorContacts(numericId);
+      const result = await gapFillAdvisorContacts(numericId, true);
       if (result.run_id !== null) {
         const runId = result.run_id;
         const deadline = Date.now() + 180_000;
@@ -303,22 +288,6 @@ export function AdvisorDetailClient({ advisorId }: { advisorId: string }) {
       setIsGapFilling(false);
     }
   }, [advisorId, reloadProfile]);
-
-  // Placeholder processing simulation for "Generate More Details". There's no
-  // advisor /enrich endpoint yet, so this just shows the spinner/"Generating…"
-  // state for a beat, then settles into the same info notice the BD People
-  // panel surfaces when enrichment turns up nothing new. Swap the timeout for
-  // a real enrich call + setData fold-in when the backend lands.
-  const generateMoreDetails = useCallback(() => {
-    if (enrichTimerRef.current) clearTimeout(enrichTimerRef.current);
-    setIsEnriching(true);
-    setEnrichNotice(null);
-    enrichTimerRef.current = setTimeout(() => {
-      setIsEnriching(false);
-      setEnrichNotice("No new contacts found for these officers.");
-      enrichTimerRef.current = null;
-    }, 2200);
-  }, []);
 
   // Restore the user's filter/sort state on back-nav, falling back to
   // the bare list URL if no return envelope was passed.
@@ -655,20 +624,6 @@ export function AdvisorDetailClient({ advisorId }: { advisorId: string }) {
           <Button
             type="button"
             variant="outline"
-            onClick={() => void runGapFill()}
-            disabled={isGapFilling || isRefreshing}
-            title="Re-query contact providers for rows missing LinkedIn, email, or phone (30-day cooldown)"
-          >
-            {isGapFilling ? (
-              <Loader2 className="h-4 w-4 animate-spin" strokeWidth={2.5} />
-            ) : (
-              <Sparkles className="h-4 w-4" strokeWidth={2} />
-            )}
-            {isGapFilling ? "Gap-filling…" : "Gap-fill contacts"}
-          </Button>
-          <Button
-            type="button"
-            variant="outline"
             onClick={() => void runManualRefresh()}
             disabled={isRefreshing || isGapFilling}
           >
@@ -685,18 +640,6 @@ export function AdvisorDetailClient({ advisorId }: { advisorId: string }) {
       {refreshError ? (
         <div className="mb-3 rounded-2xl border border-[rgba(239,68,68,0.25)] bg-[rgba(239,68,68,0.08)] px-4 py-2.5 text-[13px] text-[var(--pill-red-text,#b91c1c)]">
           {refreshError}
-        </div>
-      ) : null}
-
-      {gapFillError ? (
-        <div className="mb-3 rounded-2xl border border-[rgba(239,68,68,0.25)] bg-[rgba(239,68,68,0.08)] px-4 py-2.5 text-[13px] text-[var(--pill-red-text,#b91c1c)]">
-          {gapFillError}
-        </div>
-      ) : null}
-
-      {gapFillNotice ? (
-        <div className="mb-3 rounded-2xl border border-[var(--border,rgba(30,64,175,0.1))] bg-[var(--surface-2,#f1f6fd)] px-4 py-2.5 text-[13px] text-[var(--text-dim,#475569)]">
-          {gapFillNotice}
         </div>
       ) : null}
 
@@ -842,30 +785,38 @@ export function AdvisorDetailClient({ advisorId }: { advisorId: string }) {
         <SectionPanel eyebrow="People" title="Owners, officers, and contacts">
           <div className="mb-4 flex flex-wrap items-center justify-between gap-3">
             <p className="text-xs text-[var(--text-muted,#94a3b8)]">
-              Discover additional executive contacts for this firm.
+              {isGapFilling
+                ? "Discovering contacts across providers… this can take a moment."
+                : "Discover additional executive contacts for this firm."}
             </p>
             <button
               type="button"
-              onClick={generateMoreDetails}
-              disabled={isEnriching}
+              onClick={() => void runGapFill()}
+              disabled={isGapFilling || isRefreshing}
               className={clsx(
                 buttonBase,
                 buttonSizes.md,
                 "shrink-0 bg-gradient-to-br from-[#6366f1] to-[#8b5cf6] text-white shadow-[0_6px_16px_rgba(99,102,241,0.35)] hover:brightness-110",
               )}
             >
-              {isEnriching ? (
+              {isGapFilling ? (
                 <Loader2 className="h-4 w-4 animate-spin" strokeWidth={2.5} />
               ) : (
                 <Sparkles className="h-4 w-4" strokeWidth={2} />
               )}
-              {isEnriching ? "Generating…" : "Generate More Details"}
+              {isGapFilling ? "Generating…" : "Generate More Details"}
             </button>
           </div>
 
-          {enrichNotice ? (
+          {gapFillError ? (
+            <div className="mb-3 rounded-2xl border border-[rgba(245,158,11,0.25)] bg-[rgba(245,158,11,0.08)] px-4 py-3 text-sm text-[var(--pill-amber-text,#b45309)]">
+              {gapFillError}
+            </div>
+          ) : null}
+
+          {gapFillNotice ? (
             <div className="mb-3 rounded-2xl border border-[rgba(59,130,246,0.25)] bg-[rgba(59,130,246,0.08)] px-4 py-3 text-sm text-[var(--pill-blue-text,#1d4ed8)]">
-              {enrichNotice}
+              {gapFillNotice}
             </div>
           ) : null}
 

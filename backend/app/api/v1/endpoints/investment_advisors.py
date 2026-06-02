@@ -595,6 +595,7 @@ async def gap_fill_advisor_contacts(
     advisor_id: int,
     background_tasks: BackgroundTasks,
     response: Response,
+    force: bool = False,
     current_user: AuthenticatedUser = Depends(_require_investment_advisors),
     db: AsyncSession = Depends(get_db_session),
 ) -> RefreshAdvisorResponse:
@@ -623,7 +624,10 @@ async def gap_fill_advisor_contacts(
     if last_attempt is not None and last_attempt.tzinfo is None:
         last_attempt = last_attempt.replace(tzinfo=timezone.utc)
     cooldown_cutoff = datetime.now(timezone.utc) - timedelta(days=GAP_FILL_COOLDOWN_DAYS)
-    if last_attempt is not None and last_attempt >= cooldown_cutoff:
+    # ``force`` (the user-facing "Generate More Details" button) bypasses the
+    # cost cooldown so the action always re-runs, matching the broker-dealer
+    # enrich button. Automated / bulk callers omit it and keep the cooldown.
+    if not force and last_attempt is not None and last_attempt >= cooldown_cutoff:
         days_remaining = max(
             1,
             GAP_FILL_COOLDOWN_DAYS
