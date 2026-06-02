@@ -569,7 +569,14 @@ async def enrich_broker_dealer_contacts(
         contacts = await contact_service.list_contacts(db, broker_dealer.id)
 
     if officers:
-        domain = _resolve_domain(broker_dealer)
+        # Anchor the Phase-2 email finders (Hunter/Snov) on the firm's real
+        # email domain when we can infer it from the addresses Phase 1 /
+        # existing contacts already carry. The website host is frequently a
+        # different domain (e.g. website ``aegiscapcorp.com`` vs email
+        # ``aegiscap.com``) and would send those providers hunting the wrong
+        # domain; fall back to it only when no corporate email is known yet.
+        derived_domain = _derive_email_domain(_known_contact_emails(contacts))
+        domain = derived_domain or _resolve_domain(broker_dealer)
         existing_names = {_normalise_name(contact.name) for contact in contacts}
         discovered = 0
         for officer in officers:
@@ -655,6 +662,58 @@ def _resolve_domain(broker_dealer: BrokerDealer) -> str | None:
     if candidate.startswith("www."):
         candidate = candidate[4:]
     return candidate or None
+
+
+# Free / personal mailbox providers never represent a firm's email domain, so a
+# contact's personal Gmail can't hijack the Phase-2 domain anchor.
+_FREE_EMAIL_DOMAINS = frozenset(
+    {
+        "gmail.com", "googlemail.com", "yahoo.com", "ymail.com",
+        "outlook.com", "hotmail.com", "live.com", "msn.com",
+        "aol.com", "icloud.com", "me.com", "mac.com",
+        "protonmail.com", "proton.me", "gmx.com", "mail.com",
+    }
+)
+
+
+def _known_contact_emails(contacts: list[ExecutiveContact]) -> list[str]:
+    """Every email already on a firm's contacts -- the scalar ``email`` column
+    plus each ``emails`` JSONB entry's ``value``."""
+    out: list[str] = []
+    for contact in contacts:
+        scalar = getattr(contact, "email", None)
+        if scalar:
+            out.append(str(scalar))
+        array = getattr(contact, "emails", None)
+        if isinstance(array, list):
+            out.extend(
+                str(entry["value"])
+                for entry in array
+                if isinstance(entry, dict) and entry.get("value")
+            )
+    return out
+
+
+def _derive_email_domain(emails: list[str]) -> str | None:
+    """Most common corporate email domain among ``emails`` (or ``None``).
+
+    A firm's website host often differs from its email-sending domain (e.g.
+    website ``aegiscapcorp.com`` vs email ``aegiscap.com``). When real emails
+    are already known, their domain is a far better anchor for the Phase-2
+    email finders (Hunter/Snov) than the website host. Free mailbox providers
+    are ignored; ties break on the domain name so the result is deterministic.
+    """
+    counts: dict[str, int] = {}
+    for email in emails:
+        if not email or "@" not in email:
+            continue
+        domain = email.rsplit("@", 1)[1].strip().lower().rstrip(".")
+        if not domain or domain in _FREE_EMAIL_DOMAINS:
+            continue
+        counts[domain] = counts.get(domain, 0) + 1
+    if not counts:
+        return None
+    return max(sorted(counts), key=lambda d: counts[d])
 
 
 def _officer_to_entity(
