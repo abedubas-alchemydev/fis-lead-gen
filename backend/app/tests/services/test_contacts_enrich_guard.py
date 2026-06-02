@@ -895,10 +895,17 @@ async def test_reveal_payload_sent_and_person_id_persisted(
 
 @pytest.mark.asyncio
 @respx.mock
-async def test_reveal_keeps_id_only_match(patch_settings_with_reveal: None) -> None:
-    """When reveal is on, a match with only an ``id`` (no sync email / linkedin
-    / phone) is kept — the phone arrives later via the webhook — instead of
-    being dropped by the empty-channel guard."""
+async def test_reveal_drops_id_only_match(patch_settings_with_reveal: None) -> None:
+    """Even with reveal configured, a match with only an ``id`` (no sync
+    email / linkedin / phone) is dropped, not kept.
+
+    We used to keep these and lean on the async phone-reveal webhook to fill
+    the phone later. But Apollo returns an *ephemeral* person id for a thin
+    match (it has no stable record for the officer); that id never reappears
+    in the reveal callback, so the row would stay permanently contactless
+    while burning a phone-reveal credit. Dropping it avoids an empty row (the
+    ContactRow render guard hides it anyway). With zero per-officer matches,
+    the service falls through to org-enrich."""
     bd = _make_bd(
         last_attempt=None,
         executive_officers=[{"name": "DOE, ALICE", "title": "CEO"}],
@@ -917,16 +924,19 @@ async def test_reveal_keeps_id_only_match(patch_settings_with_reveal: None) -> N
             }),
         )
     )
-    # Not expected to fire (we produced a contact) — mocked defensively.
-    respx.post(APOLLO_ORG_URL).mock(
+    # Now expected to fire: the id-only match is dropped, leaving zero
+    # per-officer contacts, so the service falls back to org-enrich.
+    org_route = respx.post(APOLLO_ORG_URL).mock(
         return_value=httpx.Response(200, json={"organization": None})
     )
 
     service = ExecutiveContactService()
     await service.enrich_contacts(session, bd)
 
-    assert len(session.added) == 1, "id-only match must be kept when reveal is on"
-    assert session.added[0].apollo_person_id == "apollo-person-onlyid"
-    assert session.added[0].email is None
+    assert session.added == [], "id-only match must be dropped even when reveal is on"
+    assert org_route.called, "Zero per-officer matches → fall back to org enrich"
+    assert bd.last_enrich_attempt_at is not None, (
+        "Clean Apollo-owned no-result must still stamp the cooldown"
+    )
 
 
