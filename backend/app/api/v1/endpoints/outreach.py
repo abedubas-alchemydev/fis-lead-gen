@@ -16,7 +16,7 @@ from __future__ import annotations
 
 import json
 import logging
-from datetime import datetime, timedelta, timezone
+from datetime import datetime, timezone
 from typing import Literal
 
 from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, Query, Response, status
@@ -1973,6 +1973,9 @@ async def list_linked_providers(
 # (Apollo / PDL / Hunter / Snov) and operators may want to control that
 # spend independently of the send surface.
 
+# DEMO: retained but currently unenforced -- the cooldown gate in
+# dispatch_firm_gap_fill was removed for the client demo (see the note there).
+# Kept so restoring production gating is a one-line revert.
 _GAP_FILL_COOLDOWN_DAYS = 30
 
 _GAP_FILL_PIPELINE_NAMES: tuple[str, ...] = (
@@ -2407,25 +2410,15 @@ async def dispatch_firm_gap_fill(
     if firm is None:
         raise HTTPException(status_code=404, detail="firm_not_found")
 
-    last_attempt = firm.last_gap_fill_attempt_at
-    if last_attempt is not None and last_attempt.tzinfo is None:
-        last_attempt = last_attempt.replace(tzinfo=timezone.utc)
-    cooldown_cutoff = datetime.now(timezone.utc) - timedelta(
-        days=_GAP_FILL_COOLDOWN_DAYS
-    )
-    if last_attempt is not None and last_attempt >= cooldown_cutoff:
-        days_remaining = max(
-            1,
-            _GAP_FILL_COOLDOWN_DAYS
-            - (datetime.now(timezone.utc) - last_attempt).days,
-        )
-        raise HTTPException(
-            status_code=status.HTTP_429_TOO_MANY_REQUESTS,
-            detail=(
-                f"Gap-fill cooldown active. Try again in {days_remaining} day(s)."
-            ),
-            headers={"Retry-After": str(days_remaining * 86400)},
-        )
+    # DEMO: the 30-day gap-fill cooldown gate is removed so "Enrich all" on the
+    # /outreach/contacts page is always actionable for the client demo (mirrors
+    # the /investors always-enabled override). Re-enrichment now fires
+    # regardless of last_gap_fill_attempt_at. The in-flight guard below still
+    # prevents duplicate concurrent runs for the same firm. To restore
+    # production gating, re-instate the block that compared
+    # firm.last_gap_fill_attempt_at against a _GAP_FILL_COOLDOWN_DAYS cutoff and
+    # raised HTTP 429 here, and revert the matching FE gate in
+    # components/outreach-contacts/firm-row.tsx + the dispatch cooldown test.
 
     marker = f'"{marker_key}": {entity_id}'
     in_flight_stmt = (

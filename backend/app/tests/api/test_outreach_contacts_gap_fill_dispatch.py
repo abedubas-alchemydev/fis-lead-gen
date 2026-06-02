@@ -216,7 +216,11 @@ async def test_dispatch_investor_creates_pipeline_run_with_investor_marker() -> 
         await _cleanup([user_id], [], [], [investor_id], [run_id] if run_id else [])
 
 
-async def test_dispatch_returns_429_when_cooldown_active() -> None:
+async def test_dispatch_ignores_cooldown_demo_override() -> None:
+    # DEMO: the 30-day gap-fill cooldown was removed so "Enrich all" is always
+    # actionable for the client demo. A firm gap-filled 5 days ago must now
+    # still dispatch (202 + a fresh PipelineRun) instead of the old 429.
+    # Restore the 429 assertion when the cooldown gate is reinstated.
     user_id = await _seed_user()
     async with SessionLocal() as session:
         advisor = InvestmentAdvisor(
@@ -230,25 +234,30 @@ async def test_dispatch_returns_429_when_cooldown_active() -> None:
         advisor_id = advisor.id
 
     app.dependency_overrides[get_current_user] = lambda: _override_user(user_id)
+    run_id: int | None = None
     try:
         async with _client() as client:
             response = await client.post(
                 f"/api/v1/outreach/contacts/firms/advisor/{advisor_id}/gap-fill"
             )
-        assert response.status_code == 429, response.text
-        # No PipelineRun should have been created on a cooldown rejection.
+        assert response.status_code == 202, response.text
+        body = response.json()
+        assert body["status"] == "queued"
+        run_id = body["run_id"]
+        assert run_id is not None
+        # A run IS created now that the cooldown no longer rejects the request.
         async with SessionLocal() as session:
-            rows = (
+            run = (
                 await session.execute(
-                    select(PipelineRun.id).where(
-                        PipelineRun.notes.ilike(f'%"advisor_id": {advisor_id}%')
-                    )
+                    select(PipelineRun).where(PipelineRun.id == run_id)
                 )
-            ).all()
-            assert rows == []
+            ).scalar_one()
+            assert run.pipeline_name == "investment_advisor_gap_fill_contacts"
     finally:
         app.dependency_overrides.clear()
-        await _cleanup([user_id], [], [advisor_id], [], [])
+        await _cleanup(
+            [user_id], [], [advisor_id], [], [run_id] if run_id else []
+        )
 
 
 async def test_dispatch_returns_404_for_missing_firm() -> None:

@@ -20,10 +20,13 @@ import {
   type OutreachContactsFirmRow,
 } from "@/lib/outreach-contacts";
 
-// Hard-coded 30-day cooldown -- matches GAP_FILL_COOLDOWN_DAYS on the
-// backend dispatch endpoint. Used to render a disabled state on the
-// Enrich button when the firm is within the cooldown window.
-const GAP_FILL_COOLDOWN_DAYS = 30;
+// DEMO: the 30-day gap-fill cooldown gate was removed so "Enrich all" stays
+// always-clickable for the client demo (mirrors the /investors always-enabled
+// override). The withinCooldown() helper + GAP_FILL_COOLDOWN_DAYS const that
+// disabled the button within the cooldown window were deleted, along with the
+// matching BE 429 in api/v1/endpoints/outreach.py (dispatch_firm_gap_fill).
+// To restore production gating, bring them back and re-add the
+// `|| cooldown.active` gate + the cooldown tooltip branch below.
 
 const ENTITY_KIND_LABEL: Record<OutreachContactsFirmRow["entity_kind"], string> = {
   broker_dealer: "Broker-Dealer",
@@ -42,15 +45,6 @@ function firmProfileHref(firm: OutreachContactsFirmRow): Route {
       // server-side and forwards. Do not point straight at /advisor-list.
       return `/institutional-investors/${firm.entity_id}` as Route;
   }
-}
-
-function withinCooldown(stamp: string | null): { active: boolean; daysLeft: number } {
-  if (!stamp) return { active: false, daysLeft: 0 };
-  const last = Date.parse(stamp);
-  if (Number.isNaN(last)) return { active: false, daysLeft: 0 };
-  const elapsedDays = (Date.now() - last) / 86_400_000;
-  if (elapsedDays >= GAP_FILL_COOLDOWN_DAYS) return { active: false, daysLeft: 0 };
-  return { active: true, daysLeft: Math.max(1, Math.ceil(GAP_FILL_COOLDOWN_DAYS - elapsedDays)) };
 }
 
 interface FirmRowProps {
@@ -101,13 +95,12 @@ export function FirmRow({
     });
   }, [persons, personsLoading, loadPersons]);
 
-  const cooldown = withinCooldown(firm.last_gap_fill_attempt_at);
-  const enrichDisabled = isEnriching || firm.gap_fill_in_progress || cooldown.active;
+  // DEMO: cooldown gating removed (see top-of-file note) -- only the live
+  // in-flight / enriching states still disable the button.
+  const enrichDisabled = isEnriching || firm.gap_fill_in_progress;
   const buttonTitle = firm.gap_fill_in_progress
     ? "Gap-fill already running for this firm."
-    : cooldown.active
-      ? `Cooldown active. Try again in ${cooldown.daysLeft} day(s).`
-      : "Re-query PDL / Hunter / Snov for missing emails, phones, and LinkedIn URLs.";
+    : "Re-query PDL / Hunter / Snov for missing emails, phones, and LinkedIn URLs.";
 
   return (
     <div className="border-t border-[var(--border,rgba(30,64,175,0.1))] py-4 first:border-t-0">
