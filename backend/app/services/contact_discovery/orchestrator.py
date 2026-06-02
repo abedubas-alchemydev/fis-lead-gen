@@ -98,6 +98,7 @@ async def discover_contact(
     bd_id: int,
     session: AsyncSession,
     use_cache: bool = True,
+    exclude_providers: frozenset[str] = frozenset(),
 ) -> ExecutiveContact | None:
     """Resolve a broker-dealer officer into a persisted ``ExecutiveContact``.
 
@@ -112,6 +113,12 @@ async def discover_contact(
     inserted. Phones are never regressed: a forced run's sync result often
     has no phone (Apollo reveal is async), so an already-revealed phone is
     kept.
+
+    ``exclude_providers`` drops the named providers from the chain for this
+    call only. The BD ``/enrich`` endpoint passes ``{"apollo_match"}`` when
+    its company-search phase already issued the identical Apollo
+    /people/match for these officers, so the chain skips it and runs only the
+    email finders (see the endpoint for the rationale).
     """
     parsed = _parse_entity(entity)
     if parsed is None:
@@ -130,6 +137,7 @@ async def discover_contact(
         org_name=org_name,
         domain=domain,
         cache_name=cache_name,
+        exclude_providers=exclude_providers,
     )
     if result is None:
         return None
@@ -271,6 +279,7 @@ async def _walk_chain(
     org_name: str,
     domain: str | None,
     cache_name: str,
+    exclude_providers: frozenset[str] = frozenset(),
 ) -> DiscoveryResult | None:
     """Fan out to every configured provider in parallel and merge their hits.
 
@@ -283,12 +292,22 @@ async def _walk_chain(
     return ``None``, or fall below the threshold contribute nothing and are
     skipped (mirroring the previous first-hit-wins miss handling). Returns
     ``None`` when no provider clears the threshold.
+
+    Providers named in ``exclude_providers`` are dropped from the chain for
+    this call (a caller that already ran one in an earlier phase), leaving the
+    rest to fan out normally.
     """
     min_confidence = float(settings.contact_discovery_min_confidence)
     chain = [p.strip() for p in settings.contact_discovery_chain.split(",") if p.strip()]
 
     valid: list[tuple[str, ContactDiscoveryProvider]] = []
     for provider_name in chain:
+        if provider_name in exclude_providers:
+            # Caller already ran this provider in an earlier phase (the BD
+            # /enrich company-search issues Apollo /people/match), so
+            # re-running it here would repeat the identical call. The rest of
+            # the chain still fans out.
+            continue
         provider = _PROVIDERS.get(provider_name)
         if provider is None:
             logger.warning("contact_discovery_chain references unknown provider %r", provider_name)

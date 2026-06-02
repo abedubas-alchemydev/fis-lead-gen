@@ -61,6 +61,7 @@ from app.services.user_lists import (
     record_visit,
     remove_favorite,
 )
+from app.services.contact_discovery.apollo_match import ApolloMatchProvider
 from app.services.contact_discovery.orchestrator import discover_contact
 from app.services.contacts import (
     ApolloLookupError,
@@ -558,8 +559,27 @@ async def enrich_broker_dealer_contacts(
     officers = list(body.officers) if body else []
     force = bool(body.refresh) if body else False
 
+    # Did Phase 1 (company search) actually issue Apollo /people/match for this
+    # firm's officers in THIS request? Only the forced button path with Apollo
+    # configured does, and ``force`` guarantees enrich_contacts bypassed its
+    # cooldown/freshness short-circuits, so the calls really went out. When they
+    # did, Phase 2 must skip the chain's ``apollo_match`` provider: it issues the
+    # identical /people/match call, so re-running it for the officers Phase 1
+    # missed just burns a second credit on the same no-match (and would re-admit
+    # cross-firm matches Phase 1's org guard already rejected). hunter + snov —
+    # the email finders Phase 1 never runs — still carry Phase 2.
+    #
+    # When Phase 1 is unavailable (CONTACT_ENRICHMENT_PROVIDER=disabled, the
+    # default) the except branch leaves this False, so ``apollo_match`` stays in
+    # the chain as the *only* Apollo path and nothing is lost.
+    phase1_ran_apollo = False
     try:
         contacts = await contact_service.enrich_contacts(db, broker_dealer, force=force)
+        phase1_ran_apollo = (
+            force
+            and settings.contact_enrichment_provider.lower() == "apollo"
+            and bool(settings.apollo_api_key)
+        )
     except ContactEnrichmentUnavailableError as exc:
         # Company-search is unavailable. If the caller seeded officers, let
         # Phase 2 (the discovery chain) carry the request anyway; otherwise
@@ -578,6 +598,10 @@ async def enrich_broker_dealer_contacts(
         derived_domain = _derive_email_domain(_known_contact_emails(contacts))
         domain = derived_domain or _resolve_domain(broker_dealer)
         existing_names = {_normalise_name(contact.name) for contact in contacts}
+        # See ``phase1_ran_apollo`` above: drop the redundant second Apollo call.
+        phase2_exclude = (
+            frozenset({ApolloMatchProvider.name}) if phase1_ran_apollo else frozenset()
+        )
         discovered = 0
         for officer in officers:
             entity = _officer_to_entity(officer, broker_dealer, domain)
@@ -586,7 +610,11 @@ async def enrich_broker_dealer_contacts(
             if _normalise_name(entity["cache_name"]) in existing_names:
                 continue
             row = await discover_contact(
-                entity, bd_id=broker_dealer.id, session=db, use_cache=not force
+                entity,
+                bd_id=broker_dealer.id,
+                session=db,
+                use_cache=not force,
+                exclude_providers=phase2_exclude,
             )
             if row is not None:
                 # Commit immediately so the row's apollo_person_id is persisted

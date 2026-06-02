@@ -555,3 +555,61 @@ async def test_orchestrator_organization_uses_find_org(patch_settings: None) -> 
     assert not person_route.called
     assert hunter_route.called
     assert snov_domain_route.called
+
+
+@pytest.mark.asyncio
+@respx.mock
+async def test_orchestrator_exclude_providers_skips_apollo(patch_settings: None) -> None:
+    """``exclude_providers={"apollo_match"}`` drops Apollo from the chain for
+    this call — the BD ``/enrich`` endpoint passes it after its company-search
+    phase already issued the identical /people/match. Apollo's endpoint must
+    never be hit even though it would return the strongest (verified-90) hit;
+    hunter + snov still fan out and carry the result."""
+    apollo_route = respx.post(apollo_match.PEOPLE_MATCH_URL).mock(
+        return_value=httpx.Response(
+            200,
+            json={
+                "person": {
+                    "email": "bryan@example.com",
+                    "email_status": "verified",
+                    "phone_numbers": [],
+                }
+            },
+        )
+    )
+    hunter_route = respx.get(hunter.EMAIL_FINDER_URL).mock(
+        return_value=httpx.Response(
+            200,
+            json={"data": {"email": "bryan.real@example.com", "score": 82}},
+        )
+    )
+    respx.post(snov.OAUTH_URL).mock(
+        return_value=httpx.Response(200, json={"access_token": "tok", "expires_in": 3600})
+    )
+    snov_route = respx.post(snov.EMAIL_FINDER_URL).mock(
+        return_value=httpx.Response(200, json={"data": {}})
+    )
+
+    session = _FakeSession()
+    entity = {
+        "type": "person",
+        "first_name": "Bryan",
+        "last_name": "Halpert",
+        "org_name": "Example LLC",
+        "title": "CEO",
+        "domain": "example.com",
+    }
+    row = await discover_contact(
+        entity,
+        bd_id=18344,
+        session=session,
+        exclude_providers=frozenset({"apollo_match"}),
+    )
+
+    assert row is not None
+    # Apollo was excluded, so its verified-90 must NOT win — Hunter carries it.
+    assert not apollo_route.called
+    assert row.email == "bryan.real@example.com"
+    assert row.discovery_source == "hunter"
+    assert hunter_route.called
+    assert snov_route.called
