@@ -3,6 +3,7 @@ const toneMap: Record<string, string> = {
   fully_disclosed: "border-[var(--blue,#3b82f6)]/20 bg-[var(--blue,#3b82f6)] text-white",
   omnibus: "border-[var(--surface-3,#dbeafe)] bg-[var(--surface-3,#dbeafe)] text-[var(--text-dim,#475569)]",
   non_carrying: "border-[var(--slate,#64748b)]/20 bg-[var(--slate,#64748b)] text-white",
+  Identifying: "border-[var(--amber,#f59e0b)]/20 bg-[var(--amber,#f59e0b)] text-white",
   unknown: "border-dashed border-[var(--border-2,rgba(30,64,175,0.16))] bg-[var(--surface,#ffffff)] text-[var(--text-muted,#94a3b8)]"
 };
 
@@ -11,6 +12,7 @@ const labelMap: Record<string, string> = {
   fully_disclosed: "Fully Disclosed",
   omnibus: "Omnibus",
   non_carrying: "Non-Carrying",
+  Identifying: "Identifying",
   unknown: "Not classified"
 };
 

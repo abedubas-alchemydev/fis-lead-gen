@@ -17,30 +17,33 @@ DEFERRED: do not run against staging until the masterlist data fill completes
 and Deshorn has spot-checked a sample (>=27/30). Use ``--limit 30`` first to
 produce the spot-check CSV.
 
+Progress + crash recovery (one firm at a time, on purpose):
+  * Each firm is stamped ``current_clearing_type = 'Identifying'`` and committed
+    BEFORE it is processed, so the master list shows live which firm is being
+    corrected right now (exactly one at a time). The real label overwrites it
+    when the firm finishes.
+  * Every completed ``bd_id`` is appended to the checkpoint file the moment its
+    real label is written. ``--resume`` skips everything already in the
+    checkpoint, so a crash resumes exactly where it stopped. A firm left stuck
+    on 'Identifying' (killed mid-flight) is NOT in the checkpoint, so it gets
+    re-done on resume.
+
 Model selection — defaults to ``gemini-2.5-pro`` for best accuracy (the "use
 Gemini as much as possible" mandate). The deterministic validator owns the
-headline correctness regardless of model, so the cheaper paths stay safe:
-  * ``--model pro``  (default) -- best accuracy everywhere. Pro quota is
-                       ~1,000/day, so chunk a full run with ``--offset`` (the
-                       run is deferred + background anyway, so this is fine).
-  * ``--model flash`` -- cheap/fast bulk, no quota wall. The validator still
-                       fixes the sub-$250k demotions; Flash only widens the
-                       ``needs_review`` pile on genuinely ambiguous filings.
-  * ``--model flash --reverify-uncertain`` -- quota-saving HYBRID: Flash bulk,
-                       then re-run only the ``needs_review`` rows on
-                       gemini-2.5-pro. Use only if the Pro quota wall is a
-                       problem; the deterministic demotions are not re-read.
-
-A change CSV is written for review (one row per firm per pass):
-    bd_id, name, crd, old_type, new_type, old_classification,
-    new_classification, partner, required_min_capital, memberships,
-    finra_partner, confidence, status, notes, pass, model
+headline correctness regardless of model:
+  * ``--model pro``  (default) -- best accuracy. Pro quota ~1,000/day, so chunk
+                       with ``--offset`` (the run is deferred/background anyway).
+  * ``--model flash`` -- cheap/fast bulk; the validator still fixes the sub-$250k
+                       demotions, Flash only widens the ``needs_review`` pile.
+  * Quota-saving hybrid = two runs: ``--model flash`` (full), then
+    ``--model pro --only-needs-review`` (re-read just the needs_review rows).
 
 Usage:
     python -m scripts.run_clearing_reclassification_backfill --limit 30   # Pro spot-check
     python -m scripts.run_clearing_reclassification_backfill              # full Pro run
-    python -m scripts.run_clearing_reclassification_backfill --offset 1000 --limit 1000
-    python -m scripts.run_clearing_reclassification_backfill --model flash --reverify-uncertain
+    python -m scripts.run_clearing_reclassification_backfill --resume     # after a crash
+    python -m scripts.run_clearing_reclassification_backfill --model flash
+    python -m scripts.run_clearing_reclassification_backfill --model pro --only-needs-review
 """
 
 from __future__ import annotations
@@ -77,14 +80,12 @@ from app.services.pipeline import ClearingPipelineService  # noqa: E402
 
 logger = logging.getLogger(__name__)
 
-BATCH_SIZE = 8  # smaller than the text-only classifier batch: each firm does a
-# PDF fetch + Gemini PDF call, so 8 concurrent keeps provider load sane.
-SLEEP_BETWEEN_BATCHES_SECONDS = 2.0
+# Transient marker written to ``current_clearing_type`` while a firm is being
+# corrected so the master list shows live which firm is in flight. Rendered as
+# an amber "Identifying" pill on the FE (see pill-helpers / clearing-type-badge).
+IN_PROGRESS_MARKER = "Identifying"
 
-# --model maps the friendly name to the API model id. The --reverify-uncertain
-# pass always escalates to Pro regardless of the bulk model.
 MODEL_IDS = {"flash": "gemini-2.5-flash", "pro": "gemini-2.5-pro"}
-VERIFY_MODEL = "gemini-2.5-pro"
 
 CSV_FIELDS = [
     "bd_id",
@@ -101,9 +102,19 @@ CSV_FIELDS = [
     "confidence",
     "status",
     "notes",
-    "pass",
     "model",
 ]
+
+
+def _load_checkpoint(path: Path) -> set[int]:
+    if not path.exists():
+        return set()
+    done: set[int] = set()
+    for line in path.read_text(encoding="utf-8").splitlines():
+        line = line.strip()
+        if line.isdigit():
+            done.add(int(line))
+    return done
 
 
 async def _create_backfill_run() -> int:
@@ -119,20 +130,35 @@ async def _create_backfill_run() -> int:
         return run.id
 
 
-async def _reclassify_one(
-    service: ClearingPipelineService,
-    reconciler: FinraClearingReconciler,
-    run_id: int,
-    competitors: list,
-    bd_id: int,
-) -> dict | None:
-    # Snapshot before-state + assemble the deterministic signals.
+async def _snapshot_and_mark_identifying(bd_id: int) -> tuple[str | None, str | None] | None:
+    """Read the firm's pre-run clearing label, then stamp 'Identifying' and
+    commit immediately so the master list shows it in flight. Returns the
+    (old_type, old_classification) snapshot, or None if the BD vanished."""
     async with SessionLocal() as db:
         bd = await db.get(BrokerDealer, bd_id)
         if bd is None:
             return None
         old_type = bd.current_clearing_type
         old_classification = bd.clearing_classification
+        bd.current_clearing_type = IN_PROGRESS_MARKER
+        await db.commit()
+    return old_type, old_classification
+
+
+async def _reclassify_one(
+    service: ClearingPipelineService,
+    reconciler: FinraClearingReconciler,
+    run_id: int,
+    competitors: list,
+    bd_id: int,
+    *,
+    old_type: str | None,
+    old_classification: str | None,
+) -> dict | None:
+    async with SessionLocal() as db:
+        bd = await db.get(BrokerDealer, bd_id)
+        if bd is None:
+            return None
         name = bd.name
         crd = bd.crd_number
         min_cap = (
@@ -185,73 +211,18 @@ async def _reclassify_one(
         "confidence": result.get("extraction_confidence"),
         "status": result.get("extraction_status"),
         "notes": (result.get("extraction_notes") or "")[:300],
+        "model": settings.gemini_pdf_model,
     }
-
-
-async def _run_pass(
-    fh,
-    writer: "csv.DictWriter",
-    service: ClearingPipelineService,
-    reconciler: FinraClearingReconciler,
-    run_id: int,
-    competitors: list,
-    bd_ids: list[int],
-    *,
-    pass_num: int,
-    started_at: float,
-) -> list[dict]:
-    """Process ``bd_ids`` in concurrent batches, stream each result row (tagged
-    with the pass number + active model) to the CSV, and return the rows."""
-    total = len(bd_ids)
-    rows_out: list[dict] = []
-    processed = 0
-    for batch_start in range(0, total, BATCH_SIZE):
-        batch = bd_ids[batch_start : batch_start + BATCH_SIZE]
-        rows = await asyncio.gather(
-            *(
-                _reclassify_one(service, reconciler, run_id, competitors, bd_id)
-                for bd_id in batch
-            ),
-            return_exceptions=True,
-        )
-        for bd_id, row in zip(batch, rows):
-            if isinstance(row, Exception):
-                logger.error("reclassify failed for bd %s: %r", bd_id, row)
-                continue
-            if row is None:
-                continue
-            row["pass"] = pass_num
-            row["model"] = settings.gemini_pdf_model
-            writer.writerow(row)
-            rows_out.append(row)
-            processed += 1
-        fh.flush()
-
-        elapsed = time.monotonic() - started_at
-        rate = processed / elapsed if elapsed > 0 else 0.0
-        print(f"  pass {pass_num}: {processed}/{total} ({rate:.2f} firms/s)")
-        if batch_start + BATCH_SIZE < total:
-            await asyncio.sleep(SLEEP_BETWEEN_BATCHES_SECONDS)
-    return rows_out
-
-
-def _needs_pro_reverify(row: dict) -> bool:
-    # Only the genuinely uncertain rows benefit from a Pro re-read. The
-    # capital/membership corrections are deterministic (the validator gives the
-    # same answer regardless of model), so re-verifying merely-"changed" rows
-    # would burn Pro quota for no change.
-    return (
-        row["status"] == "needs_review"
-        or row["new_classification"] == "needs_review"
-    )
 
 
 async def main(
     limit: int | None,
     offset: int,
     out_path: Path,
+    checkpoint_path: Path,
     model: str,
-    reverify_uncertain: bool,
+    only_needs_review: bool,
+    resume: bool,
 ) -> None:
     started_at = time.monotonic()
     settings.gemini_pdf_model = MODEL_IDS[model]
@@ -262,69 +233,84 @@ async def main(
     async with SessionLocal() as db:
         await service.competitors.seed_defaults(db)
         competitors = await service.competitors.list_active(db)
+        query = select(BrokerDealer.id).where(BrokerDealer.filings_index_url.isnot(None))
+        if only_needs_review:
+            query = query.where(BrokerDealer.clearing_classification == "needs_review")
         bd_ids = (
-            await db.execute(
-                select(BrokerDealer.id)
-                .where(BrokerDealer.filings_index_url.isnot(None))
-                .order_by(BrokerDealer.id.asc())
-            )
+            await db.execute(query.order_by(BrokerDealer.id.asc()))
         ).scalars().all()
 
     bd_ids = bd_ids[offset:]
     if limit is not None:
         bd_ids = bd_ids[:limit]
-    total = len(bd_ids)
+
+    completed = _load_checkpoint(checkpoint_path) if resume else set()
+    pending = [b for b in bd_ids if b not in completed]
+    total = len(pending)
 
     run_id = await _create_backfill_run()
     print(f"Re-classifying {total} firms (offset={offset}, run_id={run_id})")
     print(f"  model: {settings.gemini_pdf_model}")
-    print(f"  reverify-uncertain: {reverify_uncertain}")
-    print(f"  change CSV -> {out_path}")
+    print(f"  only_needs_review: {only_needs_review} | resume: {resume} "
+          f"({len(completed)} already checkpointed)")
+    print(f"  change CSV  -> {out_path}")
+    print(f"  checkpoint  -> {checkpoint_path}")
 
     out_path.parent.mkdir(parents=True, exist_ok=True)
-    with out_path.open("w", encoding="utf-8", newline="") as fh:
-        writer = csv.DictWriter(fh, fieldnames=CSV_FIELDS)
-        writer.writeheader()
+    checkpoint_path.parent.mkdir(parents=True, exist_ok=True)
+    csv_mode = "a" if (resume and out_path.exists()) else "w"
+    ckpt_mode = "a" if resume else "w"
 
-        pass1 = await _run_pass(
-            fh, writer, service, reconciler, run_id, competitors, bd_ids,
-            pass_num=1, started_at=started_at,
-        )
-
-        pass2: list[dict] = []
-        if reverify_uncertain:
-            reverify_ids = [r["bd_id"] for r in pass1 if _needs_pro_reverify(r)]
-            settings.gemini_pdf_model = VERIFY_MODEL
-            print(
-                f"Re-verifying {len(reverify_ids)} needs_review firms "
-                f"on {settings.gemini_pdf_model}"
-            )
-            pass2 = await _run_pass(
-                fh, writer, service, reconciler, run_id, competitors, reverify_ids,
-                pass_num=2, started_at=started_at,
-            )
-
-    transitions: dict[str, int] = {}
+    processed = 0
     changed = 0
-    for r in pass1:
-        if r["old_type"] != r["new_type"]:
-            changed += 1
-            key = f"{r['old_type']} -> {r['new_type']}"
-            transitions[key] = transitions.get(key, 0) + 1
+    transitions: dict[str, int] = {}
+
+    with out_path.open(csv_mode, encoding="utf-8", newline="") as fh, \
+            checkpoint_path.open(ckpt_mode, encoding="utf-8") as ckpt:
+        writer = csv.DictWriter(fh, fieldnames=CSV_FIELDS)
+        if csv_mode == "w":
+            writer.writeheader()
+            fh.flush()
+
+        # One firm at a time: mark 'Identifying' -> correct it -> checkpoint it.
+        for bd_id in pending:
+            snapshot = await _snapshot_and_mark_identifying(bd_id)
+            if snapshot is None:
+                continue
+            old_type, old_classification = snapshot
+
+            row = await _reclassify_one(
+                service, reconciler, run_id, competitors, bd_id,
+                old_type=old_type, old_classification=old_classification,
+            )
+
+            # Record the real label, then checkpoint so a crash resumes here.
+            if row is not None:
+                writer.writerow(row)
+                fh.flush()
+                if row["old_type"] != row["new_type"]:
+                    changed += 1
+                    key = f"{row['old_type']} -> {row['new_type']}"
+                    transitions[key] = transitions.get(key, 0) + 1
+            ckpt.write(f"{bd_id}\n")
+            ckpt.flush()
+
+            processed += 1
+            elapsed = time.monotonic() - started_at
+            rate = processed / elapsed if elapsed > 0 else 0.0
+            last = f"{row['new_type']}" if row else "skipped"
+            print(f"  {processed}/{total} done: bd {bd_id} -> {last} ({rate:.2f}/s)")
 
     async with SessionLocal() as db:
         run = await db.get(PipelineRun, run_id)
         if run is not None:
             run.status = "completed"
-            run.processed_items = len(pass1)
+            run.processed_items = processed
             await db.commit()
 
     elapsed = time.monotonic() - started_at
-    print(
-        f"Done in {elapsed:.1f}s. Pass 1: {len(pass1)} firms, {changed} changed. "
-        f"Pass 2 (Pro re-verify): {len(pass2)} firms."
-    )
-    print("  top transitions (pass 1):")
+    print(f"Done in {elapsed:.1f}s. Processed {processed}/{total}; {changed} changed.")
+    print("  top transitions:")
     for key, count in sorted(transitions.items(), key=lambda kv: -kv[1])[:15]:
         print(f"    {key}: {count}")
 
@@ -343,20 +329,30 @@ def _parse_args() -> argparse.Namespace:
         "--model",
         choices=["flash", "pro"],
         default="pro",
-        help="Extraction model for the main pass (default: pro -- best accuracy).",
+        help="Extraction model (default: pro -- best accuracy).",
     )
     parser.add_argument(
-        "--reverify-uncertain",
+        "--only-needs-review",
         action="store_true",
-        help="Quota-saving HYBRID: after a Flash main pass, re-run only the "
-        "needs_review rows on gemini-2.5-pro (deterministic demotions are not "
-        "re-read).",
+        help="Restrict the universe to firms currently classified needs_review "
+        "(the Pro re-verify pass; pair with --model pro).",
+    )
+    parser.add_argument(
+        "--resume",
+        action="store_true",
+        help="Skip firms already in the checkpoint file and append to the CSV.",
     )
     parser.add_argument(
         "--out",
         type=str,
         default=str(ROOT / "reports" / "clearing_reclass_backfill.csv"),
         help="Change-CSV output path.",
+    )
+    parser.add_argument(
+        "--checkpoint",
+        type=str,
+        default=str(ROOT / "reports" / "clearing_reclass_checkpoint.txt"),
+        help="Checkpoint file of completed bd_ids (for --resume).",
     )
     return parser.parse_args()
 
@@ -369,10 +365,15 @@ if __name__ == "__main__":
         stream=sys.stderr,
     )
     out = Path(args.out)
+    ckpt = Path(args.checkpoint)
+    coro = main(
+        args.limit, args.offset, out, ckpt, args.model,
+        args.only_needs_review, args.resume,
+    )
     if sys.platform == "win32" and sys.version_info >= (3, 14):
         with asyncio.Runner(
             loop_factory=lambda: asyncio.SelectorEventLoop(selectors.SelectSelector())
         ) as runner:
-            runner.run(main(args.limit, args.offset, out, args.model, args.reverify_uncertain))
+            runner.run(coro)
     else:
-        asyncio.run(main(args.limit, args.offset, out, args.model, args.reverify_uncertain))
+        asyncio.run(coro)

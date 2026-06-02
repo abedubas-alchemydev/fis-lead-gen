@@ -131,6 +131,7 @@ function clearingTypeVariant(value: string | null): PillVariant {
   if (value === "self_clearing") return "self";
   if (value === "omnibus") return "omni";
   if (value === "non_carrying") return "noncarry";
+  if (value === "Identifying") return "warm";
   return "unknown";
 }
 
@@ -139,6 +140,7 @@ function clearingTypeLabel(value: string | null): string {
   if (value === "self_clearing") return "Self-Clearing";
   if (value === "omnibus") return "Omnibus";
   if (value === "non_carrying") return "Non-Carrying";
+  if (value === "Identifying") return "Identifying";
   return "Not classified";
 }
 
