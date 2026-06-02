@@ -97,21 +97,31 @@ async def discover_contact(
     *,
     bd_id: int,
     session: AsyncSession,
+    use_cache: bool = True,
 ) -> ExecutiveContact | None:
     """Resolve a broker-dealer officer into a persisted ``ExecutiveContact``.
 
     See module docstring for the chain semantics. The row is added to the
     session but **not** committed — the caller owns the transaction
     boundary.
+
+    ``use_cache=False`` (the user-facing force/refresh button) skips the
+    90-day cache read and re-walks the chain. To avoid stacking a duplicate
+    on repeat forced runs, an existing discovery-owned row for this
+    ``(bd_id, name)`` — regardless of age — is updated in place instead of
+    inserted. Phones are never regressed: a forced run's sync result often
+    has no phone (Apollo reveal is async), so an already-revealed phone is
+    kept.
     """
     parsed = _parse_entity(entity)
     if parsed is None:
         return None
     entity_type, first_name, last_name, org_name, domain, title, cache_name = parsed
 
-    cached = await _find_cached_executive(session, bd_id=bd_id, name=cache_name)
-    if cached is not None:
-        return cached
+    if use_cache:
+        cached = await _find_cached_executive(session, bd_id=bd_id, name=cache_name)
+        if cached is not None:
+            return cached
 
     result = await _walk_chain(
         entity_type,
@@ -124,10 +134,18 @@ async def discover_contact(
     if result is None:
         return None
 
+    title_value = title or ("Executive" if entity_type == "person" else "Organization")
+
+    if not use_cache:
+        existing = await _find_executive_any_age(session, bd_id=bd_id, name=cache_name)
+        if existing is not None:
+            _apply_discovery_to_executive(existing, title=title_value, result=result)
+            return existing
+
     row = _build_executive_row(
         bd_id=bd_id,
         name=cache_name,
-        title=title or ("Executive" if entity_type == "person" else "Organization"),
+        title=title_value,
         result=result,
     )
     session.add(row)
@@ -454,6 +472,32 @@ async def _find_cached_executive(
     return (await session.execute(stmt)).scalars().first()
 
 
+async def _find_executive_any_age(
+    session: AsyncSession,
+    *,
+    bd_id: int,
+    name: str,
+) -> ExecutiveContact | None:
+    """Latest discovery-owned ``ExecutiveContact`` for ``(bd_id, name)``, any age.
+
+    Used by the forced (``use_cache=False``) path to update an existing row
+    in place rather than insert a duplicate. ``focus_report`` rows are
+    excluded — they're higher-trust and coexist with discovery rows (see
+    ``contacts.enrich_contacts``), so we never clobber them.
+    """
+    stmt = (
+        select(ExecutiveContact)
+        .where(
+            ExecutiveContact.bd_id == bd_id,
+            ExecutiveContact.name == name,
+            ExecutiveContact.source != "focus_report",
+        )
+        .order_by(ExecutiveContact.enriched_at.desc())
+        .limit(1)
+    )
+    return (await session.execute(stmt)).scalars().first()
+
+
 async def _find_cached_investor(
     session: AsyncSession,
     *,
@@ -521,6 +565,38 @@ def _build_executive_row(
         apollo_person_id=result.apollo_person_id,
         enriched_at=datetime.now(timezone.utc),
     )
+
+
+def _apply_discovery_to_executive(
+    row: ExecutiveContact,
+    *,
+    title: str,
+    result: DiscoveryResult,
+) -> None:
+    """Refresh an existing executive row in place from a new discovery result.
+
+    Mirrors ``_build_executive_row`` field-for-field, with two don't-regress
+    rules for the forced re-run path: an existing ``phone`` / ``phones``
+    (which may have been filled asynchronously by the Apollo phone-reveal
+    webhook) is kept when this run surfaced none, and ``apollo_person_id`` is
+    preserved when the new result lacks one so a pending reveal can still
+    correlate. ``bd_id`` / ``name`` are the lookup keys and stay put.
+    """
+    source = "apollo" if result.provider.startswith("apollo") else result.provider
+    row.title = title[:255]
+    row.email = result.email or row.email
+    row.linkedin_url = result.linkedin_url or row.linkedin_url
+    if result.phone:
+        row.phone = result.phone
+    if result.phones:
+        row.phones = _array_or_none(result.phones)
+    if result.emails:
+        row.emails = _array_or_none(result.emails)
+    row.source = source
+    row.discovery_source = result.provider[:32]
+    row.discovery_confidence = Decimal(str(round(result.confidence, 2)))
+    row.apollo_person_id = result.apollo_person_id or row.apollo_person_id
+    row.enriched_at = datetime.now(timezone.utc)
 
 
 def _build_investor_row(

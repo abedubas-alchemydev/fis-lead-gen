@@ -36,7 +36,7 @@ import {
   priorityLabel,
   priorityVariant,
 } from "@/components/master-list/detail/pill-helpers";
-import { nameMatches } from "@/components/master-list/detail/name-matching";
+import { dedupOfficers, nameMatches, toOfficerEntity } from "@/components/master-list/detail/name-matching";
 import { Button, buttonBase, buttonSizes } from "@/components/ui/button";
 import { SectionPanel } from "@/components/ui/section-panel";
 import { ListPicker } from "@/components/list-picker/list-picker";
@@ -661,10 +661,14 @@ export function BrokerDealerDetailClient({ brokerDealerId }: { brokerDealerId: s
   const location = [bd.city, bd.state].filter(Boolean).join(", ");
 
   // "Generate More Details" — re-runs contact enrichment for this firm and
-  // folds any newly discovered executive contacts into the People panel.
-  // The /enrich body is optional on the BE (company-level discovery); a
-  // notice is surfaced when the chain returns no new names so the click
-  // never reads as a silent no-op.
+  // folds any newly discovered executive contacts into the People panel. We
+  // seed the request with this firm's FINRA owners + officers so the BE runs
+  // the full multi-provider discovery chain per officer (not just the
+  // company-level Apollo search), and send `refresh: true` so the click
+  // always re-runs past the BE cooldown / freshness / cache guards. Phones
+  // arrive asynchronously via the Apollo reveal webhook, so a successful run
+  // surfaces a "may take a minute" notice; an empty result surfaces a no-op
+  // notice so the click never reads as silent.
   async function enrichContacts() {
     setIsEnriching(true);
     setEnrichError(null);
@@ -673,17 +677,28 @@ export function BrokerDealerDetailClient({ brokerDealerId }: { brokerDealerId: s
       const previousNames = new Set(
         (profile?.executive_contacts ?? []).map((c) => c.name.trim().toLowerCase()),
       );
+      // Discovery seed list: this firm's FINRA owners + officers, deduped and
+      // capped to bound provider spend (mirrors the BE's _MAX_OFFICER_FANOUT).
+      const officers = dedupOfficers([
+        ...(bd.direct_owners ?? []).map(toOfficerEntity),
+        ...(bd.executive_officers ?? []).map(toOfficerEntity),
+      ]).slice(0, 10);
       const contacts = await apiRequest<BrokerDealerProfileResponse["executive_contacts"]>(
         `/api/v1/broker-dealers/${brokerDealerId}/enrich`,
-        { method: "POST" },
+        {
+          method: "POST",
+          body: JSON.stringify({ officers, refresh: true }),
+        },
       );
       setProfile((c) => (c ? { ...c, executive_contacts: contacts } : c));
       const hasNewContact = contacts.some(
         (c) => !previousNames.has(c.name.trim().toLowerCase()),
       );
-      if (!hasNewContact) {
-        setEnrichNotice("No new contacts found for these officers.");
-      }
+      setEnrichNotice(
+        hasNewContact
+          ? "Contacts updated. Phone numbers may take up to a minute to appear."
+          : "No new contacts found for these officers.",
+      );
     } catch (err) {
       setEnrichError(err instanceof Error ? err.message : "Unable to enrich contacts.");
     } finally {
@@ -934,7 +949,9 @@ export function BrokerDealerDetailClient({ brokerDealerId }: { brokerDealerId: s
         <SectionPanel eyebrow="People" title="Owners, officers, and contacts">
           <div className="mb-4 flex flex-wrap items-center justify-between gap-3">
             <p className="text-xs text-[var(--text-muted,#94a3b8)]">
-              Discover additional executive contacts for this firm.
+              {isEnriching
+                ? "Discovering contacts across providers… this can take a moment."
+                : "Discover additional executive contacts for this firm."}
             </p>
             <button
               type="button"
@@ -1023,7 +1040,6 @@ export function BrokerDealerDetailClient({ brokerDealerId }: { brokerDealerId: s
                       entityKind="broker-dealer"
                       entityId={bd.id}
                       onContactUpdated={handleContactUpdated}
-                      forceActiveLook
                     />
                   ),
                   className: "whitespace-nowrap",
@@ -1084,7 +1100,6 @@ export function BrokerDealerDetailClient({ brokerDealerId }: { brokerDealerId: s
                       entityKind="broker-dealer"
                       entityId={bd.id}
                       onContactUpdated={handleContactUpdated}
-                      forceActiveLook
                     />
                   ),
                   className: "whitespace-nowrap",

@@ -337,3 +337,90 @@ async def test_pdl_hit_persists_investor_contact(patch_settings: None) -> None:
     assert row.discovery_source == "pdl"
     assert row.emails is not None and len(row.emails) == 1
     assert row.phones is not None and row.phones[0]["type"] == "mobile"
+
+
+# ── Forced re-run (use_cache) — bypass cache, update in place ──
+
+
+@pytest.mark.asyncio
+@respx.mock
+async def test_use_cache_true_returns_cached_without_walking(
+    patch_settings: None,
+) -> None:
+    """Default ``use_cache=True``: a cache hit returns the existing row and the
+    provider chain is never walked."""
+    pdl_route = respx.post(pdl.PERSON_ENRICH_URL).mock(
+        return_value=httpx.Response(200, json={"likelihood": 8, "data": {}})
+    )
+
+    cached = ExecutiveContact(
+        bd_id=1,
+        name="Jane Doe",
+        title="CFO",
+        email="old@acme.com",
+        source="apollo",
+        discovery_source="apollo_match",
+    )
+    session = _FakeSession(cached=cached)
+    row = await discover_contact(_person_entity(), bd_id=1, session=session)
+
+    assert row is cached
+    assert not pdl_route.called, "cache hit must short-circuit the chain"
+    assert session.added == []
+
+
+@pytest.mark.asyncio
+@respx.mock
+async def test_use_cache_false_walks_chain_and_updates_in_place(
+    patch_settings: None,
+) -> None:
+    """``use_cache=False`` (the force button): skip the cache read, re-walk the
+    chain, and update the existing row in place rather than inserting a
+    duplicate. An existing phone is preserved when the fresh result has none
+    (the Apollo reveal is async)."""
+    pdl_route = respx.post(pdl.PERSON_ENRICH_URL).mock(
+        return_value=httpx.Response(
+            200,
+            json={
+                "likelihood": 8,
+                "data": {
+                    "emails": [{"address": "jane@acme.com", "type": "professional"}],
+                    # no phone in this fresh result
+                },
+            },
+        )
+    )
+    respx.post(apollo_match.PEOPLE_MATCH_URL).mock(
+        return_value=httpx.Response(200, json={"person": None})
+    )
+    respx.get(hunter.EMAIL_FINDER_URL).mock(
+        return_value=httpx.Response(200, json={"data": {}})
+    )
+    respx.post(snov.OAUTH_URL).mock(
+        return_value=httpx.Response(200, json={"access_token": "tok", "expires_in": 3600})
+    )
+    respx.post(snov.EMAIL_FINDER_URL).mock(
+        return_value=httpx.Response(200, json={"data": {}})
+    )
+
+    cached = ExecutiveContact(
+        bd_id=1,
+        name="Jane Doe",
+        title="CFO",
+        email="old@acme.com",
+        phone="+15550000000",
+        source="apollo",
+        discovery_source="apollo_match",
+    )
+    session = _FakeSession(cached=cached)
+
+    row = await discover_contact(
+        _person_entity(), bd_id=1, session=session, use_cache=False
+    )
+
+    assert pdl_route.called, "use_cache=False must re-walk the chain"
+    assert row is cached, "existing row updated in place, not duplicated"
+    assert session.added == [], "no duplicate insert on a forced re-run"
+    assert row.email == "jane@acme.com", "fresh email applied"
+    assert row.phone == "+15550000000", "existing phone preserved when fresh result has none"
+    assert row.discovery_source == "pdl"

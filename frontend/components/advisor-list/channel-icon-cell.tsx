@@ -67,8 +67,9 @@ export function ChannelIconCell({
   entityId?: number;
   onContactUpdated?: (updated: ExecutiveContactItem) => void;
   // Render every icon in the accent color even when the channel has no data
-  // (the icon stays inert — no popover — but doesn't grey out). Used on the
-  // broker-dealer People section so the row reads as "active" for demos.
+  // (the icon stays inert — no popover — but doesn't grey out). Opt-in demo
+  // toggle; currently disabled everywhere, so absent channels grey out (the
+  // default People-section style).
   forceActiveLook?: boolean;
 }) {
   const [openChannel, setOpenChannel] = useState<Channel | null>(null);
