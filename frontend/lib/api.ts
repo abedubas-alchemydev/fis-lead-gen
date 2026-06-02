@@ -868,10 +868,12 @@ export async function refreshAdvisor(
 }
 
 export async function gapFillAdvisorContacts(
-  advisorId: number
+  advisorId: number,
+  force = false,
 ): Promise<RefreshAdvisorResponse> {
+  const query = force ? "?force=true" : "";
   return apiRequest<RefreshAdvisorResponse>(
-    `/api/v1/investment-advisors/${advisorId}/gap-fill-contacts`,
+    `/api/v1/investment-advisors/${advisorId}/gap-fill-contacts${query}`,
     { method: "POST" }
   );
 }
