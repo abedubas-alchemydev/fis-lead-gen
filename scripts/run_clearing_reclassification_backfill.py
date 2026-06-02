@@ -39,8 +39,10 @@ Best + efficient + fast, without sacrificing quality:
     quota allows. The quota (~1,000/day on Tier 1) is the only wall; raise the
     tier or chunk with ``--offset`` if 3 days is too slow.
   * ``--concurrency 1`` -- strict one-firm-at-a-time (single 'Identifying').
-  * Quota-wall fallback: ``--model flash --concurrency 8`` for the bulk, then
-    ``--model pro --only-needs-review`` to re-read just the uncertain rows.
+  * Targeted fix: ``--scope suspect`` re-verifies only the firms that carry the
+    old default ``self_clearing`` label (plus ``needs_review``) -- the wrong ones
+    get fixed, the confirmed real clearers stay, uncertain ones rest at
+    ``unknown``, and the already-correct fully_disclosed firms are never touched.
 
 CSV columns: bd_id, name, crd, old_type, new_type, old_classification,
 new_classification, partner, required_min_capital, memberships, finra_partner,
@@ -77,7 +79,7 @@ if str(BACKEND_ROOT) not in sys.path:
 if sys.platform == "win32" and sys.version_info < (3, 14):
     asyncio.set_event_loop_policy(asyncio.WindowsSelectorEventLoopPolicy())
 
-from sqlalchemy import select  # noqa: E402
+from sqlalchemy import or_, select  # noqa: E402
 
 from app.core.config import settings  # noqa: E402
 from app.db.session import SessionLocal  # noqa: E402
@@ -267,7 +269,7 @@ async def main(
     checkpoint: str,
     model: str,
     concurrency: int,
-    only_needs_review: bool,
+    scope: str,
     resume: bool,
 ) -> None:
     started_at = time.monotonic()
@@ -281,7 +283,17 @@ async def main(
         await service.competitors.seed_defaults(db)
         competitors = await service.competitors.list_active(db)
         query = select(BrokerDealer.id).where(BrokerDealer.filings_index_url.isnot(None))
-        if only_needs_review:
+        if scope == "suspect":
+            # Every firm carrying the old default 'self_clearing' label, plus
+            # unresolved needs_review rows -- the targeted fix set. Leaves the
+            # fully_disclosed/omnibus firms (already correct) untouched.
+            query = query.where(
+                or_(
+                    BrokerDealer.current_clearing_type == "self_clearing",
+                    BrokerDealer.clearing_classification == "needs_review",
+                )
+            )
+        elif scope == "needs-review":
             query = query.where(BrokerDealer.clearing_classification == "needs_review")
         bd_ids = (
             await db.execute(query.order_by(BrokerDealer.id.asc()))
@@ -316,7 +328,7 @@ async def main(
     run_id = await _create_backfill_run()
     print(f"Re-classifying {total} firms (offset={offset}, run_id={run_id})")
     print(f"  model: {settings.gemini_pdf_model} | concurrency: {concurrency}")
-    print(f"  only_needs_review: {only_needs_review} | resume: {resume} "
+    print(f"  scope: {scope} | resume: {resume} "
           f"({len(completed)} already checkpointed)")
     print(f"  change CSV  -> {out}")
     print(f"  checkpoint  -> {checkpoint}")
@@ -428,10 +440,13 @@ def _parse_args() -> argparse.Namespace:
         help="Firms processed in parallel (default: 8; 1 = strict one-at-a-time).",
     )
     parser.add_argument(
-        "--only-needs-review",
-        action="store_true",
-        help="Restrict the universe to firms currently classified needs_review "
-        "(the Pro re-verify pass; pair with --model pro).",
+        "--scope",
+        choices=["all", "suspect", "needs-review"],
+        default="all",
+        help="Which firms to process: 'all' filers (default); 'suspect' = every "
+        "self_clearing OR needs_review row (the targeted fix, ~1,560 -- leaves the "
+        "already-correct fully_disclosed firms alone); 'needs-review' = only "
+        "needs_review.",
     )
     parser.add_argument(
         "--resume",
@@ -462,7 +477,7 @@ if __name__ == "__main__":
     )
     coro = main(
         args.limit, args.offset, args.out, args.checkpoint, args.model,
-        args.concurrency, args.only_needs_review, args.resume,
+        args.concurrency, args.scope, args.resume,
     )
     if sys.platform == "win32" and sys.version_info >= (3, 14):
         with asyncio.Runner(
