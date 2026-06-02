@@ -519,6 +519,12 @@ class EnrichOfficerRequest(BaseModel):
 
 class EnrichRequestBody(BaseModel):
     officers: list[EnrichOfficerRequest] = Field(default_factory=list)
+    # When True (the user-facing "Generate More Details" button), force a full
+    # re-run past the server-side throttles: Phase 1's 24h cooldown + 90-day
+    # freshness (``enrich_contacts(force=True)``) and Phase 2's 90-day
+    # discovery cache (``discover_contact(use_cache=False)``). Defaults to
+    # False so automated / bulk callers keep their guards.
+    refresh: bool = False
 
 
 @router.post("/{broker_dealer_id}/enrich", response_model=list[ExecutiveContactItem])
@@ -530,26 +536,38 @@ async def enrich_broker_dealer_contacts(
 ) -> list[ExecutiveContactItem]:
     """Enrich executive contacts for a firm.
 
-    Phase 1: run the existing Apollo-based company search (cheap and often
-    catches officers Apollo already has). Phase 2: for each officer the
-    frontend sent that didn't get matched in phase 1, run the multi-provider
-    discovery chain (Apollo match -> Hunter -> Snov) anchored on the firm's
-    website domain.
+    Phase 1: run the Apollo-based company search (cheap, often catches
+    officers Apollo already has). Phase 2: for each officer the frontend sent
+    that didn't get matched in Phase 1, run the multi-provider discovery
+    chain (``settings.contact_discovery_chain`` -- PDL / Apollo / Hunter /
+    Snov / LinkedIn) anchored on the firm's website domain.
 
-    Backward compat: when no ``officers`` list is provided the endpoint
-    behaves exactly as before -- pure company-level search, no per-officer
-    fan-out. That lets the frontend roll out the richer body incrementally.
+    ``refresh=True`` (the user-facing button) forces both phases past their
+    throttles: Phase 1's cooldown + freshness and Phase 2's 90-day cache.
+
+    When an ``officers`` list is supplied a Phase-1
+    ``ContactEnrichmentUnavailableError`` is non-fatal -- Phase 2 still runs,
+    since the chain doesn't depend on the ``contact_enrichment_provider``
+    gate. With no officers the endpoint stays pure company-search and still
+    surfaces 503 when that provider is unavailable.
     """
     broker_dealer = await repository.get_broker_dealer(db, broker_dealer_id)
     if broker_dealer is None:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Broker-dealer not found.")
 
-    try:
-        contacts = await contact_service.enrich_contacts(db, broker_dealer)
-    except ContactEnrichmentUnavailableError as exc:
-        raise HTTPException(status_code=status.HTTP_503_SERVICE_UNAVAILABLE, detail=str(exc)) from exc
-
     officers = list(body.officers) if body else []
+    force = bool(body.refresh) if body else False
+
+    try:
+        contacts = await contact_service.enrich_contacts(db, broker_dealer, force=force)
+    except ContactEnrichmentUnavailableError as exc:
+        # Company-search is unavailable. If the caller seeded officers, let
+        # Phase 2 (the discovery chain) carry the request anyway; otherwise
+        # there's nothing left to try, so surface the 503.
+        if not officers:
+            raise HTTPException(status_code=status.HTTP_503_SERVICE_UNAVAILABLE, detail=str(exc)) from exc
+        contacts = await contact_service.list_contacts(db, broker_dealer.id)
+
     if officers:
         domain = _resolve_domain(broker_dealer)
         existing_names = {_normalise_name(contact.name) for contact in contacts}
@@ -560,7 +578,9 @@ async def enrich_broker_dealer_contacts(
                 continue
             if _normalise_name(entity["cache_name"]) in existing_names:
                 continue
-            row = await discover_contact(entity, bd_id=broker_dealer.id, session=db)
+            row = await discover_contact(
+                entity, bd_id=broker_dealer.id, session=db, use_cache=not force
+            )
             if row is not None:
                 discovered += 1
                 existing_names.add(_normalise_name(row.name))
@@ -644,8 +664,15 @@ def _officer_to_entity(
     name) so the endpoint can skip it without a provider round-trip.
     """
     if officer.type == "person":
-        first = (officer.first_name or "").strip()
-        last = (officer.last_name or "").strip()
+        # Title-case the name. The frontend lowercases first/last
+        # (parseFinraName), but the orchestrator persists the contact's
+        # display name straight from these fields, and the endpoint's dedup
+        # skip-set compares ``cache_name`` against the Phase-1 rows (already
+        # title-cased via ``_parse_finra_person_name``). Both must agree, and
+        # the persisted name must render cleanly. Apollo matching is
+        # case-insensitive, so the provider query is unaffected.
+        first = (officer.first_name or "").strip().title()
+        last = (officer.last_name or "").strip().title()
         if not first or not last:
             return None
         return {

@@ -918,7 +918,7 @@ export function AdvisorDetailClient({ advisorId }: { advisorId: string }) {
                 { header: "Title", cell: (c) => c.title ?? "—" },
                 {
                   header: "Channels",
-                  cell: (c) => <ChannelIconCell contact={c} forceActiveLook />,
+                  cell: (c) => <ChannelIconCell contact={c} />,
                   className: "whitespace-nowrap",
                 },
                 {

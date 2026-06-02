@@ -362,3 +362,48 @@ async def test_find_phone_raises_unavailable_when_neither_configured(
     with pytest.raises(ContactEnrichmentUnavailableError):
         await service.find_phone_for_contact(session, 42)
     assert session.commits == 0
+
+
+# ── Apollo phone-reveal parity (async webhook correlation) ──────────
+
+
+@pytest.fixture
+def patch_settings_apollo_reveal(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Apollo configured, PDL off (so the Apollo fallback runs), reveal wired."""
+    monkeypatch.setattr(settings, "apollo_api_key", "test-apollo-key")
+    monkeypatch.setattr(settings, "pdl_api_key", None)
+    monkeypatch.setattr(settings, "apollo_webhook_secret", "shh-secret")
+    monkeypatch.setattr(settings, "public_base_url", "https://base.example")
+
+
+@pytest.mark.asyncio
+@respx.mock
+async def test_find_phone_apollo_sends_reveal_and_persists_person_id(
+    patch_settings_apollo_reveal: None,
+) -> None:
+    """The Apollo fallback opts into phone-reveal and stores ``apollo_person_id``
+    so a later webhook callback can fill the phone — even though Apollo's sync
+    response carries no phone on our plan."""
+    captured: dict[str, Any] = {}
+
+    def _capture(request: httpx.Request) -> httpx.Response:
+        import json as _json
+
+        captured.update(_json.loads(request.content.decode()))
+        return httpx.Response(
+            200, json={"person": {"id": "apollo-person-42", "phone_numbers": []}}
+        )
+
+    respx.post(_APOLLO_MATCH_URL).mock(side_effect=_capture)
+
+    contact = _seed_contact()
+    session = _FakeSession(contact)
+    service = ExecutiveContactService()
+
+    result = await service.find_phone_for_contact(session, 42)
+
+    assert captured.get("reveal_phone_number") is True
+    assert captured.get("webhook_url", "").endswith("/shh-secret/phone-reveal")
+    assert result.apollo_person_id == "apollo-person-42"
+    assert result.phone is None  # phone arrives later via the webhook
+    assert session.commits == 1
