@@ -186,10 +186,10 @@ async def _refresh_token(client_id: str, client_secret: str) -> str | None:
         "client_secret": client_secret,
     }
     try:
-        async with httpx.AsyncClient(timeout=settings.contact_discovery_timeout) as client:
+        async with httpx.AsyncClient(timeout=settings.snov_request_timeout) as client:
             response = await client.post(OAUTH_URL, json=body)
     except httpx.HTTPError as exc:
-        logger.warning("Snov OAuth request failed: %s", exc)
+        logger.warning("Snov OAuth request failed: %r", exc)
         return None
 
     if response.status_code != 200:
@@ -226,10 +226,10 @@ async def _post_with_refresh(
     """POST with bearer token; on 401 refresh the token and retry once."""
     headers = {"Authorization": f"Bearer {token}"}
     try:
-        async with httpx.AsyncClient(timeout=settings.contact_discovery_timeout) as client:
+        async with httpx.AsyncClient(timeout=settings.snov_request_timeout) as client:
             response = await client.post(url, json=body, headers=headers)
     except httpx.HTTPError as exc:
-        logger.warning("Snov %s failed: %s", url, exc)
+        logger.warning("Snov %s failed: %r", url, exc)
         return None
 
     if response.status_code != 401:
@@ -242,10 +242,10 @@ async def _post_with_refresh(
         return response
     headers = {"Authorization": f"Bearer {new_token}"}
     try:
-        async with httpx.AsyncClient(timeout=settings.contact_discovery_timeout) as client:
+        async with httpx.AsyncClient(timeout=settings.snov_request_timeout) as client:
             return await client.post(url, json=body, headers=headers)
     except httpx.HTTPError as exc:
-        logger.warning("Snov %s retry failed: %s", url, exc)
+        logger.warning("Snov %s retry failed: %r", url, exc)
         return None
 
 

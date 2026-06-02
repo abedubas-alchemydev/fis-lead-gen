@@ -190,27 +190,35 @@ class Settings(BaseSettings):
     # email/phone take the first non-null in chain order, so order still
     # decides ties. Because the fan-out calls *every* listed provider on every
     # officer, a provider that rarely wins is pure cost. The default is
-    # therefore trimmed to the two providers that actually fit this cohort
-    # (staging audit 2026-06-02):
+    # therefore scoped to the providers that fit this cohort (staging audit
+    # 2026-06-02):
     #   * ``apollo_match`` -- backbone. Matches by name + company (no domain
     #     needed), supplies phone + LinkedIn at high coverage plus some email,
     #     and carries the async phone-reveal + director-LinkedIn fallback.
-    #   * ``hunter`` -- email supplement (domain-gated). The one email finder
-    #     that performs on this data; only bills when a firm domain exists.
+    #   * ``hunter`` -- email supplement (domain-gated). Reliable email finder;
+    #     only bills when a firm domain exists.
+    #   * ``snov`` -- second email finder (domain-gated). Re-added after fixing
+    #     its silent-timeout failure (dedicated ``snov_request_timeout`` + real
+    #     error logging in ``snov.py``); email is the weak channel, so a second
+    #     source earns its call.
     # Dropped from the default but still registered in
-    # ``orchestrator._PROVIDERS`` -- re-add any to ``CONTACT_DISCOVERY_CHAIN``
-    # (env) to re-enable with no code change:
+    # ``orchestrator._PROVIDERS`` -- re-add to ``CONTACT_DISCOVERY_CHAIN`` (env)
+    # to re-enable with no code change:
     #   * ``pdl`` -- near-zero match rate on small broker-dealers despite being
     #     billed per call (6 contact rows total at audit).
-    #   * ``snov`` -- was failing on 100% of calls (transport-level error) and,
-    #     even healthy, only duplicates Hunter's domain-based email niche.
     #   * ``linkedin_search`` -- costs a serper/SerpAPI call per officer in the
     #     parallel fan-out while Apollo already supplies LinkedIn for ~97% of
     #     its matches, so it won 0 rows. Re-add (with ``SERPER_API_KEY``) only
     #     if a LinkedIn-recovery gap reappears.
-    contact_discovery_chain: str = "apollo_match,hunter"
+    contact_discovery_chain: str = "apollo_match,hunter,snov"
     contact_discovery_min_confidence: float = 60.0
     contact_discovery_timeout: float = 10.0
+    # Snov's name->email finder holds the connection while it resolves, so the
+    # shared 10s discovery timeout severed it mid-flight on every call (logged
+    # as an empty-message httpx error -> 0 contributions). Give Snov its own,
+    # longer client timeout. If staging logs still show a timeout at this
+    # ceiling, the finder is fully async and needs the v2 task+poll flow.
+    snov_request_timeout: float = 20.0
     gemini_api_key: str | None = None
     gemini_api_base: str = "https://generativelanguage.googleapis.com/v1beta"
     # Production default for the structured-PDF extraction path
