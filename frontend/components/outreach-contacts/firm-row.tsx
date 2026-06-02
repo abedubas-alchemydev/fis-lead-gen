@@ -100,7 +100,7 @@ export function FirmRow({
   const enrichDisabled = isEnriching || firm.gap_fill_in_progress;
   const buttonTitle = firm.gap_fill_in_progress
     ? "Gap-fill already running for this firm."
-    : "Re-query PDL / Hunter / Snov for missing emails, phones, and LinkedIn URLs.";
+    : "Re-enrich missing emails, phones, and LinkedIn URLs.";
 
   return (
     <div className="border-t border-[var(--border,rgba(30,64,175,0.1))] py-4 first:border-t-0">

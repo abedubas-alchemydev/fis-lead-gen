@@ -221,10 +221,9 @@ export function OutreachContactsClient(): React.ReactElement {
         >
           <p className="mb-4 max-w-2xl text-[13px] leading-5 text-[var(--text-dim,#475569)]">
             Click a firm to expand its contacts. Hit{" "}
-            <span className="font-semibold">Enrich all</span> to re-query
-            PDL / Hunter / Snov for every contact on file -- only the
-            missing email / phone / LinkedIn channels get filled. Existing data
-            is never overwritten.
+            <span className="font-semibold">Enrich all</span> to re-enrich
+            every contact on file -- only the missing email / phone /
+            LinkedIn channels get filled. Existing data is never overwritten.
           </p>
           <div className="flex flex-col gap-3 sm:flex-row sm:items-end">
             <div className="flex-1">
