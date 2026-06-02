@@ -229,12 +229,12 @@ def gap_report_for(
         report[SUB_REFRESH_CLEARING].append("current_clearing_type")
     if aggressive:
         # Sentinel re-fire: rows the original extraction couldn't decide.
-        # ``unknown`` is the LLM's "I saw a doc but it doesn't say who clears";
-        # ``needs_review`` is the classifier's same verdict on the rollup.
-        # PR #409 (resolver fix) likely changes the outcome for many of these.
+        # ``unknown`` is the undetermined resting state (the LLM saw a doc but
+        # couldn't say who clears, or the classifier couldn't decide). Legacy
+        # ``needs_review`` rows are the same verdict before the value was unified.
         if broker_dealer.current_clearing_type == "unknown":
             report[SUB_REFRESH_CLEARING].append("current_clearing_type=unknown")
-        if broker_dealer.clearing_classification in (None, "needs_review"):
+        if broker_dealer.clearing_classification in (None, "needs_review", "unknown"):
             report[SUB_REFRESH_CLEARING].append("clearing_classification")
         # Note: clearing_raw_text was previously gated here but no service
         # in the codebase writes to it -- it's a vestigial column the FE
