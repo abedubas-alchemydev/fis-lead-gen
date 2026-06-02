@@ -48,6 +48,56 @@ from app.services.unknown_reasons import (
 TYPES_OF_BUSINESS_MIN_COUNT = 2
 
 
+def pick_authoritative_arrangement(
+    arrangements: list[ClearingArrangement],
+) -> ClearingArrangement | None:
+    """Pick the arrangement that should drive a BD's ``current_clearing_*`` rollup.
+
+    Prefer the most-recent *verified* row (``is_verified=True`` — set by the
+    FINRA reconciler or the clearing validator) over a newer-but-unverified raw
+    FOCUS extraction, so a fresh re-extraction can't silently clobber a
+    reconciled/confirmed label. Falls back to the most-recent row overall when
+    nothing is verified. Recency is ``(filing_year, id)`` with a NULL-safe
+    coercion so a stray missing year can't raise.
+    """
+    if not arrangements:
+        return None
+    verified = [a for a in arrangements if a.is_verified]
+    pool = verified or list(arrangements)
+    return max(
+        pool,
+        key=lambda a: (
+            a.filing_year if a.filing_year is not None else -1,
+            a.id if a.id is not None else -1,
+        ),
+    )
+
+
+def apply_clearing_rollup(
+    bd: BrokerDealer, arrangement: ClearingArrangement | None
+) -> None:
+    """Copy an arrangement's clearing fields onto a BD's rollup columns, or
+    clear them when there is no arrangement. Shared by the per-firm rollup in
+    ``pipeline.py`` and the batch ``refresh_clearing_rollups`` so the two can't
+    drift apart."""
+    if arrangement is None:
+        bd.current_clearing_partner = None
+        bd.current_clearing_type = None
+        bd.current_clearing_is_competitor = False
+        bd.current_clearing_source_filing_url = None
+        bd.current_clearing_extraction_confidence = None
+        bd.last_audit_report_date = None
+        return
+    bd.current_clearing_partner = arrangement.clearing_partner
+    bd.current_clearing_type = arrangement.clearing_type
+    bd.current_clearing_is_competitor = bool(arrangement.is_competitor)
+    bd.current_clearing_source_filing_url = arrangement.source_filing_url
+    bd.current_clearing_extraction_confidence = (
+        float(arrangement.extraction_confidence)
+        if arrangement.extraction_confidence is not None
+        else None
+    )
+    bd.last_audit_report_date = arrangement.report_date
 
 
 ALLOWED_SORT_FIELDS = {
@@ -676,33 +726,18 @@ class BrokerDealerRepository:
 
     async def refresh_clearing_rollups(self, db: AsyncSession) -> None:
         broker_dealers = (await db.execute(select(BrokerDealer).order_by(BrokerDealer.id.asc()))).scalars().all()
-        arrangements = (await db.execute(select(ClearingArrangement).order_by(ClearingArrangement.filing_year.desc()))).scalars().all()
+        arrangements = (await db.execute(select(ClearingArrangement))).scalars().all()
 
-        latest_by_bd: dict[int, ClearingArrangement] = {}
+        # Group every arrangement per BD, then pick the authoritative one
+        # (verified-preferred, then most-recent) via the shared helper so this
+        # batch path and pipeline.py's per-firm rollup stay in lock-step.
+        by_bd: dict[int, list[ClearingArrangement]] = {}
         for arrangement in arrangements:
-            current = latest_by_bd.get(arrangement.bd_id)
-            if current is None or arrangement.filing_year > current.filing_year:
-                latest_by_bd[arrangement.bd_id] = arrangement
+            by_bd.setdefault(arrangement.bd_id, []).append(arrangement)
 
         for broker_dealer in broker_dealers:
-            latest = latest_by_bd.get(broker_dealer.id)
-            if latest is None:
-                broker_dealer.current_clearing_partner = None
-                broker_dealer.current_clearing_type = None
-                broker_dealer.current_clearing_is_competitor = False
-                broker_dealer.current_clearing_source_filing_url = None
-                broker_dealer.current_clearing_extraction_confidence = None
-                broker_dealer.last_audit_report_date = None
-                continue
-
-            broker_dealer.current_clearing_partner = latest.clearing_partner
-            broker_dealer.current_clearing_type = latest.clearing_type
-            broker_dealer.current_clearing_is_competitor = bool(latest.is_competitor)
-            broker_dealer.current_clearing_source_filing_url = latest.source_filing_url
-            broker_dealer.current_clearing_extraction_confidence = (
-                float(latest.extraction_confidence) if latest.extraction_confidence is not None else None
-            )
-            broker_dealer.last_audit_report_date = latest.report_date
+            authoritative = pick_authoritative_arrangement(by_bd.get(broker_dealer.id, []))
+            apply_clearing_rollup(broker_dealer, authoritative)
 
         await db.flush()
 

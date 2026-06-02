@@ -803,3 +803,130 @@ async def test_employment_history_at_wrong_firm_still_rejected(
     )
 
 
+# ───────────────── Force bypass + Apollo phone-reveal parity ─────────────────
+
+
+@pytest.fixture
+def patch_settings_with_reveal(monkeypatch: pytest.MonkeyPatch) -> None:
+    """``patch_settings`` plus the async phone-reveal pair, so the per-officer
+    /people/match opts into reveal and the match's ``id`` is persisted."""
+    monkeypatch.setattr(settings, "contact_enrichment_provider", "apollo")
+    monkeypatch.setattr(settings, "apollo_api_key", "test-apollo-key")
+    monkeypatch.setattr(settings, "apollo_enrich_cooldown_hours", 24)
+    monkeypatch.setattr(settings, "apollo_webhook_secret", "shh-secret")
+    monkeypatch.setattr(settings, "public_base_url", "https://base.example")
+
+
+@pytest.mark.asyncio
+@respx.mock
+async def test_force_bypasses_cooldown(patch_settings: None) -> None:
+    """``force=True`` (the user-facing button) ignores a fresh cooldown stamp
+    and re-runs Apollo."""
+    one_hour_ago = datetime.now(timezone.utc) - timedelta(hours=1)
+    bd = _make_bd(
+        last_attempt=one_hour_ago,
+        executive_officers=[{"name": "DOE, ALICE", "title": "CEO"}],
+    )
+    session = _FakeSession()
+
+    match_route = respx.post(APOLLO_MATCH_URL).mock(
+        return_value=httpx.Response(
+            200,
+            json=_apollo_response({
+                "email": "alice@example.com",
+                "email_status": "verified",
+                "phone_numbers": None,
+                "linkedin_url": "https://linkedin.com/in/alice",
+            }),
+        )
+    )
+
+    service = ExecutiveContactService()
+    await service.enrich_contacts(session, bd, force=True)
+
+    assert match_route.called, "force=True must bypass the cooldown short-circuit"
+    assert bd.last_enrich_attempt_at is not None
+    assert bd.last_enrich_attempt_at > one_hour_ago, "stamp moves forward on the forced run"
+    assert len(session.added) == 1
+    assert session.commit_count == 1
+
+
+@pytest.mark.asyncio
+@respx.mock
+async def test_reveal_payload_sent_and_person_id_persisted(
+    patch_settings_with_reveal: None,
+) -> None:
+    """With reveal configured, /people/match carries reveal_phone_number +
+    webhook_url and the match's ``id`` lands on the row so the async webhook
+    can correlate the phone back later."""
+    bd = _make_bd(
+        last_attempt=None,
+        executive_officers=[{"name": "DOE, ALICE", "title": "CEO"}],
+    )
+    session = _FakeSession()
+
+    captured: dict[str, Any] = {}
+
+    def _capture(request: httpx.Request) -> httpx.Response:
+        import json as _json
+
+        captured.update(_json.loads(request.content.decode()))
+        return httpx.Response(
+            200,
+            json=_apollo_response({
+                "id": "apollo-person-xyz",
+                "email": "alice@example.com",
+                "email_status": "verified",
+                "phone_numbers": None,
+                "linkedin_url": "https://linkedin.com/in/alice",
+            }),
+        )
+
+    respx.post(APOLLO_MATCH_URL).mock(side_effect=_capture)
+
+    service = ExecutiveContactService()
+    await service.enrich_contacts(session, bd)
+
+    assert captured.get("reveal_phone_number") is True
+    assert captured.get("webhook_url", "").endswith("/shh-secret/phone-reveal")
+    assert len(session.added) == 1
+    assert session.added[0].apollo_person_id == "apollo-person-xyz"
+
+
+@pytest.mark.asyncio
+@respx.mock
+async def test_reveal_keeps_id_only_match(patch_settings_with_reveal: None) -> None:
+    """When reveal is on, a match with only an ``id`` (no sync email / linkedin
+    / phone) is kept — the phone arrives later via the webhook — instead of
+    being dropped by the empty-channel guard."""
+    bd = _make_bd(
+        last_attempt=None,
+        executive_officers=[{"name": "DOE, ALICE", "title": "CEO"}],
+    )
+    session = _FakeSession()
+
+    respx.post(APOLLO_MATCH_URL).mock(
+        return_value=httpx.Response(
+            200,
+            json=_apollo_response({
+                "id": "apollo-person-onlyid",
+                "email": None,
+                "email_status": None,
+                "phone_numbers": None,
+                "linkedin_url": None,
+            }),
+        )
+    )
+    # Not expected to fire (we produced a contact) — mocked defensively.
+    respx.post(APOLLO_ORG_URL).mock(
+        return_value=httpx.Response(200, json={"organization": None})
+    )
+
+    service = ExecutiveContactService()
+    await service.enrich_contacts(session, bd)
+
+    assert len(session.added) == 1, "id-only match must be kept when reveal is on"
+    assert session.added[0].apollo_person_id == "apollo-person-onlyid"
+    assert session.added[0].email is None
+
+

@@ -47,8 +47,9 @@ NEW_EXAMPLE_LABELS = (
 # "does not carry customer accounts" boilerplate. Without this set the
 # prompt sends those firms back as ``unknown`` / partner=null with low
 # confidence and they land as ``needs_review``; the rule + examples
-# teach the model to return ``self_clearing`` with confidence >= 0.85
-# instead.
+# teach the model to return ``non_carrying`` with confidence >= 0.85
+# instead (distinct from self_clearing, which means the firm holds
+# securities for OTHER broker-dealers).
 #
 # Example 10 was a (k)(2)(i)/15c3-3 example that incorrectly directed
 # the model to return ``self_clearing`` for (k)(2)(ii) introducing
@@ -88,7 +89,7 @@ NO_CUSTOMER_ACCOUNTS_RULE_FRAGMENTS = (
     "Section 15(c)(3)-1",
     "(k)(1) exemption",
     "(k)(2)(i) exemption",
-    "self_clearing",
+    "non_carrying",
     "confidence_score >= 0.85",
     "(k)(2)(ii) is NOT a self-clearing signal",
     "introducing-broker exemption",
@@ -135,13 +136,16 @@ class TestBuildPrompt:
         assert "Example 2 — Self-Clearing" in prompt
         assert "Example 3 — Unknown/Ambiguous" in prompt
 
-    def test_clearing_type_enum_unchanged(self, service: LlmParserService) -> None:
-        """The downstream ``ClearingExtractionResult`` and rollup logic
-        depend on the exact set ``fully_disclosed | self_clearing |
-        omnibus | unknown``. Adding examples must not introduce a new
-        enum value into the schema instructions."""
+    def test_clearing_type_enum_includes_non_carrying(self, service: LlmParserService) -> None:
+        """The clearing-type enum is the five-value canonical set
+        ``fully_disclosed | self_clearing | omnibus | non_carrying |
+        unknown``. ``non_carrying`` was added so no-customer-account firms
+        stop being mislabeled ``self_clearing``."""
         prompt = service.build_prompt()
-        assert "'fully_disclosed', 'self_clearing', 'omnibus', or 'unknown'" in prompt
+        assert (
+            "'fully_disclosed', 'self_clearing', 'omnibus', 'non_carrying', or "
+            "'unknown'" in prompt
+        )
 
     @pytest.mark.parametrize("fragment", NO_CUSTOMER_ACCOUNTS_RULE_FRAGMENTS)
     def test_contains_no_customer_accounts_rule_fragments(
@@ -165,18 +169,19 @@ class TestBuildPrompt:
         prompt = service.build_prompt()
         assert label in prompt, f"missing example label: {label!r}"
 
-    def test_no_customer_accounts_examples_pin_self_clearing_partner_null(
+    def test_no_customer_accounts_examples_pin_non_carrying_partner_null(
         self, service: LlmParserService
     ) -> None:
         """Examples 9 and 11 (M&A advisory + "does not carry customer
         accounts" boilerplate) worked outputs must show
-        ``"clearing_type": "self_clearing"`` with ``"clearing_partner":
-        null`` — that is the exact downstream shape the
-        ``partner_required`` flip in ``extract_structured_data`` relies
-        on (a self_clearing row with null partner is the only NULL-partner
-        case that lands as ``parsed`` instead of ``needs_review``).
-        Example 10 — the (k)(2)(ii) introducing case — is intentionally
-        excluded; see ``test_k2ii_example_pins_fully_disclosed_null_partner``.
+        ``"clearing_type": "non_carrying"`` with ``"clearing_partner":
+        null`` — these firms have no customer accounts at all and are
+        distinct from self_clearing (which means the firm holds securities
+        for OTHER broker-dealers). The partner-gate exemption + the
+        clearing_validator rely on this shape so no-customer-account firms
+        stop being mislabeled self_clearing. Example 10 — the (k)(2)(ii)
+        introducing case — is intentionally excluded; see
+        ``test_k2ii_example_pins_fully_disclosed_null_partner``.
         """
         prompt = service.build_prompt()
         for label in NO_CUSTOMER_ACCOUNTS_EXAMPLE_LABELS:
@@ -190,8 +195,8 @@ class TestBuildPrompt:
                 if cut > 0:
                     tail = tail[:cut]
                     break
-            assert '"clearing_type": "self_clearing"' in tail, (
-                f"{label!r} expected output is not self_clearing"
+            assert '"clearing_type": "non_carrying"' in tail, (
+                f"{label!r} expected output is not non_carrying"
             )
             assert '"clearing_partner": null' in tail, (
                 f"{label!r} expected output does not pin clearing_partner=null"

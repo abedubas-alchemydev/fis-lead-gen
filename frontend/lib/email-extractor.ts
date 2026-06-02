@@ -121,6 +121,28 @@ export const TERMINAL_STATUSES: ReadonlySet<RunStatus> = new Set<RunStatus>([
   "failed",
 ]);
 
+// How many recent scans to pull when re-hydrating a firm-detail page's inline
+// "Discovered Emails" panel. We fetch a handful (not just the newest one) so
+// `pickHydratableScan` can skip an empty/failed/still-running retry that would
+// otherwise mask an older run that actually surfaced emails.
+export const SCAN_HYDRATION_LIMIT = 20;
+
+// Choose which scan the inline "Discovered Emails" panel restores when a
+// firm-detail page re-hydrates without an explicit `?scanId=`. This is the
+// common case: Master-List row links and Previous/Next Prospect only carry
+// `?return=`, so the panel falls back to "most recent run for this firm".
+// Prefer the newest scan that actually has emails so a newer empty / failed /
+// still-running retry never makes already-extracted emails "disappear" on
+// navigation. Falls back to the newest scan overall when none surfaced emails,
+// preserving the prior behaviour. `scans` is expected newest-first (the API
+// orders by created_at desc).
+export function pickHydratableScan(
+  scans: ScanListItem[]
+): ScanListItem | null {
+  if (scans.length === 0) return null;
+  return scans.find((scan) => scan.success_count > 0) ?? scans[0];
+}
+
 // ── API wrappers ──────────────────────────────────────────────────────────
 
 export async function getScan(scanId: number): Promise<ScanResponse> {

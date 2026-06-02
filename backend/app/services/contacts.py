@@ -14,7 +14,11 @@ from app.core.config import settings
 from app.models.broker_dealer import BrokerDealer
 from app.models.executive_contact import ExecutiveContact
 from app.services.contact_discovery import pdl
-from app.services.contact_discovery._shared import first_apollo_phone
+from app.services.contact_discovery._shared import (
+    apollo_phone_reveal_configured,
+    apollo_phone_reveal_fields,
+    first_apollo_phone,
+)
 from app.services.contact_discovery.base import DiscoveryResult
 
 logger = logging.getLogger(__name__)
@@ -347,12 +351,23 @@ class ExecutiveContactService:
                 str(linkedin_url).strip() if linkedin_url else None
             )
             phone = self._first_phone_value(person.get("phone_numbers"))
+            # MongoDB-style id from the sync response, trimmed to the column
+            # cap. Persisting it lets the async phone-reveal webhook correlate
+            # the revealed phone back to this row (mirrors apollo_match.py).
+            pid_raw = person.get("id")
+            apollo_person_id = (
+                str(pid_raw).strip()[:64] if isinstance(pid_raw, (str, int)) else None
+            )
             # Apollo /people/match can return an "I think this is the person"
             # match with no email/linkedin/phone (just name + title). Skip
             # those — they would just be empty rows that fail the
             # ContactRow render guard (no contact channel = no row shown).
+            # Exception: when phone-reveal is configured, a match carrying an
+            # apollo_person_id is worth keeping even with no sync channel —
+            # the phone lands later via the webhook.
             if not email_clean and not linkedin_clean and not phone:
-                continue
+                if not (apollo_phone_reveal_configured() and apollo_person_id):
+                    continue
             display_name = f"{officer['first']} {officer['last']}"
             contacts.append(
                 ExecutiveContact(
@@ -363,6 +378,7 @@ class ExecutiveContactService:
                     phone=phone,
                     linkedin_url=linkedin_clean,
                     source="apollo",
+                    apollo_person_id=apollo_person_id,
                     enriched_at=now,
                 )
             )
@@ -396,6 +412,11 @@ class ExecutiveContactService:
         }
         if domain:
             payload["domain"] = domain
+        # Async phone-reveal opt-in (no-op unless apollo_webhook_secret +
+        # public_base_url are configured). Apollo returns email/linkedin in the
+        # sync response; phone_numbers arrive minutes later via POST to the
+        # webhook_url, correlated back to the row by ``apollo_person_id``.
+        payload.update(apollo_phone_reveal_fields())
         try:
             async with httpx.AsyncClient(
                 timeout=self._APOLLO_PER_OFFICER_TIMEOUT_S
@@ -715,11 +736,16 @@ class ExecutiveContactService:
             "Content-Type": "application/json",
             "X-Api-Key": api_key,
         }
+        match_payload: dict[str, object] = {"email": contact.email}
+        # Async phone-reveal opt-in (no-op unless configured). On our plan
+        # Apollo's sync response carries no phone, so the revealed number
+        # arrives later via the webhook, correlated by ``apollo_person_id``.
+        match_payload.update(apollo_phone_reveal_fields())
         try:
             async with httpx.AsyncClient(timeout=20) as client:
                 response = await client.post(
                     self._APOLLO_MATCH_URL,
-                    json={"email": contact.email},
+                    json=match_payload,
                     headers=headers,
                 )
         except httpx.HTTPError as exc:
@@ -740,6 +766,13 @@ class ExecutiveContactService:
         # Don't regress an existing phone if Apollo had nothing for us.
         if phone:
             contact.phone = phone
+        # Persist the Apollo person id so a later async phone-reveal callback
+        # can correlate the number back to this row. Set only when missing —
+        # never churn an id we already stored.
+        if isinstance(person, dict) and contact.apollo_person_id is None:
+            pid_raw = person.get("id")
+            if isinstance(pid_raw, (str, int)):
+                contact.apollo_person_id = str(pid_raw).strip()[:64] or None
         contact.enriched_at = datetime.now(timezone.utc)
 
         await db.commit()

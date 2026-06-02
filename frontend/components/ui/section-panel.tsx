@@ -1,4 +1,4 @@
-import type { ReactNode } from "react";
+import type { CSSProperties, ReactNode } from "react";
 
 // Section panel for /master-list/{id}. Mirrors the panel pattern used on
 // /dashboard and /master-list (filter card, table card, KPI strip): rounded-2xl,
@@ -10,16 +10,34 @@ export function SectionPanel({
   title,
   headerAction,
   children,
+  className,
+  style,
+  bodyClassName,
 }: {
   eyebrow: string;
   title: string;
   headerAction?: ReactNode;
   children: ReactNode;
+  // Optional extra classes / inline style on the panel <article>. Used by the
+  // BD detail page to pin Filing History to the People card's height
+  // (`flex flex-col` + an inline height) so its body can scroll. Omitted at
+  // every other call site, so default rendering is byte-for-byte unchanged.
+  className?: string;
+  style?: CSSProperties;
+  // When provided, wraps the body in a div with these classes — e.g. a
+  // `flex-1` scroll region inside a height-capped card. Left undefined
+  // elsewhere so children continue to render inline as before.
+  bodyClassName?: string;
 }) {
   return (
     <article
-      className="rounded-2xl border border-[var(--border,rgba(30,64,175,0.1))] bg-[var(--surface,#ffffff)] p-5"
-      style={{ boxShadow: "var(--shadow-card, 0 1px 2px rgba(15,23,42,0.04), 0 4px 14px rgba(15,23,42,0.05))" }}
+      className={`rounded-2xl border border-[var(--border,rgba(30,64,175,0.1))] bg-[var(--surface,#ffffff)] p-5${
+        className ? ` ${className}` : ""
+      }`}
+      style={{
+        boxShadow: "var(--shadow-card, 0 1px 2px rgba(15,23,42,0.04), 0 4px 14px rgba(15,23,42,0.05))",
+        ...style,
+      }}
     >
       <div className="mb-4 flex items-start justify-between gap-4">
         <div className="min-w-0">
@@ -32,7 +50,7 @@ export function SectionPanel({
         </div>
         {headerAction}
       </div>
-      {children}
+      {bodyClassName ? <div className={bodyClassName}>{children}</div> : children}
     </article>
   );
 }

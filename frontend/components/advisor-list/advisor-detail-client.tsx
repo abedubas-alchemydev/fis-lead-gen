@@ -35,7 +35,11 @@ import {
 } from "@/lib/advisor-list-state";
 import { formatCurrency, formatDate } from "@/lib/format";
 import { EmailScansSection } from "@/components/email-extractor/email-scans-section";
-import { listScansForEntity } from "@/lib/email-extractor";
+import {
+  listScansForEntity,
+  pickHydratableScan,
+  SCAN_HYDRATION_LIMIT,
+} from "@/lib/email-extractor";
 import { ListPicker } from "@/components/list-picker/list-picker";
 import { OutreachButton } from "@/components/master-list/outreach-button";
 import { ChannelIconCell } from "@/components/advisor-list/channel-icon-cell";
@@ -419,8 +423,10 @@ export function AdvisorDetailClient({ advisorId }: { advisorId: string }) {
   // precedence order:
   //   1. `?scanId=` in the URL — wins, so deep-links and post-Find-Emails
   //      refreshes re-open the same scan.
-  //   2. Most-recent scan for this advisor via list-scans-by-advisor_id —
-  //      so the user sees prior emails on first load without re-running.
+  //   2. Most-recent scan *with emails* for this advisor (via
+  //      pickHydratableScan) — so the user sees prior emails on first load
+  //      without re-running, and a newer empty/failed retry never masks an
+  //      older run that has results.
   // Reads `window.location.search` directly so this effect doesn't have
   // to depend on the reactive `searchParams` (the URL-sync effect below
   // would otherwise feed back into this and re-fetch on every change).
@@ -446,11 +452,12 @@ export function AdvisorDetailClient({ advisorId }: { advisorId: string }) {
     let active = true;
     setIsHydratingScan(true);
     setCurrentScanId(null);
-    listScansForEntity({ kind: "advisor", id: numericId }, 1)
+    listScansForEntity({ kind: "advisor", id: numericId }, SCAN_HYDRATION_LIMIT)
       .then((scans) => {
         if (!active) return;
-        if (scans.length > 0) {
-          setCurrentScanId(scans[0].id);
+        const preferred = pickHydratableScan(scans);
+        if (preferred) {
+          setCurrentScanId(preferred.id);
         }
       })
       .catch(() => {
@@ -918,19 +925,20 @@ export function AdvisorDetailClient({ advisorId }: { advisorId: string }) {
                 { header: "Title", cell: (c) => c.title ?? "—" },
                 {
                   header: "Channels",
-                  cell: (c) => <ChannelIconCell contact={c} forceActiveLook />,
+                  cell: (c) => <ChannelIconCell contact={c} />,
                   className: "whitespace-nowrap",
                 },
                 {
                   header: "Outreach",
-                  cell: (c) => (
-                    <OutreachButton
-                      entityKind="advisor"
-                      entityId={Number(advisorId)}
-                      entityName={advisor.name}
-                      contact={c}
-                    />
-                  ),
+                  cell: (c) =>
+                    c.email || (c.emails?.length ?? 0) > 0 ? (
+                      <OutreachButton
+                        entityKind="advisor"
+                        entityId={Number(advisorId)}
+                        entityName={advisor.name}
+                        contact={c}
+                      />
+                    ) : null,
                   className: "whitespace-nowrap",
                 },
               ]}

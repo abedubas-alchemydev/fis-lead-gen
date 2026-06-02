@@ -36,7 +36,7 @@ import {
   priorityLabel,
   priorityVariant,
 } from "@/components/master-list/detail/pill-helpers";
-import { nameMatches } from "@/components/master-list/detail/name-matching";
+import { dedupOfficers, nameMatches, toOfficerEntity } from "@/components/master-list/detail/name-matching";
 import { Button, buttonBase, buttonSizes } from "@/components/ui/button";
 import { SectionPanel } from "@/components/ui/section-panel";
 import { ListPicker } from "@/components/list-picker/list-picker";
@@ -53,7 +53,11 @@ import { DetailPageSkeleton } from "@/components/ui/detail-page-skeleton";
 import { RefreshingIndicator } from "@/components/ui/refreshing-indicator";
 import { joinPipelineLabels } from "@/lib/refresh-pipeline-labels";
 import { parseArrangementBlob } from "@/lib/arrangements";
-import { listScansForBrokerDealer } from "@/lib/email-extractor";
+import {
+  listScansForBrokerDealer,
+  pickHydratableScan,
+  SCAN_HYDRATION_LIMIT,
+} from "@/lib/email-extractor";
 import {
   recordVisit,
   type FavoriteListResponse,
@@ -495,8 +499,10 @@ export function BrokerDealerDetailClient({ brokerDealerId }: { brokerDealerId: s
   // precedence order:
   //   1. `?scanId=` in the URL — wins, so deep-links and post-Find-Emails
   //      refreshes re-open the same scan.
-  //   2. Most-recent scan for this BD via list-scans-by-bd_id — so the
-  //      user sees prior emails on first load without re-running.
+  //   2. Most-recent scan *with emails* for this BD (via pickHydratableScan)
+  //      — so the user sees prior emails on first load without re-running,
+  //      and a newer empty/failed retry never masks an older run that has
+  //      results.
   // Reads `window.location.search` directly so this effect doesn't have
   // to depend on the reactive `searchParams` (the URL-sync effect below
   // would otherwise feed back into this and re-fetch on every change).
@@ -522,11 +528,12 @@ export function BrokerDealerDetailClient({ brokerDealerId }: { brokerDealerId: s
     let active = true;
     setIsHydratingScan(true);
     setCurrentScanId(null);
-    listScansForBrokerDealer(numericId, 1)
+    listScansForBrokerDealer(numericId, SCAN_HYDRATION_LIMIT)
       .then((scans) => {
         if (!active) return;
-        if (scans.length > 0) {
-          setCurrentScanId(scans[0].id);
+        const preferred = pickHydratableScan(scans);
+        if (preferred) {
+          setCurrentScanId(preferred.id);
         }
       })
       .catch(() => {
@@ -613,21 +620,6 @@ export function BrokerDealerDetailClient({ brokerDealerId }: { brokerDealerId: s
     }
   }
 
-  // Per-contact updates from the Find-phone button. Replaces the single
-  // row in place so the UI reflects the new phone without a full refetch.
-  const handleContactUpdated = useCallback((updated: ExecutiveContactItem) => {
-    setProfile((c) =>
-      c
-        ? {
-            ...c,
-            executive_contacts: c.executive_contacts.map((row) =>
-              row.id === updated.id ? updated : row,
-            ),
-          }
-        : c,
-    );
-  }, []);
-
   const chartPoints = useMemo(() => {
     if (!profile) return [] as Array<{ label: string; value: number }>;
     return profile.financials
@@ -661,10 +653,14 @@ export function BrokerDealerDetailClient({ brokerDealerId }: { brokerDealerId: s
   const location = [bd.city, bd.state].filter(Boolean).join(", ");
 
   // "Generate More Details" — re-runs contact enrichment for this firm and
-  // folds any newly discovered executive contacts into the People panel.
-  // The /enrich body is optional on the BE (company-level discovery); a
-  // notice is surfaced when the chain returns no new names so the click
-  // never reads as a silent no-op.
+  // folds any newly discovered executive contacts into the People panel. We
+  // seed the request with this firm's FINRA owners + officers so the BE runs
+  // the full multi-provider discovery chain per officer (not just the
+  // company-level Apollo search), and send `refresh: true` so the click
+  // always re-runs past the BE cooldown / freshness / cache guards. Phones
+  // arrive asynchronously via the Apollo reveal webhook, so a successful run
+  // surfaces a "may take a minute" notice; an empty result surfaces a no-op
+  // notice so the click never reads as silent.
   async function enrichContacts() {
     setIsEnriching(true);
     setEnrichError(null);
@@ -673,17 +669,28 @@ export function BrokerDealerDetailClient({ brokerDealerId }: { brokerDealerId: s
       const previousNames = new Set(
         (profile?.executive_contacts ?? []).map((c) => c.name.trim().toLowerCase()),
       );
+      // Discovery seed list: this firm's FINRA owners + officers, deduped and
+      // capped to bound provider spend (mirrors the BE's _MAX_OFFICER_FANOUT).
+      const officers = dedupOfficers([
+        ...(bd.direct_owners ?? []).map(toOfficerEntity),
+        ...(bd.executive_officers ?? []).map(toOfficerEntity),
+      ]).slice(0, 10);
       const contacts = await apiRequest<BrokerDealerProfileResponse["executive_contacts"]>(
         `/api/v1/broker-dealers/${brokerDealerId}/enrich`,
-        { method: "POST" },
+        {
+          method: "POST",
+          body: JSON.stringify({ officers, refresh: true }),
+        },
       );
       setProfile((c) => (c ? { ...c, executive_contacts: contacts } : c));
       const hasNewContact = contacts.some(
         (c) => !previousNames.has(c.name.trim().toLowerCase()),
       );
-      if (!hasNewContact) {
-        setEnrichNotice("No new contacts found for these officers.");
-      }
+      setEnrichNotice(
+        hasNewContact
+          ? "Contacts updated. Phone numbers may take up to a minute to appear."
+          : "No new contacts found for these officers.",
+      );
     } catch (err) {
       setEnrichError(err instanceof Error ? err.message : "Unable to enrich contacts.");
     } finally {
@@ -930,11 +937,20 @@ export function BrokerDealerDetailClient({ brokerDealerId }: { brokerDealerId: s
           <FinancialTrendChart points={chartPoints} />
         </SectionPanel>
 
-        {/* People */}
-        <SectionPanel eyebrow="People" title="Owners, officers, and contacts">
+        {/* People — grows (xl:flex-auto) to fill its column so it bottom-aligns
+            with Filing History on the right; both columns then end on the same
+            line with no dangling empty space (xl+ only, where the side-by-side
+            layout applies). */}
+        <SectionPanel
+          eyebrow="People"
+          title="Owners, officers, and contacts"
+          className="xl:flex-auto"
+        >
           <div className="mb-4 flex flex-wrap items-center justify-between gap-3">
             <p className="text-xs text-[var(--text-muted,#94a3b8)]">
-              Discover additional executive contacts for this firm.
+              {isEnriching
+                ? "Discovering contacts across providers… this can take a moment."
+                : "Discover additional executive contacts for this firm."}
             </p>
             <button
               type="button"
@@ -1018,44 +1034,23 @@ export function BrokerDealerDetailClient({ brokerDealerId }: { brokerDealerId: s
                 {
                   header: "Channels",
                   cell: (o) => (
-                    <ChannelIconCell
-                      contact={o.contact}
-                      entityKind="broker-dealer"
-                      entityId={bd.id}
-                      onContactUpdated={handleContactUpdated}
-                      forceActiveLook
-                    />
+                    <ChannelIconCell contact={o.contact} />
                   ),
                   className: "whitespace-nowrap",
                 },
                 {
                   header: "Outreach",
-                  // Matched officers go through the firm/contact draft path
-                  // (real contact id). FINRA officers with no enriched
-                  // contact row have no contact id, so they use the adhoc
-                  // path — Gemini still drafts from the service folder; the
-                  // modal disables Send until the contact has an email.
+                  // Only render Outreach when the officer's enriched contact
+                  // has an email — no deliverable address means nothing to send.
                   cell: (o) =>
-                    o.contact ? (
+                    o.contact && (o.contact.email || (o.contact.emails?.length ?? 0) > 0) ? (
                       <OutreachButton
                         entityKind="broker_dealer"
                         entityId={bd.id}
                         entityName={bd.name}
                         contact={o.contact}
                       />
-                    ) : (
-                      <OutreachButton
-                        entityKind="adhoc"
-                        entityId={bd.id}
-                        entityName={bd.name}
-                        contact={{
-                          id: 0,
-                          name: o.name ?? "—",
-                          title: o.title ?? "",
-                          email: null,
-                        }}
-                      />
-                    ),
+                    ) : null,
                   className: "whitespace-nowrap",
                 },
               ]}
@@ -1079,26 +1074,21 @@ export function BrokerDealerDetailClient({ brokerDealerId }: { brokerDealerId: s
                 {
                   header: "Channels",
                   cell: (c) => (
-                    <ChannelIconCell
-                      contact={c}
-                      entityKind="broker-dealer"
-                      entityId={bd.id}
-                      onContactUpdated={handleContactUpdated}
-                      forceActiveLook
-                    />
+                    <ChannelIconCell contact={c} />
                   ),
                   className: "whitespace-nowrap",
                 },
                 {
                   header: "Outreach",
-                  cell: (c) => (
-                    <OutreachButton
-                      entityKind="broker_dealer"
-                      entityId={bd.id}
-                      entityName={bd.name}
-                      contact={c}
-                    />
-                  ),
+                  cell: (c) =>
+                    c.email || (c.emails?.length ?? 0) > 0 ? (
+                      <OutreachButton
+                        entityKind="broker_dealer"
+                        entityId={bd.id}
+                        entityName={bd.name}
+                        contact={c}
+                      />
+                    ) : null,
                   className: "whitespace-nowrap",
                 },
               ]}
@@ -1397,6 +1387,8 @@ export function BrokerDealerDetailClient({ brokerDealerId }: { brokerDealerId: s
         <SectionPanel
           eyebrow="Filing History"
           title="Chronological filing timeline"
+          className={filingHistoryOpen ? "xl:flex xl:flex-col xl:flex-auto xl:min-h-0" : undefined}
+          bodyClassName={filingHistoryOpen ? "xl:flex xl:flex-col xl:flex-auto xl:min-h-0" : undefined}
           headerAction={
             <button
               type="button"
@@ -1415,7 +1407,7 @@ export function BrokerDealerDetailClient({ brokerDealerId }: { brokerDealerId: s
         >
           {filingHistoryOpen ? (
             <>
-              <div className="space-y-3">
+              <div className="space-y-3 xl:min-h-0 xl:flex-auto xl:overflow-y-auto xl:pr-1">
                 {filingLoading && filingItems.length === 0 ? (
                   <div className="flex items-center justify-center rounded-2xl bg-[var(--surface-2,#f1f6fd)] px-4 py-8 text-sm text-[var(--text-muted,#94a3b8)]">
                     <Loader2 className="mr-2 h-4 w-4 animate-spin" />
