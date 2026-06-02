@@ -226,7 +226,7 @@ async def _reclassify_one(
         if bd_row is not None:
             ctype = bd_row.current_clearing_type
             bd_row.clearing_classification = (
-                ctype if ctype and ctype != "unknown" else "needs_review"
+                ctype if ctype and ctype != "unknown" else "unknown"
             )
         await db.commit()
 

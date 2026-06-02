@@ -342,14 +342,14 @@ class ClearingPipelineService:
 
             # Unify: keep the clearing_classification column in lock-step with
             # the validated current_clearing_type so the two columns stop
-            # disagreeing (unknown/missing -> needs_review).
+            # disagreeing (unknown/missing -> unknown).
             bd_row = await write_db.get(BrokerDealer, bd_id)
             if bd_row is not None:
                 ctype_final = bd_row.current_clearing_type
                 bd_row.clearing_classification = (
                     ctype_final
                     if ctype_final and ctype_final != "unknown"
-                    else "needs_review"
+                    else "unknown"
                 )
                 await write_db.commit()
 
