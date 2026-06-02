@@ -1033,32 +1033,17 @@ export function BrokerDealerDetailClient({ brokerDealerId }: { brokerDealerId: s
                 },
                 {
                   header: "Outreach",
-                  // Matched officers go through the firm/contact draft path
-                  // (real contact id). FINRA officers with no enriched
-                  // contact row have no contact id, so they use the adhoc
-                  // path — Gemini still drafts from the service folder; the
-                  // modal disables Send until the contact has an email.
+                  // Only render Outreach when the officer's enriched contact
+                  // has an email — no deliverable address means nothing to send.
                   cell: (o) =>
-                    o.contact ? (
+                    o.contact && (o.contact.email || (o.contact.emails?.length ?? 0) > 0) ? (
                       <OutreachButton
                         entityKind="broker_dealer"
                         entityId={bd.id}
                         entityName={bd.name}
                         contact={o.contact}
                       />
-                    ) : (
-                      <OutreachButton
-                        entityKind="adhoc"
-                        entityId={bd.id}
-                        entityName={bd.name}
-                        contact={{
-                          id: 0,
-                          name: o.name ?? "—",
-                          title: o.title ?? "",
-                          email: null,
-                        }}
-                      />
-                    ),
+                    ) : null,
                   className: "whitespace-nowrap",
                 },
               ]}
@@ -1088,14 +1073,15 @@ export function BrokerDealerDetailClient({ brokerDealerId }: { brokerDealerId: s
                 },
                 {
                   header: "Outreach",
-                  cell: (c) => (
-                    <OutreachButton
-                      entityKind="broker_dealer"
-                      entityId={bd.id}
-                      entityName={bd.name}
-                      contact={c}
-                    />
-                  ),
+                  cell: (c) =>
+                    c.email || (c.emails?.length ?? 0) > 0 ? (
+                      <OutreachButton
+                        entityKind="broker_dealer"
+                        entityId={bd.id}
+                        entityName={bd.name}
+                        contact={c}
+                      />
+                    ) : null,
                   className: "whitespace-nowrap",
                 },
               ]}
