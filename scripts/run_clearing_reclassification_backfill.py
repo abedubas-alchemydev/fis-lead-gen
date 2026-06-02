@@ -15,34 +15,39 @@ the membership-confirmed megabanks stay ``self_clearing``.
 
 DEFERRED: do not run against staging until the masterlist data fill completes
 and Deshorn has spot-checked a sample (>=27/30). Use ``--limit 30`` first to
-produce the spot-check CSV.
+produce the spot-check CSV. Runs against the staging DB, so execute it where
+5432 works (Cloud Run / staging), not the DPI'd workstation.
 
-Progress + crash recovery (one firm at a time, on purpose):
+Live progress + crash recovery:
   * Each firm is stamped ``current_clearing_type = 'Identifying'`` and committed
-    BEFORE it is processed, so the master list shows live which firm is being
-    corrected right now (exactly one at a time). The real label overwrites it
-    when the firm finishes.
+    BEFORE it is processed, so the master list shows live which firms are being
+    corrected right now (up to ``--concurrency`` at a time). The real label
+    overwrites it when the firm finishes.
   * Every completed ``bd_id`` is appended to the checkpoint file the moment its
     real label is written. ``--resume`` skips everything already in the
-    checkpoint, so a crash resumes exactly where it stopped. A firm left stuck
-    on 'Identifying' (killed mid-flight) is NOT in the checkpoint, so it gets
-    re-done on resume.
+    checkpoint and appends to the CSV, so a crash resumes exactly where it
+    stopped. A firm left on 'Identifying' (killed mid-flight, or a per-firm
+    error) is NOT checkpointed, so it is re-done on the next run / --resume.
 
-Model selection — defaults to ``gemini-2.5-pro`` for best accuracy (the "use
-Gemini as much as possible" mandate). The deterministic validator owns the
-headline correctness regardless of model:
-  * ``--model pro``  (default) -- best accuracy. Pro quota ~1,000/day, so chunk
-                       with ``--offset`` (the run is deferred/background anyway).
-  * ``--model flash`` -- cheap/fast bulk; the validator still fixes the sub-$250k
-                       demotions, Flash only widens the ``needs_review`` pile.
-  * Quota-saving hybrid = two runs: ``--model flash`` (full), then
-    ``--model pro --only-needs-review`` (re-read just the needs_review rows).
+Best + efficient + fast, without sacrificing quality:
+  * DEFAULT = ``--model pro --concurrency 8`` -- every firm read by the best
+    model (no quality trade-off), parallelized so it runs as fast as the Pro
+    quota allows. The quota (~1,000/day on Tier 1) is the only wall; raise the
+    tier or chunk with ``--offset`` if 3 days is too slow.
+  * ``--concurrency 1`` -- strict one-firm-at-a-time (single 'Identifying').
+  * Quota-wall fallback (small, known quality residual on confident-but-wrong
+    high-cap reads): ``--model flash --concurrency 8`` for the bulk, then
+    ``--model pro --only-needs-review`` to re-read just the uncertain rows.
+
+CSV columns: bd_id, name, crd, old_type, new_type, old_classification,
+new_classification, partner, required_min_capital, memberships, finra_partner,
+confidence, status, notes, model.
 
 Usage:
     python -m scripts.run_clearing_reclassification_backfill --limit 30   # Pro spot-check
-    python -m scripts.run_clearing_reclassification_backfill              # full Pro run
+    python -m scripts.run_clearing_reclassification_backfill              # full Pro, 8-wide
     python -m scripts.run_clearing_reclassification_backfill --resume     # after a crash
-    python -m scripts.run_clearing_reclassification_backfill --model flash
+    python -m scripts.run_clearing_reclassification_backfill --model flash --concurrency 8
     python -m scripts.run_clearing_reclassification_backfill --model pro --only-needs-review
 """
 
@@ -81,7 +86,7 @@ from app.services.pipeline import ClearingPipelineService  # noqa: E402
 logger = logging.getLogger(__name__)
 
 # Transient marker written to ``current_clearing_type`` while a firm is being
-# corrected so the master list shows live which firm is in flight. Rendered as
+# corrected so the master list shows live which firms are in flight. Rendered as
 # an amber "Identifying" pill on the FE (see pill-helpers / clearing-type-badge).
 IN_PROGRESS_MARKER = "Identifying"
 
@@ -221,11 +226,13 @@ async def main(
     out_path: Path,
     checkpoint_path: Path,
     model: str,
+    concurrency: int,
     only_needs_review: bool,
     resume: bool,
 ) -> None:
     started_at = time.monotonic()
     settings.gemini_pdf_model = MODEL_IDS[model]
+    concurrency = max(1, concurrency)
 
     service = ClearingPipelineService()
     reconciler = FinraClearingReconciler()
@@ -250,7 +257,7 @@ async def main(
 
     run_id = await _create_backfill_run()
     print(f"Re-classifying {total} firms (offset={offset}, run_id={run_id})")
-    print(f"  model: {settings.gemini_pdf_model}")
+    print(f"  model: {settings.gemini_pdf_model} | concurrency: {concurrency}")
     print(f"  only_needs_review: {only_needs_review} | resume: {resume} "
           f"({len(completed)} already checkpointed)")
     print(f"  change CSV  -> {out_path}")
@@ -260,6 +267,28 @@ async def main(
     checkpoint_path.parent.mkdir(parents=True, exist_ok=True)
     csv_mode = "a" if (resume and out_path.exists()) else "w"
     ckpt_mode = "a" if resume else "w"
+
+    sem = asyncio.Semaphore(concurrency)
+
+    async def _process(bd_id: int) -> tuple[int, dict | None, bool]:
+        """Mark 'Identifying' -> correct -> return (bd_id, row, do_checkpoint).
+        A per-firm failure returns do_checkpoint=False so the firm (left on
+        'Identifying') is retried on the next run / --resume, never silently
+        skipped."""
+        async with sem:
+            try:
+                snapshot = await _snapshot_and_mark_identifying(bd_id)
+                if snapshot is None:
+                    return bd_id, None, True  # BD vanished: nothing to do, skip it
+                old_type, old_classification = snapshot
+                row = await _reclassify_one(
+                    service, reconciler, run_id, competitors, bd_id,
+                    old_type=old_type, old_classification=old_classification,
+                )
+                return bd_id, row, True
+            except Exception:
+                logger.exception("reclassify failed for bd %s", bd_id)
+                return bd_id, None, False
 
     processed = 0
     changed = 0
@@ -272,19 +301,12 @@ async def main(
             writer.writeheader()
             fh.flush()
 
-        # One firm at a time: mark 'Identifying' -> correct it -> checkpoint it.
-        for bd_id in pending:
-            snapshot = await _snapshot_and_mark_identifying(bd_id)
-            if snapshot is None:
-                continue
-            old_type, old_classification = snapshot
-
-            row = await _reclassify_one(
-                service, reconciler, run_id, competitors, bd_id,
-                old_type=old_type, old_classification=old_classification,
-            )
-
-            # Record the real label, then checkpoint so a crash resumes here.
+        # Up to ``concurrency`` firms in flight; each marks 'Identifying',
+        # corrects, and is written + checkpointed the instant it finishes
+        # (streamed via as_completed, so no batch barrier).
+        tasks = [asyncio.create_task(_process(b)) for b in pending]
+        for fut in asyncio.as_completed(tasks):
+            bd_id, row, do_checkpoint = await fut
             if row is not None:
                 writer.writerow(row)
                 fh.flush()
@@ -292,13 +314,13 @@ async def main(
                     changed += 1
                     key = f"{row['old_type']} -> {row['new_type']}"
                     transitions[key] = transitions.get(key, 0) + 1
-            ckpt.write(f"{bd_id}\n")
-            ckpt.flush()
-
+            if do_checkpoint:
+                ckpt.write(f"{bd_id}\n")
+                ckpt.flush()
             processed += 1
             elapsed = time.monotonic() - started_at
             rate = processed / elapsed if elapsed > 0 else 0.0
-            last = f"{row['new_type']}" if row else "skipped"
+            last = row["new_type"] if row else "skipped/failed"
             print(f"  {processed}/{total} done: bd {bd_id} -> {last} ({rate:.2f}/s)")
 
     async with SessionLocal() as db:
@@ -330,6 +352,12 @@ def _parse_args() -> argparse.Namespace:
         choices=["flash", "pro"],
         default="pro",
         help="Extraction model (default: pro -- best accuracy).",
+    )
+    parser.add_argument(
+        "--concurrency",
+        type=int,
+        default=8,
+        help="Firms processed in parallel (default: 8; 1 = strict one-at-a-time).",
     )
     parser.add_argument(
         "--only-needs-review",
@@ -364,11 +392,9 @@ if __name__ == "__main__":
         format="%(asctime)s %(levelname)s %(name)s: %(message)s",
         stream=sys.stderr,
     )
-    out = Path(args.out)
-    ckpt = Path(args.checkpoint)
     coro = main(
-        args.limit, args.offset, out, ckpt, args.model,
-        args.only_needs_review, args.resume,
+        args.limit, args.offset, Path(args.out), Path(args.checkpoint), args.model,
+        args.concurrency, args.only_needs_review, args.resume,
     )
     if sys.platform == "win32" and sys.version_info >= (3, 14):
         with asyncio.Runner(
