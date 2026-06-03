@@ -42,7 +42,7 @@ export const ALL_FEATURE_KEYS = [
 export type FeatureKey = (typeof ALL_FEATURE_KEYS)[number];
 
 export const FEATURE_LABELS: Record<FeatureKey, string> = {
-  master_list: "Master List",
+  master_list: "Broker Dealers",
   investment_advisors: "Investment Advisors",
   investors: "Investors",
   institutional_investors: "Institutional Investors",

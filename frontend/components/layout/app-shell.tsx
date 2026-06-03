@@ -274,7 +274,7 @@ const navSections: ReadonlyArray<NavSection> = [
   {
     label: "Lists",
     items: [
-      { href: "/master-list", label: "Master List", icon: MasterListIcon, badgeKey: "total", permissionKey: "master_list" },
+      { href: "/master-list", label: "Broker Dealers", icon: MasterListIcon, badgeKey: "total", permissionKey: "master_list" },
       { href: "/advisor-list" as Route, label: "Investment Advisors", icon: AdvisorListIcon, badgeKey: null, permissionKey: "investment_advisors" },
       { href: "/investors" as Route, label: "Investors", icon: InvestorsIcon, badgeKey: null, permissionKey: "investors" }
     ]
