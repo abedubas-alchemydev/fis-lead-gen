@@ -611,7 +611,7 @@ function EmptyState({
           href="/master-list"
           className="font-semibold text-[var(--text,#0f172a)] underline-offset-4 hover:underline"
         >
-          Master List
+          Broker Dealers
         </Link>{" "}
         and use a contact&apos;s Outreach button to draft your first email.
       </p>

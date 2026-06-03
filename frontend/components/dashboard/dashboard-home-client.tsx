@@ -255,7 +255,7 @@ export function DashboardHomeClient() {
               value={totalBds}
               tone="blue"
               icon={KpiIconBuilding}
-              helper="All broker-dealers in Master List"
+              helper="All broker-dealers in the list"
               href="/master-list?list=all"
             />
           </div>

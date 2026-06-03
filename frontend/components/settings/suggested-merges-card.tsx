@@ -168,8 +168,7 @@ export function SuggestedMergesCard({ onAccepted }: { onAccepted?: () => void })
             LLC&rdquo;, &ldquo;RBC Capital Markets LLC&rdquo;, etc.) are now
             grouped automatically in the Clearing Arrangement filter. Use this
             list to refine a cluster &mdash; accept it to lock in a canonical
-            label and competitor provider, or reject it to split a wrong
-            auto-merge back apart.
+            label, or reject it to split a wrong auto-merge back apart.
           </p>
         </div>
         <Button

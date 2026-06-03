@@ -85,7 +85,7 @@ import type {
 // page can render "Back to My Favorites" / "Back to Visited Firms"
 // instead of always saying "Back to Master List".
 const SOURCE_LABELS: Record<DetailSource, { breadcrumb: string; back: string }> = {
-  "master-list": { breadcrumb: "Master List", back: "Back to Master List" },
+  "master-list": { breadcrumb: "Broker Dealers", back: "Back to Broker Dealers" },
   favorites: { breadcrumb: "My Favorites", back: "Back to My Favorites" },
   visited: { breadcrumb: "Visited Firms", back: "Back to Visited Firms" },
 };
@@ -887,7 +887,6 @@ export function BrokerDealerDetailClient({ brokerDealerId }: { brokerDealerId: s
             />
           ) : null}
         </span>
-        {bd.current_clearing_is_competitor ? <Pill variant="competitor">COMPETITOR</Pill> : null}
         {classification ? (
           <Pill variant={classification.variant}>{classification.label}</Pill>
         ) : null}
@@ -1458,7 +1457,6 @@ export function BrokerDealerDetailClient({ brokerDealerId }: { brokerDealerId: s
                           compact
                         />
                       ) : null}
-                      {item.is_competitor ? <Pill variant="competitor">COMPETITOR</Pill> : null}
                     </div>
                   </div>
                 </div>

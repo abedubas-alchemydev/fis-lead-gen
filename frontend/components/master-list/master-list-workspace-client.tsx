@@ -568,10 +568,10 @@ export function MasterListWorkspaceClient() {
         <div className="min-w-0">
           <p className="text-[12px] uppercase tracking-[0.06em] text-[var(--text-muted,#94a3b8)]">
             Enterprise Dashboard{" "}
-            <span className="text-[var(--text-dim,#475569)]">/</span> Master List
+            <span className="text-[var(--text-dim,#475569)]">/</span> Broker Dealers
           </p>
           <h1 className="mt-1 text-[24px] font-bold tracking-[-0.02em] text-[var(--text,#0f172a)]">
-            Broker-Dealer Master List
+            Broker Dealers
           </h1>
         </div>
         {/* .topbar-actions — search + theme + notifications. The search
@@ -1281,9 +1281,6 @@ export function MasterListWorkspaceClient() {
                               fallback="Not on file"
                             />
                           )}
-                          {item.current_clearing_is_competitor ? (
-                            <Pill variant="competitor">COMPETITOR</Pill>
-                          ) : null}
                         </div>
                       </td>
                       <td className="px-5 py-3.5">
