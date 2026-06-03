@@ -8,6 +8,7 @@ from app.api.v1.endpoints import (
     clearing_memberships_admin,
     contacts,
     email_extractor,
+    extraction_analytics,
     favorite_lists,
     favorites,
     health,
@@ -41,6 +42,9 @@ api_router.include_router(pipeline.admin_destructive_router, tags=["pipeline"])
 api_router.include_router(pipeline.status_router, tags=["pipeline"])
 api_router.include_router(settings.router, tags=["settings"])
 api_router.include_router(stats.router, tags=["stats"])
+api_router.include_router(
+    extraction_analytics.router, tags=["extraction-analytics"]
+)
 api_router.include_router(email_extractor.router, tags=["email-extractor"])
 api_router.include_router(favorites.router, tags=["favorites"])
 api_router.include_router(favorite_lists.router, tags=["favorite-lists"])
