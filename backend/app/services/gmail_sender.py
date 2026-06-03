@@ -43,19 +43,30 @@ async def send_gmail(
     *,
     access_token: str,
     sender_email: str,
-    to_email: str,
+    to_emails: list[str],
     subject: str,
     body: str,
+    cc_emails: list[str] | None = None,
+    bcc_emails: list[str] | None = None,
 ) -> str:
     """Send a plaintext email through Gmail; return the message id.
 
     The message body is sent as ``text/plain`` only — the Gemini-generated
     drafts are plain text, and rich HTML would invite spam-filter
     complications without buying anything for this feature.
+
+    ``to_emails`` / ``cc_emails`` go out as visible ``To`` / ``Cc``
+    headers; ``bcc_emails`` go in a ``Bcc`` header which Gmail honours
+    for delivery and removes from the stored/sent message, so BCC
+    recipients stay hidden.
     """
     message = EmailMessage()
     message["From"] = sender_email
-    message["To"] = to_email
+    message["To"] = ", ".join(to_emails)
+    if cc_emails:
+        message["Cc"] = ", ".join(cc_emails)
+    if bcc_emails:
+        message["Bcc"] = ", ".join(bcc_emails)
     message["Subject"] = subject
     message.set_content(body)
 

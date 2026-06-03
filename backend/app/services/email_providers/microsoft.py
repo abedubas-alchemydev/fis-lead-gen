@@ -55,25 +55,38 @@ class MicrosoftEmailProvider:
         *,
         access_token: str,
         sender_email: str,
-        to_email: str,
+        to_emails: list[str],
         subject: str,
         body: str,
+        cc_emails: list[str] | None = None,
+        bcc_emails: list[str] | None = None,
     ) -> str:
         """Send via Graph and return a synthetic message id.
 
         Graph's sendMail wraps the message in JSON (not RFC 822 raw like
-        Gmail). saveToSentItems=true so the message appears in the
-        user's Sent Items folder — parity with Gmail's default behavior.
+        Gmail). ``ccRecipients`` are visible; ``bccRecipients`` are
+        hidden from other recipients by Graph natively.
+        saveToSentItems=true so the message appears in the user's Sent
+        Items folder — parity with Gmail's default behavior.
         """
 
+        message: dict[str, object] = {
+            "subject": subject,
+            "body": {"contentType": "Text", "content": body},
+            "toRecipients": [
+                {"emailAddress": {"address": addr}} for addr in to_emails
+            ],
+        }
+        if cc_emails:
+            message["ccRecipients"] = [
+                {"emailAddress": {"address": addr}} for addr in cc_emails
+            ]
+        if bcc_emails:
+            message["bccRecipients"] = [
+                {"emailAddress": {"address": addr}} for addr in bcc_emails
+            ]
         payload = {
-            "message": {
-                "subject": subject,
-                "body": {"contentType": "Text", "content": body},
-                "toRecipients": [
-                    {"emailAddress": {"address": to_email}}
-                ],
-            },
+            "message": message,
             "saveToSentItems": True,
         }
         headers = {

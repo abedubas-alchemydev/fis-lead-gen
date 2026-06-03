@@ -13,6 +13,7 @@ import clsx from "clsx";
 import { Button, buttonBase, buttonSizes } from "@/components/ui/button";
 import {
   ApiError,
+  composeSendOutreach,
   generateAdhocOutreachDraft,
   generateAdvisorOutreachDraft,
   generateInvestorOutreachDraft,
@@ -20,10 +21,6 @@ import {
   getLinkedProviders,
   getOutreachSignature,
   listVaultFolders,
-  sendAdhocOutreach,
-  sendAdvisorOutreach,
-  sendInvestorOutreach,
-  sendOutreachEmail,
 } from "@/lib/api";
 import { authClient } from "@/lib/auth-client";
 import {
@@ -107,7 +104,14 @@ function resolveDefaultSenderAccountId(
 }
 
 export function CreateOutreachTab() {
-  const [recipients, setRecipients] = useState<RecipientValue[]>([]);
+  // To / Cc / Bcc, like a real email composer. One message is sent to
+  // all of them (compose-send); To & Cc are visible to each other, Bcc
+  // is hidden. Cc / Bcc rows stay collapsed until revealed (Gmail-style).
+  const [to, setTo] = useState<RecipientValue[]>([]);
+  const [cc, setCc] = useState<RecipientValue[]>([]);
+  const [bcc, setBcc] = useState<RecipientValue[]>([]);
+  const [showCc, setShowCc] = useState(false);
+  const [showBcc, setShowBcc] = useState(false);
   const [sentCount, setSentCount] = useState(0);
   const [folders, setFolders] = useState<VaultFolder[]>([]);
   const [foldersLoading, setFoldersLoading] = useState(true);
@@ -217,17 +221,12 @@ export function CreateOutreachTab() {
   );
   const providerId: EmailProviderId = selectedAccount?.provider ?? "google";
 
-  const hasRecipients = recipients.length > 0;
-  const hasContact = recipients.some((r) => r.kind === "contact");
-  const hasAdhoc = recipients.some((r) => r.kind === "adhoc");
-  // BD/Advisor/Investor sends require folder_id (server validates gt=0).
-  // Adhoc sends accept null folder_id — so a folder is only required when
-  // at least one contact recipient is in the batch.
-  const folderRequired = hasContact;
-  // AI draft generation needs a Service folder for the RAG context,
-  // regardless of whether the recipients are known contacts or adhoc.
-  // The send path stays unchanged — adhoc sends still don't require a
-  // folder; the gate is on Generate only.
+  const hasRecipients = to.length > 0;
+  const totalRecipients = to.length + cc.length + bcc.length;
+  // compose-send is adhoc-style (one email to the To/Cc/Bcc set, no
+  // per-firm endpoint), so a Service folder is never required to SEND.
+  // AI draft generation still needs one for RAG context — that's the
+  // only gate on the folder.
   const canGenerate =
     hasRecipients &&
     folderId !== null &&
@@ -236,7 +235,6 @@ export function CreateOutreachTab() {
     hasRecipients &&
     subject.trim().length > 0 &&
     body.trim().length > 0 &&
-    (folderRequired ? folderId !== null : true) &&
     (stage === "idle" || stage === "error");
 
   async function handleGenerate() {
@@ -244,7 +242,7 @@ export function CreateOutreachTab() {
     // back to the first one-off recipient. The same draft is sent to
     // everyone — per-recipient personalization is a later enhancement.
     const draftSource =
-      recipients.find((r) => r.kind === "contact") ?? recipients[0] ?? null;
+      to.find((r) => r.kind === "contact") ?? to[0] ?? null;
     if (!draftSource || folderId === null) return;
     setStage("generating");
     setError(null);
@@ -289,59 +287,8 @@ export function CreateOutreachTab() {
     }
   }
 
-  // Dispatch one recipient to its matching per-entity send endpoint. One
-  // 1:1 email per recipient — no CC/BCC, so recipients never see each
-  // other (the industry-standard outreach behaviour).
-  async function sendOne(r: RecipientValue, outgoingBody: string) {
-    if (r.kind === "adhoc") {
-      await sendAdhocOutreach({
-        recipient_email: r.email,
-        recipient_name: r.name ?? null,
-        subject,
-        body: outgoingBody,
-        sender_account_id: senderAccountId,
-        folder_id: folderId,
-      });
-      return;
-    }
-    const { result } = r;
-    const folderIdSafe = folderId ?? 0;
-    if (result.entity_kind === "broker_dealer") {
-      await sendOutreachEmail({
-        broker_dealer_id: result.entity_id,
-        contact_id: result.contact_id,
-        folder_id: folderIdSafe,
-        subject,
-        body: outgoingBody,
-        provider: providerId,
-        sender_account_id: senderAccountId,
-      });
-    } else if (result.entity_kind === "advisor") {
-      await sendAdvisorOutreach({
-        advisor_id: result.entity_id,
-        advisor_contact_id: result.contact_id,
-        folder_id: folderIdSafe,
-        subject,
-        body: outgoingBody,
-        provider: providerId,
-        sender_account_id: senderAccountId,
-      });
-    } else {
-      await sendInvestorOutreach({
-        institutional_investor_id: result.entity_id,
-        investor_contact_id: result.contact_id,
-        folder_id: folderIdSafe,
-        subject,
-        body: outgoingBody,
-        provider: providerId,
-        sender_account_id: senderAccountId,
-      });
-    }
-  }
-
   async function handleSend() {
-    if (recipients.length === 0 || !subject.trim() || !body.trim()) return;
-    if (folderRequired && folderId === null) return;
+    if (to.length === 0 || !subject.trim() || !body.trim()) return;
     // Append the (possibly edited) footer beneath the body. Merged on the
     // client so the BE send contract is unchanged and the audit row
     // stores exactly what was transmitted.
@@ -351,57 +298,35 @@ export function CreateOutreachTab() {
     setStage("sending");
     setError(null);
     setLinkActionProvider(null);
-
-    // Send sequentially so a sender-account 412 stops the batch cleanly
-    // (rather than firing N identical consent prompts). Successful sends
-    // drop out of `remaining`; failures stay so a retry doesn't
-    // double-send to addresses that already went out.
-    const batch = recipients;
-    let sent = 0;
-    const remaining: RecipientValue[] = [];
-    const failures: { email: string; message: string }[] = [];
-
-    for (let i = 0; i < batch.length; i++) {
-      const r = batch[i];
-      try {
-        await sendOne(r, outgoingBody);
-        sent += 1;
-      } catch (err) {
-        // A 412 is about the SENDER account (not linked / missing send
-        // scope) and will repeat for everyone — stop, keep the unsent
-        // recipients, and surface the grant-access action.
-        if (err instanceof ApiError && err.status === 412) {
-          remaining.push(...batch.slice(i));
-          if (!isMountedRef.current) return;
-          setRecipients(remaining);
-          setSentCount(sent);
-          setError(buildSendErrorMessage(err, providerId));
-          const action = decodeLinkAction(err.detail, providerId);
-          setLinkActionProvider(action?.provider ?? null);
-          setStage("error");
-          return;
-        }
-        failures.push({
-          email: recipientEmail(r),
-          message: buildSendErrorMessage(err, providerId),
-        });
-        remaining.push(r);
-      }
-    }
-
-    if (!isMountedRef.current) return;
-    setSentCount(sent);
-    if (failures.length === 0) {
+    try {
+      // One email to the whole To/Cc/Bcc set. To & Cc carry display names
+      // where known; Cc/Bcc are address-only.
+      await composeSendOutreach({
+        to: to.map((v) => ({
+          email: recipientEmail(v),
+          name:
+            v.kind === "adhoc" ? v.name ?? null : v.result.contact_name || null,
+        })),
+        cc: cc.map(recipientEmail),
+        bcc: bcc.map(recipientEmail),
+        subject,
+        body: outgoingBody,
+        sender_account_id: senderAccountId,
+        folder_id: folderId,
+      });
+      if (!isMountedRef.current) return;
+      setSentCount(to.length + cc.length + bcc.length);
       setStage("sent");
-      return;
+    } catch (err) {
+      if (!isMountedRef.current) return;
+      setError(buildSendErrorMessage(err, providerId));
+      const action =
+        err instanceof ApiError && err.status === 412
+          ? decodeLinkAction(err.detail, providerId)
+          : null;
+      setLinkActionProvider(action?.provider ?? null);
+      setStage("error");
     }
-    setRecipients(remaining);
-    setError(
-      `Sent ${sent} of ${batch.length}. ${failures.length} couldn't be sent: ${failures
-        .map((f) => `${f.email} — ${f.message}`)
-        .join("; ")}`,
-    );
-    setStage("error");
   }
 
   async function handleLinkProvider(target: EmailProviderId) {
@@ -447,7 +372,11 @@ export function CreateOutreachTab() {
   }
 
   function handleReset() {
-    setRecipients([]);
+    setTo([]);
+    setCc([]);
+    setBcc([]);
+    setShowCc(false);
+    setShowBcc(false);
     setSentCount(0);
     setSubject("");
     setBody("");
@@ -467,11 +396,11 @@ export function CreateOutreachTab() {
             <CheckCircle2 className="h-6 w-6" strokeWidth={2} />
           </div>
           <h2 className="text-[16px] font-semibold tracking-[-0.01em] text-[var(--text,#0f172a)]">
-            {sentCount > 1 ? `${sentCount} emails sent` : "Email sent"}
+            Email sent
           </h2>
           <p className="max-w-md text-[13px] leading-5 text-[var(--text-dim,#475569)]">
             {sentCount > 1
-              ? `Your ${sentCount} messages are on their way — each recipient got their own copy. A copy of each is in your ${PROVIDER_LABEL[providerId]} Sent folder. They'll appear on the Sent history tab in a moment.`
+              ? `Your message is on its way to ${sentCount} recipients (To, Cc and Bcc). A copy is in your ${PROVIDER_LABEL[providerId]} Sent folder. It'll appear on the Sent history tab in a moment.`
               : `Your message is on its way. A copy is in your ${PROVIDER_LABEL[providerId]} Sent folder. The send will appear on the Sent history tab in a moment.`}
           </p>
           <div className="mt-2 flex flex-wrap items-center justify-center gap-2">
@@ -487,26 +416,73 @@ export function CreateOutreachTab() {
   return (
     <div className={CARD}>
       <div className="space-y-5">
-        <div>
-          <label className={LABEL}>To</label>
-          <div className="mt-2">
-            <RecipientPicker
-              value={recipients}
-              onChange={setRecipients}
-              disabled={stage === "generating" || stage === "sending"}
-              ariaLabel="Recipients"
-            />
+        <div className="space-y-3">
+          <div>
+            <div className="flex items-center justify-between gap-2">
+              <label className={LABEL}>To</label>
+              <div className="flex items-center gap-1">
+                {!showCc ? (
+                  <button
+                    type="button"
+                    onClick={() => setShowCc(true)}
+                    className="rounded-md px-1.5 py-0.5 text-[11px] font-semibold uppercase tracking-[0.08em] text-[var(--text-muted,#94a3b8)] transition hover:bg-[var(--surface-2,#f1f6fd)] hover:text-[var(--accent,#6366f1)]"
+                  >
+                    Cc
+                  </button>
+                ) : null}
+                {!showBcc ? (
+                  <button
+                    type="button"
+                    onClick={() => setShowBcc(true)}
+                    className="rounded-md px-1.5 py-0.5 text-[11px] font-semibold uppercase tracking-[0.08em] text-[var(--text-muted,#94a3b8)] transition hover:bg-[var(--surface-2,#f1f6fd)] hover:text-[var(--accent,#6366f1)]"
+                  >
+                    Bcc
+                  </button>
+                ) : null}
+              </div>
+            </div>
+            <div className="mt-2">
+              <RecipientPicker
+                value={to}
+                onChange={setTo}
+                disabled={stage === "generating" || stage === "sending"}
+                ariaLabel="To recipients"
+              />
+            </div>
           </div>
-          {recipients.length > 1 ? (
-            <p className="mt-2 text-[11px] text-[var(--text-dim,#475569)]">
-              Each recipient gets their own individual email — they won&apos;t
-              see each other. The same subject and body go to all{" "}
-              {recipients.length}.
-            </p>
-          ) : hasAdhoc ? (
-            <p className="mt-2 text-[11px] text-[var(--text-dim,#475569)]">
-              One-off sends generate a draft from the selected service only
-              (no firm context). Edit before sending.
+
+          {showCc ? (
+            <div>
+              <label className={LABEL}>Cc</label>
+              <div className="mt-2">
+                <RecipientPicker
+                  value={cc}
+                  onChange={setCc}
+                  disabled={stage === "generating" || stage === "sending"}
+                  ariaLabel="Cc recipients"
+                />
+              </div>
+            </div>
+          ) : null}
+
+          {showBcc ? (
+            <div>
+              <label className={LABEL}>Bcc</label>
+              <div className="mt-2">
+                <RecipientPicker
+                  value={bcc}
+                  onChange={setBcc}
+                  disabled={stage === "generating" || stage === "sending"}
+                  ariaLabel="Bcc recipients"
+                />
+              </div>
+            </div>
+          ) : null}
+
+          {totalRecipients > 1 ? (
+            <p className="text-[11px] text-[var(--text-dim,#475569)]">
+              One email goes to everyone. To and Cc recipients can see each
+              other; Bcc recipients stay hidden.
             </p>
           ) : null}
         </div>
@@ -514,7 +490,7 @@ export function CreateOutreachTab() {
         <div className="grid gap-5 md:grid-cols-2">
           <div>
             <label className={LABEL} htmlFor="create-outreach-folder">
-              Service {folderRequired ? "" : "(optional)"}
+              Service (optional)
             </label>
             <select
               id="create-outreach-folder"
@@ -532,9 +508,7 @@ export function CreateOutreachTab() {
               }
               className={INPUT}
             >
-              {!folderRequired ? (
-                <option value="">— No service —</option>
-              ) : null}
+              <option value="">— No service —</option>
               {folders.map((folder) => (
                 <option key={folder.id} value={folder.id}>
                   {folder.name}

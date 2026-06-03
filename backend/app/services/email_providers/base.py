@@ -88,11 +88,22 @@ class EmailProvider(Protocol):
         *,
         access_token: str,
         sender_email: str,
-        to_email: str,
+        to_emails: list[str],
         subject: str,
         body: str,
+        cc_emails: list[str] | None = None,
+        bcc_emails: list[str] | None = None,
     ) -> str:
-        """Send the email and return a provider-side message id.
+        """Send one email to all recipients and return a message id.
+
+        ``to_emails`` is the visible primary recipient list (at least
+        one). ``cc_emails`` are also visible to everyone; ``bcc_emails``
+        are hidden — each transport delivers to BCC addresses while
+        stripping the ``Bcc`` header from the transmitted/saved copy
+        (Gmail strips it server-side, ``aiosmtplib.send_message`` removes
+        it before DATA, and Graph models BCC natively via
+        ``bccRecipients``). A single message is sent, so To/CC recipients
+        see each other.
 
         Gmail returns the real Gmail message id. Microsoft Graph and
         Yahoo SMTP don't return an id we can rely on; those providers

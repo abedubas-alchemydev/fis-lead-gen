@@ -45,9 +45,11 @@ async def test_send_gmail_returns_message_id_on_success() -> None:
     message_id = await send_gmail(
         access_token="tok-xyz",
         sender_email="rep@alchemydev.io",
-        to_email="contact@firm.example",
+        to_emails=["contact@firm.example", "second@firm.example"],
         subject="Re: clearing services",
         body="Hi Jane,\n\nWanted to introduce our new custody offering.\n\nArvin",
+        cc_emails=["manager@alchemydev.io"],
+        bcc_emails=["crm@alchemydev.io"],
     )
 
     assert message_id == "msg-abc-123"
@@ -62,7 +64,11 @@ async def test_send_gmail_returns_message_id_on_success() -> None:
     padded = raw + "=" * (-len(raw) % 4)
     decoded = base64.urlsafe_b64decode(padded).decode("utf-8", errors="replace")
     assert "From: rep@alchemydev.io" in decoded
-    assert "To: contact@firm.example" in decoded
+    # Multiple To addresses are comma-joined in one header; Cc visible and
+    # Bcc present in the raw we build (Gmail strips Bcc server-side).
+    assert "To: contact@firm.example, second@firm.example" in decoded
+    assert "Cc: manager@alchemydev.io" in decoded
+    assert "Bcc: crm@alchemydev.io" in decoded
     assert "Subject: Re: clearing services" in decoded
     assert "introduce our new custody offering" in decoded
 
@@ -86,7 +92,7 @@ async def test_send_gmail_raises_scope_required_on_insufficient_permissions() ->
         await send_gmail(
             access_token="tok-xyz",
             sender_email="rep@alchemydev.io",
-            to_email="contact@firm.example",
+            to_emails=["contact@firm.example"],
             subject="s",
             body="b",
         )
@@ -102,7 +108,7 @@ async def test_send_gmail_raises_send_error_on_5xx() -> None:
         await send_gmail(
             access_token="tok-xyz",
             sender_email="rep@alchemydev.io",
-            to_email="contact@firm.example",
+            to_emails=["contact@firm.example"],
             subject="s",
             body="b",
         )
@@ -116,7 +122,7 @@ async def test_send_gmail_raises_send_error_when_response_missing_id() -> None:
         await send_gmail(
             access_token="tok-xyz",
             sender_email="rep@alchemydev.io",
-            to_email="contact@firm.example",
+            to_emails=["contact@firm.example"],
             subject="s",
             body="b",
         )
