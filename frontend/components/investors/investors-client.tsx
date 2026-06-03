@@ -72,13 +72,6 @@ const SORT_OPTIONS = [
   { key: "reporting_owner_name", label: "Owner Name" },
 ] as const;
 
-// DEMO: rows whose insider has no found contact email still get a working
-// Outreach button. The BE adhoc-draft endpoint requires a valid EmailStr,
-// so those rows fall back to this reserved, non-deliverable placeholder
-// (RFC 2606) — "Generate draft" works and an accidental Send just bounces.
-// Remove this + re-gate on `row.enriched_email` to restore production.
-const DEMO_FALLBACK_EMAIL = "prospect@example.com";
-
 // ── Pagination helper ─────────────────────────────────────────────────
 // Mirrors the master-list / advisor-list helper. Produces
 // [1, 2, 3, …, last] with ellipses as string literals so React can key
@@ -297,11 +290,14 @@ export function InvestorsClient() {
     });
   }
 
-  async function handleEnrich(id: number) {
-    setEnrichingId(id);
-    setError(null);
-    try {
-      const result: InvestorEnrichResponse = await enrichInvestor(id);
+  // Run the contact lookup for one row and merge the result in place,
+  // returning the response so callers can react to the outcome. Loading
+  // UI + error surfacing are the caller's concern — the Re-enrich button
+  // (handleEnrich) shows the per-row spinner; the Outreach button reads
+  // back the found email for its just-in-time lookup.
+  const runEnrich = useCallback(
+    async (id: number): Promise<InvestorEnrichResponse> => {
+      const result = await enrichInvestor(id);
       setItems((current) =>
         current.map((row) =>
           row.id === id
@@ -316,6 +312,16 @@ export function InvestorsClient() {
             : row,
         ),
       );
+      return result;
+    },
+    [],
+  );
+
+  async function handleEnrich(id: number) {
+    setEnrichingId(id);
+    setError(null);
+    try {
+      await runEnrich(id);
       // CLIENT REQUEST: every row presents as actionable, so we don't
       // surface the "no contact match" / "entity filer" outcomes as a
       // negative banner. A successful match still updates the row in place;
@@ -763,6 +769,16 @@ export function InvestorsClient() {
                         row={row}
                         enriching={enrichingId === row.id}
                         onEnrich={() => void handleEnrich(row.id)}
+                        onLookupEmail={async () => {
+                          try {
+                            return (await runEnrich(row.id)).enriched_email;
+                          } catch {
+                            // Silent: the demo feed never surfaces lookup
+                            // failures as banners. No email → modal opens
+                            // with no recipient (drafting still works).
+                            return null;
+                          }
+                        }}
                       />
                     ))}
                   </div>
@@ -833,12 +849,21 @@ function InvestorRow({
   row,
   enriching,
   onEnrich,
+  onLookupEmail,
 }: {
   row: InvestorItem;
   enriching: boolean;
   onEnrich: () => void;
+  onLookupEmail: () => Promise<string | null>;
 }) {
   const [outreachOpen, setOutreachOpen] = useState(false);
+  // Recipient address handed to the compose modal. Seeded per Outreach
+  // click: the row's existing email when present, else whatever the
+  // just-in-time lookup returns (real address or null — never a fake).
+  const [outreachEmail, setOutreachEmail] = useState<string | null>(null);
+  // True while the on-click contact lookup is in flight, so the Outreach
+  // button can spin without also spinning the Re-enrich button.
+  const [preparingOutreach, setPreparingOutreach] = useState(false);
   const adChipClass =
     row.ad_code === "A"
       ? "border-emerald-200 bg-emerald-50 text-emerald-700"
@@ -870,13 +895,34 @@ function InvestorRow({
     Date.now() - Date.parse(row.enriched_at) < PHONE_PENDING_WINDOW_MS;
   const phonePending =
     row.phone_pending && !row.enriched_phone && recentlyEnriched;
-  // DEMO: Outreach is enabled on every row regardless of enrichment so the
-  // compose/draft flow is always reachable. Rows without a found contact
-  // email fall back to DEMO_FALLBACK_EMAIL below (the BE adhoc-draft
-  // endpoint requires a valid EmailStr). To restore production gating, set
-  // `const canOutreach = !!row.enriched_email;`, re-add the button's
-  // disabled/title props, and gate the modal + recipient on
-  // `row.enriched_email`.
+
+  // Outreach is reachable on every row. If the row already has (or has
+  // already attempted) a contact lookup, open the compose modal straight
+  // away with whatever email we have — a real address when found, null
+  // otherwise. If it's never been looked up, run a just-in-time contact
+  // lookup first to try to resolve a real address. Entity/company filers
+  // (e.g. "TANG CAPITAL MANAGEMENT LLC") and genuine no-matches come back
+  // empty; we still open the modal with no recipient so the user can
+  // generate, edit, and copy a draft (the modal disables Send and shows
+  // its "no email on file" note). No synthetic placeholder is ever shown.
+  // Retrying the lookup is the Re-enrich button's job, so we don't repeat
+  // it once enriched_at is set.
+  async function handleOutreachClick() {
+    if (row.enriched_email || row.enriched_at) {
+      setOutreachEmail(row.enriched_email);
+      setOutreachOpen(true);
+      return;
+    }
+    setPreparingOutreach(true);
+    let found: string | null = null;
+    try {
+      found = await onLookupEmail();
+    } finally {
+      setPreparingOutreach(false);
+      setOutreachEmail(found);
+      setOutreachOpen(true);
+    }
+  }
 
   return (
     <div className="grid gap-3 py-3 md:grid-cols-[minmax(0,1.4fr)_minmax(0,1.2fr)_minmax(0,264px)]">
@@ -987,7 +1033,7 @@ function InvestorRow({
           variant="outline"
           size="sm"
           onClick={onEnrich}
-          disabled={enriching}
+          disabled={enriching || preparingOutreach}
           className="shrink-0 whitespace-nowrap"
         >
           {enriching ? (
@@ -998,10 +1044,19 @@ function InvestorRow({
         <Button
           type="button"
           size="sm"
-          onClick={() => setOutreachOpen(true)}
+          onClick={() => void handleOutreachClick()}
+          disabled={preparingOutreach || enriching}
           className="shrink-0 whitespace-nowrap"
         >
-          <MailPlus className="h-3.5 w-3.5" strokeWidth={2} aria-hidden />
+          {preparingOutreach ? (
+            <Loader2
+              className="h-3.5 w-3.5 animate-spin"
+              strokeWidth={2}
+              aria-hidden
+            />
+          ) : (
+            <MailPlus className="h-3.5 w-3.5" strokeWidth={2} aria-hidden />
+          )}
           Outreach
         </Button>
       </div>
@@ -1014,7 +1069,7 @@ function InvestorRow({
             id: row.reporting_owner_id ?? 0,
             name: row.reporting_owner_name,
             title: row.reporting_owner_title ?? "",
-            email: row.enriched_email ?? DEMO_FALLBACK_EMAIL,
+            email: outreachEmail,
           }}
           onClose={() => setOutreachOpen(false)}
         />
