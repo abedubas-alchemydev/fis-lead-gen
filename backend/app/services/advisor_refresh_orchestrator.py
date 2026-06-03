@@ -69,6 +69,10 @@ from app.services.contact_discovery.orchestrator import (
     _walk_chain,
     discover_advisor_contact,
 )
+from app.services.contact_discovery.web_fallback import (
+    GapPerson,
+    discover_web_fallback,
+)
 from app.services.edgar import EdgarService, build_edgar_filing_url
 from app.services.finra_pdf_service import fetch_brokercheck_pdf
 from app.services.gemini_responses import (
@@ -1494,6 +1498,52 @@ async def _run_gap_fill_contacts(
                         row.enriched_at = datetime.now(timezone.utc)
                         filled += 1
                         await db.commit()
+
+        # PHASE 3 — last-resort web fallback for People STILL missing a channel
+        # after the provider chain (covers both pre-existing gap rows and the
+        # names-only rows seeded in Phase 1). Crawls the firm site once + searches
+        # public LinkedIn URLs, merging non-destructively via _apply_gap_fill.
+        # Off by default and intentionally SILENT: it adds nothing to the run
+        # summary, so the client sees the same generic progress -- merged channels
+        # simply appear on the People icons. Server logs record the count for ops.
+        if settings.web_fallback_enabled:
+            async with SessionLocal() as db:
+                wf_rows = list(
+                    (
+                        await db.execute(
+                            select(AdvisorContact)
+                            .where(AdvisorContact.advisor_id == advisor_id)
+                            .order_by(AdvisorContact.id.asc())
+                        )
+                    )
+                    .scalars()
+                    .all()
+                )
+                wf_people = [
+                    GapPerson(row_id=r.id, first_name=split[0], last_name=split[1])
+                    for r in wf_rows
+                    if _is_gap_row(r) and (split := _split_officer_name(r.name)) is not None
+                ]
+                if wf_people:
+                    wf_results = await discover_web_fallback(
+                        domain=domain,
+                        org_name=chain_org_name or firm_name,
+                        people=wf_people,
+                    )
+                    wf_filled = 0
+                    for wf_row_id, wf_merged in wf_results.items():
+                        row = await db.get(AdvisorContact, wf_row_id)
+                        if row is not None and _apply_gap_fill(row, wf_merged):
+                            row.enriched_at = datetime.now(timezone.utc)
+                            wf_filled += 1
+                            await db.commit()
+                    if wf_filled:
+                        logger.info(
+                            "advisor %s: web fallback filled %d of %d gap row(s)",
+                            advisor_id,
+                            wf_filled,
+                            len(wf_people),
+                        )
 
         await _stamp_gap_fill_attempt(advisor_id)
         new_rows = discovered + names_only

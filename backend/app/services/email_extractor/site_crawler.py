@@ -25,7 +25,12 @@ from urllib.robotparser import RobotFileParser
 import httpx
 from selectolax.parser import HTMLParser
 
-from app.services.email_extractor.base import DiscoveredEmailDraft, DiscoveryResult
+from app.services.email_extractor.base import (
+    DiscoveredEmailDraft,
+    DiscoveredPhoneDraft,
+    DiscoveryResult,
+    PageText,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -34,6 +39,13 @@ CANDIDATE_PATHS: tuple[str, ...] = ("/contact", "/about", "/team", "/staff", "/p
 MAX_PAGES = 6
 
 EMAIL_RE = re.compile(r"[A-Za-z0-9._%+\-]+@[A-Za-z0-9.\-]+\.[A-Za-z]{2,}")
+# Conservative US/NANP phone matcher: optional +1, then 3-3-4 digit groups that
+# MUST carry a separator between groups (space, dot, or hyphen; area code may be
+# parenthesized). Requiring separators avoids matching long opaque digit runs
+# (IDs, CRDs, ZIP+route strings). ``_clean_phone`` validates the digit count.
+PHONE_RE = re.compile(
+    r"(?:\+?1[\s.\-]?)?\(?\d{3}\)?[\s.\-]\d{3}[\s.\-]\d{4}"
+)
 ATOB_RE = re.compile(r"""atob\(\s*['"]([A-Za-z0-9+/=]+)['"]\s*\)""")
 OBFUSCATION_REPLACEMENTS: tuple[tuple[re.Pattern[str], str], ...] = (
     (re.compile(r"\s*\[\s*at\s*\]\s*", re.IGNORECASE), "@"),
@@ -43,6 +55,21 @@ OBFUSCATION_REPLACEMENTS: tuple[tuple[re.Pattern[str], str], ...] = (
     (re.compile(r"\s*\(\s*dot\s*\)\s*", re.IGNORECASE), "."),
     (re.compile(r"\s+dot\s+", re.IGNORECASE), "."),
 )
+
+
+def _clean_phone(raw: str) -> str | None:
+    """Normalize a matched phone to canonical US format, or None if not NANP.
+
+    Strips to digits; accepts 10-digit numbers (or 11 starting with the US
+    country code ``1``) and renders ``(AAA) PPP-NNNN`` so different spacings of
+    the same number dedupe. Anything else (too few/many digits, intl) → None.
+    """
+    digits = re.sub(r"\D", "", raw or "")
+    if len(digits) == 11 and digits.startswith("1"):
+        digits = digits[1:]
+    if len(digits) != 10:
+        return None
+    return f"({digits[:3]}) {digits[3:6]}-{digits[6:]}"
 
 
 class SiteCrawler:
@@ -57,11 +84,16 @@ class SiteCrawler:
         request_timeout_seconds: float = 10.0,
         user_agent: str = DEFAULT_USER_AGENT,
         max_pages: int = MAX_PAGES,
+        collect_page_text: bool = False,
     ) -> None:
         self._delay = request_delay_seconds
         self._timeout = request_timeout_seconds
         self._user_agent = user_agent
         self._max_pages = max_pages
+        # When True, ``run`` retains each page's normalized text in
+        # ``result.pages`` so callers can do co-location (attach a phone to a
+        # person named on the same page). Off by default to avoid holding text.
+        self._collect_page_text = collect_page_text
 
     async def run(self, domain: str) -> DiscoveryResult:
         normalized_domain = domain.lower().strip().lstrip(".")
@@ -70,6 +102,7 @@ class SiteCrawler:
 
         result = DiscoveryResult()
         seen: dict[str, DiscoveredEmailDraft] = {}
+        seen_phones: dict[str, DiscoveredPhoneDraft] = {}
 
         async with httpx.AsyncClient(
             headers={"User-Agent": self._user_agent},
@@ -112,9 +145,12 @@ class SiteCrawler:
                 if not content_type.lower().startswith("text/html"):
                     continue
 
-                self._extract_into(response.text, url, normalized_domain, seen)
+                self._extract_into(
+                    response.text, url, normalized_domain, seen, seen_phones, result
+                )
 
         result.emails = list(seen.values())
+        result.phones = list(seen_phones.values())
         return result
 
     async def _resolve_base_url(self, client: httpx.AsyncClient, domain: str) -> tuple[str, str | None, str | None]:
@@ -155,8 +191,11 @@ class SiteCrawler:
         page_url: str,
         scan_domain: str,
         seen: dict[str, DiscoveredEmailDraft],
+        seen_phones: dict[str, DiscoveredPhoneDraft],
+        result: DiscoveryResult,
     ) -> None:
         tree = HTMLParser(html_text)
+        raw_text = html.unescape(tree.text(separator=" ", strip=True))
 
         # mailto: links — confidence 0.75
         for node in tree.css("a[href^='mailto:']"):
@@ -174,17 +213,50 @@ class SiteCrawler:
                     ),
                 )
 
-        # Plain-text + obfuscation — confidence 0.6
-        text = html.unescape(tree.text(separator=" ", strip=True))
+        # tel: links — confidence 0.75
+        for node in tree.css("a[href^='tel:']"):
+            href = node.attributes.get("href") or ""
+            raw = href[len("tel:") :].split("?", 1)[0].strip()
+            phone = _clean_phone(html.unescape(raw))
+            if phone:
+                seen_phones.setdefault(
+                    phone,
+                    DiscoveredPhoneDraft(
+                        value=phone,
+                        source=self.name,
+                        confidence=0.75,
+                        attribution=page_url,
+                    ),
+                )
+
+        # Plain-text emails + obfuscation — confidence 0.6. Work on a copy so the
+        # at/dot substitutions don't perturb the raw text used for phones/pages.
+        email_text = raw_text
         for pattern, replacement in OBFUSCATION_REPLACEMENTS:
-            text = pattern.sub(replacement, text)
-        for match in EMAIL_RE.findall(text):
+            email_text = pattern.sub(replacement, email_text)
+        for match in EMAIL_RE.findall(email_text):
             email = match.lower()
             if self._domain_matches(email, scan_domain):
                 seen.setdefault(
                     email,
                     DiscoveredEmailDraft(
                         email=email,
+                        source=self.name,
+                        confidence=0.6,
+                        attribution=page_url,
+                    ),
+                )
+
+        # Plain-text phones — confidence 0.6. Unlike emails, phones aren't
+        # domain-filterable, so precision rests on the conservative PHONE_RE +
+        # _clean_phone validation; person attribution happens downstream.
+        for match in PHONE_RE.findall(raw_text):
+            phone = _clean_phone(match)
+            if phone:
+                seen_phones.setdefault(
+                    phone,
+                    DiscoveredPhoneDraft(
+                        value=phone,
                         source=self.name,
                         confidence=0.6,
                         attribution=page_url,
@@ -209,6 +281,9 @@ class SiteCrawler:
                             attribution=page_url,
                         ),
                     )
+
+        if self._collect_page_text:
+            result.pages.append(PageText(url=page_url, text=raw_text))
 
     @staticmethod
     def _domain_matches(email: str, scan_domain: str) -> bool:

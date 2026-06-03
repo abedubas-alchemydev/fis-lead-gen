@@ -241,10 +241,11 @@ export function AdvisorDetailClient({ advisorId }: { advisorId: string }) {
 
   // "Generate More Details" handler. POST /gap-fill-contacts with force (the
   // user-facing button always re-runs past the cost cooldown, matching the BD
-  // enrich button), poll the run until terminal (180s deadline; the chain
-  // fan-out is bounded by the per-firm officer cap), then reload /profile so
-  // the new emails/phones/LinkedIn URLs land in the icon popovers. Error /
-  // notice strings show inline in the People panel.
+  // enrich button), poll the run until terminal (300s deadline -- headroom so
+  // the "Generating…" loader keeps spanning the run's optional final
+  // web-fallback stage; the user just sees the same generic progress), then
+  // reload /profile so the new emails/phones/LinkedIn URLs land in the icon
+  // popovers. Error / notice strings show inline in the People panel.
   const runGapFill = useCallback(async () => {
     const numericId = Number(advisorId);
     if (!Number.isFinite(numericId)) return;
@@ -255,7 +256,7 @@ export function AdvisorDetailClient({ advisorId }: { advisorId: string }) {
       const result = await gapFillAdvisorContacts(numericId, true);
       if (result.run_id !== null) {
         const runId = result.run_id;
-        const deadline = Date.now() + 180_000;
+        const deadline = Date.now() + 300_000;
         const TERMINAL = new Set([
           "completed",
           "completed_with_errors",
