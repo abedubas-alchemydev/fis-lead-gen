@@ -146,6 +146,18 @@ function UsersIcon(props: IconProps) {
   );
 }
 
+// Bar-chart glyph for the admin per-provider extraction analytics page.
+function ExtractionAnalyticsIcon(props: IconProps) {
+  return (
+    <IconBase {...props}>
+      <path d="M3 3v18h18" />
+      <rect x="7" y="11" width="3" height="6" />
+      <rect x="12" y="7" width="3" height="10" />
+      <rect x="17" y="13" width="3" height="4" />
+    </IconBase>
+  );
+}
+
 // Address-book glyph for the persons-by-firm browse / per-firm enrich page.
 function OutreachContactsIcon(props: IconProps) {
   return (
@@ -289,7 +301,8 @@ const navSections: ReadonlyArray<NavSection> = [
       { href: "/settings", label: "Settings", icon: SettingsIcon, badgeKey: null, permissionKey: "settings" },
       { href: "/settings/account" as Route, label: "My Account", icon: KeyIcon, badgeKey: null },
       { href: "/settings/email-accounts" as Route, label: "Email Accounts", icon: MailAtIcon, badgeKey: null },
-      { href: "/settings/users" as Route, label: "Users", icon: UsersIcon, badgeKey: null, adminOnly: true, permissionKey: "users" }
+      { href: "/settings/users" as Route, label: "Users", icon: UsersIcon, badgeKey: null, adminOnly: true, permissionKey: "users" },
+      { href: "/settings/extractions" as Route, label: "Extraction Analytics", icon: ExtractionAnalyticsIcon, badgeKey: null, adminOnly: true }
       // Memberships nav item intentionally hidden (2026-05-30) — route/page kept:
       // { href: "/settings/clearing-memberships" as Route, label: "Memberships", icon: ShieldCheckIcon, badgeKey: null, adminOnly: true }
     ]
