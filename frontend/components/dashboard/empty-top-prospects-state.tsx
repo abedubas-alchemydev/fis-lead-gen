@@ -4,8 +4,9 @@ import Link from "next/link";
 import { ArrowRight, Target } from "lucide-react";
 
 // Empty state for the TopProspectsCard tile when /api/v1/broker-dealers
-// returns no firms inside the High Value Participant band ($5M–$100M
-// latest_net_capital). Mirrors the medallion pattern shipped on /alerts
+// returns no firms in the High Value Participant segment (net capital
+// $5M–$100M OR the OTC corporate-equity retailing business type). Mirrors
+// the medallion pattern shipped on /alerts
 // (EmptyAlertsState), /visited-firms (EmptyVisitedState), /my-favorites
 // (EmptyItemsState) so the dashboard tile feels visually consistent
 // with the rest of the app.
@@ -19,8 +20,8 @@ export function EmptyTopProspectsState() {
         No high-value participants yet
       </h3>
       <p className="mx-auto mt-2 max-w-sm text-[13px] leading-5 text-[var(--text-dim,#475569)]">
-        Firms with Net Capital between $5M and $100M surface here as the
-        financial pipeline fills in.
+        Firms with Net Capital $5M–$100M, or that retail OTC corporate
+        equity, surface here as the financial pipeline fills in.
       </p>
       <Link
         href="/master-list"

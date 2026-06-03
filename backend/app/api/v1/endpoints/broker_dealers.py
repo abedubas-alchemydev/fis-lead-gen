@@ -208,6 +208,11 @@ async def list_broker_dealers(
     max_net_capital: float | None = Query(default=None, ge=0),
     registered_after: date | None = Query(default=None),
     registered_before: date | None = Query(default=None),
+    # Named-segment preset. Resolves to an OR-predicate the per-field filters
+    # can't express (net-capital band OR a business type) — see
+    # ``high_value_participant_filter``. Strict pattern: unknown segments 422
+    # rather than silently returning the unfiltered list.
+    segment: str | None = Query(default=None, pattern="^high_value$"),
     list_mode: str = Query(default="primary", alias="list", pattern="^(primary|alternative|all)$"),
     sort_by: str = Query(default="latest_net_capital"),
     sort_dir: str = Query(default="desc", pattern="^(asc|desc)$"),
@@ -254,6 +259,7 @@ async def list_broker_dealers(
         max_net_capital=max_net_capital,
         registered_after=registered_after,
         registered_before=registered_before,
+        segment=segment,
         list_mode=list_mode,
         sort_by=sort_by,
         sort_dir=sort_dir,

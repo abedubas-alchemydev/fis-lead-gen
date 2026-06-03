@@ -47,6 +47,44 @@ from app.services.unknown_reasons import (
 # that the type is shared rather than firm-specific noise.
 TYPES_OF_BUSINESS_MIN_COUNT = 2
 
+# "High Value Participant" segment definition — shared by the dashboard KPI
+# tile (``count_high_value_participants``), the Top Prospects card, and the
+# master-list ``?segment=high_value`` deep-link so the headline count and the
+# drill-down list never drift. A firm qualifies when EITHER:
+#   • its latest net capital sits in the [$5M, $100M] band, OR
+#   • it reports the OTC corporate-equity retailing business type.
+# The business-type arm was added 2026-06-03 (client request): these
+# retail-facing OTC equity dealers are high-value prospects regardless of
+# net-capital size. ``HIGH_VALUE_BUSINESS_TYPES`` holds the canonical FINRA
+# Form BD label exactly as it appears in the master-list "Types of Business"
+# filter (the ~1,093-firm option) — the one-off free-text "Other - ..."
+# variant is intentionally excluded so the segment matches what the user picks.
+HIGH_VALUE_NET_CAPITAL_MIN = 5_000_000
+HIGH_VALUE_NET_CAPITAL_MAX = 100_000_000
+HIGH_VALUE_BUSINESS_TYPES = (
+    "Broker or dealer retailing corporate equity securities over-the-counter",
+)
+
+
+def high_value_participant_filter():
+    """SQLAlchemy predicate for the High Value Participant segment.
+
+    Net-capital band OR the OTC corporate-equity retailing business type (see
+    the ``HIGH_VALUE_*`` constants). ``between`` is inclusive on both ends and
+    NULL net-capital never satisfies it, matching the prior band-only rule.
+    ``?|`` is the JSONB any-of operator — it returns false (never errors) on
+    the JSONB scalar ``'null'`` rows the nullable column can hold, so no
+    ``jsonb_typeof`` guard is needed (unlike ``jsonb_array_elements_text``).
+    """
+    return or_(
+        BrokerDealer.latest_net_capital.between(
+            HIGH_VALUE_NET_CAPITAL_MIN, HIGH_VALUE_NET_CAPITAL_MAX
+        ),
+        BrokerDealer.types_of_business.op("?|")(
+            cast(list(HIGH_VALUE_BUSINESS_TYPES), ARRAY(String))
+        ),
+    )
+
 
 def pick_authoritative_arrangement(
     arrangements: list[ClearingArrangement],
@@ -299,6 +337,7 @@ class BrokerDealerRepository:
         max_net_capital: float | None = None,
         registered_after: date | None = None,
         registered_before: date | None = None,
+        segment: str | None = None,
     ) -> BrokerDealerListResponse:
         filters = []
         if search:
@@ -394,6 +433,14 @@ class BrokerDealerRepository:
             filters.append(BrokerDealer.registration_date >= registered_after)
         if registered_before is not None:
             filters.append(BrokerDealer.registration_date <= registered_before)
+
+        # Named-segment preset (currently just the dashboard "High Value
+        # Participants" tile). ANDs with every other filter, so a user can
+        # narrow the segment by state / clearing type / etc. once they land on
+        # the list. Unknown values are ignored here; the endpoint's Query
+        # ``pattern`` is the gate that rejects anything but a known segment.
+        if segment == "high_value":
+            filters.append(high_value_participant_filter())
 
         if list_mode == "primary":
             filters.append(BrokerDealer.is_deficient.is_(False))
@@ -594,14 +641,13 @@ class BrokerDealerRepository:
         return int((await db.execute(stmt)).scalar_one())
 
     async def count_high_value_participants(self, db: AsyncSession) -> int:
-        # "High Value" = firms with latest_net_capital in the [$5M, $100M] band
-        # (business rule). Decoupled from the ACG ICP composite scorer, which
-        # still drives lead_priority hot/warm/cold for the master list and the
-        # Top Prospects card.
-        stmt = select(func.count(BrokerDealer.id)).where(
-            BrokerDealer.latest_net_capital >= 5_000_000,
-            BrokerDealer.latest_net_capital <= 100_000_000,
-        )
+        # "High Value" = net-capital [$5M, $100M] band OR the OTC corporate-
+        # equity retailing business type (see ``high_value_participant_filter``).
+        # Decoupled from the ACG ICP composite scorer, which still drives
+        # lead_priority hot/warm/cold for the master list and the Top Prospects
+        # card. Stays in lockstep with the ``?segment=high_value`` list filter
+        # so the KPI count and the drill-down list always agree.
+        stmt = select(func.count(BrokerDealer.id)).where(high_value_participant_filter())
         return int((await db.execute(stmt)).scalar_one())
 
     async def list_states(self, db: AsyncSession) -> list[str]:
