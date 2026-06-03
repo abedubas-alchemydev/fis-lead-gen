@@ -28,6 +28,7 @@ import {
 import { authClient } from "@/lib/auth-client";
 import {
   RecipientPicker,
+  recipientEmail,
   type RecipientValue,
 } from "@/components/outreach/recipient-picker";
 import type {
@@ -106,7 +107,8 @@ function resolveDefaultSenderAccountId(
 }
 
 export function CreateOutreachTab() {
-  const [recipient, setRecipient] = useState<RecipientValue | null>(null);
+  const [recipients, setRecipients] = useState<RecipientValue[]>([]);
+  const [sentCount, setSentCount] = useState(0);
   const [folders, setFolders] = useState<VaultFolder[]>([]);
   const [foldersLoading, setFoldersLoading] = useState(true);
   const [folderId, setFolderId] = useState<number | null>(null);
@@ -215,40 +217,47 @@ export function CreateOutreachTab() {
   );
   const providerId: EmailProviderId = selectedAccount?.provider ?? "google";
 
-  const isContact = recipient?.kind === "contact";
-  const isAdhoc = recipient?.kind === "adhoc";
+  const hasRecipients = recipients.length > 0;
+  const hasContact = recipients.some((r) => r.kind === "contact");
+  const hasAdhoc = recipients.some((r) => r.kind === "adhoc");
   // BD/Advisor/Investor sends require folder_id (server validates gt=0).
-  // Adhoc sends accept null folder_id.
-  const folderRequired = isContact;
+  // Adhoc sends accept null folder_id — so a folder is only required when
+  // at least one contact recipient is in the batch.
+  const folderRequired = hasContact;
   // AI draft generation needs a Service folder for the RAG context,
-  // regardless of whether the recipient is a known contact or adhoc.
+  // regardless of whether the recipients are known contacts or adhoc.
   // The send path stays unchanged — adhoc sends still don't require a
   // folder; the gate is on Generate only.
   const canGenerate =
-    (isContact || isAdhoc) &&
+    hasRecipients &&
     folderId !== null &&
     (stage === "idle" || stage === "error");
   const canSend =
-    !!recipient &&
+    hasRecipients &&
     subject.trim().length > 0 &&
     body.trim().length > 0 &&
     (folderRequired ? folderId !== null : true) &&
     (stage === "idle" || stage === "error");
 
   async function handleGenerate() {
-    if (!recipient || folderId === null) return;
+    // Draft from the first firm-linked contact (for RAG context); fall
+    // back to the first one-off recipient. The same draft is sent to
+    // everyone — per-recipient personalization is a later enhancement.
+    const draftSource =
+      recipients.find((r) => r.kind === "contact") ?? recipients[0] ?? null;
+    if (!draftSource || folderId === null) return;
     setStage("generating");
     setError(null);
     try {
       let draft;
-      if (recipient.kind === "adhoc") {
+      if (draftSource.kind === "adhoc") {
         draft = await generateAdhocOutreachDraft({
           folder_id: folderId,
-          recipient_email: recipient.email,
-          recipient_name: recipient.name ?? null,
+          recipient_email: draftSource.email,
+          recipient_name: draftSource.name ?? null,
         });
       } else {
-        const { result } = recipient;
+        const { result } = draftSource;
         if (result.entity_kind === "broker_dealer") {
           draft = await generateOutreachDraft({
             broker_dealer_id: result.entity_id,
@@ -280,8 +289,58 @@ export function CreateOutreachTab() {
     }
   }
 
+  // Dispatch one recipient to its matching per-entity send endpoint. One
+  // 1:1 email per recipient — no CC/BCC, so recipients never see each
+  // other (the industry-standard outreach behaviour).
+  async function sendOne(r: RecipientValue, outgoingBody: string) {
+    if (r.kind === "adhoc") {
+      await sendAdhocOutreach({
+        recipient_email: r.email,
+        recipient_name: r.name ?? null,
+        subject,
+        body: outgoingBody,
+        sender_account_id: senderAccountId,
+        folder_id: folderId,
+      });
+      return;
+    }
+    const { result } = r;
+    const folderIdSafe = folderId ?? 0;
+    if (result.entity_kind === "broker_dealer") {
+      await sendOutreachEmail({
+        broker_dealer_id: result.entity_id,
+        contact_id: result.contact_id,
+        folder_id: folderIdSafe,
+        subject,
+        body: outgoingBody,
+        provider: providerId,
+        sender_account_id: senderAccountId,
+      });
+    } else if (result.entity_kind === "advisor") {
+      await sendAdvisorOutreach({
+        advisor_id: result.entity_id,
+        advisor_contact_id: result.contact_id,
+        folder_id: folderIdSafe,
+        subject,
+        body: outgoingBody,
+        provider: providerId,
+        sender_account_id: senderAccountId,
+      });
+    } else {
+      await sendInvestorOutreach({
+        institutional_investor_id: result.entity_id,
+        investor_contact_id: result.contact_id,
+        folder_id: folderIdSafe,
+        subject,
+        body: outgoingBody,
+        provider: providerId,
+        sender_account_id: senderAccountId,
+      });
+    }
+  }
+
   async function handleSend() {
-    if (!recipient || !subject.trim() || !body.trim()) return;
+    if (recipients.length === 0 || !subject.trim() || !body.trim()) return;
     if (folderRequired && folderId === null) return;
     // Append the (possibly edited) footer beneath the body. Merged on the
     // client so the BE send contract is unchanged and the audit row
@@ -292,63 +351,57 @@ export function CreateOutreachTab() {
     setStage("sending");
     setError(null);
     setLinkActionProvider(null);
-    try {
-      if (recipient.kind === "adhoc") {
-        await sendAdhocOutreach({
-          recipient_email: recipient.email,
-          recipient_name: recipient.name ?? null,
-          subject,
-          body: outgoingBody,
-          sender_account_id: senderAccountId,
-          folder_id: folderId,
-        });
-      } else {
-        const { result } = recipient;
-        const folderIdSafe = folderId ?? 0;
-        if (result.entity_kind === "broker_dealer") {
-          await sendOutreachEmail({
-            broker_dealer_id: result.entity_id,
-            contact_id: result.contact_id,
-            folder_id: folderIdSafe,
-            subject,
-            body: outgoingBody,
-            provider: providerId,
-            sender_account_id: senderAccountId,
-          });
-        } else if (result.entity_kind === "advisor") {
-          await sendAdvisorOutreach({
-            advisor_id: result.entity_id,
-            advisor_contact_id: result.contact_id,
-            folder_id: folderIdSafe,
-            subject,
-            body: outgoingBody,
-            provider: providerId,
-            sender_account_id: senderAccountId,
-          });
-        } else {
-          await sendInvestorOutreach({
-            institutional_investor_id: result.entity_id,
-            investor_contact_id: result.contact_id,
-            folder_id: folderIdSafe,
-            subject,
-            body: outgoingBody,
-            provider: providerId,
-            sender_account_id: senderAccountId,
-          });
+
+    // Send sequentially so a sender-account 412 stops the batch cleanly
+    // (rather than firing N identical consent prompts). Successful sends
+    // drop out of `remaining`; failures stay so a retry doesn't
+    // double-send to addresses that already went out.
+    const batch = recipients;
+    let sent = 0;
+    const remaining: RecipientValue[] = [];
+    const failures: { email: string; message: string }[] = [];
+
+    for (let i = 0; i < batch.length; i++) {
+      const r = batch[i];
+      try {
+        await sendOne(r, outgoingBody);
+        sent += 1;
+      } catch (err) {
+        // A 412 is about the SENDER account (not linked / missing send
+        // scope) and will repeat for everyone — stop, keep the unsent
+        // recipients, and surface the grant-access action.
+        if (err instanceof ApiError && err.status === 412) {
+          remaining.push(...batch.slice(i));
+          if (!isMountedRef.current) return;
+          setRecipients(remaining);
+          setSentCount(sent);
+          setError(buildSendErrorMessage(err, providerId));
+          const action = decodeLinkAction(err.detail, providerId);
+          setLinkActionProvider(action?.provider ?? null);
+          setStage("error");
+          return;
         }
+        failures.push({
+          email: recipientEmail(r),
+          message: buildSendErrorMessage(err, providerId),
+        });
+        remaining.push(r);
       }
-      if (!isMountedRef.current) return;
-      setStage("sent");
-    } catch (err) {
-      if (!isMountedRef.current) return;
-      setError(buildSendErrorMessage(err, providerId));
-      const action =
-        err instanceof ApiError && err.status === 412
-          ? decodeLinkAction(err.detail, providerId)
-          : null;
-      setLinkActionProvider(action?.provider ?? null);
-      setStage("error");
     }
+
+    if (!isMountedRef.current) return;
+    setSentCount(sent);
+    if (failures.length === 0) {
+      setStage("sent");
+      return;
+    }
+    setRecipients(remaining);
+    setError(
+      `Sent ${sent} of ${batch.length}. ${failures.length} couldn't be sent: ${failures
+        .map((f) => `${f.email} — ${f.message}`)
+        .join("; ")}`,
+    );
+    setStage("error");
   }
 
   async function handleLinkProvider(target: EmailProviderId) {
@@ -394,7 +447,8 @@ export function CreateOutreachTab() {
   }
 
   function handleReset() {
-    setRecipient(null);
+    setRecipients([]);
+    setSentCount(0);
     setSubject("");
     setBody("");
     setFooter(defaultSignatureRef.current);
@@ -413,12 +467,12 @@ export function CreateOutreachTab() {
             <CheckCircle2 className="h-6 w-6" strokeWidth={2} />
           </div>
           <h2 className="text-[16px] font-semibold tracking-[-0.01em] text-[var(--text,#0f172a)]">
-            Email sent
+            {sentCount > 1 ? `${sentCount} emails sent` : "Email sent"}
           </h2>
           <p className="max-w-md text-[13px] leading-5 text-[var(--text-dim,#475569)]">
-            Your message is on its way. A copy is in your{" "}
-            {PROVIDER_LABEL[providerId]} Sent folder. The send will appear on
-            the Sent history tab in a moment.
+            {sentCount > 1
+              ? `Your ${sentCount} messages are on their way — each recipient got their own copy. A copy of each is in your ${PROVIDER_LABEL[providerId]} Sent folder. They'll appear on the Sent history tab in a moment.`
+              : `Your message is on its way. A copy is in your ${PROVIDER_LABEL[providerId]} Sent folder. The send will appear on the Sent history tab in a moment.`}
           </p>
           <div className="mt-2 flex flex-wrap items-center justify-center gap-2">
             <Button type="button" onClick={handleReset}>
@@ -437,13 +491,19 @@ export function CreateOutreachTab() {
           <label className={LABEL}>To</label>
           <div className="mt-2">
             <RecipientPicker
-              value={recipient}
-              onChange={setRecipient}
+              value={recipients}
+              onChange={setRecipients}
               disabled={stage === "generating" || stage === "sending"}
-              ariaLabel="Recipient"
+              ariaLabel="Recipients"
             />
           </div>
-          {isAdhoc ? (
+          {recipients.length > 1 ? (
+            <p className="mt-2 text-[11px] text-[var(--text-dim,#475569)]">
+              Each recipient gets their own individual email — they won&apos;t
+              see each other. The same subject and body go to all{" "}
+              {recipients.length}.
+            </p>
+          ) : hasAdhoc ? (
             <p className="mt-2 text-[11px] text-[var(--text-dim,#475569)]">
               One-off sends generate a draft from the selected service only
               (no firm context). Edit before sending.
@@ -528,7 +588,7 @@ export function CreateOutreachTab() {
           ) : null}
         </div>
 
-        {isContact || isAdhoc ? (
+        {hasRecipients ? (
           <div>
             <button
               type="button"
