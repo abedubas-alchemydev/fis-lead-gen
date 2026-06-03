@@ -132,6 +132,47 @@ function listPathFromReturnState(
   });
 }
 
+// Mirrors backend _FREE_EMAIL_DOMAINS (app/api/v1/endpoints/broker_dealers.py):
+// personal / free mailbox providers never represent a firm's own domain, so a
+// contact's personal Gmail can't masquerade as the firm website.
+const FREE_EMAIL_DOMAINS = new Set([
+  "gmail.com", "googlemail.com", "yahoo.com", "ymail.com",
+  "outlook.com", "hotmail.com", "live.com", "msn.com",
+  "aol.com", "icloud.com", "me.com", "mac.com",
+  "protonmail.com", "proton.me", "gmx.com", "mail.com",
+]);
+
+// Most common corporate email domain across a firm's contacts — the scalar
+// `email` column plus every `emails[].value`. Free mailbox providers are
+// ignored and ties break alphabetically, mirroring the backend's
+// _known_contact_emails + _derive_email_domain (broker_dealers.py) so the FE
+// and BE agree on a firm's domain. Returns null when no corporate email is
+// known. Used as the header website fallback so a domain surfaced by FOCUS
+// extraction (which lights up the Email Extractor) also shows under the firm
+// name instead of "No public website on file".
+function deriveContactEmailDomain(contacts: ExecutiveContactItem[]): string | null {
+  const counts = new Map<string, number>();
+  for (const contact of contacts) {
+    const raw: string[] = [];
+    if (contact.email) raw.push(contact.email);
+    for (const hit of contact.emails ?? []) {
+      if (hit?.value) raw.push(hit.value);
+    }
+    for (const email of raw) {
+      if (!email.includes("@")) continue;
+      const domain = email.split("@").pop()?.trim().toLowerCase().replace(/\.+$/, "");
+      if (!domain || FREE_EMAIL_DOMAINS.has(domain)) continue;
+      counts.set(domain, (counts.get(domain) ?? 0) + 1);
+    }
+  }
+  if (counts.size === 0) return null;
+  // Alphabetical sort + strictly-greater replacement keeps the lowest-named
+  // domain on a count tie, matching the backend's max(sorted, key=count).
+  return [...counts.keys()]
+    .sort()
+    .reduce((best, d) => ((counts.get(d) ?? 0) > (counts.get(best) ?? 0) ? d : best));
+}
+
 export function BrokerDealerDetailClient({ brokerDealerId }: { brokerDealerId: string }) {
   const router = useRouter();
   const searchParams = useSearchParams();
@@ -785,6 +826,12 @@ export function BrokerDealerDetailClient({ brokerDealerId }: { brokerDealerId: s
   const contactEmail = profile.executive_contacts.find((c) => c.email)?.email ?? null;
   const emailDomain = contactEmail ? contactEmail.split("@")[1]?.toLowerCase() ?? null : null;
   const resolvedDomain = websiteDomain || emailDomain;
+  // Header website fallback: the firm's most-common corporate contact-email
+  // domain (free-mail filtered), so a domain surfaced by FOCUS extraction
+  // shows under the firm name even when no website is on file. Distinct from
+  // `emailDomain` above (the Email Extractor's raw first-email anchor) — the
+  // header must never present a personal/free mailbox as the firm's website.
+  const headerFallbackDomain = deriveContactEmailDomain(profile.executive_contacts);
   const classification = classificationDisplay(bd.clearing_classification);
 
   // Derived contact-matching for the People panel
@@ -838,7 +885,12 @@ export function BrokerDealerDetailClient({ brokerDealerId }: { brokerDealerId: s
               />
             ) : null}
           </div>
-          <FirmWebsiteLink firmId={bd.id} firmName={bd.name} website={bd.website} />
+          <FirmWebsiteLink
+            firmId={bd.id}
+            firmName={bd.name}
+            website={bd.website}
+            fallbackDomain={headerFallbackDomain}
+          />
           <div className="mt-2 flex flex-wrap items-center gap-x-3 gap-y-1 text-[12px] text-[var(--text-muted,#94a3b8)]">
             <span>
               CIK <span className="font-mono text-[var(--text-dim,#475569)]">{bd.cik ?? "N/A"}</span>
