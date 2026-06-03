@@ -8,7 +8,6 @@ export type SecurityEventKind =
   | "copy_blocked"
   | "right_click"
   | "print_blocked"
-  | "devtools_open"
   | "shortcut_blocked"
   | "clipboard_cleared";
 

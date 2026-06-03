@@ -7,7 +7,6 @@ const ALLOWED_KINDS = new Set([
   "copy_blocked",
   "right_click",
   "print_blocked",
-  "devtools_open",
   "shortcut_blocked",
   "clipboard_cleared",
 ]);

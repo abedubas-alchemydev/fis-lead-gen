@@ -62,29 +62,3 @@ html[data-print-locked="true"] body > *:not([data-security-overlay]) {
 html[data-app-blurred="true"] body > *:not([data-security-overlay]) {
   filter: blur(20px) !important;
 }
-
-/* Devtools-open lockdown. Heuristic only — we never block, just blur and
-   show an overlay. False positives (responsive mode, narrow windows) are
-   accepted intentionally. */
-html[data-devtools-open="true"] body > *:not([data-security-overlay]) {
-  filter: blur(28px) saturate(0) !important;
-  pointer-events: none !important;
-  user-select: none !important;
-}
-
-html[data-devtools-open="true"] body::after {
-  content: "Developer tools detected — content hidden for security. This event has been logged.";
-  position: fixed;
-  inset: 0;
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  padding: 2rem;
-  text-align: center;
-  background: rgba(8, 12, 24, 0.92);
-  color: #ffffff;
-  z-index: 2147483647;
-  font-size: 16px;
-  font-weight: 500;
-  letter-spacing: 0.01em;
-}
