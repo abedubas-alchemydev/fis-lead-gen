@@ -3231,15 +3231,16 @@ TOOL_REGISTRY: dict[str, Tool] = {
     "research_term": Tool(
         name="research_term",
         description=(
-            "Define an unfamiliar financial or technical TERM, acronym, or "
-            "concept. Doxie checks its learned glossary first, then the "
-            "public web, and remembers the result. Call this FIRST whenever "
-            "the user's request hinges on a term you don't fully know (e.g. "
-            "'SOFR', 'Reg BI', 'T+1 settlement', 'CCP') or the question is "
-            "ambiguous, BEFORE using the data tools. Returns a short "
-            "definition and a few cited sources. Do NOT use it to look up a "
-            "specific firm's data, filings, financials, or contacts — the "
-            "database tools own that."
+            "Look up a term Doxie genuinely does NOT know — obscure jargon, a "
+            "niche or brand-new acronym, or a firm/product-specific name you "
+            "cannot confidently define yourself. Checks the learned glossary "
+            "first, then the public web, and remembers the result. IMPORTANT: "
+            "only call this for terms you truly don't know. If you already "
+            "understand the term (standard finance/regulatory vocabulary such "
+            "as SOFR, Reg BI, T+1, 13F, FOCUS, clearing), just answer directly "
+            "— do NOT call this tool. Never use it for a specific firm's data, "
+            "filings, financials, or contacts (the database tools own that). "
+            "Returns a short definition and a few cited sources."
         ),
         parameters_schema=_RESEARCH_TERM_PARAMETERS_SCHEMA,
         # ``feature_key`` is informational only — the execute function never
