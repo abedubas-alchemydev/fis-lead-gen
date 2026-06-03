@@ -59,6 +59,7 @@ from app.schemas.vault import (
     OutreachAdhocSendRequest,
     OutreachAdvisorDraftRequest,
     OutreachAdvisorSendRequest,
+    OutreachComposeSendRequest,
     OutreachDraftRequest,
     OutreachDraftResponse,
     OutreachInvestorDraftRequest,
@@ -420,7 +421,7 @@ async def send_outreach(
         current_user=current_user,
         audit=audit,
         sender_account=sender_account,
-        recipient_email=contact.email,
+        to_emails=[contact.email],
         subject=payload.subject,
         body=payload.body,
     )
@@ -691,6 +692,9 @@ def _row_to_item(row: tuple, *, include_sender: bool) -> dict:
         "contact_email": contact_email,
         "recipient_email": send.recipient_email,
         "recipient_name": send.recipient_name,
+        "to_emails": send.to_emails,
+        "cc_emails": send.cc_emails,
+        "bcc_emails": send.bcc_emails,
         "folder_id": send.folder_id,
         "folder_name": row[10],
     }
@@ -841,7 +845,7 @@ async def send_advisor_outreach(
         current_user=current_user,
         audit=audit,
         sender_account=sender_account,
-        recipient_email=contact.email,
+        to_emails=[contact.email],
         subject=payload.subject,
         body=payload.body,
     )
@@ -916,7 +920,7 @@ async def send_investor_outreach(
         current_user=current_user,
         audit=audit,
         sender_account=sender_account,
-        recipient_email=contact.email,
+        to_emails=[contact.email],
         subject=payload.subject,
         body=payload.body,
     )
@@ -1540,9 +1544,107 @@ async def send_adhoc_outreach(
         current_user=current_user,
         audit=audit,
         sender_account=sender_account,
-        recipient_email=payload.recipient_email,
+        to_emails=[payload.recipient_email],
         subject=payload.subject,
         body=payload.body,
+    )
+
+
+def _dedupe_compose_recipients(
+    payload: OutreachComposeSendRequest,
+) -> tuple[list[str], list[str], list[str]]:
+    """Normalise + de-duplicate To/CC/BCC across all three buckets.
+
+    An address lands in at most one bucket — earliest wins in To > CC >
+    BCC order, matched case-insensitively — so nobody is double-addressed
+    (and a BCC recipient can't be silently un-hidden by also sitting in
+    To). Within a bucket the first occurrence's original casing is kept
+    and order is preserved.
+    """
+
+    seen: set[str] = set()
+
+    def _collect(addresses: list[str]) -> list[str]:
+        out: list[str] = []
+        for raw in addresses:
+            addr = str(raw).strip()
+            key = addr.lower()
+            if key and key not in seen:
+                seen.add(key)
+                out.append(addr)
+        return out
+
+    to_emails = _collect([r.email for r in payload.to])
+    cc_emails = _collect(list(payload.cc))
+    bcc_emails = _collect(list(payload.bcc))
+    return to_emails, cc_emails, bcc_emails
+
+
+@router.post("/compose-send", response_model=OutreachSendResponse)
+async def send_compose_outreach(
+    payload: OutreachComposeSendRequest,
+    current_user: AuthenticatedUser = Depends(_require_sent_outreach),
+    db: AsyncSession = Depends(get_db_session),
+) -> OutreachSendResponse:
+    """Send one email to multiple recipients with CC/BCC (the composer).
+
+    Mirrors the adhoc-send path but carries a full To list plus optional
+    CC and BCC. A single message is transmitted — To/CC recipients see
+    each other; BCC is delivered hidden — and audited as one adhoc-style
+    ``outreach_sends`` row (no firm/contact FK) carrying the recipient
+    lists. Folder is optional service metadata, same as adhoc-send.
+    """
+
+    to_emails, cc_emails, bcc_emails = _dedupe_compose_recipients(payload)
+    if not to_emails:
+        # Pydantic guarantees >= 1 To, but dedupe could in theory empty it
+        # if every entry collided — guard so we never send to nobody.
+        raise HTTPException(status_code=422, detail="recipient_required")
+
+    folder: VaultFolder | None = None
+    if payload.folder_id is not None:
+        folder = (
+            await db.execute(
+                select(VaultFolder).where(
+                    VaultFolder.id == payload.folder_id,
+                    VaultFolder.user_id == current_user.id,
+                )
+            )
+        ).scalar_one_or_none()
+        if folder is None:
+            raise HTTPException(
+                status_code=404, detail="outreach_inputs_not_found"
+            )
+
+    sender_account = await _resolve_sender_account(
+        db=db,
+        current_user=current_user,
+        folder=folder,
+        explicit_account_id=payload.sender_account_id,
+    )
+    # Primary To powers the sent-history "recipient" column; the full
+    # lists land on to_emails/cc_emails/bcc_emails inside the send helper.
+    primary = payload.to[0]
+    audit = OutreachSend(
+        user_id=current_user.id,
+        folder_id=folder.id if folder else None,
+        subject=payload.subject,
+        body=payload.body,
+        status="failed",
+        provider=sender_account.provider_id,
+        recipient_email=to_emails[0],
+        recipient_name=primary.name,
+    )
+    return await _provider_send_and_record(
+        db=db,
+        current_user=current_user,
+        audit=audit,
+        sender_account=sender_account,
+        to_emails=to_emails,
+        subject=payload.subject,
+        body=payload.body,
+        cc_emails=cc_emails or None,
+        bcc_emails=bcc_emails or None,
     )
 
 
@@ -1649,9 +1751,11 @@ async def _provider_send_and_record(
     current_user: AuthenticatedUser,
     audit: OutreachSend,
     sender_account: Account,
-    recipient_email: str,
+    to_emails: list[str],
     subject: str,
     body: str,
+    cc_emails: list[str] | None = None,
+    bcc_emails: list[str] | None = None,
 ) -> OutreachSendResponse:
     """Dispatch the send via the resolved sender account + commit the audit.
 
@@ -1663,7 +1767,23 @@ async def _provider_send_and_record(
     Sets ``audit.sender_account_id``, ``audit.sender_email``, and
     ``audit.provider`` from the resolved account before committing,
     so the audit row always reflects which mailbox actually transmitted.
+
+    ``to_emails`` is the visible primary recipient list (>= 1). ``cc_emails``
+    are also visible; ``bcc_emails`` are delivered hidden. They're recorded
+    on the audit row before the send attempt so failure rows still capture
+    the intended recipients.
     """
+
+    # Record the recipient set up front so even a failure row reflects who
+    # the message was meant for. Single-To rows leave ``to_emails`` NULL —
+    # ``recipient_email`` / the joined contact already carries the lone
+    # address; multi-recipient compose-sends store the full list.
+    if len(to_emails) > 1:
+        audit.to_emails = ", ".join(to_emails)
+    if cc_emails:
+        audit.cc_emails = ", ".join(cc_emails)
+    if bcc_emails:
+        audit.bcc_emails = ", ".join(bcc_emails)
 
     provider_id = sender_account.provider_id
     provider = PROVIDERS.get(provider_id)
@@ -1711,9 +1831,11 @@ async def _provider_send_and_record(
         message_id = await provider.send(
             access_token=access_token,
             sender_email=audit.sender_email,
-            to_email=recipient_email,
+            to_emails=to_emails,
             subject=subject,
             body=body,
+            cc_emails=cc_emails,
+            bcc_emails=bcc_emails,
         )
     except EmailScopeRequired as exc:
         await _record_failure(db, audit, scope_required_code)

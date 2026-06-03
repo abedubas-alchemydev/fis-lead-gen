@@ -131,6 +131,16 @@ class OutreachSend(Base):
     recipient_name: Mapped[str | None] = mapped_column(
         String(255), nullable=True
     )
+    # Multi-recipient compose-send (POST /outreach/compose-send) records
+    # the full visible To and Cc lists plus the hidden Bcc list as
+    # comma-joined addresses. NULL on single-recipient / contact-based
+    # rows, which carry their address in ``recipient_email`` or the joined
+    # contact row. ``to_emails`` is populated only when the send had more
+    # than one To (single-To rows keep using ``recipient_email``). Added
+    # in migration 20260603_0003.
+    to_emails: Mapped[str | None] = mapped_column(Text, nullable=True)
+    cc_emails: Mapped[str | None] = mapped_column(Text, nullable=True)
+    bcc_emails: Mapped[str | None] = mapped_column(Text, nullable=True)
     sent_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True),
         nullable=False,

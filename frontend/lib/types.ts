@@ -749,6 +749,12 @@ export type OutreachSendItem = {
   // contact_email / contact_name.
   recipient_email?: string | null;
   recipient_name?: string | null;
+  // Multi-recipient compose-send (POST /outreach/compose-send) audit:
+  // comma-joined address lists. Null on single-recipient / contact rows.
+  // to_emails is set only when there was more than one To.
+  to_emails?: string | null;
+  cc_emails?: string | null;
+  bcc_emails?: string | null;
   folder_id: number | null;
   folder_name: string | null;
   // Populated only when the admin "all users" scope is requested. Null
@@ -825,6 +831,26 @@ export type FavoriteFirmsResponse = {
 export type OutreachAdhocSendRequest = {
   recipient_email: string;
   recipient_name?: string | null;
+  subject: string;
+  body: string;
+  sender_account_id?: string | null;
+  folder_id?: number | null;
+};
+
+// One visible To recipient on a compose-send: address + optional name.
+export type OutreachComposeRecipient = {
+  email: string;
+  name?: string | null;
+};
+
+// POST /api/v1/outreach/compose-send — one email to a To/Cc/Bcc set, like
+// a normal mail client. To & Cc are visible to each other; Bcc is hidden.
+// The server de-dupes addresses across the three buckets (To > Cc > Bcc).
+// folder_id is optional service metadata (no folder required to send).
+export type OutreachComposeSendRequest = {
+  to: OutreachComposeRecipient[];
+  cc: string[];
+  bcc: string[];
   subject: string;
   body: string;
   sender_account_id?: string | null;

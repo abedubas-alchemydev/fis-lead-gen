@@ -52,17 +52,21 @@ class GoogleEmailProvider:
         *,
         access_token: str,
         sender_email: str,
-        to_email: str,
+        to_emails: list[str],
         subject: str,
         body: str,
+        cc_emails: list[str] | None = None,
+        bcc_emails: list[str] | None = None,
     ) -> str:
         try:
             return await send_gmail(
                 access_token=access_token,
                 sender_email=sender_email,
-                to_email=to_email,
+                to_emails=to_emails,
                 subject=subject,
                 body=body,
+                cc_emails=cc_emails,
+                bcc_emails=bcc_emails,
             )
         except GmailScopeRequired as exc:
             raise EmailScopeRequired(str(exc)) from exc

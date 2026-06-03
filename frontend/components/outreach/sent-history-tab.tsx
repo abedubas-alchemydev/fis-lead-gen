@@ -43,6 +43,23 @@ const CARD_TITLE =
 
 const PAGE_SIZE = 50;
 
+// Recipients beyond the primary shown in the list cell — sums the extra
+// To addresses (multi-recipient compose-sends), Cc, and Bcc from the
+// comma-joined audit columns. 0 for single-recipient / legacy rows.
+function extraRecipientCount(item: OutreachSendItem): number {
+  const splitCount = (v?: string | null) =>
+    v ? v.split(",").filter((s) => s.trim()).length : 0;
+  const toCount = item.to_emails
+    ? splitCount(item.to_emails)
+    : item.recipient_email
+      ? 1
+      : 0;
+  return Math.max(
+    0,
+    toCount + splitCount(item.cc_emails) + splitCount(item.bcc_emails) - 1,
+  );
+}
+
 type StatusFilter = "all" | OutreachSendStatus;
 
 const STATUS_ITEMS: ReadonlyArray<SegmentedItem> = [
@@ -396,6 +413,21 @@ function RowGroup({
             <div className="mt-0.5 inline-flex items-center gap-1.5 text-xs text-[var(--text-dim,#475569)]">
               <Mail className="h-3 w-3 text-[var(--text-muted,#94a3b8)]" aria-hidden />
               {item.contact_email ?? item.recipient_email}
+            </div>
+          ) : null}
+          {extraRecipientCount(item) > 0 ? (
+            <div
+              className="mt-0.5 text-[11px] text-[var(--text-muted,#94a3b8)]"
+              title={[
+                item.to_emails ? `To: ${item.to_emails}` : null,
+                item.cc_emails ? `Cc: ${item.cc_emails}` : null,
+                item.bcc_emails ? `Bcc: ${item.bcc_emails}` : null,
+              ]
+                .filter(Boolean)
+                .join("\n")}
+            >
+              +{extraRecipientCount(item)} more
+              {item.bcc_emails ? " · incl. Bcc" : ""}
             </div>
           ) : null}
         </td>

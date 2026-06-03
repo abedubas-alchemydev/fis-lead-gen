@@ -325,6 +325,76 @@ async def test_adhoc_send_412_when_no_linked_account() -> None:
         await _cleanup([user_id], [], [], [])
 
 
+# ── POST /outreach/compose-send (To/Cc/Bcc) ──────────────────────────────
+
+
+async def test_compose_send_422_on_empty_to() -> None:
+    user_id = await _seed_user()
+    app.dependency_overrides[get_current_user] = lambda: _override_user(user_id)
+    try:
+        async with _client() as client:
+            response = await client.post(
+                "/api/v1/outreach/compose-send",
+                json={
+                    "to": [],
+                    "cc": [],
+                    "bcc": [],
+                    "subject": "Hello",
+                    "body": "hi",
+                },
+            )
+        # Pydantic min_length=1 on `to` rejects pre-handler.
+        assert response.status_code == 422
+    finally:
+        app.dependency_overrides.clear()
+        await _cleanup([user_id], [], [], [])
+
+
+async def test_compose_send_422_on_invalid_recipient_email() -> None:
+    user_id = await _seed_user()
+    app.dependency_overrides[get_current_user] = lambda: _override_user(user_id)
+    try:
+        async with _client() as client:
+            response = await client.post(
+                "/api/v1/outreach/compose-send",
+                json={
+                    "to": [{"email": "not-an-email"}],
+                    "cc": [],
+                    "bcc": [],
+                    "subject": "Hello",
+                    "body": "hi",
+                },
+            )
+        assert response.status_code == 422
+    finally:
+        app.dependency_overrides.clear()
+        await _cleanup([user_id], [], [], [])
+
+
+async def test_compose_send_412_when_no_linked_account() -> None:
+    user_id = await _seed_user()
+    app.dependency_overrides[get_current_user] = lambda: _override_user(user_id)
+    try:
+        async with _client() as client:
+            response = await client.post(
+                "/api/v1/outreach/compose-send",
+                json={
+                    "to": [{"email": "someone@example.com", "name": "Someone"}],
+                    "cc": ["colleague@example.com"],
+                    "bcc": ["crm@example.com"],
+                    "subject": "Hello",
+                    "body": "hi there",
+                },
+            )
+        # No linked account -> _resolve_sender_account returns 412 before
+        # any transport is touched.
+        assert response.status_code == 412
+        assert response.json()["detail"] == "google_account_not_linked"
+    finally:
+        app.dependency_overrides.clear()
+        await _cleanup([user_id], [], [], [])
+
+
 # ── /outreach/firms/search + /outreach/firms/contacts ────────────────
 
 

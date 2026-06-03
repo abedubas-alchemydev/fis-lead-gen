@@ -116,6 +116,7 @@ import type {
   OutreachAdhocSendRequest,
   OutreachAdvisorDraftRequest,
   OutreachAdvisorSendRequest,
+  OutreachComposeSendRequest,
   OptimizeInstructionsRequest,
   OptimizeInstructionsResponse,
   OutreachDraft,
@@ -1097,6 +1098,18 @@ export async function sendAdhocOutreach(
   payload: OutreachAdhocSendRequest
 ): Promise<OutreachSendResponse> {
   return apiRequest<OutreachSendResponse>("/api/v1/outreach/adhoc-send", {
+    method: "POST",
+    body: JSON.stringify(payload)
+  });
+}
+
+// POST /api/v1/outreach/compose-send — sends one email to a To/Cc/Bcc
+// recipient set (the Create Outreach composer). 412 link/scope errors are
+// recoverable the same way the other send paths handle them.
+export async function composeSendOutreach(
+  payload: OutreachComposeSendRequest
+): Promise<OutreachSendResponse> {
+  return apiRequest<OutreachSendResponse>("/api/v1/outreach/compose-send", {
     method: "POST",
     body: JSON.stringify(payload)
   });

@@ -60,15 +60,27 @@ class YahooEmailProvider:
         *,
         access_token: str,
         sender_email: str,
-        to_email: str,
+        to_emails: list[str],
         subject: str,
         body: str,
+        cc_emails: list[str] | None = None,
+        bcc_emails: list[str] | None = None,
     ) -> str:
-        """Send via SMTP STARTTLS + XOAUTH2; return synthetic id."""
+        """Send via SMTP STARTTLS + XOAUTH2; return synthetic id.
+
+        ``aiosmtplib.send_message`` derives the envelope recipients from
+        the ``To``/``Cc``/``Bcc`` headers and removes the ``Bcc`` header
+        before DATA, so BCC addresses receive the mail without appearing
+        to anyone else.
+        """
 
         message = EmailMessage()
         message["From"] = sender_email
-        message["To"] = to_email
+        message["To"] = ", ".join(to_emails)
+        if cc_emails:
+            message["Cc"] = ", ".join(cc_emails)
+        if bcc_emails:
+            message["Bcc"] = ", ".join(bcc_emails)
         message["Subject"] = subject
         message.set_content(body)
 

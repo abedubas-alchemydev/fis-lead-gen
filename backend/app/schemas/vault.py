@@ -187,6 +187,38 @@ class OutreachAdhocSendRequest(BaseModel):
     folder_id: int | None = Field(default=None, gt=0)
 
 
+class OutreachComposeRecipient(BaseModel):
+    """One visible ``To`` recipient: address plus optional display name."""
+
+    email: EmailStr
+    name: str | None = Field(default=None, max_length=255)
+
+
+class OutreachComposeSendRequest(BaseModel):
+    """Body for ``POST /outreach/compose-send``.
+
+    One email to multiple recipients with CC and BCC, like a normal mail
+    client. ``to`` is the visible primary list (>= 1 recipient); ``cc``
+    is also visible to everyone; ``bcc`` is delivered hidden. A single
+    message is transmitted — To/CC recipients see each other — and
+    audited as one adhoc-style ``outreach_sends`` row carrying the
+    recipient lists.
+
+    ``folder_id`` is optional service metadata for the sent-history
+    label (same semantics as the adhoc-send path); the compose surface
+    doesn't require a service to send. Addresses are de-duplicated
+    across the three buckets server-side (To > CC > BCC, earliest wins).
+    """
+
+    to: list[OutreachComposeRecipient] = Field(..., min_length=1, max_length=100)
+    cc: list[EmailStr] = Field(default_factory=list, max_length=100)
+    bcc: list[EmailStr] = Field(default_factory=list, max_length=100)
+    subject: str = Field(..., min_length=1, max_length=998)
+    body: str = Field(..., min_length=1, max_length=100_000)
+    sender_account_id: str | None = Field(default=None, max_length=255)
+    folder_id: int | None = Field(default=None, gt=0)
+
+
 class OutreachAdhocDraftRequest(BaseModel):
     """Body for ``POST /outreach/adhoc-draft``.
 
@@ -363,6 +395,13 @@ class OutreachSendItem(BaseModel):
     # rows and falls back to ``contact_email`` on contact rows.
     recipient_email: str | None = None
     recipient_name: str | None = None
+    # Multi-recipient compose-send audit (POST /outreach/compose-send).
+    # Comma-joined address lists; None on single-recipient / contact-based
+    # rows. ``to_emails`` is populated only when there was more than one
+    # To recipient (single-To rows carry the address in recipient_email).
+    to_emails: str | None = None
+    cc_emails: str | None = None
+    bcc_emails: str | None = None
     # Folder may be NULL if the service folder was deleted after the
     # send. The send row stays so the audit history doesn't lose
     # entries.
