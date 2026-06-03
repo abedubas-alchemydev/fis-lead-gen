@@ -879,6 +879,68 @@ async def test_resolver_aliases_merges_with_dba_names() -> None:
 
 
 @respx.mock
+async def test_apollo_searches_aliases_when_legal_name_misses() -> None:
+    """AQR INVESTMENTS, LLC regression: Apollo returns zero orgs for the
+    legal entity name, but the brand alias "AQR Capital Management" resolves
+    straight to aqr.com via Apollo's org index. The resolver must query
+    Apollo with the aliases — not just the legal name — so the parent-brand
+    site is recovered. Legal name is tried first (with its CRD keyword); the
+    alias is queried bare."""
+    candidate = "https://www.aqr.com"
+
+    async def _org_for(name: str, crd: str | None = None) -> ApolloOrganization | None:
+        # Apollo knows the brand, not the obscure legal entity.
+        if name == "AQR Capital Management":
+            return ApolloOrganization(
+                name="AQR Capital Management",
+                website_url=candidate,
+                domain="aqr.com",
+            )
+        return None
+
+    apollo = AsyncMock()
+    apollo.search_organization = AsyncMock(side_effect=_org_for)
+    respx.head(candidate).mock(
+        return_value=httpx.Response(200, request=httpx.Request("HEAD", candidate)),
+    )
+
+    website, source, reason = await resolve_website(
+        "AQR INVESTMENTS, LLC",
+        "289244",
+        apollo,
+        resolver_aliases=["AQR Capital Management", "AQR"],
+    )
+
+    assert (website, source, reason) == (candidate, "apollo", None)
+    calls = [c.args for c in apollo.search_organization.await_args_list]
+    # Legal name (with CRD) is queried first, then the brand alias (bare).
+    assert calls[0] == ("AQR INVESTMENTS, LLC", "289244")
+    assert ("AQR Capital Management", None) in calls
+
+
+@respx.mock
+async def test_apollo_alias_queries_skipped_when_legal_name_hits() -> None:
+    """When the legal-name Apollo query already validates, the resolver
+    returns immediately and spends no extra org-search calls on the aliases
+    (no wasted Apollo traffic for the common case)."""
+    apollo = AsyncMock()
+    apollo.search_organization = AsyncMock(return_value=_apollo_org())
+    respx.head(_CANDIDATE_URL).mock(
+        return_value=httpx.Response(200, request=httpx.Request("HEAD", _CANDIDATE_URL)),
+    )
+
+    website, source, reason = await resolve_website(
+        _FIRM_NAME,
+        "1234",
+        apollo,
+        resolver_aliases=["Some Parent Brand", "Another Alias"],
+    )
+
+    assert (website, source, reason) == (_CANDIDATE_URL, "apollo", None)
+    apollo.search_organization.assert_awaited_once_with(_FIRM_NAME, "1234")
+
+
+@respx.mock
 async def test_dba_names_none_preserves_legacy_legal_name_path() -> None:
     """Sanity: callers that don't yet pass ``dba_names`` (or pass None)
     still get the legal-name-only behavior. No regression on firms whose
