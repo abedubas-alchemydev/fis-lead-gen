@@ -106,6 +106,22 @@ def _broker_dealer(
     return bd
 
 
+async def _no_alias_enrichment(_db: Any, _bd: BrokerDealer) -> list[str]:
+    """No-op stand-in for ``ensure_resolver_aliases``.
+
+    The resolve-website handler lazily populates ``resolver_aliases`` (PR #373)
+    via its own execute + commit BEFORE the website-resolution chain runs — an
+    independent write that happens on every full-path call regardless of the
+    website outcome. These tests assert the *website* persistence contract
+    (UPDATE issued on success, none on miss/error), so we stub the alias write
+    out to keep that assertion focused; the alias enricher has dedicated
+    coverage in ``test_firm_alias_enricher.py``. Without this stub the fake
+    session would record the alias write and the website-persistence assertions
+    would be conflated with it.
+    """
+    return []
+
+
 # ─────────────────────────── shared override helper ──────────────────────
 
 
@@ -149,6 +165,7 @@ async def test_admin_runs_chain_persists_returns(
 
     monkeypatch.setattr(bd_endpoint.repository, "get_broker_dealer", _fake_get)
     monkeypatch.setattr(bd_endpoint, "resolve_website", _fake_resolve)
+    monkeypatch.setattr(bd_endpoint, "ensure_resolver_aliases", _no_alias_enrichment)
     # The handler instantiates real Apollo/Hunter clients before passing
     # them to the chain — provide non-empty keys so construction succeeds.
     monkeypatch.setattr(bd_endpoint.settings, "apollo_api_key", "test-apollo")
@@ -277,6 +294,7 @@ async def test_chain_clean_miss_returns_reason_no_persistence(
 
     monkeypatch.setattr(bd_endpoint.repository, "get_broker_dealer", _fake_get)
     monkeypatch.setattr(bd_endpoint, "resolve_website", _fake_resolve)
+    monkeypatch.setattr(bd_endpoint, "ensure_resolver_aliases", _no_alias_enrichment)
     monkeypatch.setattr(bd_endpoint.settings, "apollo_api_key", "test-apollo")
     monkeypatch.setattr(bd_endpoint.settings, "hunter_api_key", "test-hunter")
 
@@ -316,6 +334,7 @@ async def test_chain_provider_error_leaves_column_unchanged(
 
     monkeypatch.setattr(bd_endpoint.repository, "get_broker_dealer", _fake_get)
     monkeypatch.setattr(bd_endpoint, "resolve_website", _fake_resolve)
+    monkeypatch.setattr(bd_endpoint, "ensure_resolver_aliases", _no_alias_enrichment)
     monkeypatch.setattr(bd_endpoint.settings, "apollo_api_key", "test-apollo")
     monkeypatch.setattr(bd_endpoint.settings, "hunter_api_key", "test-hunter")
 

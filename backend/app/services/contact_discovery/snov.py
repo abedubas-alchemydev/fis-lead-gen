@@ -28,6 +28,7 @@ As with the other providers, every exception / timeout / non-200 yields
 
 from __future__ import annotations
 
+import asyncio
 import logging
 import time
 from typing import Any
@@ -52,6 +53,16 @@ DOMAIN_SEARCH_URL = "https://api.snov.io/v1/get-domain-emails-with-info"
 # header." Token refresh is cheap (one extra POST) so being conservative here
 # has negligible cost.
 _TOKEN_SAFETY_MARGIN_SECONDS = 60.0
+
+# Snov's name->email finder (``get-emails-from-names``) is ASYNC: the first POST
+# starts the search and returns ``status.identifier == "in_progress"`` with an
+# empty ``emails`` list; the result lands on a later poll of the same endpoint
+# (``identifier == "complete"``). ``find_person`` re-POSTs the same body every
+# ``_SNOV_POLL_INTERVAL_SECONDS`` until complete, bounded by both
+# ``_SNOV_MAX_POLL_ATTEMPTS`` and ``settings.snov_request_timeout`` so a slow
+# search can't stall the discovery fan-out. Tests monkeypatch the interval to 0.
+_SNOV_POLL_INTERVAL_SECONDS = 2.0
+_SNOV_MAX_POLL_ATTEMPTS = 5
 
 # Module-level token cache. Not thread-safe, but we only run inside asyncio
 # and the worst-case race (two coroutines refreshing simultaneously) produces
@@ -89,36 +100,51 @@ class SnovProvider(ContactDiscoveryProvider):
             "lastName": last_name,
             "domain": domain,
         }
-        response = await _post_with_refresh(EMAIL_FINDER_URL, body, token, client_id, client_secret)
-        if response is None or response.status_code != 200:
-            return None
 
-        try:
-            payload = response.json()
-        except ValueError:
-            return None
+        # The search is async: poll the same endpoint until Snov marks it
+        # ``complete`` (or emails appear), bounded by the request-timeout budget
+        # and a hard attempt cap so a stuck search can't stall the fan-out.
+        deadline = time.monotonic() + float(settings.snov_request_timeout)
+        payload: dict[str, Any] | None = None
+        for attempt in range(_SNOV_MAX_POLL_ATTEMPTS):
+            response = await _post_with_refresh(
+                EMAIL_FINDER_URL, body, token, client_id, client_secret
+            )
+            if response is None or response.status_code != 200:
+                return None
+            try:
+                parsed = response.json()
+            except ValueError:
+                return None
+            if not isinstance(parsed, dict):
+                return None
+            payload = parsed
 
-        if not isinstance(payload, dict):
-            return None
+            identifier = _status_identifier(parsed)
+            if _emails_from_payload(parsed) or identifier == "complete":
+                break
+            if identifier != "in_progress":
+                # Unrecognised terminal state with no emails -- nothing to wait for.
+                return None
+            if attempt == _SNOV_MAX_POLL_ATTEMPTS - 1 or time.monotonic() >= deadline:
+                logger.info(
+                    "Snov search still in_progress for %s %s @ %s after %d poll(s)",
+                    first_name, last_name, domain, attempt + 1,
+                )
+                return None
+            await asyncio.sleep(_SNOV_POLL_INTERVAL_SECONDS)
 
-        data = payload.get("data")
-        if isinstance(data, list):
-            data = data[0] if data else None
-        if not isinstance(data, dict):
-            return None
-
-        email = data.get("email")
+        email, email_status = _select_email(_emails_from_payload(payload or {}))
         if not email:
             return None
-
-        confidence = _coerce_probability(data.get("probability"))
+        data = payload.get("data") if isinstance(payload, dict) else None
         return DiscoveryResult(
-            email=str(email).strip(),
+            email=email,
             phone=None,
             linkedin_url=None,
-            confidence=confidence,
+            confidence=_confidence_from_email_status(email_status),
             provider=self.name,
-            raw=data,
+            raw=data if isinstance(data, dict) else payload,
         )
 
     async def find_org(
@@ -186,10 +212,10 @@ async def _refresh_token(client_id: str, client_secret: str) -> str | None:
         "client_secret": client_secret,
     }
     try:
-        async with httpx.AsyncClient(timeout=settings.contact_discovery_timeout) as client:
+        async with httpx.AsyncClient(timeout=settings.snov_request_timeout) as client:
             response = await client.post(OAUTH_URL, json=body)
     except httpx.HTTPError as exc:
-        logger.warning("Snov OAuth request failed: %s", exc)
+        logger.warning("Snov OAuth request failed: %r", exc)
         return None
 
     if response.status_code != 200:
@@ -226,10 +252,10 @@ async def _post_with_refresh(
     """POST with bearer token; on 401 refresh the token and retry once."""
     headers = {"Authorization": f"Bearer {token}"}
     try:
-        async with httpx.AsyncClient(timeout=settings.contact_discovery_timeout) as client:
+        async with httpx.AsyncClient(timeout=settings.snov_request_timeout) as client:
             response = await client.post(url, json=body, headers=headers)
     except httpx.HTTPError as exc:
-        logger.warning("Snov %s failed: %s", url, exc)
+        logger.warning("Snov %s failed: %r", url, exc)
         return None
 
     if response.status_code != 401:
@@ -242,11 +268,60 @@ async def _post_with_refresh(
         return response
     headers = {"Authorization": f"Bearer {new_token}"}
     try:
-        async with httpx.AsyncClient(timeout=settings.contact_discovery_timeout) as client:
+        async with httpx.AsyncClient(timeout=settings.snov_request_timeout) as client:
             return await client.post(url, json=body, headers=headers)
     except httpx.HTTPError as exc:
-        logger.warning("Snov %s retry failed: %s", url, exc)
+        logger.warning("Snov %s retry failed: %r", url, exc)
         return None
+
+
+def _emails_from_payload(payload: dict[str, Any]) -> list[Any]:
+    """Pull the ``data.emails`` list out of a get-emails-from-names response.
+
+    Snov nests results under ``data`` (a dict, occasionally a single-element
+    list); each entry is ``{"email": ..., "emailStatus": "valid"|"unknown"}``.
+    """
+    data = payload.get("data")
+    if isinstance(data, list):
+        data = data[0] if data else None
+    if not isinstance(data, dict):
+        return []
+    emails = data.get("emails")
+    return emails if isinstance(emails, list) else []
+
+
+def _status_identifier(payload: dict[str, Any]) -> str | None:
+    """``status.identifier`` is ``in_progress`` until the async search finishes,
+    then ``complete``."""
+    status = payload.get("status")
+    if isinstance(status, dict) and status.get("identifier") is not None:
+        return str(status["identifier"])
+    return None
+
+
+def _select_email(emails: list[Any]) -> tuple[str | None, str]:
+    """Prefer an SMTP-``valid`` address; else the first entry that has an email.
+    Returns ``(email_or_None, email_status)``."""
+    fallback: tuple[str, str] | None = None
+    for entry in emails:
+        if not isinstance(entry, dict):
+            continue
+        addr = entry.get("email")
+        if not addr:
+            continue
+        status = str(entry.get("emailStatus") or "").lower()
+        if status == "valid":
+            return str(addr).strip(), status
+        if fallback is None:
+            fallback = (str(addr).strip(), status)
+    return fallback if fallback is not None else (None, "")
+
+
+def _confidence_from_email_status(status: str) -> float:
+    """``valid`` = SMTP-verified deliverable -> clears the default 60 floor.
+    Anything else stays below it, so only verified Snov emails contribute unless
+    the caller lowers ``contact_discovery_min_confidence``."""
+    return 85.0 if status == "valid" else 45.0
 
 
 def _coerce_probability(value: Any) -> float:

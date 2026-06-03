@@ -299,6 +299,7 @@ class ConsolidatedPersonRow:
     # writes the same values to every underlying row so this is authoritative)
     enriched_phone: str | None
     enriched_email: str | None
+    enriched_linkedin_url: str | None
     enriched_at: datetime | None
 
     source_filing_url: str | None
@@ -310,6 +311,13 @@ class ConsolidatedPersonRow:
     # ``is_favorited`` reflects membership in the caller's default list.
     reporting_owner_id: int | None
     is_favorited: bool
+
+    # Apollo person id stamped when an async phone-reveal was requested for
+    # this insider (Apollo had a record but the number arrives later via the
+    # webhook). Carried through so the endpoint can derive ``phone_pending``;
+    # not surfaced to the FE directly. Defaulted so non-list constructors
+    # (tests, other call sites) don't have to pass it.
+    apollo_person_id: str | None = None
 
 
 @dataclass(slots=True)

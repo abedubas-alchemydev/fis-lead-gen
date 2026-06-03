@@ -85,6 +85,14 @@ class Form4Transaction(Base):
     # ── Optional Apollo enrichment (filled on the per-row Enrich click) ──
     enriched_phone: Mapped[str | None] = mapped_column(String(64), nullable=True)
     enriched_email: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    enriched_linkedin_url: Mapped[str | None] = mapped_column(Text, nullable=True)
+    # Apollo's MongoDB-style person.id from the sync /people/match response,
+    # captured so the async phone-reveal webhook can find this person's rows
+    # later. Indexed (single equality probe from the webhook). Mirrors the
+    # contact tables' apollo_person_id (migration 20260528_0065).
+    apollo_person_id: Mapped[str | None] = mapped_column(
+        String(64), nullable=True, index=True
+    )
     enriched_at: Mapped[datetime | None] = mapped_column(
         DateTime(timezone=True), nullable=True
     )

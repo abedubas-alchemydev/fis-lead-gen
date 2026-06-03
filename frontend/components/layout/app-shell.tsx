@@ -6,6 +6,7 @@ import type { ReactNode } from "react";
 import { Fragment, useEffect, useMemo, useState } from "react";
 import { usePathname, useRouter, useSearchParams } from "next/navigation";
 
+import { GlobalBackButton } from "@/components/layout/global-back-button";
 import { apiRequest } from "@/lib/api";
 import { authClient } from "@/lib/auth-client";
 
@@ -145,6 +146,30 @@ function UsersIcon(props: IconProps) {
   );
 }
 
+// Bar-chart glyph for the admin per-provider extraction analytics page.
+function ExtractionAnalyticsIcon(props: IconProps) {
+  return (
+    <IconBase {...props}>
+      <path d="M3 3v18h18" />
+      <rect x="7" y="11" width="3" height="6" />
+      <rect x="12" y="7" width="3" height="10" />
+      <rect x="17" y="13" width="3" height="4" />
+    </IconBase>
+  );
+}
+
+// Address-book glyph for the persons-by-firm browse / per-firm enrich page.
+function OutreachContactsIcon(props: IconProps) {
+  return (
+    <IconBase {...props}>
+      <path d="M4 4h14a2 2 0 012 2v12a2 2 0 01-2 2H4z" />
+      <path d="M4 8h-2M4 12h-2M4 16h-2" />
+      <circle cx="11" cy="11" r="2.5" />
+      <path d="M7 17c0-2.2 1.8-4 4-4s4 1.8 4 4" />
+    </IconBase>
+  );
+}
+
 // Paper-plane glyph for the per-user "sent outreach" history view.
 function SentOutreachIcon(props: IconProps) {
   return (
@@ -156,14 +181,16 @@ function SentOutreachIcon(props: IconProps) {
 }
 
 // Shield-with-check glyph for the clearing-membership review queue.
-function ShieldCheckIcon(props: IconProps) {
-  return (
-    <IconBase {...props}>
-      <path d="M12 3l8 3v6c0 4.5-3.5 8-8 9-4.5-1-8-4.5-8-9V6l8-3z" />
-      <path d="M9 12l2 2 4-4" />
-    </IconBase>
-  );
-}
+// Commented out alongside the hidden Memberships nav item (2026-05-30) to
+// avoid an unused-symbol lint warning. Restore together with that entry.
+// function ShieldCheckIcon(props: IconProps) {
+//   return (
+//     <IconBase {...props}>
+//       <path d="M12 3l8 3v6c0 4.5-3.5 8-8 9-4.5-1-8-4.5-8-9V6l8-3z" />
+//       <path d="M9 12l2 2 4-4" />
+//     </IconBase>
+//   );
+// }
 
 // Envelope @-sign glyph for the multi-sender settings page.
 function MailAtIcon(props: IconProps) {
@@ -247,16 +274,18 @@ const navSections: ReadonlyArray<NavSection> = [
   {
     label: "Lists",
     items: [
-      { href: "/master-list", label: "Master List", icon: MasterListIcon, badgeKey: "total", permissionKey: "master_list" },
+      { href: "/master-list", label: "Broker Dealers", icon: MasterListIcon, badgeKey: "total", permissionKey: "master_list" },
       { href: "/advisor-list" as Route, label: "Investment Advisors", icon: AdvisorListIcon, badgeKey: null, permissionKey: "investment_advisors" },
       { href: "/investors" as Route, label: "Investors", icon: InvestorsIcon, badgeKey: null, permissionKey: "investors" }
     ]
   },
   {
-    label: "Outreach",
+    label: "Outbound",
     items: [
       { href: "/email-extractor", label: "Email Extractor", icon: EmailExtractorIcon, badgeKey: null, permissionKey: "email_extractor" },
-      { href: "/outreach/sent" as Route, label: "Sent Outreach", icon: SentOutreachIcon, badgeKey: null, permissionKey: "sent_outreach" }
+      { href: "/outreach/contacts" as Route, label: "Contacts", icon: OutreachContactsIcon, badgeKey: null, permissionKey: "outreach_contacts" },
+      { href: "/outreach/sent" as Route, label: "Outreach", icon: SentOutreachIcon, badgeKey: null, permissionKey: "sent_outreach" },
+      { href: "/vault", label: "Vault", icon: VaultIcon, badgeKey: null, permissionKey: "vault" }
     ]
   },
   {
@@ -273,8 +302,9 @@ const navSections: ReadonlyArray<NavSection> = [
       { href: "/settings/account" as Route, label: "My Account", icon: KeyIcon, badgeKey: null },
       { href: "/settings/email-accounts" as Route, label: "Email Accounts", icon: MailAtIcon, badgeKey: null },
       { href: "/settings/users" as Route, label: "Users", icon: UsersIcon, badgeKey: null, adminOnly: true, permissionKey: "users" },
-      { href: "/settings/clearing-memberships" as Route, label: "Memberships", icon: ShieldCheckIcon, badgeKey: null, adminOnly: true },
-      { href: "/vault", label: "Vault", icon: VaultIcon, badgeKey: null, permissionKey: "vault" }
+      { href: "/settings/extractions" as Route, label: "Extraction Analytics", icon: ExtractionAnalyticsIcon, badgeKey: null, adminOnly: true }
+      // Memberships nav item intentionally hidden (2026-05-30) — route/page kept:
+      // { href: "/settings/clearing-memberships" as Route, label: "Memberships", icon: ShieldCheckIcon, badgeKey: null, adminOnly: true }
     ]
   }
 ];
@@ -587,7 +617,10 @@ export function AppShell({
           {/* Scrollable content area — each page renders its own topbar row
               (crumbs + title + TopActions) matching the mockup's `.topbar`
               inside `.main`. */}
-          <main className="min-w-0 flex-1 overflow-auto">{children}</main>
+          <main className="min-w-0 flex-1 overflow-auto">
+            <GlobalBackButton />
+            {children}
+          </main>
         </div>
       </div>
     </div>

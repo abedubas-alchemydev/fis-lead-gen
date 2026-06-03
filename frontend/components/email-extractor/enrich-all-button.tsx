@@ -3,8 +3,9 @@
 import { Loader2, Sparkles, Square } from "lucide-react";
 import { useCallback, useEffect, useRef, useState } from "react";
 
+import { Button } from "@/components/ui/button";
 import { useToast } from "@/components/ui/use-toast";
-import { apiRequest } from "@/lib/api";
+import { ApiError, apiRequest } from "@/lib/api";
 import {
   cancelEnrichAll,
   enrichAll,
@@ -89,12 +90,16 @@ export function EnrichAllButton({
     let queued: EnrichAllResponse;
     try {
       queued = await enrichAll(scanId);
-    } catch {
+    } catch (err) {
       if (!mountedRef.current) return;
       setIsRunning(false);
       setOptimisticQueued(0);
       setStatusText(null);
-      toast.error("Couldn't start enrichment — please try again.");
+      toast.error(
+        err instanceof ApiError && err.status === 503
+          ? "Apollo enrichment isn't configured — contact an admin."
+          : "Couldn't start enrichment — please try again."
+      );
       return;
     }
 
@@ -209,13 +214,12 @@ export function EnrichAllButton({
   return (
     <div className="flex flex-col items-end gap-1">
       <div className="flex items-center gap-2">
-        <button
+        <Button
           type="button"
           onClick={() => void handleClick()}
           disabled={disabled}
           aria-busy={isRunning}
           title={disabledTitle}
-          className="inline-flex items-center gap-2 rounded-xl bg-[var(--accent,#6366f1)] px-3 py-2 text-xs font-semibold text-white shadow-sm shadow-[var(--accent,#6366f1)]/20 transition hover:bg-[var(--accent-2,#8b5cf6)] hover:shadow-md hover:shadow-[var(--accent,#6366f1)]/25 focus:outline-none focus:ring-2 focus:ring-[var(--accent,#6366f1)]/30 disabled:cursor-not-allowed disabled:opacity-60"
         >
           {isRunning ? (
             <Loader2 className="h-4 w-4 animate-spin" aria-hidden />
@@ -223,19 +227,19 @@ export function EnrichAllButton({
             <Sparkles className="h-4 w-4" aria-hidden />
           )}
           {label}
-        </button>
+        </Button>
         {isRunning ? (
-          <button
+          <Button
             type="button"
+            variant="outline"
             onClick={() => void handleStop()}
             disabled={isStopping}
             aria-label="Stop enrichment"
             title="Stop enrichment — keeps rows already extracted"
-            className="inline-flex items-center gap-2 rounded-xl border border-[var(--border-2,rgba(30,64,175,0.16))] bg-[var(--surface,#ffffff)] px-3 py-2 text-xs font-semibold text-[var(--text-dim,#475569)] shadow-sm transition hover:bg-[var(--surface-2,#f1f6fd)] focus:outline-none focus:ring-2 focus:ring-[var(--border-2,rgba(30,64,175,0.16))] disabled:cursor-not-allowed disabled:opacity-60"
           >
             <Square className="h-4 w-4" aria-hidden />
             {isStopping ? "Stopping…" : "Stop"}
-          </button>
+          </Button>
         ) : null}
       </div>
       {statusText !== null ? (

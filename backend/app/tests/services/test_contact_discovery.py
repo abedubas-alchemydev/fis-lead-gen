@@ -47,6 +47,9 @@ def patch_settings(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(settings, "contact_discovery_chain", "apollo_match,hunter,snov")
     monkeypatch.setattr(settings, "contact_discovery_min_confidence", 60.0)
     monkeypatch.setattr(settings, "contact_discovery_timeout", 2.0)
+    monkeypatch.setattr(settings, "snov_request_timeout", 2.0)
+    # Snov's finder polls until "complete"; kill the inter-poll sleep in tests.
+    monkeypatch.setattr(snov, "_SNOV_POLL_INTERVAL_SECONDS", 0.0)
 
 
 @pytest.fixture(autouse=True)
@@ -247,7 +250,10 @@ async def test_snov_person_happy_path(patch_settings: None) -> None:
     respx.post(snov.EMAIL_FINDER_URL).mock(
         return_value=httpx.Response(
             200,
-            json={"data": {"email": "bryan@example.com", "probability": 82}},
+            json={
+                "data": {"emails": [{"email": "bryan@example.com", "emailStatus": "valid"}]},
+                "status": {"identifier": "complete"},
+            },
         )
     )
 
@@ -256,7 +262,7 @@ async def test_snov_person_happy_path(patch_settings: None) -> None:
 
     assert result is not None
     assert result.email == "bryan@example.com"
-    assert result.confidence == 82.0
+    assert result.confidence == 85.0
 
 
 @pytest.mark.asyncio
@@ -272,7 +278,10 @@ async def test_snov_token_refresh_on_401(patch_settings: None) -> None:
     search_route = respx.post(snov.EMAIL_FINDER_URL).mock(
         side_effect=[
             httpx.Response(401),
-            httpx.Response(200, json={"data": {"email": "bryan@example.com", "probability": 91}}),
+            httpx.Response(200, json={
+                "data": {"emails": [{"email": "bryan@example.com", "emailStatus": "valid"}]},
+                "status": {"identifier": "complete"},
+            }),
         ]
     )
 
@@ -281,8 +290,38 @@ async def test_snov_token_refresh_on_401(patch_settings: None) -> None:
 
     assert result is not None
     assert result.email == "bryan@example.com"
-    assert result.confidence == 91.0
+    assert result.confidence == 85.0
     assert oauth_route.call_count == 2
+    assert search_route.call_count == 2
+
+
+@pytest.mark.asyncio
+@respx.mock
+async def test_snov_person_polls_until_complete(patch_settings: None) -> None:
+    """The finder is async: the first call is ``in_progress`` with no emails,
+    so ``find_person`` re-POSTs the same search until it completes."""
+    respx.post(snov.OAUTH_URL).mock(
+        return_value=httpx.Response(200, json={"access_token": "snov-token", "expires_in": 3600})
+    )
+    search_route = respx.post(snov.EMAIL_FINDER_URL).mock(
+        side_effect=[
+            httpx.Response(200, json={"data": {"emails": []}, "status": {"identifier": "in_progress"}}),
+            httpx.Response(
+                200,
+                json={
+                    "data": {"emails": [{"email": "bryan@example.com", "emailStatus": "valid"}]},
+                    "status": {"identifier": "complete"},
+                },
+            ),
+        ]
+    )
+
+    provider = SnovProvider()
+    result = await provider.find_person("Bryan", "Halpert", "Example LLC", "example.com")
+
+    assert result is not None
+    assert result.email == "bryan@example.com"
+    assert result.confidence == 85.0
     assert search_route.call_count == 2
 
 
@@ -516,3 +555,61 @@ async def test_orchestrator_organization_uses_find_org(patch_settings: None) -> 
     assert not person_route.called
     assert hunter_route.called
     assert snov_domain_route.called
+
+
+@pytest.mark.asyncio
+@respx.mock
+async def test_orchestrator_exclude_providers_skips_apollo(patch_settings: None) -> None:
+    """``exclude_providers={"apollo_match"}`` drops Apollo from the chain for
+    this call — the BD ``/enrich`` endpoint passes it after its company-search
+    phase already issued the identical /people/match. Apollo's endpoint must
+    never be hit even though it would return the strongest (verified-90) hit;
+    hunter + snov still fan out and carry the result."""
+    apollo_route = respx.post(apollo_match.PEOPLE_MATCH_URL).mock(
+        return_value=httpx.Response(
+            200,
+            json={
+                "person": {
+                    "email": "bryan@example.com",
+                    "email_status": "verified",
+                    "phone_numbers": [],
+                }
+            },
+        )
+    )
+    hunter_route = respx.get(hunter.EMAIL_FINDER_URL).mock(
+        return_value=httpx.Response(
+            200,
+            json={"data": {"email": "bryan.real@example.com", "score": 82}},
+        )
+    )
+    respx.post(snov.OAUTH_URL).mock(
+        return_value=httpx.Response(200, json={"access_token": "tok", "expires_in": 3600})
+    )
+    snov_route = respx.post(snov.EMAIL_FINDER_URL).mock(
+        return_value=httpx.Response(200, json={"data": {}})
+    )
+
+    session = _FakeSession()
+    entity = {
+        "type": "person",
+        "first_name": "Bryan",
+        "last_name": "Halpert",
+        "org_name": "Example LLC",
+        "title": "CEO",
+        "domain": "example.com",
+    }
+    row = await discover_contact(
+        entity,
+        bd_id=18344,
+        session=session,
+        exclude_providers=frozenset({"apollo_match"}),
+    )
+
+    assert row is not None
+    # Apollo was excluded, so its verified-90 must NOT win — Hunter carries it.
+    assert not apollo_route.called
+    assert row.email == "bryan.real@example.com"
+    assert row.discovery_source == "hunter"
+    assert hunter_route.called
+    assert snov_route.called

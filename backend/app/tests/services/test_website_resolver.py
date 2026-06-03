@@ -879,6 +879,180 @@ async def test_resolver_aliases_merges_with_dba_names() -> None:
 
 
 @respx.mock
+async def test_apollo_searches_aliases_when_legal_name_misses() -> None:
+    """AQR INVESTMENTS, LLC regression: Apollo returns zero orgs for the
+    legal entity name, but the brand alias "AQR Capital Management" resolves
+    straight to aqr.com via Apollo's org index. The resolver must query
+    Apollo with the aliases — not just the legal name — so the parent-brand
+    site is recovered. Legal name is tried first (with its CRD keyword); the
+    alias is queried bare."""
+    candidate = "https://www.aqr.com"
+
+    async def _org_for(name: str, crd: str | None = None) -> ApolloOrganization | None:
+        # Apollo knows the brand, not the obscure legal entity.
+        if name == "AQR Capital Management":
+            return ApolloOrganization(
+                name="AQR Capital Management",
+                website_url=candidate,
+                domain="aqr.com",
+            )
+        return None
+
+    apollo = AsyncMock()
+    apollo.search_organization = AsyncMock(side_effect=_org_for)
+    respx.head(candidate).mock(
+        return_value=httpx.Response(200, request=httpx.Request("HEAD", candidate)),
+    )
+
+    website, source, reason = await resolve_website(
+        "AQR INVESTMENTS, LLC",
+        "289244",
+        apollo,
+        resolver_aliases=["AQR Capital Management", "AQR"],
+    )
+
+    assert (website, source, reason) == (candidate, "apollo", None)
+    calls = [c.args for c in apollo.search_organization.await_args_list]
+    # Legal name (with CRD) is queried first, then the brand alias (bare).
+    assert calls[0] == ("AQR INVESTMENTS, LLC", "289244")
+    assert ("AQR Capital Management", None) in calls
+
+
+@respx.mock
+async def test_apollo_alias_queries_skipped_when_legal_name_hits() -> None:
+    """When the legal-name Apollo query already validates, the resolver
+    returns immediately and spends no extra org-search calls on the aliases
+    (no wasted Apollo traffic for the common case)."""
+    apollo = AsyncMock()
+    apollo.search_organization = AsyncMock(return_value=_apollo_org())
+    respx.head(_CANDIDATE_URL).mock(
+        return_value=httpx.Response(200, request=httpx.Request("HEAD", _CANDIDATE_URL)),
+    )
+
+    website, source, reason = await resolve_website(
+        _FIRM_NAME,
+        "1234",
+        apollo,
+        resolver_aliases=["Some Parent Brand", "Another Alias"],
+    )
+
+    assert (website, source, reason) == (_CANDIDATE_URL, "apollo", None)
+    apollo.search_organization.assert_awaited_once_with(_FIRM_NAME, "1234")
+
+
+# ───────────────── bare-acronym false-positive guards ─────────────────
+
+
+@respx.mock
+async def test_bare_acronym_alias_not_queried_on_apollo() -> None:
+    """DAVID LERNER ASSOCIATES regression: the LLM alias ``"DLA"`` made the
+    resolver query Apollo for "DLA", which returns DLA Piper (the law firm at
+    ``dlapiper.com``) — a wrong site that the 3-char token ``"dla"`` then
+    anchored. Bare ≤3-char acronym aliases must NOT be issued as Apollo
+    queries. With the legal name returning no org, the chain cleanly misses
+    instead of stamping the law firm's site."""
+    async def _org_for(name, crd=None):
+        if name == "DLA":  # the famous-acronym collision we must never fetch
+            return ApolloOrganization(
+                name="DLA Piper", website_url="https://www.dlapiper.com",
+                domain="dlapiper.com",
+            )
+        return None  # legal name "DAVID LERNER ASSOCIATES" — Apollo has no org
+
+    apollo = AsyncMock()
+    apollo.search_organization = AsyncMock(side_effect=_org_for)
+
+    website, source, reason = await resolve_website(
+        "DAVID LERNER ASSOCIATES, INC.", "12345", apollo,
+        resolver_aliases=["David Lerner Associates", "DLA"],
+    )
+
+    assert (website, source, reason) == (None, None, "no_valid_candidate")
+    queried = [c.args[0] for c in apollo.search_organization.await_args_list]
+    assert "DLA" not in queried  # the bare acronym was never queried
+    assert "DAVID LERNER ASSOCIATES, INC." in queried  # legal name still was
+
+
+@respx.mock
+async def test_one_to_two_char_alias_token_does_not_anchor() -> None:
+    """M1 FINANCE regression: alias ``"M1"`` yields the 1-char token ``"m"``,
+    which forward-matched ``m1.com.sg`` (an unrelated Singapore telecom). Even
+    if such a candidate is returned (here via the legal-name query), tokens
+    below ``_MIN_ANCHOR_TOKEN_LEN`` must never anchor it."""
+    bad = "https://www.m1.com.sg"
+    apollo = AsyncMock()
+    apollo.search_organization = AsyncMock(
+        return_value=ApolloOrganization(
+            name="M1 FINANCE LLC", website_url=bad, domain="m1.com.sg",
+        ),
+    )
+    respx.head(bad).mock(
+        return_value=httpx.Response(200, request=httpx.Request("HEAD", bad)),
+    )
+    respx.get(bad).mock(
+        return_value=httpx.Response(
+            200, text="<html><head><title>M1 Limited</title></head></html>",
+        ),
+    )
+
+    website, source, reason = await resolve_website(
+        "M1 FINANCE LLC", None, apollo, resolver_aliases=["M1"],
+    )
+
+    assert (website, source, reason) == (None, None, "no_valid_candidate")
+
+
+def test_firm_tokens_drops_sub_min_length_tokens() -> None:
+    """The anchor-token floor removes 1–2 char tokens that over-match.
+    ``M1 FINANCE LLC`` + alias ``"M1"`` must yield no token shorter than
+    ``_MIN_ANCHOR_TOKEN_LEN`` (so no ``"m"``)."""
+    tokens = _firm_tokens("M1 FINANCE LLC", ["M1"])
+    assert "m" not in tokens
+    assert all(len(t) >= 3 for t in tokens)
+    # The legitimate longer token survives.
+    assert "mfinance" in tokens
+
+
+def test_firm_tokens_keeps_three_char_brand_token() -> None:
+    """The floor is 3, not 4 — legitimate 3-char brand tokens that anchor a
+    full second-level domain (``AQR`` → ``aqr.com``) must survive."""
+    tokens = _firm_tokens("AQR INVESTMENTS, LLC", ["AQR Capital Management", "AQR"])
+    assert "aqr" in tokens
+
+
+@respx.mock
+async def test_multiword_alias_still_queried_when_bare_sibling_skipped() -> None:
+    """AQR stays fixed: the bare ``"AQR"`` alias is skipped as a query, but
+    the multi-word ``"AQR Capital Management"`` (which actually resolves to
+    ``aqr.com`` via Apollo) is still queried. Locks that the acronym guard
+    doesn't regress the brand≠legal-name fix it sits on top of."""
+    candidate = "https://www.aqr.com"
+
+    async def _org_for(name, crd=None):
+        if name == "AQR Capital Management":
+            return ApolloOrganization(
+                name="AQR Capital Management", website_url=candidate, domain="aqr.com",
+            )
+        return None
+
+    apollo = AsyncMock()
+    apollo.search_organization = AsyncMock(side_effect=_org_for)
+    respx.head(candidate).mock(
+        return_value=httpx.Response(200, request=httpx.Request("HEAD", candidate)),
+    )
+
+    website, source, reason = await resolve_website(
+        "AQR INVESTMENTS, LLC", "289244", apollo,
+        resolver_aliases=["AQR Capital Management", "AQR"],
+    )
+
+    assert (website, source, reason) == (candidate, "apollo", None)
+    queried = [c.args[0] for c in apollo.search_organization.await_args_list]
+    assert "AQR Capital Management" in queried
+    assert "AQR" not in queried
+
+
+@respx.mock
 async def test_dba_names_none_preserves_legacy_legal_name_path() -> None:
     """Sanity: callers that don't yet pass ``dba_names`` (or pass None)
     still get the legal-name-only behavior. No regression on firms whose

@@ -22,6 +22,7 @@ from typing import Any
 from app.models.broker_dealer import BrokerDealer
 from app.services.refresh_all_orchestrator import (
     SUB_ENRICH,
+    SUB_FOCUS_CONTACT,
     SUB_HEALTH_CHECK,
     SUB_REFRESH_CLEARING,
     SUB_REFRESH_FILINGS,
@@ -419,3 +420,59 @@ def test_gap_report_strict_mode_omits_aggressive_only_fields() -> None:
     assert report[SUB_RESOLVE_WEBSITE] == []
     assert report[SUB_ENRICH] == []
     assert report[SUB_REFRESH_FILINGS] == []
+
+
+# ─────────────────────────── focus-contact gate (opt-in) ───────────────────────────
+
+
+def test_focus_contact_absent_when_flag_not_supplied() -> None:
+    """Backward-compat anchor: callers that don't pass ``has_focus_contact``
+    (the interactive refresh-all endpoint, cold-cheap, inspect scripts)
+    never see ``SUB_FOCUS_CONTACT`` in the decision at all — neither run nor
+    skip. This is what keeps the existing exact-set tests above valid and
+    keeps an unbudgeted Gemini call off the interactive path."""
+    bd = _bd(cik="0000320193")
+    decision = decide_pipelines(bd, has_contacts=False)
+    assert SUB_FOCUS_CONTACT not in decision.to_run
+    assert SUB_FOCUS_CONTACT not in decision.to_skip
+
+
+def test_focus_contact_gate_opens_when_missing() -> None:
+    """``has_focus_contact=False`` → no focus_report contact yet → run it."""
+    decision = decide_pipelines(_bd(), has_contacts=True, has_focus_contact=False)
+    assert SUB_FOCUS_CONTACT in decision.to_run
+
+
+def test_focus_contact_gate_closed_when_present() -> None:
+    """``has_focus_contact=True`` → already extracted → skip, don't re-run
+    (and don't burn a Gemini call re-reading the same PDF)."""
+    decision = decide_pipelines(_bd(), has_contacts=True, has_focus_contact=True)
+    assert SUB_FOCUS_CONTACT in decision.to_skip
+    assert SUB_FOCUS_CONTACT not in decision.to_run
+
+
+def test_focus_contact_force_skipped_in_list_only() -> None:
+    """Detail-page-only, like enrich: ``list_only`` force-skips it even when
+    the gate would otherwise open (it drives no master-list grid column)."""
+    decision = decide_pipelines(
+        _bd(cik="0000320193"),
+        has_contacts=True,
+        scope="list_only",
+        has_focus_contact=False,
+    )
+    assert SUB_FOCUS_CONTACT in decision.to_skip
+    assert SUB_FOCUS_CONTACT not in decision.to_run
+
+
+def test_gap_report_focus_contact_opt_in() -> None:
+    """``gap_report_for`` surfaces the focus-contact gap only when the flag
+    is supplied; the ``None`` default omits the key entirely."""
+    bd = _bd()
+    missing = gap_report_for(bd, has_contacts=True, has_focus_contact=False)
+    assert "focus_report_contact" in missing[SUB_FOCUS_CONTACT]
+
+    present = gap_report_for(bd, has_contacts=True, has_focus_contact=True)
+    assert present[SUB_FOCUS_CONTACT] == []
+
+    default = gap_report_for(bd, has_contacts=True)
+    assert SUB_FOCUS_CONTACT not in default

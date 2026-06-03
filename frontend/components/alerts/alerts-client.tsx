@@ -8,6 +8,7 @@ import { useRouter, useSearchParams } from "next/navigation";
 import { AlertTriangle, ArrowRight, Check, CheckCheck } from "lucide-react";
 
 import { TopActions } from "@/components/layout/top-actions";
+import { Button } from "@/components/ui/button";
 import { Pill, type PillVariant } from "@/components/ui/pill";
 import { Segmented, type SegmentedItem } from "@/components/ui/segmented";
 import { apiRequest, buildApiPath } from "@/lib/api";
@@ -440,22 +441,18 @@ export function AlertsClient({
             </h3>
           </div>
           <div className="flex items-center gap-2">
-            <button
-              type="button"
-              onClick={clearFilters}
-              className="rounded-[6px] border border-[var(--border-2,rgba(30,64,175,0.16))] bg-transparent px-2.5 py-1 text-[11px] font-semibold text-[var(--text-dim,#475569)] transition hover:bg-[var(--surface-2,#f1f6fd)] hover:text-[var(--text,#0f172a)]"
-            >
+            <Button variant="outline" size="sm" onClick={clearFilters}>
               Clear filters
-            </button>
-            <button
-              type="button"
+            </Button>
+            <Button
+              variant="outline"
+              size="sm"
               onClick={markAllRead}
               disabled={markAllPending || items.every((alert) => alert.is_read)}
-              className="inline-flex items-center gap-1.5 rounded-[6px] border border-[var(--border-2,rgba(30,64,175,0.16))] bg-transparent px-2.5 py-1 text-[11px] font-semibold text-[var(--text-dim,#475569)] transition hover:bg-[var(--surface-2,#f1f6fd)] hover:text-[var(--text,#0f172a)] disabled:cursor-not-allowed disabled:opacity-45"
             >
               <CheckCheck className="h-3.5 w-3.5" strokeWidth={2} />
               {markAllPending ? "Marking…" : "Mark all read"}
-            </button>
+            </Button>
           </div>
         </div>
 
@@ -702,13 +699,9 @@ function LoadErrorCard({
       <p className="mx-auto mt-2 max-w-sm text-[13px] leading-5 text-[var(--text-dim,#475569)]">
         {message}
       </p>
-      <button
-        type="button"
-        onClick={onRetry}
-        className="mt-5 inline-flex h-[34px] items-center rounded-[10px] border border-[var(--border-2,rgba(30,64,175,0.16))] bg-[var(--surface,#ffffff)] px-4 text-[13px] font-semibold text-[var(--text-dim,#475569)] transition hover:bg-[var(--surface,#ffffff)] hover:text-[var(--text,#0f172a)]"
-      >
+      <Button variant="outline" size="sm" onClick={onRetry} className="mt-5">
         Retry
-      </button>
+      </Button>
     </div>
   );
 }

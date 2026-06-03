@@ -18,6 +18,7 @@ export type PillVariant =
   | "self"
   | "fd"
   | "omni"
+  | "noncarry"
   | "unknown"
   | "competitor"
   | "critical"
@@ -36,6 +37,7 @@ const variantClasses: Record<PillVariant, string> = {
   self: "bg-[rgba(139,92,246,0.12)] text-[var(--pill-purple-text,#6d28d9)] border-[rgba(139,92,246,0.25)]",
   fd: "bg-[rgba(99,102,241,0.12)] text-[#4338ca] border-[rgba(99,102,241,0.25)]",
   omni: "bg-[rgba(6,182,212,0.12)] text-[#0e7490] border-[rgba(6,182,212,0.25)]",
+  noncarry: "bg-[rgba(100,116,139,0.12)] text-[#475569] border-[rgba(100,116,139,0.25)]",
   unknown:
     "bg-[var(--surface-2,#f1f6fd)] text-[var(--text-muted,#94a3b8)] border-[var(--border,rgba(30,64,175,0.1))]",
   competitor: "bg-[rgba(239,68,68,0.08)] text-[var(--pill-red-text,#b91c1c)] border-[rgba(239,68,68,0.2)]",

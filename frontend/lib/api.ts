@@ -112,8 +112,13 @@ import type {
   InstitutionalInvestorProfileResponse,
   InvestorEnrichResponse,
   InvestorListResponse,
+  OutreachAdhocDraftRequest,
+  OutreachAdhocSendRequest,
   OutreachAdvisorDraftRequest,
   OutreachAdvisorSendRequest,
+  OutreachComposeSendRequest,
+  OptimizeInstructionsRequest,
+  OptimizeInstructionsResponse,
   OutreachDraft,
   OutreachDraftRequest,
   OutreachInvestorDraftRequest,
@@ -124,6 +129,12 @@ import type {
   OutreachSendStatus,
   OutreachSendsListResponse,
   OutreachSendsScope,
+  OutreachSignature,
+  RecipientSearchResponse,
+  FirmSearchResponse,
+  FirmContactsResponse,
+  FavoriteSearchResponse,
+  FavoriteFirmsResponse,
   PipelineRunItem,
   PipelineStatusResponse,
   PipelineTriggerResponse,
@@ -857,6 +868,17 @@ export async function refreshAdvisor(
   }
 }
 
+export async function gapFillAdvisorContacts(
+  advisorId: number,
+  force = false,
+): Promise<RefreshAdvisorResponse> {
+  const query = force ? "?force=true" : "";
+  return apiRequest<RefreshAdvisorResponse>(
+    `/api/v1/investment-advisors/${advisorId}/gap-fill-contacts${query}`,
+    { method: "POST" }
+  );
+}
+
 export async function getPipelineRunStatus(
   runId: number
 ): Promise<PipelineRunDetail> {
@@ -909,6 +931,32 @@ export async function generateOutreachDraft(
   });
 }
 
+export async function optimizeOutreachInstructions(
+  payload: OptimizeInstructionsRequest
+): Promise<OptimizeInstructionsResponse> {
+  return apiRequest<OptimizeInstructionsResponse>(
+    "/api/v1/outreach/optimize-instructions",
+    {
+      method: "POST",
+      body: JSON.stringify(payload)
+    }
+  );
+}
+
+// Adhoc draft path — used by /outreach/sent?tab=create when the
+// recipient is a typed-in email with no contact record. Unlike the
+// contact-keyed draft endpoints, this only requires (folder_id,
+// recipient_email) — Gemini works from the service folder + RAG plus
+// the optional recipient name.
+export async function generateAdhocOutreachDraft(
+  payload: OutreachAdhocDraftRequest
+): Promise<OutreachDraft> {
+  return apiRequest<OutreachDraft>("/api/v1/outreach/adhoc-draft", {
+    method: "POST",
+    body: JSON.stringify(payload)
+  });
+}
+
 // ── Send outreach via the user's chosen provider ──────────────────────────
 // POST /api/v1/outreach/send transmits the (possibly user-edited) draft
 // through the provider the user picked (or Gmail by default if no
@@ -932,6 +980,23 @@ export async function getLinkedProviders(): Promise<LinkedProvidersResponse> {
   return apiRequest<LinkedProvidersResponse>(
     "/api/v1/outreach/linked-providers"
   );
+}
+
+// The caller's saved outreach signature (footer). Returns { signature: "" }
+// when unset. Read by the compose surfaces to prefill the Footer field and
+// by the account-settings editor.
+export async function getOutreachSignature(): Promise<OutreachSignature> {
+  return apiRequest<OutreachSignature>("/api/v1/outreach/signature");
+}
+
+// Upsert the caller's outreach signature. Empty string clears it.
+export async function updateOutreachSignature(
+  signature: string
+): Promise<OutreachSignature> {
+  return apiRequest<OutreachSignature>("/api/v1/outreach/signature", {
+    method: "PUT",
+    body: JSON.stringify({ signature })
+  });
 }
 
 // List of outreach sends (success + failure). Body is omitted from the
@@ -962,6 +1027,92 @@ export async function getOutreachSend(
   return apiRequest<OutreachSendDetail>(
     buildApiPath(`/api/v1/outreach/sends/${sendId}`, { scope })
   );
+}
+
+// Soft-delete one of the caller's OWN sends. Owner-only on the BE (no
+// scope override even for admins), so there's no scope param here. 204 on
+// success; 404 if the id is missing or belongs to another user.
+export async function deleteOutreachSend(sendId: number): Promise<void> {
+  await apiRequest<void>(`/api/v1/outreach/sends/${sendId}`, {
+    method: "DELETE"
+  });
+}
+
+// ── /outreach/sent?tab=create surface ─────────────────────────────────
+// Backs the recipient combobox (search across all three contact tables)
+// and the free-form-email send path for the new Create Outreach tab.
+
+export async function searchOutreachContacts(
+  query: string,
+  limit = 20
+): Promise<RecipientSearchResponse> {
+  return apiRequest<RecipientSearchResponse>(
+    buildApiPath("/api/v1/outreach/contacts/search", { q: query, limit })
+  );
+}
+
+// Firm-name autocomplete for the recipient picker. Picking a firm
+// opens the firm-contacts modal; see listFirmContacts.
+export async function searchOutreachFirms(
+  query: string,
+  limit = 20
+): Promise<FirmSearchResponse> {
+  return apiRequest<FirmSearchResponse>(
+    buildApiPath("/api/v1/outreach/firms/search", { q: query, limit })
+  );
+}
+
+export async function listFirmContacts(
+  entityKind: "broker_dealer" | "advisor" | "institutional_investor",
+  entityId: number
+): Promise<FirmContactsResponse> {
+  return apiRequest<FirmContactsResponse>(
+    buildApiPath("/api/v1/outreach/firms/contacts", {
+      entity_kind: entityKind,
+      entity_id: entityId
+    })
+  );
+}
+
+// Favorite-list autocomplete + drill-down. The list-firms response is
+// shaped like a firm-search response so the picker modal can reuse the
+// firm-row rendering before drilling into firm-contacts.
+export async function searchOutreachFavorites(
+  query: string,
+  limit = 20
+): Promise<FavoriteSearchResponse> {
+  return apiRequest<FavoriteSearchResponse>(
+    buildApiPath("/api/v1/outreach/favorites/search", { q: query, limit })
+  );
+}
+
+export async function listFavoriteFirms(
+  listId: number
+): Promise<FavoriteFirmsResponse> {
+  return apiRequest<FavoriteFirmsResponse>(
+    `/api/v1/outreach/favorites/${listId}/firms`
+  );
+}
+
+export async function sendAdhocOutreach(
+  payload: OutreachAdhocSendRequest
+): Promise<OutreachSendResponse> {
+  return apiRequest<OutreachSendResponse>("/api/v1/outreach/adhoc-send", {
+    method: "POST",
+    body: JSON.stringify(payload)
+  });
+}
+
+// POST /api/v1/outreach/compose-send — sends one email to a To/Cc/Bcc
+// recipient set (the Create Outreach composer). 412 link/scope errors are
+// recoverable the same way the other send paths handle them.
+export async function composeSendOutreach(
+  payload: OutreachComposeSendRequest
+): Promise<OutreachSendResponse> {
+  return apiRequest<OutreachSendResponse>("/api/v1/outreach/compose-send", {
+    method: "POST",
+    body: JSON.stringify(payload)
+  });
 }
 
 // Admin-only flat view of every firm a target user has saved across all

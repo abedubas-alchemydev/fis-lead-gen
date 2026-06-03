@@ -1,6 +1,6 @@
 import Image from "next/image";
 import type { LucideIcon } from "lucide-react";
-import { Activity, Layers, Lock, Network } from "lucide-react";
+import { Lock, Network, ScrollText, Users } from "lucide-react";
 
 type Kpi = {
   icon: LucideIcon;
@@ -11,21 +11,21 @@ type Kpi = {
 
 const KPIS: Kpi[] = [
   {
-    icon: Network,
-    label: "Broker-dealers tracked",
-    meta: "Updated this morning · 06:14 ET",
+    icon: ScrollText,
+    label: "Regulatory Intelligence",
+    meta: "Forensic monitoring of primary-source filings.",
     delayClass: "delay-300",
   },
   {
-    icon: Layers,
-    label: "Cleared assets mapped",
-    meta: "Across 48 clearing relationships",
+    icon: Network,
+    label: "Clearing & Custody Mapping",
+    meta: "Revealing exactly where and how participants clear and settle.",
     delayClass: "delay-400",
   },
   {
-    icon: Activity,
-    label: "Filings ingested",
-    meta: "FOCUS · X-17A-5 · BrokerCheck",
+    icon: Users,
+    label: "Participant Discovery",
+    meta: "Identifying executive shifts into high-conviction discovery.",
     delayClass: "delay-500",
   },
 ];
@@ -47,12 +47,9 @@ export function AuthHero() {
 
       {/* Middle: headline + KPIs */}
       <div className="relative my-auto">
-        <h1 className="animate-fade-in-left max-w-md text-[clamp(1.875rem,1.4vw+1.4rem,2.5rem)] font-semibold leading-[1.1] tracking-tight text-white">
-          The clearing layer, mapped.
-        </h1>
-        <p className="animate-fade-in-left delay-150 mt-4 max-w-md text-sm leading-relaxed text-white/60">
-          Primary-source filings, custody chains, and counterparty graphs — refreshed continuously,
-          surfaced as one unified research layer.
+        <p className="animate-fade-in-left max-w-md text-sm leading-relaxed text-white/60">
+          Enterprise broker-dealer intelligence for surfacing clearing opportunities, tracking risk
+          signals, and managing qualified prospects in one system.
         </p>
 
         <div className="mt-10 space-y-2">

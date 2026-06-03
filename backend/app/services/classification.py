@@ -253,10 +253,10 @@ async def apply_classification_to_all(db: AsyncSession) -> int:
         ):
             new_classification = result.value
         else:
-            new_classification = "needs_review"
+            new_classification = "unknown"
             if result.value not in CANONICAL_VALUES:
                 logger.warning(
-                    "Classifier returned non-canonical value '%s' for bd_id=%s; coercing to needs_review",
+                    "Classifier returned non-canonical value '%s' for bd_id=%s; coercing to unknown",
                     result.value,
                     bd.id,
                 )

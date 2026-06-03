@@ -21,6 +21,7 @@ import asyncio
 import base64
 import io
 import logging
+import re
 from dataclasses import dataclass
 from datetime import date, datetime, timezone
 from pathlib import Path
@@ -56,25 +57,52 @@ logger = logging.getLogger(__name__)
 
 _FOCUS_CEO_PROMPT = """\
 Read this broker-dealer annual audit PDF (SEC Form X-17A-5 / Statement of Financial Condition) \
-and extract the following information:
+and extract the following information. The schema uses ``ceo_*`` field names for historical \
+reasons, but the actual person you should identify is the FILING CONTACT (see priority order \
+below) — this is who the firm tells the SEC to reach about the report, and is what the dox \
+product surfaces on the broker-dealer detail page.
 
-1. **CEO or principal executive officer's full name** — typically found on the cover page, \
-   in the header, or in the oath/affirmation section at the end where a senior officer signs.
-2. **Their title** (e.g., "Chief Executive Officer", "President", "Managing Member").
-3. **Their phone number** — if listed on the cover page, header, or contact section.
-4. **Their email address** — if listed anywhere in the document.
-5. **The firm's net capital** — from the "Computation of Net Capital" or \
-   "Statement of Financial Condition" section. This is the regulatory net capital figure.
-6. **The report date** — the fiscal year-end date the report covers (as YYYY-MM-DD).
+**Priority order for identifying the contact person (return the FIRST one you find):**
 
-IMPORTANT:
-- Return ALL dollar values in FULL US DOLLARS (not thousands, not millions).
-- If the document shows "$1,234" it means $1,234 not $1,234,000.
-- If a value states "(in thousands)" then multiply by 1000.
-- Use null for any field you cannot find with reasonable confidence.
-- The confidence_score should reflect how certain you are about the CEO identification \
-  and net capital extraction (0.0 = no useful data found, 1.0 = highly confident).
-- Provide a brief rationale explaining where you found each piece of data.
+1. **"PERSON TO CONTACT REGARDING THIS REPORT"** section on the facing sheet / cover page. \
+   This is the SEC-mandated contact and is present on most filings. The block usually has \
+   four labeled lines: NAME, TELEPHONE, EMAIL ADDRESS, ADDRESS. If the facing sheet has this \
+   section, that person's name + phone + email is what you should return — regardless of \
+   their title.
+2. **"PERSON TO CONTACT"** or **"FILING CONTACT"** section anywhere else in the document.
+3. **Chief Compliance Officer / FinOp / Treasurer** signature on the oath/affirmation section \
+   at the end. The oath identifies who signed the report under penalty of perjury.
+4. **CEO / President / Managing Member** signature on the oath/affirmation section.
+
+Return the following fields (using the ``ceo_*`` schema names — the values are the contact \
+person you identified, not necessarily a CEO):
+
+1. **ceo_name** — the contact person's full name. Examples that ARE valid names:
+   "Joel D. Magerman", "Alyssa DeLeon", "William D. Hawthorne". Examples that are NOT names \
+   (do not return these — leave ceo_name as null instead):
+   - Section headers like "B. ACCOUNTANT IDENTIFICATION", "AFFIRMATION", "OATH".
+   - Auditor / accounting firm names ("PricewaterhouseCoopers LLP", "KPMG").
+   - The broker-dealer firm's own name.
+2. **ceo_title** — exactly as printed on the form. Common values: "Filing Contact", \
+   "Chief Compliance Officer", "Chief Financial Officer", "Chief Executive Officer", \
+   "President", "Managing Member", "FinOp".
+3. **ceo_phone** — the contact's phone number, as printed (any format).
+4. **ceo_email** — the contact's email address, as printed.
+5. **net_capital** — the firm's regulatory net capital from the "Computation of Net Capital" \
+   schedule (NOT total assets, NOT equity).
+6. **report_date** — the fiscal year-end date the report covers (YYYY-MM-DD).
+
+**Important constraints:**
+- Return ALL dollar values in FULL US DOLLARS (not thousands, not millions). "$1,234" means \
+  $1,234, not $1,234,000. If a value is labeled "(in thousands)", multiply by 1000.
+- Use null for any field you cannot find with reasonable confidence. Do NOT make up data.
+- Do NOT capture form labels or section headers as ``ceo_name``. If the facing sheet has a \
+  "PERSON TO CONTACT" header but the actual NAME line is blank, return null for ceo_name.
+- The ``confidence_score`` should reflect how certain you are about the contact identification \
+  and net capital extraction (0.0 = nothing useful found, 1.0 = highly confident).
+- Provide a brief rationale explaining which section each piece of data came from \
+  (e.g., "Filing contact from facing sheet PERSON TO CONTACT section", \
+  "CEO from oath at end of report").
 """
 
 
@@ -110,6 +138,68 @@ _RANK_DISPLAY_TITLES = {
 
 def _rank_to_display_title(officer_rank: str) -> str:
     return _RANK_DISPLAY_TITLES.get(officer_rank, "Executive Officer")
+
+
+# Signature of pdfplumber's font-encoding mangle: underscores wrapping
+# individual characters, e.g. "_W__ill_ia_m__ D__. _H_a_w_t_h_o_rn_e_".
+# This happens on PDFs whose font /ToUnicode CMap is missing or broken —
+# pdfplumber returns a glyph-stream that looks like text but is mostly
+# unusable noise. Real names and emails almost never contain this pattern.
+# When detected, the extraction flow falls through to Gemini vision which
+# reads the page as an image and is robust to the font issue.
+_GARBAGE_TEXT_PATTERN = re.compile(r"_\w_\w_")
+
+
+def _looks_like_pdfplumber_garbage(*texts: str | None) -> bool:
+    """Return True if any of ``texts`` shows pdfplumber's scrambled-glyph
+    signature. Used to gate whether the pdfplumber result is trustworthy
+    before persisting; on a True result the caller falls through to
+    Gemini vision instead of writing the garbage to the DB.
+
+    Patterns checked (any one trips the detector):
+
+    1. Underscore mangle (font /ToUnicode broken) — 3+ underscores or
+       the ``_<char>_<char>_`` signature. AVID CAPITAL ADVISORS
+       verbatim in the prod smoke that prompted the original guard.
+    2. Unicode replacement character (\\ufffd) — what pdfplumber emits
+       when the PDF source uses a special character (em-dash, en-dash,
+       smart quotes) whose mapping is broken. Seen in DC ADVISORY
+       (``Peter Pacitto 212\\ufffd904\\ufffd9488``).
+    """
+    for text in texts:
+        if not text:
+            continue
+        # Real names/emails rarely contain even one underscore; legitimate
+        # email addresses (e.g. ``first_last@example.com``) max out at two.
+        # 3+ is the font-mangle signature.
+        if text.count("_") >= 3:
+            return True
+        # Stronger pattern check: ``_<char>_<char>_`` is impossible in
+        # natural text but is the diagnostic shape of the mangle.
+        if _GARBAGE_TEXT_PATTERN.search(text):
+            return True
+        # Unicode replacement character — strong miss signal on any string.
+        if "�" in text:
+            return True
+    return False
+
+
+def _name_has_embedded_phone(name: str | None) -> bool:
+    """Return True when pdfplumber's regex captured a phone number into
+    the ``contact_name`` field — a separate failure mode where the
+    "PERSON TO CONTACT" line on the PDF cover page combines the name
+    and phone on a single line and the extractor's split doesn't fire.
+
+    Real person names virtually never contain digits (Roman numerals are
+    not digits; rare "John 3rd" variants peak at 1 digit). 3+ digits in
+    a name field is the diagnostic signature of a phone-in-name event.
+    Seen in the smoke on ASANTE CAPITAL (``Alka Patel +44 203 696 4
+    730``) and four others. When True, the caller falls through to
+    Gemini vision so the name and phone land in their respective
+    fields."""
+    if not name:
+        return False
+    return sum(1 for ch in name if ch.isdigit()) >= 3
 
 
 def _render_pdf_pages_to_images(
@@ -264,50 +354,19 @@ class FocusCeoExtractionService:
                 extraction_notes="No X-17A-5 PDF available for this broker-dealer.",
             )
 
-        # ── Step 2: Try pdfplumber first (FREE, ~500ms) ──
-        if pdf_record.local_document_path:
-            text_result = await asyncio.to_thread(extract_from_pdf, pdf_record.local_document_path)
-            if text_result.success:
-                confidence = 0.95 if (text_result.contact_name and text_result.net_capital) else 0.80
-                # Persist if we found a contact name
-                if text_result.contact_name and confidence >= 0.5:
-                    await self._upsert_focus_contact(
-                        db,
-                        broker_dealer=broker_dealer,
-                        ceo_name=text_result.contact_name,
-                        ceo_title=text_result.contact_title or "Filing Contact",
-                        ceo_email=text_result.contact_email,
-                        ceo_phone=text_result.contact_phone,
-                    )
-                # Persist the net capital reading (if any). pdfplumber rarely
-                # surfaces a parseable report_date, so the persistence helper
-                # falls back to the BD's last_audit_report_date when needed.
-                await self._persist_net_capital(
-                    db,
-                    broker_dealer=broker_dealer,
-                    net_capital=text_result.net_capital,
-                    excess_net_capital=text_result.excess_net_capital,
-                    total_assets=None,
-                    required_min_capital=None,
-                    extracted_report_date=None,
-                    confidence_score=confidence,
-                    source_filing_url=pdf_record.source_pdf_url,
-                )
-                return FocusCeoExtractionResult(
-                    bd_id=broker_dealer.id,
-                    ceo_name=text_result.contact_name,
-                    ceo_title=text_result.contact_title,
-                    ceo_phone=text_result.contact_phone,
-                    ceo_email=text_result.contact_email,
-                    net_capital=text_result.net_capital,
-                    report_date=None,
-                    source_pdf_url=pdf_record.source_pdf_url,
-                    confidence_score=confidence,
-                    extraction_status="success",
-                    extraction_notes="Extracted via text analysis (no API cost).",
-                )
+        # Gemini-only extraction path. The previous pdfplumber fast path
+        # was removed after the 2026-05-28 prod backfill surfaced four
+        # categories of pdfplumber quality issues that needed defensive
+        # guards (underscore mangle, � replacement chars, phone-in-name,
+        # FOCUS form section headers like "B. ACCOUNTANT IDENTIFICATION"
+        # captured as a person name). The ~$5 saved per backfill by the
+        # pdfplumber path wasn't worth the four whack-a-mole defects, so
+        # every BD now goes straight to Gemini vision for consistent
+        # quality. _looks_like_pdfplumber_garbage and _name_has_embedded_phone
+        # are kept (defense-in-depth in case pdfplumber is re-introduced
+        # via a feature flag later) but their wired call sites are gone.
 
-        # ── Step 3: Fallback to Gemini vision ──
+        # ── Gemini vision extraction ──
         page_images = await asyncio.to_thread(
             _render_pdf_pages_to_images,
             pdf_record.bytes_base64,
@@ -450,27 +509,12 @@ class FocusCeoExtractionService:
                 extraction_notes="No X-17A-5 PDF available for this broker-dealer.",
             )
 
-        # Step 2: Try pdfplumber first (FREE, ~500ms, no API call)
-        if pdf_record.local_document_path:
-            text_result = await asyncio.to_thread(extract_from_pdf, pdf_record.local_document_path)
-            if text_result.success:
-                # Got data from text extraction — no Gemini needed
-                confidence = 0.95 if (text_result.contact_name and text_result.net_capital) else 0.80
-                return FocusCeoExtractionResult(
-                    bd_id=bd_id,
-                    ceo_name=text_result.contact_name,
-                    ceo_title=text_result.contact_title,
-                    ceo_phone=text_result.contact_phone,
-                    ceo_email=text_result.contact_email,
-                    net_capital=text_result.net_capital,
-                    report_date=None,
-                    source_pdf_url=pdf_record.source_pdf_url,
-                    confidence_score=confidence,
-                    extraction_status="success",
-                    extraction_notes="Extracted via pdfplumber (text mode, no API cost).",
-                )
+        # Gemini-only extraction path (batch). See _run_extract for the
+        # full rationale — every BD goes straight to Gemini vision for
+        # consistent quality, after the pdfplumber path produced four
+        # categories of defects on the 2026-05-28 backfill.
 
-        # Step 3: pdfplumber failed — fall back to Gemini vision
+        # ── Gemini vision extraction ──
         page_images = await asyncio.to_thread(
             _render_pdf_pages_to_images,
             pdf_record.bytes_base64,
@@ -496,7 +540,7 @@ class FocusCeoExtractionService:
                 net_capital=None, report_date=None,
                 source_pdf_url=pdf_record.source_pdf_url,
                 confidence_score=0.0, extraction_status="error",
-                extraction_notes=f"Gemini vision fallback failed: {exc}",
+                extraction_notes=f"Gemini vision extraction failed: {exc}",
             )
 
         report_date: date | None = None
@@ -517,7 +561,7 @@ class FocusCeoExtractionService:
             source_pdf_url=pdf_record.source_pdf_url,
             confidence_score=extraction.confidence_score,
             extraction_status="success" if extraction.confidence_score >= 0.5 else "low_confidence",
-            extraction_notes=f"Extracted via Gemini vision (fallback). {extraction.rationale}",
+            extraction_notes=f"Extracted via Gemini vision. {extraction.rationale}",
         )
 
     async def run_batch(

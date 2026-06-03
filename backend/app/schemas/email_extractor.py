@@ -15,6 +15,16 @@ class ScanCreateRequest(BaseModel):
         default=None,
         description="Broker-dealer id this scan was triggered from (optional; populated when the scan is kicked off from a firm detail page).",
     )
+    advisor_id: int | None = Field(
+        default=None,
+        description="Investment-advisor id this scan was triggered from (optional; populated when the scan is kicked off from an advisor detail page).",
+    )
+
+    @model_validator(mode="after")
+    def _bd_and_advisor_mutually_exclusive(self) -> ScanCreateRequest:
+        if self.bd_id is not None and self.advisor_id is not None:
+            raise ValueError("bd_id and advisor_id are mutually exclusive")
+        return self
 
 
 class EmailVerificationResponse(BaseModel):
@@ -36,13 +46,18 @@ class DiscoveredEmailResponse(BaseModel):
     confidence: float | None
     attribution: str | None
     bd_id: int | None = None
+    advisor_id: int | None = None
     enriched_name: str | None = None
     enriched_title: str | None = None
     enriched_linkedin_url: str | None = None
     enriched_company: str | None = None
+    enriched_email: str | None = None
     enriched_phone: str | None = None
     enriched_at: datetime | None = None
     enrichment_status: str = "not_enriched"
+    # Computed on the model: True while an async phone-reveal callback is still
+    # expected, so the UI can poll for the number without polling forever.
+    phone_reveal_pending: bool = False
     created_at: datetime
     verifications: list[EmailVerificationResponse] = Field(default_factory=list)
 
@@ -148,6 +163,7 @@ class ScanListItem(BaseModel):
     domain: str
     person_name: str | None
     bd_id: int | None
+    advisor_id: int | None
     status: str
     total_items: int
     processed_items: int

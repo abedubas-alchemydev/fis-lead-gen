@@ -125,11 +125,13 @@ class SerperClient:
             if not domain:
                 continue
             title = hit.get("title")
+            snippet = hit.get("snippet")
             results.append(
                 SerpResult(
                     url=url_raw,
                     domain=domain,
                     title=str(title) if isinstance(title, str) else "",
+                    snippet=str(snippet) if isinstance(snippet, str) else "",
                 )
             )
         return results

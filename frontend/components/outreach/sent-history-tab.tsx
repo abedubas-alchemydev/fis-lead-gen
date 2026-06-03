@@ -1,6 +1,7 @@
 "use client";
 
 import Link from "next/link";
+import type { Route } from "next";
 import { useCallback, useEffect, useMemo, useState } from "react";
 import {
   AlertCircle,
@@ -10,10 +11,16 @@ import {
   Mail,
   MailX,
   Send,
+  Trash2,
   XCircle,
 } from "lucide-react";
 
-import { ApiError, getOutreachSend, listOutreachSends } from "@/lib/api";
+import {
+  ApiError,
+  deleteOutreachSend,
+  getOutreachSend,
+  listOutreachSends,
+} from "@/lib/api";
 import type {
   OutreachSendDetail,
   OutreachSendItem,
@@ -21,6 +28,9 @@ import type {
   OutreachSendsListResponse,
   OutreachSendsScope,
 } from "@/lib/types";
+import { Segmented, type SegmentedItem } from "@/components/ui/segmented";
+import { useToast } from "@/components/ui/use-toast";
+import { DeleteSendDialog } from "./delete-send-dialog";
 
 const CARD =
   "rounded-2xl border border-[var(--border,rgba(30,64,175,0.1))] bg-[var(--surface,#ffffff)] p-6 shadow-[var(--shadow-card,0_1px_2px_rgba(15,23,42,0.04),0_4px_14px_rgba(15,23,42,0.05))]";
@@ -33,20 +43,44 @@ const CARD_TITLE =
 
 const PAGE_SIZE = 50;
 
+// Recipients beyond the primary shown in the list cell — sums the extra
+// To addresses (multi-recipient compose-sends), Cc, and Bcc from the
+// comma-joined audit columns. 0 for single-recipient / legacy rows.
+function extraRecipientCount(item: OutreachSendItem): number {
+  const splitCount = (v?: string | null) =>
+    v ? v.split(",").filter((s) => s.trim()).length : 0;
+  const toCount = item.to_emails
+    ? splitCount(item.to_emails)
+    : item.recipient_email
+      ? 1
+      : 0;
+  return Math.max(
+    0,
+    toCount + splitCount(item.cc_emails) + splitCount(item.bcc_emails) - 1,
+  );
+}
+
 type StatusFilter = "all" | OutreachSendStatus;
 
-const STATUS_FILTERS: { value: StatusFilter; label: string }[] = [
+const STATUS_ITEMS: ReadonlyArray<SegmentedItem> = [
   { value: "all", label: "All" },
   { value: "sent", label: "Sent" },
   { value: "failed", label: "Failed" },
 ];
 
-const SCOPE_FILTERS: { value: OutreachSendsScope; label: string }[] = [
+const SCOPE_ITEMS: ReadonlyArray<SegmentedItem> = [
   { value: "mine", label: "My sends" },
   { value: "all", label: "All users" },
 ];
 
-export function OutreachSentClient({ isAdmin = false }: { isAdmin?: boolean }) {
+export function SentHistoryTab({
+  isAdmin = false,
+  currentUserId,
+}: {
+  isAdmin?: boolean;
+  currentUserId: string;
+}) {
+  const toast = useToast();
   const [data, setData] = useState<OutreachSendsListResponse | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
@@ -61,6 +95,9 @@ export function OutreachSentClient({ isAdmin = false }: { isAdmin?: boolean }) {
   >({});
   const [detailLoading, setDetailLoading] = useState<number | null>(null);
   const [detailError, setDetailError] = useState<string | null>(null);
+  const [pendingDelete, setPendingDelete] = useState<OutreachSendItem | null>(
+    null,
+  );
 
   const load = useCallback(async () => {
     setLoading(true);
@@ -118,6 +155,43 @@ export function OutreachSentClient({ isAdmin = false }: { isAdmin?: boolean }) {
     }
   }
 
+  // Owner-only delete: in the cross-user admin view a row is deletable only
+  // if it's the caller's own send (item.user_id is populated only on the
+  // admin scope="all" payload). In the default "mine" view every row is the
+  // caller's, so the control always shows.
+  const canDelete = useCallback(
+    (item: OutreachSendItem) =>
+      scope !== "all" || item.user_id === currentUserId,
+    [scope, currentUserId],
+  );
+
+  const confirmDelete = useCallback(
+    async (item: OutreachSendItem) => {
+      // Throws on failure -> DeleteSendDialog surfaces the reason inline and
+      // stays open. On success we drop the row locally and close the dialog.
+      await deleteOutreachSend(item.id);
+      const wasLastOnPage = (data?.items.length ?? 0) <= 1;
+      setData((current) =>
+        current
+          ? {
+              ...current,
+              items: current.items.filter((i) => i.id !== item.id),
+              total: Math.max(0, current.total - 1),
+            }
+          : current,
+      );
+      setExpandedId((current) => (current === item.id ? null : current));
+      if (wasLastOnPage && offset > 0) {
+        // Stepping back re-runs load() (an effect dep) so we land on the
+        // now-correct previous page instead of a blank one.
+        setOffset((current) => Math.max(0, current - PAGE_SIZE));
+      }
+      toast.success("Deleted from Sent history.");
+      setPendingDelete(null);
+    },
+    [data, offset, toast],
+  );
+
   const total = data?.total ?? 0;
   const pageCount = data?.items.length ?? 0;
   const page = Math.floor(offset / PAGE_SIZE) + 1;
@@ -127,23 +201,7 @@ export function OutreachSentClient({ isAdmin = false }: { isAdmin?: boolean }) {
   const showSenderColumn = isAdmin && scope === "all";
 
   return (
-    <section className="space-y-6">
-      <div className="flex flex-wrap items-center gap-4">
-        <div className="min-w-0">
-          <p className="text-[12px] uppercase tracking-[0.06em] text-[var(--text-muted,#94a3b8)]">
-            Vault <span className="text-[var(--text-dim,#475569)]">/</span> Outreach
-          </p>
-          <h1 className="mt-1 text-[24px] font-bold tracking-[-0.02em] text-[var(--text,#0f172a)]">
-            Sent outreach
-          </h1>
-          <p className="mt-2 max-w-3xl text-[13px] leading-5 text-[var(--text-dim,#475569)]">
-            {showSenderColumn
-              ? "Every outreach email sent across all users, including failed attempts and the reason they didn't go through. Click a row to read the full message."
-              : "Every outreach email you've sent through Gmail, plus any failed attempts and the reason they didn't go through. Click a row to read the full message."}
-          </p>
-        </div>
-      </div>
-
+    <div className="space-y-6">
       {error ? (
         <div className="flex items-start gap-2 rounded-xl border border-red-500/25 bg-red-500/12 px-4 py-3 text-sm text-[var(--pill-red-text,#b91c1c)]">
           <AlertCircle className="mt-0.5 h-4 w-4 shrink-0" aria-hidden />
@@ -167,10 +225,10 @@ export function OutreachSentClient({ isAdmin = false }: { isAdmin?: boolean }) {
           </div>
           <div className="flex flex-wrap items-center gap-2">
             {isAdmin ? (
-              <ScopePills
+              <Segmented
                 value={scope}
                 onChange={(next) => {
-                  setScope(next);
+                  setScope(next as OutreachSendsScope);
                   setOffset(0);
                   setExpandedId(null);
                   // Detail cache is keyed by id and can collide between
@@ -179,15 +237,19 @@ export function OutreachSentClient({ isAdmin = false }: { isAdmin?: boolean }) {
                   // lacks sender fields when scope=all is active.
                   setDetailCache({});
                 }}
+                items={SCOPE_ITEMS}
+                ariaLabel="Scope"
               />
             ) : null}
-            <FilterPills
+            <Segmented
               value={statusFilter}
               onChange={(next) => {
-                setStatusFilter(next);
+                setStatusFilter(next as StatusFilter);
                 setOffset(0);
                 setExpandedId(null);
               }}
+              items={STATUS_ITEMS}
+              ariaLabel="Status"
             />
           </div>
         </div>
@@ -215,6 +277,9 @@ export function OutreachSentClient({ isAdmin = false }: { isAdmin?: boolean }) {
                   <th className="px-5 py-3">Service</th>
                   <th className="px-5 py-3">Subject</th>
                   <th className="px-5 py-3">Status</th>
+                  <th className="px-5 py-3 text-right">
+                    <span className="sr-only">Actions</span>
+                  </th>
                 </tr>
               </thead>
               <tbody className="divide-y divide-[var(--border,rgba(30,64,175,0.1))]">
@@ -230,6 +295,8 @@ export function OutreachSentClient({ isAdmin = false }: { isAdmin?: boolean }) {
                       detailError={isExpanded ? detailError : null}
                       onToggle={() => void handleExpand(item)}
                       showSender={showSenderColumn}
+                      canDelete={canDelete(item)}
+                      onRequestDelete={() => setPendingDelete(item)}
                     />
                   );
                 })}
@@ -251,7 +318,7 @@ export function OutreachSentClient({ isAdmin = false }: { isAdmin?: boolean }) {
                   setExpandedId(null);
                   setOffset(Math.max(0, offset - PAGE_SIZE));
                 }}
-                className="rounded-xl border border-[var(--border,rgba(30,64,175,0.1))] bg-white px-3 py-1.5 font-semibold text-[var(--text,#0f172a)] transition hover:bg-[var(--surface-2,#f1f6fd)] disabled:cursor-not-allowed disabled:opacity-50"
+                className="rounded-[8px] border border-[var(--border-2,rgba(30,64,175,0.16))] bg-[var(--surface,#ffffff)] px-3 py-1.5 text-[12px] font-medium text-[var(--text-dim,#475569)] transition hover:bg-[var(--surface-2,#f1f6fd)] disabled:cursor-not-allowed disabled:opacity-45"
               >
                 Previous
               </button>
@@ -265,7 +332,7 @@ export function OutreachSentClient({ isAdmin = false }: { isAdmin?: boolean }) {
                   setExpandedId(null);
                   setOffset(offset + PAGE_SIZE);
                 }}
-                className="rounded-xl border border-[var(--border,rgba(30,64,175,0.1))] bg-white px-3 py-1.5 font-semibold text-[var(--text,#0f172a)] transition hover:bg-[var(--surface-2,#f1f6fd)] disabled:cursor-not-allowed disabled:opacity-50"
+                className="rounded-[8px] border border-[var(--border-2,rgba(30,64,175,0.16))] bg-[var(--surface,#ffffff)] px-3 py-1.5 text-[12px] font-medium text-[var(--text-dim,#475569)] transition hover:bg-[var(--surface-2,#f1f6fd)] disabled:cursor-not-allowed disabled:opacity-45"
               >
                 Next
               </button>
@@ -273,66 +340,14 @@ export function OutreachSentClient({ isAdmin = false }: { isAdmin?: boolean }) {
           </div>
         ) : null}
       </div>
-    </section>
-  );
-}
 
-function FilterPills({
-  value,
-  onChange,
-}: {
-  value: StatusFilter;
-  onChange: (next: StatusFilter) => void;
-}) {
-  return (
-    <div className="inline-flex rounded-xl border border-[var(--border,rgba(30,64,175,0.1))] bg-[var(--surface-2,#f1f6fd)] p-1 text-[11px] font-semibold uppercase tracking-[0.06em]">
-      {STATUS_FILTERS.map((option) => {
-        const active = option.value === value;
-        return (
-          <button
-            key={option.value}
-            type="button"
-            onClick={() => onChange(option.value)}
-            className={
-              active
-                ? "rounded-lg bg-white px-3 py-1.5 text-[var(--text,#0f172a)] shadow-[0_1px_3px_rgba(15,23,42,0.08)]"
-                : "rounded-lg px-3 py-1.5 text-[var(--text-muted,#94a3b8)] transition hover:text-[var(--text,#0f172a)]"
-            }
-          >
-            {option.label}
-          </button>
-        );
-      })}
-    </div>
-  );
-}
-
-function ScopePills({
-  value,
-  onChange,
-}: {
-  value: OutreachSendsScope;
-  onChange: (next: OutreachSendsScope) => void;
-}) {
-  return (
-    <div className="inline-flex rounded-xl border border-[var(--border,rgba(30,64,175,0.1))] bg-[var(--surface-2,#f1f6fd)] p-1 text-[11px] font-semibold uppercase tracking-[0.06em]">
-      {SCOPE_FILTERS.map((option) => {
-        const active = option.value === value;
-        return (
-          <button
-            key={option.value}
-            type="button"
-            onClick={() => onChange(option.value)}
-            className={
-              active
-                ? "rounded-lg bg-white px-3 py-1.5 text-[var(--text,#0f172a)] shadow-[0_1px_3px_rgba(15,23,42,0.08)]"
-                : "rounded-lg px-3 py-1.5 text-[var(--text-muted,#94a3b8)] transition hover:text-[var(--text,#0f172a)]"
-            }
-          >
-            {option.label}
-          </button>
-        );
-      })}
+      {pendingDelete ? (
+        <DeleteSendDialog
+          item={pendingDelete}
+          onCancel={() => setPendingDelete(null)}
+          onConfirm={() => confirmDelete(pendingDelete)}
+        />
+      ) : null}
     </div>
   );
 }
@@ -345,6 +360,8 @@ function RowGroup({
   detailError,
   onToggle,
   showSender,
+  canDelete,
+  onRequestDelete,
 }: {
   item: OutreachSendItem;
   isExpanded: boolean;
@@ -353,6 +370,8 @@ function RowGroup({
   detailError: string | null;
   onToggle: () => void;
   showSender: boolean;
+  canDelete: boolean;
+  onRequestDelete: () => void;
 }) {
   const sentAt = useMemo(() => new Date(item.sent_at), [item.sent_at]);
   return (
@@ -383,22 +402,49 @@ function RowGroup({
           </td>
         ) : null}
         <td className="px-5 py-4 text-[var(--text,#0f172a)]">
-          <div className="font-semibold">{item.contact_name || "—"}</div>
-          {item.contact_email ? (
+          <div className="font-semibold">
+            {item.contact_name || item.recipient_name || (
+              <span className="text-[var(--text-muted,#94a3b8)]">
+                {item.firm_type === "adhoc" ? "One-off recipient" : "—"}
+              </span>
+            )}
+          </div>
+          {item.contact_email || item.recipient_email ? (
             <div className="mt-0.5 inline-flex items-center gap-1.5 text-xs text-[var(--text-dim,#475569)]">
               <Mail className="h-3 w-3 text-[var(--text-muted,#94a3b8)]" aria-hidden />
-              {item.contact_email}
+              {item.contact_email ?? item.recipient_email}
+            </div>
+          ) : null}
+          {extraRecipientCount(item) > 0 ? (
+            <div
+              className="mt-0.5 text-[11px] text-[var(--text-muted,#94a3b8)]"
+              title={[
+                item.to_emails ? `To: ${item.to_emails}` : null,
+                item.cc_emails ? `Cc: ${item.cc_emails}` : null,
+                item.bcc_emails ? `Bcc: ${item.bcc_emails}` : null,
+              ]
+                .filter(Boolean)
+                .join("\n")}
+            >
+              +{extraRecipientCount(item)} more
+              {item.bcc_emails ? " · incl. Bcc" : ""}
             </div>
           ) : null}
         </td>
         <td className="px-5 py-4 text-[var(--text-dim,#475569)]">
-          <Link
-            href={`/master-list/${item.broker_dealer_id}`}
-            onClick={(e) => e.stopPropagation()}
-            className="underline-offset-4 hover:underline"
-          >
-            {item.broker_dealer_name || "—"}
-          </Link>
+          {item.broker_dealer_id ? (
+            <Link
+              href={`/master-list/${item.broker_dealer_id}`}
+              onClick={(e) => e.stopPropagation()}
+              className="underline-offset-4 hover:underline"
+            >
+              {item.broker_dealer_name || "—"}
+            </Link>
+          ) : (
+            <span className="text-[var(--text-muted,#94a3b8)]">
+              {item.advisor_name ?? item.institutional_investor_name ?? "—"}
+            </span>
+          )}
         </td>
         <td className="px-5 py-4 text-[var(--text-dim,#475569)]">
           {item.folder_name ?? <span className="text-[var(--text-muted,#94a3b8)]">(deleted)</span>}
@@ -411,10 +457,26 @@ function RowGroup({
         <td className="px-5 py-4">
           <StatusPill status={item.status} error={item.error} />
         </td>
+        <td className="px-5 py-4 text-right">
+          {canDelete ? (
+            <button
+              type="button"
+              onClick={(event) => {
+                event.stopPropagation();
+                onRequestDelete();
+              }}
+              aria-label="Delete this send"
+              title="Delete"
+              className="inline-flex items-center justify-center rounded-md p-1.5 text-[var(--text-muted,#94a3b8)] transition hover:bg-red-500/10 hover:text-[var(--pill-red-text,#b91c1c)]"
+            >
+              <Trash2 className="h-4 w-4" aria-hidden />
+            </button>
+          ) : null}
+        </td>
       </tr>
       {isExpanded ? (
         <tr className="bg-[var(--surface-2,#f1f6fd)]/40">
-          <td colSpan={showSender ? 7 : 6} className="px-5 py-5">
+          <td colSpan={showSender ? 8 : 7} className="px-5 py-5">
             <ExpandedBody
               item={item}
               detail={detail}
@@ -473,7 +535,7 @@ function ExpandedBody({
           </a>
         ) : null}
       </div>
-      <div className="rounded-xl border border-[var(--border,rgba(30,64,175,0.1))] bg-white p-4">
+      <div className="rounded-xl border border-[var(--border,rgba(30,64,175,0.1))] bg-[var(--surface,#ffffff)] p-4">
         <div className="text-xs font-semibold text-[var(--text-muted,#94a3b8)]">
           Subject
         </div>
@@ -569,12 +631,19 @@ function EmptyState({
         You haven&apos;t sent any outreach yet
       </p>
       <p className="mt-1 text-xs text-[var(--text-dim,#475569)]">
-        Open a firm on the{" "}
+        Switch to the{" "}
+        <Link
+          href={"/outreach/sent?tab=create" as Route}
+          className="font-semibold text-[var(--text,#0f172a)] underline-offset-4 hover:underline"
+        >
+          Create outreach
+        </Link>{" "}
+        tab or open a firm on the{" "}
         <Link
           href="/master-list"
           className="font-semibold text-[var(--text,#0f172a)] underline-offset-4 hover:underline"
         >
-          Master List
+          Broker Dealers
         </Link>{" "}
         and use a contact&apos;s Outreach button to draft your first email.
       </p>

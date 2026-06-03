@@ -1,6 +1,165 @@
-member_name,member_number,city,state
-"Goldman Sachs & Co. LLC",,New York,NY
-"Morgan Stanley & Co. LLC",,New York,NY
-"J.P. Morgan Securities LLC",,New York,NY
-"Citigroup Global Markets Inc.",,New York,NY
-"Bank of New York Mellon",,New York,NY
+member_name,member_number
+Aardvark Securities LLC,9916
+ABN AMRO Securities (USA) LLC,9578
+Apex Clearing Corporation,9652
+"Arcola Securities, Inc.",9696
+ASL Capital Markets Inc.,9951
+"Banco Bilbao Vizcaya Argentaria, S.A.",9287
+"Banco Santander, S.A., New York Branch",9958
+"Bank of America NA, Liquid Products Rates Trading",9518
+"Bank of America, National Association",9537
+"Bank of Montreal, Chicago Branch",9662
+"Bank of Montreal, Chicago Branch - Omnibus",9491
+Barclays Bank PLC,9782
+Barclays Capital Inc.,9561
+BBVA Securities Inc.,9629
+"Bethesda Securities, LLC",9783
+"BGC Financial, L.P. Broker Account*",9508
+BMO Capital Markets Corp.,9533
+BNP Paribas SA,9764
+BNP Paribas Securities Corp,9637
+BNP Paribas Securities Corp.- Omnibus,9055
+"BNY Mellon Capital Markets, LLC",9753
+BOKF National Association,9964
+"Brean Capital, LLC",9430
+BrokerTec Americas LLC   Broker Account*,9506
+Buckler Securities LLC,9946
+Canadian Imperial Bank of Commerce New York Branch,9932
+"Canadian Imperial Bank of Commerce, New York Branch - Omnibus",9118
+Cantor Fitzgerald & Co,9385
+Cantor Fitzgerald & Co. - Omnibus,9084
+"Capital One, National Association",9542
+"CF Secured, LLC",9930
+"Charles Schwab & Co., Inc.",9529
+"Charles Schwab Bank, SSB",9297
+"Charles Schwab Premier Bank, SSB",9295
+Charles Schwab Trust Bank,9296
+CIBC World Markets Corp.,9581
+Citadel Securities Institutional LLC,9074
+Citadel Securities LLC,9579
+"Citibank, N.A.",9516
+"Citizens Bank, National Association",9564
+Clear Street LLC,9258
+Commerz Markets LLC,9569
+"Cooperatieve Rabobank, U.A., New York Branch",9632
+"Credit Agricole Corporate and Investment Bank, New York Branch",9592
+"Credit Agricole Securities (USA), Inc.",9587
+"Curvature Securities, LLC",9799
+Daiwa Capital Markets America Inc.,9521
+Dealerweb Inc. Broker Account*  Broker and Dealer Accounts**,9695
+"Deutsche Bank AG, New York Branch",9973
+DNB Bank ASA,9281
+DRW Execution Services LLC,9117
+"DV Securities, LLC",9046
+Edward D. Jones & Co.,9657
+Fannie Mae,9597
+Federal Home Loan Mortgage Corporation,9755
+"Fifth Third Bank, National Association",9290
+First Horizon Bank,9557
+"FMX Execution, LLC",9280
+"FMX Execution, LLC - Repo Broker Account*",9409
+"Gelber Securities, LLC",9288
+Goldman Sachs & Co. LLC,9531
+Goldman Sachs Bank USA,9042
+"Guggenheim Securities, LLC",9636
+Hidden Road Partners CIV US LLC,9388
+Hilltop Securities Inc.,9687
+"HSBC Bank USA, National Association",9661
+HSBC Securities (USA) Inc.,9513
+HSBC Securities (USA) Inc. - Omnibus,9057
+ICE Securities Execution and Clearing LLC,9011
+ING Financial Markets LLC,9682
+ING Financial Markets LLC - Omnibus,9090
+Interactive Brokers LLC,9594
+Intesa Sanpaolo IMI Securities Corp.,9672
+J.P. Morgan Securities LLC,9515
+Janney Montgomery Scott LLC,9707
+Jefferies LLC,9681
+"JPMorgan Chase Bank, National Association",9655
+KeyBank National Association,9405
+"Landesbank Baden - Wurttemberg, New York Branch",9619
+Lloyds Bank Corporate Markets Plc,9773
+Lloyds Bank PLC,9956
+Loop Capital Markets LLC,9274
+LPL Financial LLC,9704
+Manufacturers and Traders Trust Company,9088
+Marex Capital Markets Inc.,9757
+MarketAxess Corporation,9038
+"Merrill Lynch, Pierce, Fenner & Smith Inc.",9795
+"Mesirow Financial, Inc",9870
+MFI Funding LLC,9277
+"Millennium Advisors, LLC",9625
+Mirae Asset Securities (USA) Inc. - Omnibus,9217
+Mirae Asset Securities (USA) Inc. A-C Dealer - House,9498
+Mitsubishi UFJ Trust and Banking Corporation,9741
+"Mizuho Bank, LTD., New York Branch",9678
+Mizuho Securities USA LLC,9536
+Montec Securities LLC,9143
+Morgan Stanley & Co. International PLC,9960
+Morgan Stanley & Co. LLC,9543
+Morgan Stanley Smith Barney LLC,9522
+MUFG Bank Ltd.,9743
+"MUFG Securities (Canada), Ltd.",9775
+MUFG Securities Americas Inc.,9588
+MUFG Securities EMEA PLC,9943
+"National Australia Bank, LTD., New York Branch",9673
+"National Bank of Canada, New York Branch",9523
+"National Financial Services, LLC - FBO Proprietary",9440
+Natixis Securities Americas LLC,9514
+"Natixis, New York Branch",9612
+"Natixis, New York Branch - Omnibus",9015
+Natwest Markets Securities Inc.,9532
+"Nomura Securities International, Inc.",9546
+"Oppenheimer & Co., Inc.",9596
+"Palafox Trading, LLC",9568
+Pershing LLC - Repo Netting Sub Account,9427
+"PNC Bank, National Association",9294
+PNC Capital Markets LLC,9056
+Raymond James & Associates - Institutional,9570
+"Raymond James Associates, Inc.",9553
+"RBC Capital Markets, LLC",9611
+RBC Dominion Securities Inc.,9969
+Robert W. Baird & Co. Incorporated,9582
+"Royal Bank of Canada, WFC Branch",9944
+"Santander Bank, N.A.",9072
+Santander UK PLC,9953
+Santander US Capital Markets LLC,9576
+Scotia Capital (USA) Inc.,9613
+"SG Americas Securities, LLC",9616
+"SMBC Nikko Securities America, Inc.",9644
+SMBC Nikko Securities Inc.,9954
+Societe Generale,9949
+Societe Generale - Paris Self Clearing,9708
+Societe Generale-New York Branch Omnibus,9435
+South Street Securities LLC,9520
+Standard Chartered Bank,9942
+State Street Bank & Trust Company,9645
+State Street Bank & Trust Company Omnibus Account,9517
+"Stifel, Nicolaus & Company, Incorporated",9614
+StoneX Financial Inc,9058
+"Sumitomo Mitsui Banking Corporation, New York Branch",9558
+"Sumitomo Mitsui Trust Bank, Limited",9933
+"TCBI Securities, Inc.",9006
+TD Securities (USA) LLC,9586
+The Bank of New York Mellon,9641
+The Bank of New York Mellon - Omnibus CIL Done-With,9879
+"The Bank of Nova Scotia, New York Agency",9675
+The Huntington National Bank,9414
+"The Norinchukin Bank, New York Branch",9669
+The Northern Trust Company,9053
+TP ICAP Global Markets Americas LLC Broker Account* Broker and Dealer Accounts **,9504
+Tradition Securities and Derivatives LLC Broker Account*,9505
+Truist Bank,9282
+"Truist Securities, Inc.",9761
+"U.S. Bancorp Investments, Inc.",9574
+U.S. Bank National Association,9286
+UBS Financial Services Inc.,9548
+UBS Securities LLC,9555
+"UBS, AG Stamford Branch",9785
+Velocity Clearing LLC,9291
+Wedbush Securities Inc. - Beta Prop Account,9680
+Wedbush Securities Inc. - Sungard - Prop Account,9688
+"Wells Fargo Bank, National Association",9658
+"Wells Fargo Clearing Services, LLC",9544
+"Wells Fargo Securities, LLC",9664
+"Zions Bancorporation, National Association",9524

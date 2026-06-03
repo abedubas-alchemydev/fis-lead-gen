@@ -6,6 +6,7 @@ import logging
 import re
 from datetime import date, datetime, time, timedelta, timezone
 
+import httpx
 from fastapi import APIRouter, BackgroundTasks, Body, Depends, HTTPException, Query, status
 from fastapi.responses import Response
 from pydantic import BaseModel, Field
@@ -61,7 +62,11 @@ from app.services.user_lists import (
     record_visit,
     remove_favorite,
 )
+from app.services.advisor_refresh_orchestrator import _split_officer_name
+from app.services.contact_discovery.apollo_match import ApolloMatchProvider
+from app.services.contact_discovery.gap_fill_common import apply_gap_fill, is_gap_row
 from app.services.contact_discovery.orchestrator import discover_contact
+from app.services.contact_discovery.web_fallback import GapPerson, discover_web_fallback
 from app.services.contacts import (
     ApolloLookupError,
     ContactEnrichmentUnavailableError,
@@ -207,6 +212,11 @@ async def list_broker_dealers(
     max_net_capital: float | None = Query(default=None, ge=0),
     registered_after: date | None = Query(default=None),
     registered_before: date | None = Query(default=None),
+    # Named-segment preset. Resolves to an OR-predicate the per-field filters
+    # can't express (net-capital band OR a business type) — see
+    # ``high_value_participant_filter``. Strict pattern: unknown segments 422
+    # rather than silently returning the unfiltered list.
+    segment: str | None = Query(default=None, pattern="^high_value$"),
     list_mode: str = Query(default="primary", alias="list", pattern="^(primary|alternative|all)$"),
     sort_by: str = Query(default="latest_net_capital"),
     sort_dir: str = Query(default="desc", pattern="^(asc|desc)$"),
@@ -253,6 +263,7 @@ async def list_broker_dealers(
         max_net_capital=max_net_capital,
         registered_after=registered_after,
         registered_before=registered_before,
+        segment=segment,
         list_mode=list_mode,
         sort_by=sort_by,
         sort_dir=sort_dir,
@@ -314,6 +325,27 @@ async def download_focus_report_pdf(
     with pdf_tempdir(prefix="focus_report_endpoint_") as tmp_dir:
         try:
             record = await downloader.download_latest_x17a5_pdf(broker_dealer, tmp_dir)
+        except httpx.HTTPStatusError as exc:
+            # SEC EDGAR throttles our shared Cloud Run egress IP (~10 req/s,
+            # project-wide). Surface a clean, retryable 503 — carrying the
+            # upstream Retry-After when present — instead of leaking the raw
+            # httpx error into the browser tab. The focus-report link opens
+            # this endpoint directly (a plain <a> in the detail page), so
+            # whatever this returns is exactly what the user sees.
+            if exc.response is not None and exc.response.status_code == 429:
+                retry_after = exc.response.headers.get("retry-after", "30")
+                raise HTTPException(
+                    status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+                    detail=(
+                        "SEC EDGAR is rate-limiting requests right now. "
+                        "Please wait a few seconds and try again."
+                    ),
+                    headers={"Retry-After": retry_after},
+                ) from exc
+            raise HTTPException(
+                status_code=status.HTTP_502_BAD_GATEWAY,
+                detail=f"Could not fetch FOCUS report from SEC: {exc}",
+            ) from exc
         except Exception as exc:  # noqa: BLE001
             raise HTTPException(
                 status_code=status.HTTP_502_BAD_GATEWAY,
@@ -519,6 +551,12 @@ class EnrichOfficerRequest(BaseModel):
 
 class EnrichRequestBody(BaseModel):
     officers: list[EnrichOfficerRequest] = Field(default_factory=list)
+    # When True (the user-facing "Generate More Details" button), force a full
+    # re-run past the server-side throttles: Phase 1's 24h cooldown + 90-day
+    # freshness (``enrich_contacts(force=True)``) and Phase 2's 90-day
+    # discovery cache (``discover_contact(use_cache=False)``). Defaults to
+    # False so automated / bulk callers keep their guards.
+    refresh: bool = False
 
 
 @router.post("/{broker_dealer_id}/enrich", response_model=list[ExecutiveContactItem])
@@ -530,29 +568,71 @@ async def enrich_broker_dealer_contacts(
 ) -> list[ExecutiveContactItem]:
     """Enrich executive contacts for a firm.
 
-    Phase 1: run the existing Apollo-based company search (cheap and often
-    catches officers Apollo already has). Phase 2: for each officer the
-    frontend sent that didn't get matched in phase 1, run the multi-provider
-    discovery chain (Apollo match -> Hunter -> Snov) anchored on the firm's
-    website domain.
+    Phase 1: run the Apollo-based company search (cheap, often catches
+    officers Apollo already has). Phase 2: for each officer the frontend sent
+    that didn't get matched in Phase 1, run the multi-provider discovery
+    chain (``settings.contact_discovery_chain`` -- PDL / Apollo / Hunter /
+    Snov / LinkedIn) anchored on the firm's website domain.
 
-    Backward compat: when no ``officers`` list is provided the endpoint
-    behaves exactly as before -- pure company-level search, no per-officer
-    fan-out. That lets the frontend roll out the richer body incrementally.
+    ``refresh=True`` (the user-facing button) forces both phases past their
+    throttles: Phase 1's cooldown + freshness and Phase 2's 90-day cache.
+
+    When an ``officers`` list is supplied a Phase-1
+    ``ContactEnrichmentUnavailableError`` is non-fatal -- Phase 2 still runs,
+    since the chain doesn't depend on the ``contact_enrichment_provider``
+    gate. With no officers the endpoint stays pure company-search and still
+    surfaces 503 when that provider is unavailable.
     """
     broker_dealer = await repository.get_broker_dealer(db, broker_dealer_id)
     if broker_dealer is None:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Broker-dealer not found.")
 
-    try:
-        contacts = await contact_service.enrich_contacts(db, broker_dealer)
-    except ContactEnrichmentUnavailableError as exc:
-        raise HTTPException(status_code=status.HTTP_503_SERVICE_UNAVAILABLE, detail=str(exc)) from exc
-
     officers = list(body.officers) if body else []
+    force = bool(body.refresh) if body else False
+
+    # Did Phase 1 (company search) actually issue Apollo /people/match for this
+    # firm's officers in THIS request? Only the forced button path with Apollo
+    # configured does, and ``force`` guarantees enrich_contacts bypassed its
+    # cooldown/freshness short-circuits, so the calls really went out. When they
+    # did, Phase 2 must skip the chain's ``apollo_match`` provider: it issues the
+    # identical /people/match call, so re-running it for the officers Phase 1
+    # missed just burns a second credit on the same no-match (and would re-admit
+    # cross-firm matches Phase 1's org guard already rejected). hunter + snov —
+    # the email finders Phase 1 never runs — still carry Phase 2.
+    #
+    # When Phase 1 is unavailable (CONTACT_ENRICHMENT_PROVIDER=disabled, the
+    # default) the except branch leaves this False, so ``apollo_match`` stays in
+    # the chain as the *only* Apollo path and nothing is lost.
+    phase1_ran_apollo = False
+    try:
+        contacts = await contact_service.enrich_contacts(db, broker_dealer, force=force)
+        phase1_ran_apollo = (
+            force
+            and settings.contact_enrichment_provider.lower() == "apollo"
+            and bool(settings.apollo_api_key)
+        )
+    except ContactEnrichmentUnavailableError as exc:
+        # Company-search is unavailable. If the caller seeded officers, let
+        # Phase 2 (the discovery chain) carry the request anyway; otherwise
+        # there's nothing left to try, so surface the 503.
+        if not officers:
+            raise HTTPException(status_code=status.HTTP_503_SERVICE_UNAVAILABLE, detail=str(exc)) from exc
+        contacts = await contact_service.list_contacts(db, broker_dealer.id)
+
     if officers:
-        domain = _resolve_domain(broker_dealer)
+        # Anchor the Phase-2 email finders (Hunter/Snov) on the firm's real
+        # email domain when we can infer it from the addresses Phase 1 /
+        # existing contacts already carry. The website host is frequently a
+        # different domain (e.g. website ``aegiscapcorp.com`` vs email
+        # ``aegiscap.com``) and would send those providers hunting the wrong
+        # domain; fall back to it only when no corporate email is known yet.
+        derived_domain = _derive_email_domain(_known_contact_emails(contacts))
+        domain = derived_domain or _resolve_domain(broker_dealer)
         existing_names = {_normalise_name(contact.name) for contact in contacts}
+        # See ``phase1_ran_apollo`` above: drop the redundant second Apollo call.
+        phase2_exclude = (
+            frozenset({ApolloMatchProvider.name}) if phase1_ran_apollo else frozenset()
+        )
         discovered = 0
         for officer in officers:
             entity = _officer_to_entity(officer, broker_dealer, domain)
@@ -560,13 +640,63 @@ async def enrich_broker_dealer_contacts(
                 continue
             if _normalise_name(entity["cache_name"]) in existing_names:
                 continue
-            row = await discover_contact(entity, bd_id=broker_dealer.id, session=db)
+            row = await discover_contact(
+                entity,
+                bd_id=broker_dealer.id,
+                session=db,
+                use_cache=not force,
+                exclude_providers=phase2_exclude,
+            )
             if row is not None:
+                # Commit immediately so the row's apollo_person_id is persisted
+                # before Apollo's async phone-reveal callback races in (the
+                # webhook 200s on a no-match and Apollo won't retry). Use the
+                # entity cache_name (== row.name) so we don't touch the
+                # commit-expired ORM object.
+                await db.commit()
                 discovered += 1
-                existing_names.add(_normalise_name(row.name))
+                existing_names.add(_normalise_name(entity["cache_name"]))
         if discovered:
-            await db.commit()
             contacts = await contact_service.list_contacts(db, broker_dealer.id)
+
+        # PHASE 3 — last-resort web fallback (off by default). For any contact
+        # still missing a channel after the chain, crawl the firm site once +
+        # search public LinkedIn URLs and merge non-destructively. Silent: the
+        # refreshed contact list reflects new channels with no separate client
+        # signal. Re-query the rows fresh so we never touch a commit-expired ORM
+        # object from the Phase-2 loop above.
+        if settings.web_fallback_enabled:
+            wf_rows = list(
+                (
+                    await db.execute(
+                        select(ExecutiveContact)
+                        .where(ExecutiveContact.bd_id == broker_dealer.id)
+                        .order_by(ExecutiveContact.id.asc())
+                    )
+                )
+                .scalars()
+                .all()
+            )
+            wf_people = [
+                GapPerson(row_id=r.id, first_name=split[0], last_name=split[1])
+                for r in wf_rows
+                if is_gap_row(r) and (split := _split_officer_name(r.name)) is not None
+            ]
+            if wf_people:
+                wf_results = await discover_web_fallback(
+                    domain=domain,
+                    org_name=broker_dealer.name,
+                    people=wf_people,
+                )
+                wf_changed = False
+                for wf_row_id, wf_merged in wf_results.items():
+                    row = await db.get(ExecutiveContact, wf_row_id)
+                    if row is not None and apply_gap_fill(row, wf_merged):
+                        row.enriched_at = datetime.now(timezone.utc)
+                        wf_changed = True
+                if wf_changed:
+                    await db.commit()
+                    contacts = await contact_service.list_contacts(db, broker_dealer.id)
 
     return [ExecutiveContactItem.model_validate(item) for item in contacts]
 
@@ -632,6 +762,58 @@ def _resolve_domain(broker_dealer: BrokerDealer) -> str | None:
     return candidate or None
 
 
+# Free / personal mailbox providers never represent a firm's email domain, so a
+# contact's personal Gmail can't hijack the Phase-2 domain anchor.
+_FREE_EMAIL_DOMAINS = frozenset(
+    {
+        "gmail.com", "googlemail.com", "yahoo.com", "ymail.com",
+        "outlook.com", "hotmail.com", "live.com", "msn.com",
+        "aol.com", "icloud.com", "me.com", "mac.com",
+        "protonmail.com", "proton.me", "gmx.com", "mail.com",
+    }
+)
+
+
+def _known_contact_emails(contacts: list[ExecutiveContact]) -> list[str]:
+    """Every email already on a firm's contacts -- the scalar ``email`` column
+    plus each ``emails`` JSONB entry's ``value``."""
+    out: list[str] = []
+    for contact in contacts:
+        scalar = getattr(contact, "email", None)
+        if scalar:
+            out.append(str(scalar))
+        array = getattr(contact, "emails", None)
+        if isinstance(array, list):
+            out.extend(
+                str(entry["value"])
+                for entry in array
+                if isinstance(entry, dict) and entry.get("value")
+            )
+    return out
+
+
+def _derive_email_domain(emails: list[str]) -> str | None:
+    """Most common corporate email domain among ``emails`` (or ``None``).
+
+    A firm's website host often differs from its email-sending domain (e.g.
+    website ``aegiscapcorp.com`` vs email ``aegiscap.com``). When real emails
+    are already known, their domain is a far better anchor for the Phase-2
+    email finders (Hunter/Snov) than the website host. Free mailbox providers
+    are ignored; ties break on the domain name so the result is deterministic.
+    """
+    counts: dict[str, int] = {}
+    for email in emails:
+        if not email or "@" not in email:
+            continue
+        domain = email.rsplit("@", 1)[1].strip().lower().rstrip(".")
+        if not domain or domain in _FREE_EMAIL_DOMAINS:
+            continue
+        counts[domain] = counts.get(domain, 0) + 1
+    if not counts:
+        return None
+    return max(sorted(counts), key=lambda d: counts[d])
+
+
 def _officer_to_entity(
     officer: EnrichOfficerRequest,
     broker_dealer: BrokerDealer,
@@ -644,8 +826,15 @@ def _officer_to_entity(
     name) so the endpoint can skip it without a provider round-trip.
     """
     if officer.type == "person":
-        first = (officer.first_name or "").strip()
-        last = (officer.last_name or "").strip()
+        # Title-case the name. The frontend lowercases first/last
+        # (parseFinraName), but the orchestrator persists the contact's
+        # display name straight from these fields, and the endpoint's dedup
+        # skip-set compares ``cache_name`` against the Phase-1 rows (already
+        # title-cased via ``_parse_finra_person_name``). Both must agree, and
+        # the persisted name must render cleanly. Apollo matching is
+        # case-insensitive, so the provider query is unaffected.
+        first = (officer.first_name or "").strip().title()
+        last = (officer.last_name or "").strip().title()
         if not first or not last:
             return None
         return {
@@ -683,11 +872,17 @@ async def extract_focus_ceo(
     _: AuthenticatedUser = Depends(_require_master_list),
     db: AsyncSession = Depends(get_db_session),
 ) -> FocusCeoExtractionResponse:
-    """On-demand extraction of CEO contact info and net capital from the latest FOCUS Report PDF.
+    """On-demand (manual / ops) extraction of the FOCUS filing contact + net
+    capital from the latest X-17A-5 PDF.
 
     Downloads the most recent X-17A-5 filing for this broker-dealer, sends it to
-    Gemini for structured extraction, and persists the CEO as an ExecutiveContact
-    with source="focus_report".
+    Gemini for structured extraction, and persists the contact person as an
+    ExecutiveContact with source="focus_report".
+
+    No longer backs a FE button — the detail-page "Extract FOCUS Data" button
+    was retired once bulk coverage moved into the gap-fill backfill (the
+    refresh-all orchestrator's ``broker_dealer_focus_contact`` sub-pipeline).
+    Kept as the single-firm manual trigger for ops / re-extraction.
     """
     broker_dealer = await repository.get_broker_dealer(db, broker_dealer_id)
     if broker_dealer is None:
@@ -1080,13 +1275,12 @@ async def trigger_health_check(
                 broker_dealer.types_of_business_other = enriched_record.types_of_business_other
                 changes.append("types_of_business_other")
 
-    # Re-apply classification logic
-    from app.services.classification import determine_clearing_classification, classify_niche_restricted
-
-    new_classification = determine_clearing_classification(broker_dealer.firm_operations_text)
-    if broker_dealer.clearing_classification != new_classification:
-        broker_dealer.clearing_classification = new_classification
-        changes.append("clearing_classification")
+    # Re-apply the niche-restricted flag only. clearing_classification is NOT
+    # derived here anymore: the old determine_clearing_classification() regex
+    # was inverted and only returned "needs_review", clobbering good labels on
+    # every refresh. The clearing label is owned by the FOCUS-extraction +
+    # clearing_validator path and the batch classifier.
+    from app.services.classification import classify_niche_restricted
 
     new_niche = classify_niche_restricted(broker_dealer.types_of_business)
     if broker_dealer.is_niche_restricted != new_niche:

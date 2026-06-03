@@ -5,6 +5,7 @@ from app.models.auth import Account, AuthSession, AuthUser, Verification
 from app.models.broker_dealer import BrokerDealer
 from app.models.chatbot_conversation import ChatbotConversation
 from app.models.chatbot_firm_embedding import ChatbotFirmEmbedding
+from app.models.chatbot_learned_term import ChatbotLearnedTerm
 from app.models.chatbot_message import ChatbotMessage
 from app.models.clearing_agency_membership import ClearingAgencyMembership
 from app.models.clearing_arrangement import ClearingArrangement
@@ -29,6 +30,7 @@ from app.models.pipeline_run import PipelineRun
 from app.models.reporting_owner import ReportingOwner
 from app.models.scoring_setting import ScoringSetting
 from app.models.user_activity import UserActivity
+from app.models.user_outreach_settings import UserOutreachSettings
 from app.models.user_visit import UserVisit
 from app.models.vault_folder import VaultFolder
 from app.models.vault_folder_chunk import VaultFolderChunk
@@ -45,6 +47,7 @@ __all__ = [
     "BrokerDealer",
     "ChatbotConversation",
     "ChatbotFirmEmbedding",
+    "ChatbotLearnedTerm",
     "ChatbotMessage",
     "ClearingAgencyMembership",
     "ClearingArrangement",
@@ -70,6 +73,7 @@ __all__ = [
     "ReportingOwner",
     "ScoringSetting",
     "UserActivity",
+    "UserOutreachSettings",
     "UserVisit",
     "VaultFolder",
     "VaultFolderChunk",

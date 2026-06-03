@@ -20,9 +20,12 @@ from app.models.financial_metric import FinancialMetric
 from app.models.pipeline_run import PipelineRun
 from app.models.scoring_setting import ScoringSetting
 from app.schemas.broker_dealer import BrokerDealerListMeta, BrokerDealerListResponse
+from app.services.clearing_auto_group import (
+    auto_group_long_tail,
+    expand_auto_group_predicate,
+    load_rejected_signatures,
+)
 from app.services.clearing_consolidation import (
-    consolidated_label_set,
-    expand_filter_predicate,
     load_providers as load_consolidation_providers,
 )
 from app.services.scoring import CompetitorLookup, calculate_lead_score, classify_lead_priority
@@ -44,7 +47,95 @@ from app.services.unknown_reasons import (
 # that the type is shared rather than firm-specific noise.
 TYPES_OF_BUSINESS_MIN_COUNT = 2
 
+# "High Value Participant" segment definition — shared by the dashboard KPI
+# tile (``count_high_value_participants``), the Top Prospects card, and the
+# master-list ``?segment=high_value`` deep-link so the headline count and the
+# drill-down list never drift. A firm qualifies when EITHER:
+#   • its latest net capital sits in the [$5M, $100M] band, OR
+#   • it reports the OTC corporate-equity retailing business type.
+# The business-type arm was added 2026-06-03 (client request): these
+# retail-facing OTC equity dealers are high-value prospects regardless of
+# net-capital size. ``HIGH_VALUE_BUSINESS_TYPES`` holds the canonical FINRA
+# Form BD label exactly as it appears in the master-list "Types of Business"
+# filter (the ~1,093-firm option) — the one-off free-text "Other - ..."
+# variant is intentionally excluded so the segment matches what the user picks.
+HIGH_VALUE_NET_CAPITAL_MIN = 5_000_000
+HIGH_VALUE_NET_CAPITAL_MAX = 100_000_000
+HIGH_VALUE_BUSINESS_TYPES = (
+    "Broker or dealer retailing corporate equity securities over-the-counter",
+)
 
+
+def high_value_participant_filter():
+    """SQLAlchemy predicate for the High Value Participant segment.
+
+    Net-capital band OR the OTC corporate-equity retailing business type (see
+    the ``HIGH_VALUE_*`` constants). ``between`` is inclusive on both ends and
+    NULL net-capital never satisfies it, matching the prior band-only rule.
+    ``?|`` is the JSONB any-of operator — it returns false (never errors) on
+    the JSONB scalar ``'null'`` rows the nullable column can hold, so no
+    ``jsonb_typeof`` guard is needed (unlike ``jsonb_array_elements_text``).
+    """
+    return or_(
+        BrokerDealer.latest_net_capital.between(
+            HIGH_VALUE_NET_CAPITAL_MIN, HIGH_VALUE_NET_CAPITAL_MAX
+        ),
+        BrokerDealer.types_of_business.op("?|")(
+            cast(list(HIGH_VALUE_BUSINESS_TYPES), ARRAY(String))
+        ),
+    )
+
+
+def pick_authoritative_arrangement(
+    arrangements: list[ClearingArrangement],
+) -> ClearingArrangement | None:
+    """Pick the arrangement that should drive a BD's ``current_clearing_*`` rollup.
+
+    Prefer the most-recent *verified* row (``is_verified=True`` — set by the
+    FINRA reconciler or the clearing validator) over a newer-but-unverified raw
+    FOCUS extraction, so a fresh re-extraction can't silently clobber a
+    reconciled/confirmed label. Falls back to the most-recent row overall when
+    nothing is verified. Recency is ``(filing_year, id)`` with a NULL-safe
+    coercion so a stray missing year can't raise.
+    """
+    if not arrangements:
+        return None
+    verified = [a for a in arrangements if a.is_verified]
+    pool = verified or list(arrangements)
+    return max(
+        pool,
+        key=lambda a: (
+            a.filing_year if a.filing_year is not None else -1,
+            a.id if a.id is not None else -1,
+        ),
+    )
+
+
+def apply_clearing_rollup(
+    bd: BrokerDealer, arrangement: ClearingArrangement | None
+) -> None:
+    """Copy an arrangement's clearing fields onto a BD's rollup columns, or
+    clear them when there is no arrangement. Shared by the per-firm rollup in
+    ``pipeline.py`` and the batch ``refresh_clearing_rollups`` so the two can't
+    drift apart."""
+    if arrangement is None:
+        bd.current_clearing_partner = None
+        bd.current_clearing_type = None
+        bd.current_clearing_is_competitor = False
+        bd.current_clearing_source_filing_url = None
+        bd.current_clearing_extraction_confidence = None
+        bd.last_audit_report_date = None
+        return
+    bd.current_clearing_partner = arrangement.clearing_partner
+    bd.current_clearing_type = arrangement.clearing_type
+    bd.current_clearing_is_competitor = bool(arrangement.is_competitor)
+    bd.current_clearing_source_filing_url = arrangement.source_filing_url
+    bd.current_clearing_extraction_confidence = (
+        float(arrangement.extraction_confidence)
+        if arrangement.extraction_confidence is not None
+        else None
+    )
+    bd.last_audit_report_date = arrangement.report_date
 
 
 ALLOWED_SORT_FIELDS = {
@@ -246,6 +337,7 @@ class BrokerDealerRepository:
         max_net_capital: float | None = None,
         registered_after: date | None = None,
         registered_before: date | None = None,
+        segment: str | None = None,
     ) -> BrokerDealerListResponse:
         filters = []
         if search:
@@ -292,12 +384,12 @@ class BrokerDealerRepository:
             filters.append(BrokerDealer.lead_priority.in_(lead_priorities))
 
         if clearing_partners:
-            # Selected labels are canonical short forms ("Pershing", "Apex"),
-            # not raw extracted strings. Expand each label back to the set
-            # of raw values that consolidate to it, then filter by
-            # `current_clearing_partner IN (raw_values)`. Reuses the same
-            # consolidate function the dropdown uses, so what the user sees
-            # and what they filter by are guaranteed to agree.
+            # Selected labels are display labels ("Pershing", or an
+            # auto-grouped base name like "Acme Securities"), not raw
+            # extracted strings. Expand each back to the set of raw values
+            # in its group, then filter by `current_clearing_partner IN
+            # (raw_values)`. Reuses the same grouping the dropdown renders,
+            # so what the user sees and what they filter by agree.
             distinct_raw_stmt = (
                 select(BrokerDealer.current_clearing_partner)
                 .where(BrokerDealer.current_clearing_partner.is_not(None))
@@ -307,11 +399,13 @@ class BrokerDealerRepository:
                 (await db.execute(distinct_raw_stmt)).scalars().all()
             )
             providers = await load_consolidation_providers(db)
-            predicate = expand_filter_predicate(
+            rejected = await load_rejected_signatures(db)
+            predicate = expand_auto_group_predicate(
                 clearing_partners,
                 providers,
                 BrokerDealer.current_clearing_partner,
                 distinct_raw,
+                rejected,
             )
             if predicate is not None:
                 filters.append(predicate)
@@ -339,6 +433,14 @@ class BrokerDealerRepository:
             filters.append(BrokerDealer.registration_date >= registered_after)
         if registered_before is not None:
             filters.append(BrokerDealer.registration_date <= registered_before)
+
+        # Named-segment preset (currently just the dashboard "High Value
+        # Participants" tile). ANDs with every other filter, so a user can
+        # narrow the segment by state / clearing type / etc. once they land on
+        # the list. Unknown values are ignored here; the endpoint's Query
+        # ``pattern`` is the gate that rejects anything but a known segment.
+        if segment == "high_value":
+            filters.append(high_value_participant_filter())
 
         if list_mode == "primary":
             filters.append(BrokerDealer.is_deficient.is_(False))
@@ -539,14 +641,13 @@ class BrokerDealerRepository:
         return int((await db.execute(stmt)).scalar_one())
 
     async def count_high_value_participants(self, db: AsyncSession) -> int:
-        # "High Value" = firms with latest_net_capital in the [$5M, $100M] band
-        # (business rule). Decoupled from the ACG ICP composite scorer, which
-        # still drives lead_priority hot/warm/cold for the master list and the
-        # Top Prospects card.
-        stmt = select(func.count(BrokerDealer.id)).where(
-            BrokerDealer.latest_net_capital >= 5_000_000,
-            BrokerDealer.latest_net_capital <= 100_000_000,
-        )
+        # "High Value" = net-capital [$5M, $100M] band OR the OTC corporate-
+        # equity retailing business type (see ``high_value_participant_filter``).
+        # Decoupled from the ACG ICP composite scorer, which still drives
+        # lead_priority hot/warm/cold for the master list and the Top Prospects
+        # card. Stays in lockstep with the ``?segment=high_value`` list filter
+        # so the KPI count and the drill-down list always agree.
+        stmt = select(func.count(BrokerDealer.id)).where(high_value_participant_filter())
         return int((await db.execute(stmt)).scalar_one())
 
     async def list_states(self, db: AsyncSession) -> list[str]:
@@ -562,7 +663,11 @@ class BrokerDealerRepository:
         / "BNY PERSHING"). The dropdown groups them via
         ``CompetitorProvider`` aliases into one entry per canonical firm
         (using ``display_name`` as the short label). Long-tail raw values
-        that don't match any provider are kept as their trimmed text.
+        that don't match any provider are then auto-grouped by similarity
+        (``clearing_auto_group``) so a base name and its longer variants
+        ("Acme Securities" / "Acme Securities Trust Co") collapse into one
+        entry under the shorter base name; anything still distinct keeps its
+        own trimmed text.
         """
         stmt = (
             select(BrokerDealer.current_clearing_partner)
@@ -571,7 +676,9 @@ class BrokerDealerRepository:
         )
         rows = (await db.execute(stmt)).scalars().all()
         providers = await load_consolidation_providers(db)
-        return consolidated_label_set(list(rows), providers)
+        rejected = await load_rejected_signatures(db)
+        groups = auto_group_long_tail(list(rows), providers, rejected)
+        return sorted(groups.keys(), key=lambda label: label.lower())
 
     async def list_types_of_business(self, db: AsyncSession) -> list[dict[str, object]]:
         """Distinct types-of-business across all firms with per-type counts.
@@ -665,33 +772,18 @@ class BrokerDealerRepository:
 
     async def refresh_clearing_rollups(self, db: AsyncSession) -> None:
         broker_dealers = (await db.execute(select(BrokerDealer).order_by(BrokerDealer.id.asc()))).scalars().all()
-        arrangements = (await db.execute(select(ClearingArrangement).order_by(ClearingArrangement.filing_year.desc()))).scalars().all()
+        arrangements = (await db.execute(select(ClearingArrangement))).scalars().all()
 
-        latest_by_bd: dict[int, ClearingArrangement] = {}
+        # Group every arrangement per BD, then pick the authoritative one
+        # (verified-preferred, then most-recent) via the shared helper so this
+        # batch path and pipeline.py's per-firm rollup stay in lock-step.
+        by_bd: dict[int, list[ClearingArrangement]] = {}
         for arrangement in arrangements:
-            current = latest_by_bd.get(arrangement.bd_id)
-            if current is None or arrangement.filing_year > current.filing_year:
-                latest_by_bd[arrangement.bd_id] = arrangement
+            by_bd.setdefault(arrangement.bd_id, []).append(arrangement)
 
         for broker_dealer in broker_dealers:
-            latest = latest_by_bd.get(broker_dealer.id)
-            if latest is None:
-                broker_dealer.current_clearing_partner = None
-                broker_dealer.current_clearing_type = None
-                broker_dealer.current_clearing_is_competitor = False
-                broker_dealer.current_clearing_source_filing_url = None
-                broker_dealer.current_clearing_extraction_confidence = None
-                broker_dealer.last_audit_report_date = None
-                continue
-
-            broker_dealer.current_clearing_partner = latest.clearing_partner
-            broker_dealer.current_clearing_type = latest.clearing_type
-            broker_dealer.current_clearing_is_competitor = bool(latest.is_competitor)
-            broker_dealer.current_clearing_source_filing_url = latest.source_filing_url
-            broker_dealer.current_clearing_extraction_confidence = (
-                float(latest.extraction_confidence) if latest.extraction_confidence is not None else None
-            )
-            broker_dealer.last_audit_report_date = latest.report_date
+            authoritative = pick_authoritative_arrangement(by_bd.get(broker_dealer.id, []))
+            apply_clearing_rollup(broker_dealer, authoritative)
 
         await db.flush()
 

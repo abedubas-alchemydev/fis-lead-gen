@@ -1,6 +1,7 @@
 "use client";
 
 import { useCallback, useEffect, useMemo, useState } from "react";
+import clsx from "clsx";
 
 import {
   AlertCircle,
@@ -17,6 +18,7 @@ import {
   rejectClearingMembership,
 } from "@/lib/api";
 import { agencyLabel } from "@/components/master-list/detail/clearing-membership-helpers";
+import { buttonBase, buttonSizes } from "@/components/ui/button";
 import { Pill } from "@/components/ui/pill";
 import type { ClearingMembershipReviewRow } from "@/lib/types";
 
@@ -192,7 +194,11 @@ export function ClearingMembershipsAdminClient() {
                         type="button"
                         onClick={() => void act(c.id, "approve")}
                         disabled={isActing}
-                        className="inline-flex items-center gap-1.5 rounded-[8px] border border-[rgba(16,185,129,0.25)] bg-[rgba(16,185,129,0.12)] px-3 py-1.5 text-[12px] font-semibold text-[var(--pill-green-text,#047857)] transition hover:bg-[rgba(16,185,129,0.18)] disabled:cursor-not-allowed disabled:opacity-50"
+                        className={clsx(
+                          buttonBase,
+                          buttonSizes.sm,
+                          "border border-[rgba(16,185,129,0.25)] bg-[rgba(16,185,129,0.12)] text-[var(--pill-green-text,#047857)] hover:bg-[rgba(16,185,129,0.18)]",
+                        )}
                       >
                         {isActing ? (
                           <Loader2 className="h-3.5 w-3.5 animate-spin" aria-hidden />
@@ -205,7 +211,11 @@ export function ClearingMembershipsAdminClient() {
                         type="button"
                         onClick={() => void act(c.id, "reject")}
                         disabled={isActing}
-                        className="inline-flex items-center gap-1.5 rounded-[8px] border border-[rgba(239,68,68,0.25)] bg-[rgba(239,68,68,0.08)] px-3 py-1.5 text-[12px] font-semibold text-[var(--pill-red-text,#b91c1c)] transition hover:bg-[rgba(239,68,68,0.14)] disabled:cursor-not-allowed disabled:opacity-50"
+                        className={clsx(
+                          buttonBase,
+                          buttonSizes.sm,
+                          "border border-[rgba(239,68,68,0.25)] bg-[rgba(239,68,68,0.08)] text-[var(--pill-red-text,#b91c1c)] hover:bg-[rgba(239,68,68,0.14)]",
+                        )}
                       >
                         <XCircle className="h-3.5 w-3.5" aria-hidden />
                         Reject

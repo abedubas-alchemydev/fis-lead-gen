@@ -73,7 +73,7 @@ class PdfProcessorService:
         self._vision_ocr = VisionOCR()
 
     async def process_downloaded_pdf(
-        self, pdf_record: DownloadedPdfRecord
+        self, pdf_record: DownloadedPdfRecord, *, signals_text: str | None = None
     ) -> ClearingExtractionResult:
         # OCR pre-pass: scanned-image PDFs (pdfplumber < 50 chars) get
         # routed through Cloud Vision before the LLM call; everything
@@ -87,20 +87,24 @@ class PdfProcessorService:
         if pdf_bytes:
             plumber_text = await asyncio.to_thread(_extract_pdfplumber_text, pdf_bytes)
             if len(plumber_text.strip()) < _PDFPLUMBER_MIN_TEXT_CHARS:
-                return await self._extract_via_ocr(pdf_record, pdf_bytes)
+                return await self._extract_via_ocr(
+                    pdf_record, pdf_bytes, signals_text=signals_text
+                )
 
         if not settings.llm_use_files_api:
             # Legacy default-off path: byte-for-byte unchanged from today.
             # The LLM parser consumes ``pdf_record.bytes_base64`` and inlines
             # the PDF into the provider call.
-            return await self.llm_parser.extract_structured_data(pdf_record)
+            return await self.llm_parser.extract_structured_data(
+                pdf_record, signals_text=signals_text
+            )
 
         # Files-API path (ADR-0001 phase 2). The PDF is on disk at
         # ``local_document_path`` (streamed there by ``PdfDownloaderService``)
         # and ``bytes_base64`` is empty by construction. The LLM provider
         # uploads the PDF via its Files API and references it by file_id —
         # no inline bytes cross the wire.
-        return await self._extract_via_files_api(pdf_record)
+        return await self._extract_via_files_api(pdf_record, signals_text=signals_text)
 
     @staticmethod
     def _read_pdf_bytes(pdf_record: DownloadedPdfRecord) -> bytes | None:
@@ -132,7 +136,11 @@ class PdfProcessorService:
         return None
 
     async def _extract_via_ocr(
-        self, pdf_record: DownloadedPdfRecord, pdf_bytes: bytes
+        self,
+        pdf_record: DownloadedPdfRecord,
+        pdf_bytes: bytes,
+        *,
+        signals_text: str | None = None,
     ) -> ClearingExtractionResult:
         """Run Vision OCR then dispatch to the OCR-aware LLM extractor.
 
@@ -166,10 +174,11 @@ class PdfProcessorService:
             pdf_record,
             ocr_text=ocr_text,
             pdf_bytes_base64=base64.b64encode(pdf_bytes).decode("ascii"),
+            signals_text=signals_text,
         )
 
     async def _extract_via_files_api(
-        self, pdf_record: DownloadedPdfRecord
+        self, pdf_record: DownloadedPdfRecord, *, signals_text: str | None = None
     ) -> ClearingExtractionResult:
         accession_number = pdf_record.accession_number
         local_path = (
@@ -187,7 +196,7 @@ class PdfProcessorService:
                 ),
             )
 
-        prompt = self.llm_parser.build_prompt()
+        prompt = self.llm_parser.build_prompt_with_signals(signals_text)
         provider = settings.llm_provider
 
         if provider == "gemini":
@@ -241,7 +250,11 @@ class PdfProcessorService:
         # missing-partner-when-required, and unknown rows land tagged
         # ``needs_review`` rather than silently bypassing the queue.
         status = "parsed"
-        partner_required = extraction.clearing_type != "self_clearing"
+        # Only partner-naming types (fully_disclosed/omnibus) require a partner.
+        # self_clearing and non_carrying are partnerless by nature, so a missing
+        # partner must not flag them for review; the clearing_validator owns the
+        # capital/membership contradiction check.
+        partner_required = extraction.clearing_type in ("fully_disclosed", "omnibus")
         if (
             extraction.confidence_score < settings.clearing_extraction_min_confidence
             or (partner_required and not extraction.clearing_partner)

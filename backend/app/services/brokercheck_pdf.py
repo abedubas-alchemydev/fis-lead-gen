@@ -39,7 +39,7 @@ import asyncio
 import io
 import logging
 import re
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import date, datetime
 from typing import Optional
 
@@ -130,6 +130,29 @@ _PAGE_HARD_CAP = 80
 
 
 @dataclass(frozen=True)
+class IntroducingArrangementRecord:
+    """One Form BD Item 12 "Introducing Arrangements" entry.
+
+    This is the authoritative current-state record of who clears for an
+    introducing broker — the FINRA reconciler uses it to correct the
+    FOCUS-derived ``current_clearing_partner`` (see
+    ``services/finra_reconciler.py``). ``business_name`` is the clearing
+    firm the customers are introduced to; ``effective_date`` is when the
+    arrangement was filed on Form BD (may predate our latest FOCUS report
+    by years — FINRA is still authoritative). ``statement`` is the
+    section-level "This firm does refer or introduce customers …" line,
+    denormalized onto each record to mirror the ``introducing_arrangements``
+    table shape.
+    """
+
+    business_name: str
+    crd: Optional[str] = None
+    effective_date: Optional[date] = None
+    description: Optional[str] = None
+    statement: Optional[str] = None
+
+
+@dataclass(frozen=True)
 class FormBdDetail:
     """Form BD fields extracted from the BrokerCheck Detailed Report PDF.
 
@@ -146,6 +169,13 @@ class FormBdDetail:
     were added 2026-05-04 to fill three previously-empty UI sections on the
     firm-detail page. Each defaults to None so pre-existing call sites that
     construct ``FormBdDetail`` without these fields keep working.
+
+    ``introducing_arrangements`` (added 2026-05-29) carries the parsed Form BD
+    Item 12 introducing entries — empty list when the firm files
+    "does not refer or introduce customers" (self-clearing / no introducing
+    relationship) OR when the section is absent. Defaults via
+    ``field(default_factory=list)`` so existing ``FormBdDetail`` call sites
+    that don't pass it keep working.
     """
 
     crd: str
@@ -156,6 +186,9 @@ class FormBdDetail:
     types_of_business_other: Optional[str] = None
     registration_date: Optional[date] = None
     formation_date: Optional[date] = None
+    introducing_arrangements: list[IntroducingArrangementRecord] = field(
+        default_factory=list
+    )
 
 
 async def fetch_form_bd_detail(crd: str) -> Optional[FormBdDetail]:
@@ -198,6 +231,9 @@ def _parse_form_bd_pdf(crd: str, pdf_bytes: bytes) -> FormBdDetail:
         ),
         registration_date=_parse_registration_date(sections, full_text),
         formation_date=_parse_formation_date(sections, full_text),
+        introducing_arrangements=_parse_introducing_arrangements(
+            sections.get("Introducing Arrangements", "")
+        ),
     )
 
 
@@ -433,6 +469,118 @@ def _parse_firm_operations(sections: dict[str, str]) -> Optional[str]:
     if _INFO_NOT_AVAILABLE.search(body):
         return None
     return body
+
+
+# ---------------------------------------------------------------------------
+# Introducing Arrangements (Form BD Item 12 — the authoritative current
+# clearing relationship for introducing brokers)
+# ---------------------------------------------------------------------------
+
+# Section-level statement lines. FINRA prints exactly one of these directly
+# under the "Introducing Arrangements" header.
+_INTRO_NEGATIVE_RE = re.compile(
+    r"This firm does not refer or introduce customers", re.IGNORECASE
+)
+_INTRO_POSITIVE_RE = re.compile(
+    r"This firm does refer or introduce customers[^\n]*", re.IGNORECASE
+)
+# A US date as FINRA formats Effective Date / etc. (mm/dd/yyyy).
+_INTRO_EFFECTIVE_RE = re.compile(r"Effective Date:\s*(\d{1,2}/\d{1,2}/\d{4})")
+_INTRO_CRD_RE = re.compile(r"CRD #:\s*(\d+)")
+# Lines of FINRA per-page boilerplate that can survive ``_normalize`` when
+# pdfplumber kerns the page footer into a content line at a page boundary
+# (the ``©`` often renders as the U+FFFD replacement char, so ``_PAGE_FOOTER``
+# misses it). Strip them out of a captured Description body.
+_INTRO_BOILERPLATE_RE = re.compile(
+    r"(?im)^.*(?:FINRA\. All rights reserved|Report about |www\.finra\.org).*$"
+)
+
+
+def _parse_us_date(value: str) -> Optional[date]:
+    try:
+        return datetime.strptime(value.strip(), "%m/%d/%Y").date()
+    except (ValueError, AttributeError):
+        return None
+
+
+def _parse_introducing_arrangements(
+    section_text: str,
+) -> list[IntroducingArrangementRecord]:
+    """Parse the Form BD Item 12 "Introducing Arrangements" section.
+
+    Returns one record per introducing entry. Returns ``[]`` when the firm
+    files "does not refer or introduce customers" (no introducing
+    relationship — genuinely self-clearing or no customers) OR when the
+    section is empty/absent.
+
+    Layout (verified against live BrokerCheck PDFs, e.g. CRD 322213 ORTEX →
+    Alpaca)::
+
+        Introducing Arrangements
+        This firm does refer or introduce customers to other brokers and dealers.
+        Name: ALPACA SECURITIES LLC
+        CRD #: 288202
+        Business Address: ...
+        Effective Date: 03/19/2026
+        Description: THE FIRM CLEARS ALL TRANSACTIONS ON A FULLY DISCLOSED BASIS
+        WITH ALPACA SECURITIES LLC
+
+    Entries are anchored on ``Name:`` lines; everything between two anchors
+    (or the last anchor and section end) is one entry. The section is bounded
+    by the splitter at the next sibling header ("Industry Arrangements"), so
+    the same clearing-firm block that FINRA repeats under Industry
+    Arrangements is not double-counted here.
+    """
+    if not section_text or _INTRO_NEGATIVE_RE.search(section_text):
+        return []
+
+    statement_match = _INTRO_POSITIVE_RE.search(section_text)
+    statement = statement_match.group(0).strip() if statement_match else None
+
+    records: list[IntroducingArrangementRecord] = []
+    # Split into per-entry chunks anchored on each "Name:" line.
+    chunks = re.split(r"(?m)(?=^Name:\s)", section_text)
+    for chunk in chunks:
+        name_match = re.match(r"Name:\s*([^\n]+?)\s*(?:\n|$)", chunk)
+        if not name_match:
+            continue
+        business_name = name_match.group(1).strip()
+        if not business_name:
+            continue
+
+        crd_match = _INTRO_CRD_RE.search(chunk)
+        date_match = _INTRO_EFFECTIVE_RE.search(chunk)
+
+        description: Optional[str] = None
+        desc_match = re.search(r"Description:\s*(.+)", chunk, re.DOTALL)
+        if desc_match:
+            raw = _INTRO_BOILERPLATE_RE.sub("", desc_match.group(1))
+            # Cut at the next section/sibling header that bled into the body
+            # when FINRA didn't print a hard break (pdfplumber runs the
+            # description straight into the following section's first line).
+            for terminator in (
+                "Firm Operations",
+                "Industry Arrangements",
+                "Control Persons",
+                "Organization Affiliates",
+            ):
+                cut = raw.find(terminator)
+                if cut != -1:
+                    raw = raw[:cut]
+            collapsed = " ".join(raw.split())
+            description = collapsed or None
+
+        records.append(
+            IntroducingArrangementRecord(
+                business_name=business_name,
+                crd=crd_match.group(1) if crd_match else None,
+                effective_date=_parse_us_date(date_match.group(1)) if date_match else None,
+                description=description,
+                statement=statement,
+            )
+        )
+
+    return records
 
 
 # ---------------------------------------------------------------------------

@@ -72,6 +72,13 @@ class DiscoveryResult:
     (Apollo, Hunter, Snov) leave them as the empty default and rely on
     the schema's read-time synthesis to project the scalar ``email`` /
     ``phone`` into a 1-element list on the wire.
+
+    ``apollo_person_id`` is the MongoDB-style id from Apollo's sync
+    ``/people/match`` response (e.g. ``"587cf802f65125cad923a266"``).
+    Only set by ``apollo_match``; other providers leave it ``None``.
+    Persisted onto the contact row so the async phone-reveal webhook
+    (whose payload only carries this id, not our row id) can locate
+    the row later.
     """
 
     email: str | None
@@ -82,6 +89,7 @@ class DiscoveryResult:
     raw: dict[str, Any]
     emails: list[EmailHit] = field(default_factory=list)
     phones: list[PhoneHit] = field(default_factory=list)
+    apollo_person_id: str | None = None
 
 
 class ContactDiscoveryProvider(ABC):

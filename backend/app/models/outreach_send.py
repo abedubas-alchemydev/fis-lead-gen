@@ -36,9 +36,10 @@ class OutreachSend(Base):
         nullable=False,
         index=True,
     )
-    # Polymorphic firm FKs: exactly one of broker_dealer_id, advisor_id,
+    # Polymorphic firm FKs: at most one of broker_dealer_id, advisor_id,
     # institutional_investor_id is non-null per row. Enforced at the DB
-    # via ``ck_outreach_sends_exactly_one_firm`` (migration 0046).
+    # via ``ck_outreach_sends_at_most_one_firm`` (relaxed from = 1 to
+    # <= 1 in migration 0063 so adhoc rows can set zero firm FKs).
     broker_dealer_id: Mapped[int | None] = mapped_column(
         Integer,
         ForeignKey("broker_dealers.id", ondelete="CASCADE"),
@@ -57,9 +58,11 @@ class OutreachSend(Base):
         nullable=True,
         index=True,
     )
-    # Polymorphic contact FKs: exactly one of contact_id (executive),
+    # Polymorphic contact FKs: at most one of contact_id (executive),
     # advisor_contact_id, investor_contact_id is non-null per row.
-    # Enforced via ``ck_outreach_sends_exactly_one_contact``.
+    # Enforced via ``ck_outreach_sends_at_most_one_contact`` (relaxed
+    # from = 1 to <= 1 in migration 0063 so adhoc rows can set zero
+    # contact FKs and carry ``recipient_email`` instead).
     contact_id: Mapped[int | None] = mapped_column(
         Integer,
         ForeignKey("executive_contacts.id", ondelete="CASCADE"),
@@ -117,8 +120,39 @@ class OutreachSend(Base):
     # ``failed_recipient``.
     status: Mapped[str] = mapped_column(String(16), nullable=False)
     error: Mapped[str | None] = mapped_column(Text, nullable=True)
+    # Adhoc recipient fields. Populated only when all six contact/firm
+    # FKs are NULL (the user sent to a free-form email with no firm
+    # record in our system). For contact-based rows these stay NULL and
+    # the read path pulls the address from the joined contact row.
+    # Added in migration 0063.
+    recipient_email: Mapped[str | None] = mapped_column(
+        String(320), nullable=True
+    )
+    recipient_name: Mapped[str | None] = mapped_column(
+        String(255), nullable=True
+    )
+    # Multi-recipient compose-send (POST /outreach/compose-send) records
+    # the full visible To and Cc lists plus the hidden Bcc list as
+    # comma-joined addresses. NULL on single-recipient / contact-based
+    # rows, which carry their address in ``recipient_email`` or the joined
+    # contact row. ``to_emails`` is populated only when the send had more
+    # than one To (single-To rows keep using ``recipient_email``). Added
+    # in migration 20260603_0003.
+    to_emails: Mapped[str | None] = mapped_column(Text, nullable=True)
+    cc_emails: Mapped[str | None] = mapped_column(Text, nullable=True)
+    bcc_emails: Mapped[str | None] = mapped_column(Text, nullable=True)
     sent_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True),
         nullable=False,
         server_default=func.now(),
+    )
+    # Soft-delete marker for the Sent-history list. NULL = live, a
+    # timestamp = the owner deleted it from their history. Rows are
+    # retained (never hard-deleted) so admin audits / compliance keep the
+    # record; every read path filters ``archived_at IS NULL``. Mirrors the
+    # ``ChatbotConversation.archived_at`` convention. The hot-path partial
+    # index ``WHERE archived_at IS NULL`` lives in the alembic migration.
+    archived_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True),
+        nullable=True,
     )

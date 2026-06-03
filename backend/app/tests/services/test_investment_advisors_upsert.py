@@ -148,6 +148,29 @@ async def test_upsert_many_protects_id_and_created_at_from_overwrite(
 
 
 @pytest.mark.asyncio
+async def test_upsert_many_never_touches_other_business_names(
+    repository: InvestmentAdvisorRepository,
+) -> None:
+    """``other_business_names`` is enrichment-only — written by the IAPD-summary
+    refresh sub-pipeline / one-shot backfill, never the bulk IAPD ingest. It
+    must stay out of the upsert entirely (not an INSERT column, not in DO
+    UPDATE SET) so a re-ingest can't wipe an enriched value. Same protection
+    ``registration_date`` / ``direct_owners`` rely on: they're simply absent
+    from ``_record_to_columns``. If a future edit adds it to the ingest path,
+    this fails loudly.
+    """
+
+    session = _RecordingSession()
+    await repository.upsert_many(session, [_merged_record(crd="1")])
+    sql = _compile(session.executed[0])
+
+    assert "other_business_names" not in sql, (
+        "other_business_names is enrichment-only and must stay out of the bulk "
+        f"ingest upsert entirely; got SQL:\n{sql}"
+    )
+
+
+@pytest.mark.asyncio
 async def test_upsert_many_chunks_into_batches_of_500(
     repository: InvestmentAdvisorRepository,
 ) -> None:

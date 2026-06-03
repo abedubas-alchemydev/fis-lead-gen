@@ -5,7 +5,7 @@ from __future__ import annotations
 from datetime import datetime
 from typing import Literal
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, EmailStr, Field
 
 
 # Which transport actually ran (or should run) an outreach send. New
@@ -62,6 +62,45 @@ class OutreachDraftRequest(BaseModel):
 class OutreachDraftResponse(BaseModel):
     subject: str
     body: str
+
+
+class OutreachSignatureResponse(BaseModel):
+    """The caller's saved outreach signature (footer).
+
+    ``signature`` is the empty string when the user has never saved one,
+    so the compose surfaces can treat "no footer" and "empty footer"
+    identically without a null check.
+    """
+
+    signature: str
+
+
+class OutreachSignatureUpdate(BaseModel):
+    """Body for ``PUT /outreach/signature``.
+
+    5000 chars is generous for an email footer (name, title, firm,
+    phone, disclaimer); the DB column is unbounded TEXT but we cap here
+    so a client can't store something pathological. Empty string clears
+    the footer.
+    """
+
+    signature: str = Field(default="", max_length=5000)
+
+
+class OptimizeInstructionsRequest(BaseModel):
+    """Body for ``POST /outreach/optimize-instructions``.
+
+    ``text`` is the raw per-service outreach instructions the user typed in
+    the Vault editor; the endpoint returns an LLM-polished version. Capped at
+    the same 10_000 chars as ``VaultFolderUpdate.outreach_instructions`` so a
+    client bypassing the editor can't blow out the prompt size.
+    """
+
+    text: str = Field(..., min_length=1, max_length=10_000)
+
+
+class OptimizeInstructionsResponse(BaseModel):
+    optimized_text: str
 
 
 class OutreachSendRequest(BaseModel):
@@ -123,6 +162,183 @@ class OutreachInvestorSendRequest(BaseModel):
     sender_account_id: str | None = Field(default=None, max_length=255)
 
 
+class OutreachAdhocSendRequest(BaseModel):
+    """Body for ``POST /outreach/adhoc-send``.
+
+    Used by the ``/outreach/sent?tab=create`` workspace when the user
+    sends to a free-form email address with no contact / firm record
+    in the system. AI draft generation is available via
+    ``POST /outreach/adhoc-draft`` (see ``OutreachAdhocDraftRequest``);
+    the send path itself just accepts whatever subject + body the user
+    submits.
+
+    ``folder_id`` is optional metadata: when provided, it lets the
+    sent-history table label the service the send was about; when
+    omitted (e.g. user wrote a totally one-off message), the row
+    shows ``(deleted)`` / ``—`` for service the same way it would
+    for any send whose folder has since been deleted.
+    """
+
+    recipient_email: EmailStr
+    recipient_name: str | None = Field(default=None, max_length=255)
+    subject: str = Field(..., min_length=1, max_length=998)
+    body: str = Field(..., min_length=1, max_length=100_000)
+    sender_account_id: str | None = Field(default=None, max_length=255)
+    folder_id: int | None = Field(default=None, gt=0)
+
+
+class OutreachComposeRecipient(BaseModel):
+    """One visible ``To`` recipient: address plus optional display name."""
+
+    email: EmailStr
+    name: str | None = Field(default=None, max_length=255)
+
+
+class OutreachComposeSendRequest(BaseModel):
+    """Body for ``POST /outreach/compose-send``.
+
+    One email to multiple recipients with CC and BCC, like a normal mail
+    client. ``to`` is the visible primary list (>= 1 recipient); ``cc``
+    is also visible to everyone; ``bcc`` is delivered hidden. A single
+    message is transmitted — To/CC recipients see each other — and
+    audited as one adhoc-style ``outreach_sends`` row carrying the
+    recipient lists.
+
+    ``folder_id`` is optional service metadata for the sent-history
+    label (same semantics as the adhoc-send path); the compose surface
+    doesn't require a service to send. Addresses are de-duplicated
+    across the three buckets server-side (To > CC > BCC, earliest wins).
+    """
+
+    to: list[OutreachComposeRecipient] = Field(..., min_length=1, max_length=100)
+    cc: list[EmailStr] = Field(default_factory=list, max_length=100)
+    bcc: list[EmailStr] = Field(default_factory=list, max_length=100)
+    subject: str = Field(..., min_length=1, max_length=998)
+    body: str = Field(..., min_length=1, max_length=100_000)
+    sender_account_id: str | None = Field(default=None, max_length=255)
+    folder_id: int | None = Field(default=None, gt=0)
+
+
+class OutreachAdhocDraftRequest(BaseModel):
+    """Body for ``POST /outreach/adhoc-draft``.
+
+    Drafts a cold email for the free-form-email path on
+    ``/outreach/sent?tab=create``. Unlike the contact-keyed draft
+    endpoints, this one has no firm / contact context — Gemini works
+    from the service folder's description + RAG excerpts plus the
+    optional recipient name.
+
+    ``folder_id`` is required (unlike on the send path): without a
+    service folder there's nothing concrete for the LLM to pitch, so
+    the FE only enables the Generate button once a service is picked.
+
+    ``recipient_email`` is optional: the draft is generated from the
+    service folder + RAG + optional ``recipient_name`` only — the
+    address is never read here. Leaving it off lets the firm-detail
+    People section draft for FINRA officers that have no email on file
+    yet (the send path still requires a real address). When supplied it
+    must be a valid address so an obviously malformed value is caught
+    early.
+    """
+
+    folder_id: int = Field(..., gt=0)
+    recipient_email: EmailStr | None = None
+    recipient_name: str | None = Field(default=None, max_length=255)
+
+
+class RecipientSearchResult(BaseModel):
+    """One contact row in the recipient autocomplete dropdown.
+
+    Returned by ``GET /outreach/contacts/search``. UNIONs the three
+    contact tables (executive_contacts, advisor_contacts,
+    investor_contacts) with their parent firm joined for display.
+    Excludes rows with no email -- you can't send outreach to a
+    contact without an address, and the dropdown shouldn't tease
+    options the user can't pick.
+    """
+
+    entity_kind: Literal["broker_dealer", "advisor", "institutional_investor"]
+    entity_id: int
+    entity_name: str
+    contact_id: int
+    contact_name: str
+    contact_title: str | None
+    contact_email: str
+
+
+class RecipientSearchResponse(BaseModel):
+    items: list[RecipientSearchResult]
+
+
+class FirmSearchResult(BaseModel):
+    """One firm row in the recipient autocomplete dropdown.
+
+    Returned by ``GET /outreach/firms/search``. The autocomplete
+    surfaces firm rows alongside contact rows so the user can either
+    pick a known contact directly (no modal) or pick a firm to open
+    a "pick a contact at this firm" modal. ``contact_count`` only
+    counts contacts that have an email on file -- a firm whose
+    contacts all lack emails can't be sent to and shouldn't appear.
+    """
+
+    entity_kind: Literal["broker_dealer", "advisor", "institutional_investor"]
+    entity_id: int
+    entity_name: str
+    contact_count: int
+
+
+class FirmSearchResponse(BaseModel):
+    items: list[FirmSearchResult]
+
+
+class FirmContactsResponse(BaseModel):
+    """All email-bearing contacts at a single firm.
+
+    Returned by ``GET /outreach/firms/contacts`` after the user picks a
+    firm row in the recipient autocomplete. Reuses the
+    ``RecipientSearchResult`` shape since the modal renders one row per
+    contact identically to how the autocomplete renders contact-hit
+    rows, then picks one into the create-outreach form.
+    """
+
+    entity_kind: Literal["broker_dealer", "advisor", "institutional_investor"]
+    entity_id: int
+    entity_name: str
+    items: list[RecipientSearchResult]
+
+
+class FavoriteSearchResult(BaseModel):
+    """One favorite-list row in the recipient autocomplete dropdown.
+
+    Returned by ``GET /outreach/favorites/search``. ``firm_count``
+    counts only the firms in the list whose contacts have at least
+    one email -- a list whose firms are all un-emailable shouldn't
+    appear in the dropdown since picking it would land in an empty
+    drill-down modal.
+    """
+
+    list_id: int
+    name: str
+    firm_count: int
+
+
+class FavoriteSearchResponse(BaseModel):
+    items: list[FavoriteSearchResult]
+
+
+class FavoriteFirmsResponse(BaseModel):
+    """All email-bearing-contact firms in a single favorite list.
+
+    Returned by ``GET /outreach/favorites/{list_id}/firms``. The drill-
+    down modal renders one row per firm; picking a row swaps the modal
+    to the firm-contacts view (``GET /outreach/firms/contacts``).
+    """
+
+    list_id: int
+    name: str
+    items: list[FirmSearchResult]
+
+
 class OutreachSendResponse(BaseModel):
     id: int
     gmail_message_id: str
@@ -138,10 +354,15 @@ class OutreachSendItem(BaseModel):
     expands a row.
 
     Polymorphic across firm types: ``firm_type`` discriminates
-    broker_dealer / advisor / institutional_investor. The matching pair
-    of id/name fields is populated; the others are None. Legacy
-    ``broker_dealer_id`` + ``broker_dealer_name`` stay populated for BD
-    rows for FE backwards compatibility.
+    broker_dealer / advisor / institutional_investor / adhoc. The
+    matching pair of id/name fields is populated; the others are None.
+    Legacy ``broker_dealer_id`` + ``broker_dealer_name`` stay populated
+    for BD rows for FE backwards compatibility.
+
+    Adhoc rows (``firm_type="adhoc"``) carry the destination address
+    in ``recipient_email`` / ``recipient_name``; all firm + contact
+    id/name fields are None. Contact-based rows leave the recipient_*
+    fields None and the FE falls back to ``contact_email``.
     """
 
     id: int
@@ -168,6 +389,19 @@ class OutreachSendItem(BaseModel):
     investor_contact_id: int | None = None
     contact_name: str = ""
     contact_email: str | None = None
+    # Adhoc destination address + display name. Populated only for
+    # ``firm_type="adhoc"`` rows; None for contact-based rows. The FE
+    # treats ``recipient_email`` as the canonical address on adhoc
+    # rows and falls back to ``contact_email`` on contact rows.
+    recipient_email: str | None = None
+    recipient_name: str | None = None
+    # Multi-recipient compose-send audit (POST /outreach/compose-send).
+    # Comma-joined address lists; None on single-recipient / contact-based
+    # rows. ``to_emails`` is populated only when there was more than one
+    # To recipient (single-To rows carry the address in recipient_email).
+    to_emails: str | None = None
+    cc_emails: str | None = None
+    bcc_emails: str | None = None
     # Folder may be NULL if the service folder was deleted after the
     # send. The send row stays so the audit history doesn't lose
     # entries.

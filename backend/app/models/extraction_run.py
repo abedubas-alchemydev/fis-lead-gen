@@ -38,6 +38,9 @@ class ExtractionRun(Base):
     bd_id: Mapped[int | None] = mapped_column(
         Integer, ForeignKey("broker_dealers.id", ondelete="SET NULL"), nullable=True, index=True
     )
+    advisor_id: Mapped[int | None] = mapped_column(
+        Integer, ForeignKey("investment_advisors.id", ondelete="SET NULL"), nullable=True, index=True
+    )
     status: Mapped[str] = mapped_column(String(32), default=RunStatus.queued.value, nullable=False, index=True)
     total_items: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
     processed_items: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
@@ -50,5 +53,12 @@ class ExtractionRun(Base):
     enrich_cancelled_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
 
     discovered_emails: Mapped[list[DiscoveredEmail]] = relationship(
-        back_populates="run", cascade="all, delete-orphan", lazy="selectin"
+        back_populates="run",
+        cascade="all, delete-orphan",
+        lazy="selectin",
+        # Stable ascending-by-id (discovery) order so the results table doesn't
+        # reshuffle across pages when a row is mutated (e.g. enriched) and the
+        # collection is re-selected -- Postgres returns unstable physical order
+        # otherwise, which made a just-enriched row jump pages on refetch.
+        order_by="DiscoveredEmail.id",
     )

@@ -85,7 +85,7 @@ export function ClearingDistributionChart({
               Clearing market &mdash; provider distribution
             </h3>
             <p className="mt-0.5 text-[12px] text-[var(--text-muted,#94a3b8)]">
-              Click a row to filter the Master List
+              Click a row to filter Broker Dealers
             </p>
           </div>
         </div>
@@ -118,7 +118,7 @@ export function ClearingDistributionChart({
               Clearing market &mdash; provider distribution
             </h3>
             <p className="mt-0.5 text-[12px] text-[var(--text-muted,#94a3b8)]">
-              Click a row to filter the Master List
+              Click a row to filter Broker Dealers
             </p>
           </div>
         </div>
@@ -170,7 +170,7 @@ export function ClearingDistributionChart({
             Clearing market — provider distribution
           </h3>
           <p className="mt-0.5 text-[12px] text-[var(--text-muted,#94a3b8)]">
-            Click a row to filter the Master List
+            Click a row to filter Broker Dealers
           </p>
         </div>
       </div>
@@ -208,11 +208,6 @@ export function ClearingDistributionChart({
                 <span className="shrink-0 whitespace-nowrap text-[11px] text-[var(--text-muted,#94a3b8)]">
                   · {firmsLabel}
                 </span>
-                {item.is_competitor ? (
-                  <span className="shrink-0 rounded bg-red-500/12 px-1.5 py-0.5 text-[10px] font-semibold tracking-wide text-red-600">
-                    COMPETITOR
-                  </span>
-                ) : null}
               </div>
               <div className="relative h-1.5 overflow-hidden rounded-full bg-[var(--surface-2,#f1f6fd)]">
                 <div

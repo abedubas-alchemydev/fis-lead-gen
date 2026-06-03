@@ -1,13 +1,16 @@
 "use client";
 
 import Link from "next/link";
-import { useCallback, useEffect, useMemo, useState } from "react";
+import clsx from "clsx";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useRouter, useSearchParams } from "next/navigation";
 import type { Route } from "next";
 
 import {
   ArrowLeft,
   ArrowRight,
+  ChevronDown,
+  ChevronUp,
   Download,
   ExternalLink,
   Loader2,
@@ -17,8 +20,10 @@ import {
 
 import { AlertPriorityBadge } from "@/components/alerts/alert-priority-badge";
 import { ArrangementFields } from "@/components/master-list/detail/arrangement-fields";
-import { ContactRow } from "@/components/master-list/detail/contact-row";
-import { EmailScansSection } from "@/components/master-list/detail/email-scans-section";
+import { ChannelIconCell } from "@/components/advisor-list/channel-icon-cell";
+import { OutreachButton } from "@/components/master-list/outreach-button";
+import { PeopleTable } from "@/components/master-list/detail/people-table";
+import { EmailScansSection } from "@/components/email-extractor/email-scans-section";
 import { FinancialTrendChart } from "@/components/master-list/detail/financial-trend-chart";
 import { FirmWebsiteLink } from "@/components/master-list/detail/firm-website-link";
 import { FocusReportSection } from "@/components/master-list/detail/focus-report-section";
@@ -31,14 +36,12 @@ import {
   priorityLabel,
   priorityVariant,
 } from "@/components/master-list/detail/pill-helpers";
-import {
-  dedupOfficers,
-  nameMatches,
-  toOfficerEntity,
-} from "@/components/master-list/detail/name-matching";
+import { dedupOfficers, nameMatches, toOfficerEntity } from "@/components/master-list/detail/name-matching";
+import { Button, buttonBase, buttonSizes } from "@/components/ui/button";
 import { SectionPanel } from "@/components/ui/section-panel";
 import { ListPicker } from "@/components/list-picker/list-picker";
 import { Pill } from "@/components/ui/pill";
+import { CollapsiblePillList } from "@/components/ui/collapsible-pill-list";
 import { agencyLabel } from "@/components/master-list/detail/clearing-membership-helpers";
 import { UnknownCell } from "@/components/master-list/unknown-cell";
 import {
@@ -47,10 +50,15 @@ import {
   getPipelineRunStatus,
   refreshFirm,
 } from "@/lib/api";
-import { PageSpinner } from "@/components/ui/spinner";
+import { DetailPageSkeleton } from "@/components/ui/detail-page-skeleton";
+import { RefreshingIndicator } from "@/components/ui/refreshing-indicator";
 import { joinPipelineLabels } from "@/lib/refresh-pipeline-labels";
 import { parseArrangementBlob } from "@/lib/arrangements";
-import { listScansForBrokerDealer } from "@/lib/email-extractor";
+import {
+  listScansForBrokerDealer,
+  pickHydratableScan,
+  SCAN_HYDRATION_LIMIT,
+} from "@/lib/email-extractor";
 import {
   recordVisit,
   type FavoriteListResponse,
@@ -78,7 +86,7 @@ import type {
 // page can render "Back to My Favorites" / "Back to Visited Firms"
 // instead of always saying "Back to Master List".
 const SOURCE_LABELS: Record<DetailSource, { breadcrumb: string; back: string }> = {
-  "master-list": { breadcrumb: "Master List", back: "Back to Master List" },
+  "master-list": { breadcrumb: "Broker Dealers", back: "Back to Broker Dealers" },
   favorites: { breadcrumb: "My Favorites", back: "Back to My Favorites" },
   visited: { breadcrumb: "Visited Firms", back: "Back to Visited Firms" },
 };
@@ -89,13 +97,6 @@ const SOURCE_LABELS: Record<DetailSource, { breadcrumb: string; back: string }> 
 // as a no-envelope deep-link). Cross-page walking is omitted on
 // purpose — see plans/fe-favorites-visited-sort-2026-04-29.md.
 const USER_LIST_WALKER_LIMIT = 100;
-
-// Shared button presets — kept as constants so the page can stay focused on
-// composition rather than re-typing the same Tailwind utility chains.
-const PRIMARY_BTN =
-  "inline-flex items-center justify-center gap-2 rounded-[10px] bg-gradient-to-br from-[#6366f1] to-[#8b5cf6] px-4 py-2 text-[13px] font-semibold text-white shadow-[0_6px_16px_rgba(99,102,241,0.35)] transition hover:brightness-110 disabled:cursor-not-allowed disabled:opacity-60";
-const SECONDARY_BTN =
-  "inline-flex items-center justify-center gap-2 rounded-[10px] border border-[var(--border-2,rgba(30,64,175,0.16))] bg-[var(--surface,#ffffff)] px-4 py-2 text-[13px] font-medium text-[var(--text-dim,#475569)] transition hover:bg-[var(--surface-2,#f1f6fd)] hover:text-[var(--text,#0f172a)] disabled:cursor-not-allowed disabled:opacity-45";
 
 // Builds the same /api/v1/broker-dealers query the master list emits,
 // from a recovered MasterListQueryState. Mirrors the queryPath useMemo
@@ -130,6 +131,47 @@ function listPathFromReturnState(
     page: pageOverride ?? state.page,
     limit: state.limit,
   });
+}
+
+// Mirrors backend _FREE_EMAIL_DOMAINS (app/api/v1/endpoints/broker_dealers.py):
+// personal / free mailbox providers never represent a firm's own domain, so a
+// contact's personal Gmail can't masquerade as the firm website.
+const FREE_EMAIL_DOMAINS = new Set([
+  "gmail.com", "googlemail.com", "yahoo.com", "ymail.com",
+  "outlook.com", "hotmail.com", "live.com", "msn.com",
+  "aol.com", "icloud.com", "me.com", "mac.com",
+  "protonmail.com", "proton.me", "gmx.com", "mail.com",
+]);
+
+// Most common corporate email domain across a firm's contacts — the scalar
+// `email` column plus every `emails[].value`. Free mailbox providers are
+// ignored and ties break alphabetically, mirroring the backend's
+// _known_contact_emails + _derive_email_domain (broker_dealers.py) so the FE
+// and BE agree on a firm's domain. Returns null when no corporate email is
+// known. Used as the header website fallback so a domain surfaced by FOCUS
+// extraction (which lights up the Email Extractor) also shows under the firm
+// name instead of "No public website on file".
+function deriveContactEmailDomain(contacts: ExecutiveContactItem[]): string | null {
+  const counts = new Map<string, number>();
+  for (const contact of contacts) {
+    const raw: string[] = [];
+    if (contact.email) raw.push(contact.email);
+    for (const hit of contact.emails ?? []) {
+      if (hit?.value) raw.push(hit.value);
+    }
+    for (const email of raw) {
+      if (!email.includes("@")) continue;
+      const domain = email.split("@").pop()?.trim().toLowerCase().replace(/\.+$/, "");
+      if (!domain || FREE_EMAIL_DOMAINS.has(domain)) continue;
+      counts.set(domain, (counts.get(domain) ?? 0) + 1);
+    }
+  }
+  if (counts.size === 0) return null;
+  // Alphabetical sort + strictly-greater replacement keeps the lowest-named
+  // domain on a count tie, matching the backend's max(sorted, key=count).
+  return [...counts.keys()]
+    .sort()
+    .reduce((best, d) => ((counts.get(d) ?? 0) > (counts.get(best) ?? 0) ? d : best));
 }
 
 export function BrokerDealerDetailClient({ brokerDealerId }: { brokerDealerId: string }) {
@@ -167,11 +209,22 @@ export function BrokerDealerDetailClient({ brokerDealerId }: { brokerDealerId: s
 
   const [profile, setProfile] = useState<BrokerDealerProfileResponse | null>(null);
   const [error, setError] = useState<string | null>(null);
-  const [enrichError, setEnrichError] = useState<string | null>(null);
-  const [enrichNotice, setEnrichNotice] = useState<string | null>(null);
-  const [isEnriching, setIsEnriching] = useState(false);
   const [isHealthChecking, setIsHealthChecking] = useState(false);
   const [healthCheckResult, setHealthCheckResult] = useState<string | null>(null);
+  const [isEnriching, setIsEnriching] = useState(false);
+  const [enrichError, setEnrichError] = useState<string | null>(null);
+  const [enrichNotice, setEnrichNotice] = useState<string | null>(null);
+  // Apollo phone reveals land asynchronously (~1-3 min after enrich); this timer
+  // drives a few extra /profile re-fetches so they appear without a reload.
+  const latePhonePollRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  useEffect(() => {
+    return () => {
+      if (latePhonePollRef.current) {
+        clearTimeout(latePhonePollRef.current);
+        latePhonePollRef.current = null;
+      }
+    };
+  }, [brokerDealerId]);
   const [prevId, setPrevId] = useState<number | null>(null);
   const [nextId, setNextId] = useState<number | null>(null);
   // Inline "Discovered Emails" section state. `currentScanId` is the
@@ -186,6 +239,61 @@ export function BrokerDealerDetailClient({ brokerDealerId }: { brokerDealerId: s
   const [filingTotal, setFilingTotal] = useState(0);
   const [filingTotalPages, setFilingTotalPages] = useState(0);
   const [filingLoading, setFilingLoading] = useState(false);
+  // Filing History is a long, full-width timeline; let users collapse it
+  // to declutter the page. Defaults open so no data is hidden on load.
+  const [filingHistoryOpen, setFilingHistoryOpen] = useState(true);
+
+  // xl+ only: cap the right column (Filing History) to the People column's
+  // content height so Filing History scrolls internally and the two columns
+  // bottom-align — instead of align-items:stretch padding the shorter People
+  // column with empty space below it. This is measured on purpose: pure CSS
+  // can't size a content-driven flex column to match a sibling. `flex-1`'s
+  // flex-basis:0% collapses to the *content* height when the column's own
+  // height is indefinite, so the Filing column always wins and pads People.
+  // We read the People card's bottom relative to its column top (stable under
+  // the stretch) and pin the right column to it, but only when Filing History
+  // would still get a usable height — so a sparse People column never clips
+  // the Assessment/Relationship cards above Filing History.
+  const leftColRef = useRef<HTMLDivElement | null>(null);
+  const rightColRef = useRef<HTMLDivElement | null>(null);
+  useEffect(() => {
+    const left = leftColRef.current;
+    const right = rightColRef.current;
+    if (!profile || !left || !right) return;
+
+    const mql = window.matchMedia("(min-width: 1280px)");
+    const MIN_FILING_PX = 160;
+
+    const apply = () => {
+      if (!mql.matches || !filingHistoryOpen) {
+        right.style.height = "";
+        return;
+      }
+      const peopleCard = left.lastElementChild as HTMLElement | null;
+      const filingCard = right.lastElementChild as HTMLElement | null;
+      if (!peopleCard || !filingCard) return;
+      const target = Math.round(
+        peopleCard.getBoundingClientRect().bottom - left.getBoundingClientRect().top,
+      );
+      const filingTop = Math.round(
+        filingCard.getBoundingClientRect().top - right.getBoundingClientRect().top,
+      );
+      const next = target - filingTop >= MIN_FILING_PX ? `${target}px` : "";
+      if (right.style.height !== next) right.style.height = next;
+    };
+
+    apply();
+    const observer = new ResizeObserver(apply);
+    observer.observe(left);
+    window.addEventListener("resize", apply);
+    mql.addEventListener("change", apply);
+    return () => {
+      observer.disconnect();
+      window.removeEventListener("resize", apply);
+      mql.removeEventListener("change", apply);
+      right.style.height = "";
+    };
+  }, [filingHistoryOpen, profile]);
 
   // Refresh-on-visit gating. We POST /refresh-all on mount so the BE's
   // per-pipeline gates can fill any missing column before we render.
@@ -441,21 +549,27 @@ export function BrokerDealerDetailClient({ brokerDealerId }: { brokerDealerId: s
       `/api/v1/broker-dealers/${brokerDealerId}/profile`,
     );
     setProfile(response);
+    // Clear any error from a prior failed fetch — a successful reload
+    // means the page is fully recoverable, render the data not the error.
+    setError(null);
   }, [brokerDealerId]);
 
+  // Fetch /profile immediately on mount — stale-while-revalidate.
+  // The refresh-on-visit useEffect above runs in parallel; when it
+  // transitions to "ready" the effect below re-fetches /profile so
+  // the user picks up whatever fresh data the orchestrator produced
+  // without ever staring at a blocking spinner.
   useEffect(() => {
-    // Wait for refresh-on-visit to finish before fetching /profile so
-    // the page renders with the freshest data the orchestrator can
-    // produce. While refreshState.phase is "queuing" or "polling" the
-    // loading-screen branches below intercept the render anyway.
-    if (refreshState.phase !== "ready") return;
     let active = true;
     async function loadProfile() {
       try {
         const response = await apiRequest<BrokerDealerProfileResponse>(
           `/api/v1/broker-dealers/${brokerDealerId}/profile`,
         );
-        if (active) setProfile(response);
+        if (active) {
+          setProfile(response);
+          setError(null);
+        }
       } catch (loadError) {
         if (active) {
           setError(
@@ -468,14 +582,32 @@ export function BrokerDealerDetailClient({ brokerDealerId }: { brokerDealerId: s
     return () => {
       active = false;
     };
-  }, [brokerDealerId, refreshState.phase]);
+  }, [brokerDealerId]);
+
+  // When refresh-on-visit transitions from in-flight (queuing/polling)
+  // to ready, re-fetch /profile so the visible page picks up any new
+  // values the orchestrator wrote. The ref ensures we only re-fetch on
+  // the transition, not on initial mount where phase may already be
+  // "ready" via the "skipped" short-circuit.
+  const prevRefreshPhaseRef = useRef(refreshState.phase);
+  useEffect(() => {
+    const prev = prevRefreshPhaseRef.current;
+    prevRefreshPhaseRef.current = refreshState.phase;
+    if (refreshState.phase === "ready" && prev !== "ready") {
+      void reloadProfile().catch(() => {
+        /* re-fetch is best-effort; the stale view is still useful */
+      });
+    }
+  }, [refreshState.phase, reloadProfile]);
 
   // Hydrate the inline "Discovered Emails" section. Two sources, in
   // precedence order:
   //   1. `?scanId=` in the URL — wins, so deep-links and post-Find-Emails
   //      refreshes re-open the same scan.
-  //   2. Most-recent scan for this BD via list-scans-by-bd_id — so the
-  //      user sees prior emails on first load without re-running.
+  //   2. Most-recent scan *with emails* for this BD (via pickHydratableScan)
+  //      — so the user sees prior emails on first load without re-running,
+  //      and a newer empty/failed retry never masks an older run that has
+  //      results.
   // Reads `window.location.search` directly so this effect doesn't have
   // to depend on the reactive `searchParams` (the URL-sync effect below
   // would otherwise feed back into this and re-fetch on every change).
@@ -501,11 +633,12 @@ export function BrokerDealerDetailClient({ brokerDealerId }: { brokerDealerId: s
     let active = true;
     setIsHydratingScan(true);
     setCurrentScanId(null);
-    listScansForBrokerDealer(numericId, 1)
+    listScansForBrokerDealer(numericId, SCAN_HYDRATION_LIMIT)
       .then((scans) => {
         if (!active) return;
-        if (scans.length > 0) {
-          setCurrentScanId(scans[0].id);
+        const preferred = pickHydratableScan(scans);
+        if (preferred) {
+          setCurrentScanId(preferred.id);
         }
       })
       .catch(() => {
@@ -592,58 +725,6 @@ export function BrokerDealerDetailClient({ brokerDealerId }: { brokerDealerId: s
     }
   }
 
-  async function enrichContacts() {
-    setIsEnriching(true);
-    setEnrichError(null);
-    setEnrichNotice(null);
-    try {
-      const directOwners = profile?.broker_dealer.direct_owners ?? [];
-      const executiveOfficers = profile?.broker_dealer.executive_officers ?? [];
-      const officers = dedupOfficers([
-        ...directOwners.map(toOfficerEntity),
-        ...executiveOfficers.map(toOfficerEntity),
-      ]);
-      const previousNames = new Set(
-        (profile?.executive_contacts ?? []).map((c) => c.name.trim().toLowerCase()),
-      );
-      const contacts = await apiRequest<BrokerDealerProfileResponse["executive_contacts"]>(
-        `/api/v1/broker-dealers/${brokerDealerId}/enrich`,
-        { method: "POST", body: JSON.stringify({ officers }) },
-      );
-      setProfile((c) => (c ? { ...c, executive_contacts: contacts } : c));
-      // BE returns the existing list verbatim when the discovery chain
-      // didn't find any new officers (90-day cooldown short-circuits the
-      // company-level Apollo path; per-officer fan-out can also return zero
-      // matches). Without this notice the button just stops spinning and
-      // the panel looks identical, so the click reads as a no-op.
-      const hasNewContact = contacts.some(
-        (c) => !previousNames.has(c.name.trim().toLowerCase()),
-      );
-      if (!hasNewContact) {
-        setEnrichNotice("No new contacts found for these officers.");
-      }
-    } catch (err) {
-      setEnrichError(err instanceof Error ? err.message : "Unable to enrich contacts.");
-    } finally {
-      setIsEnriching(false);
-    }
-  }
-
-  // Per-contact updates from the Find-phone button. Replaces the single
-  // row in place so the UI reflects the new phone without a full refetch.
-  const handleContactUpdated = useCallback((updated: ExecutiveContactItem) => {
-    setProfile((c) =>
-      c
-        ? {
-            ...c,
-            executive_contacts: c.executive_contacts.map((row) =>
-              row.id === updated.id ? updated : row,
-            ),
-          }
-        : c,
-    );
-  }, []);
-
   const chartPoints = useMemo(() => {
     if (!profile) return [] as Array<{ label: string; value: number }>;
     return profile.financials
@@ -655,27 +736,9 @@ export function BrokerDealerDetailClient({ brokerDealerId }: { brokerDealerId: s
       }));
   }, [profile]);
 
-  // Refresh-on-visit gate. Show the loading screen while the BE
-  // orchestrator is queuing or running. Once it goes "ready" the
-  // /profile fetch below populates and the existing render path runs.
-  if (refreshState.phase === "queuing") {
-    return (
-      <div className="px-7 pb-12 pt-7 lg:px-9">
-        <PageSpinner label="Preparing fresh data for this firm…" />
-      </div>
-    );
-  }
-  if (refreshState.phase === "polling") {
-    const label =
-      refreshState.pipelinesRunning.length > 0
-        ? `Refreshing ${joinPipelineLabels(refreshState.pipelinesRunning)}…`
-        : "Refreshing firm data…";
-    return (
-      <div className="px-7 pb-12 pt-7 lg:px-9">
-        <PageSpinner label={label} />
-      </div>
-    );
-  }
+  // Refresh-on-visit is non-blocking — the RefreshingIndicator pill in
+  // the topbar communicates progress while /profile renders with
+  // whatever the DB has now. See refreshState useEffect above.
 
   if (error) {
     return (
@@ -688,32 +751,88 @@ export function BrokerDealerDetailClient({ brokerDealerId }: { brokerDealerId: s
   }
 
   if (!profile) {
-    return (
-      <div className="px-7 pb-12 pt-7 lg:px-9">
-        <div
-          className="rounded-2xl border border-[var(--border,rgba(30,64,175,0.1))] bg-[var(--surface,#ffffff)] p-8"
-          style={{ boxShadow: "var(--shadow-card, 0 1px 2px rgba(15,23,42,0.04), 0 4px 14px rgba(15,23,42,0.05))" }}
-        >
-          <div className="h-6 w-56 animate-pulse rounded bg-[var(--surface-2,#f1f6fd)]" />
-          <div className="mt-4 h-4 w-full animate-pulse rounded bg-[var(--surface-2,#f1f6fd)]" />
-          <div className="mt-8 grid gap-4 xl:grid-cols-2">
-            {Array.from({ length: 4 }).map((_, i) => (
-              <div key={i} className="h-64 animate-pulse rounded-2xl bg-[var(--surface-2,#f1f6fd)]" />
-            ))}
-          </div>
-        </div>
-      </div>
-    );
+    return <DetailPageSkeleton />;
   }
 
   const { broker_dealer: bd } = profile;
   const location = [bd.city, bd.state].filter(Boolean).join(", ");
+
+  // "Generate More Details" — re-runs contact enrichment for this firm and
+  // folds any newly discovered executive contacts into the People panel. We
+  // seed the request with this firm's FINRA owners + officers so the BE runs
+  // the full multi-provider discovery chain per officer (not just the
+  // company-level Apollo search), and send `refresh: true` so the click
+  // always re-runs past the BE cooldown / freshness / cache guards. Phones
+  // arrive asynchronously via the Apollo reveal webhook, so a successful run
+  // surfaces a "may take a minute" notice; an empty result surfaces a no-op
+  // notice so the click never reads as silent.
+  async function enrichContacts() {
+    setIsEnriching(true);
+    setEnrichError(null);
+    setEnrichNotice(null);
+    try {
+      const previousNames = new Set(
+        (profile?.executive_contacts ?? []).map((c) => c.name.trim().toLowerCase()),
+      );
+      // Discovery seed list: this firm's FINRA owners + officers, deduped and
+      // capped to bound provider spend (mirrors the BE's _MAX_OFFICER_FANOUT).
+      const officers = dedupOfficers([
+        ...(bd.direct_owners ?? []).map(toOfficerEntity),
+        ...(bd.executive_officers ?? []).map(toOfficerEntity),
+      ]).slice(0, 10);
+      const contacts = await apiRequest<BrokerDealerProfileResponse["executive_contacts"]>(
+        `/api/v1/broker-dealers/${brokerDealerId}/enrich`,
+        {
+          method: "POST",
+          body: JSON.stringify({ officers, refresh: true }),
+        },
+      );
+      setProfile((c) => (c ? { ...c, executive_contacts: contacts } : c));
+      // Apollo phone reveals arrive async (~1-3 min) via the webhook; re-fetch
+      // the profile a few more times so the numbers appear without a manual
+      // reload.
+      if (latePhonePollRef.current) clearTimeout(latePhonePollRef.current);
+      let phonePollAttempts = 0;
+      const pollLatePhones = () => {
+        latePhonePollRef.current = setTimeout(() => {
+          phonePollAttempts += 1;
+          void reloadProfile().catch(() => {
+            /* transient — keep polling */
+          });
+          if (phonePollAttempts < 5) {
+            pollLatePhones();
+          } else {
+            latePhonePollRef.current = null;
+          }
+        }, 30_000);
+      };
+      pollLatePhones();
+      const hasNewContact = contacts.some(
+        (c) => !previousNames.has(c.name.trim().toLowerCase()),
+      );
+      setEnrichNotice(
+        hasNewContact
+          ? "Contacts updated. Phone numbers may take up to a minute to appear."
+          : "No new contacts found for these officers.",
+      );
+    } catch (err) {
+      setEnrichError(err instanceof Error ? err.message : "Unable to enrich contacts.");
+    } finally {
+      setIsEnriching(false);
+    }
+  }
   const websiteDomain = bd.website
     ? bd.website.replace(/^https?:\/\//i, "").replace(/\/+$/, "").split("/")[0]?.toLowerCase() ?? null
     : null;
   const contactEmail = profile.executive_contacts.find((c) => c.email)?.email ?? null;
   const emailDomain = contactEmail ? contactEmail.split("@")[1]?.toLowerCase() ?? null : null;
   const resolvedDomain = websiteDomain || emailDomain;
+  // Header website fallback: the firm's most-common corporate contact-email
+  // domain (free-mail filtered), so a domain surfaced by FOCUS extraction
+  // shows under the firm name even when no website is on file. Distinct from
+  // `emailDomain` above (the Email Extractor's raw first-email anchor) — the
+  // header must never present a personal/free mailbox as the firm's website.
+  const headerFallbackDomain = deriveContactEmailDomain(profile.executive_contacts);
   const classification = classificationDisplay(bd.clearing_classification);
 
   // Derived contact-matching for the People panel
@@ -757,8 +876,22 @@ export function BrokerDealerDetailClient({ brokerDealerId }: { brokerDealerId: s
               variant="detail"
               initialFavorited={profile.is_favorited}
             />
+            {refreshState.phase !== "ready" ? (
+              <RefreshingIndicator
+                label={
+                  refreshState.phase === "polling" && refreshState.pipelinesRunning.length > 0
+                    ? `Refreshing ${joinPipelineLabels(refreshState.pipelinesRunning)}…`
+                    : "Refreshing data…"
+                }
+              />
+            ) : null}
           </div>
-          <FirmWebsiteLink firmId={bd.id} firmName={bd.name} website={bd.website} />
+          <FirmWebsiteLink
+            firmId={bd.id}
+            firmName={bd.name}
+            website={bd.website}
+            fallbackDomain={headerFallbackDomain}
+          />
           <div className="mt-2 flex flex-wrap items-center gap-x-3 gap-y-1 text-[12px] text-[var(--text-muted,#94a3b8)]">
             <span>
               CIK <span className="font-mono text-[var(--text-dim,#475569)]">{bd.cik ?? "N/A"}</span>
@@ -775,11 +908,11 @@ export function BrokerDealerDetailClient({ brokerDealerId }: { brokerDealerId: s
           </div>
         </div>
         <div className="flex shrink-0 items-center gap-2.5">
-          <button
+          <Button
+            variant="outline"
             type="button"
             onClick={() => void runHealthCheck()}
             disabled={isHealthChecking}
-            className={SECONDARY_BTN}
           >
             {isHealthChecking ? (
               <Loader2 className="h-4 w-4 animate-spin" strokeWidth={2.5} />
@@ -787,7 +920,7 @@ export function BrokerDealerDetailClient({ brokerDealerId }: { brokerDealerId: s
               <RefreshCw className="h-4 w-4" strokeWidth={2} />
             )}
             {isHealthChecking ? "Checking…" : "Health Check"}
-          </button>
+          </Button>
         </div>
       </div>
 
@@ -807,7 +940,6 @@ export function BrokerDealerDetailClient({ brokerDealerId }: { brokerDealerId: s
             />
           ) : null}
         </span>
-        {bd.current_clearing_is_competitor ? <Pill variant="competitor">COMPETITOR</Pill> : null}
         {classification ? (
           <Pill variant={classification.variant}>{classification.label}</Pill>
         ) : null}
@@ -830,34 +962,37 @@ export function BrokerDealerDetailClient({ brokerDealerId }: { brokerDealerId: s
 
       {/* ── Adjacent-firm nav ── */}
       <div className="mb-5 flex items-center justify-between gap-3">
-        <button
+        <Button
+          variant="outline"
           type="button"
           disabled={!prevId}
           onClick={() => prevId && router.push(buildAdjacentHref(prevId))}
-          className={SECONDARY_BTN}
         >
           <ArrowLeft className="h-4 w-4" strokeWidth={2} />
           Previous Prospect
-        </button>
+        </Button>
         <Link
           href={sourceListHref}
           className="text-[12px] uppercase tracking-[0.08em] text-[var(--text-muted,#94a3b8)] transition hover:text-[var(--text,#0f172a)]"
         >
           {sourceLabels.back}
         </Link>
-        <button
+        <Button
+          variant="outline"
           type="button"
           disabled={!nextId}
           onClick={() => nextId && router.push(buildAdjacentHref(nextId))}
-          className={SECONDARY_BTN}
         >
           Next Prospect
           <ArrowRight className="h-4 w-4" strokeWidth={2} />
-        </button>
+        </Button>
       </div>
 
-      {/* ── 2-column section grid ── */}
-      <div className="grid gap-4 xl:grid-cols-2">
+      {/* ── 2-column section layout. At xl the right column is JS-capped to the
+          People column's content height (see leftColRef/rightColRef effect) so
+          Filing History scrolls internally and both columns bottom-align. ── */}
+      <div className="flex flex-col gap-4 xl:flex-row">
+      <div ref={leftColRef} className="flex min-w-0 flex-1 flex-col gap-4">
         {/* Financials */}
         <SectionPanel eyebrow="Financials" title="Net capital and trend">
           <div className="mb-4 grid gap-3 md:grid-cols-3">
@@ -938,6 +1073,167 @@ export function BrokerDealerDetailClient({ brokerDealerId }: { brokerDealerId: s
           <FinancialTrendChart points={chartPoints} />
         </SectionPanel>
 
+        {/* People — sizes to its content and drives the row height. Filing
+            History on the right caps to this column's height and scrolls
+            internally (xl:flex-1 + min-h-0), so both columns end on the same
+            line without padding People (xl+ only, where the side-by-side
+            layout applies). */}
+        <SectionPanel
+          eyebrow="People"
+          title="Owners, officers, and contacts"
+        >
+          <div className="mb-4 flex flex-wrap items-center justify-between gap-3">
+            <p className="text-xs text-[var(--text-muted,#94a3b8)]">
+              {isEnriching
+                ? "Discovering contacts across providers… this can take a moment."
+                : "Discover additional executive contacts for this firm."}
+            </p>
+            <button
+              type="button"
+              onClick={() => void enrichContacts()}
+              disabled={isEnriching}
+              className={clsx(
+                buttonBase,
+                buttonSizes.md,
+                "shrink-0 bg-gradient-to-br from-[#6366f1] to-[#8b5cf6] text-white shadow-[0_6px_16px_rgba(99,102,241,0.35)] hover:brightness-110",
+              )}
+            >
+              {isEnriching ? (
+                <Loader2 className="h-4 w-4 animate-spin" strokeWidth={2.5} />
+              ) : (
+                <Sparkles className="h-4 w-4" strokeWidth={2} />
+              )}
+              {isEnriching ? "Generating…" : "Generate More Details"}
+            </button>
+          </div>
+
+          {enrichError ? (
+            <div className="mb-3 rounded-2xl border border-[rgba(245,158,11,0.25)] bg-[rgba(245,158,11,0.08)] px-4 py-3 text-sm text-[var(--pill-amber-text,#b45309)]">
+              {enrichError}
+            </div>
+          ) : null}
+
+          {enrichNotice ? (
+            <div className="mb-3 rounded-2xl border border-[rgba(59,130,246,0.25)] bg-[rgba(59,130,246,0.08)] px-4 py-3 text-sm text-[var(--pill-blue-text,#1d4ed8)]">
+              {enrichNotice}
+            </div>
+          ) : null}
+
+          {(!bd.direct_owners || bd.direct_owners.length === 0) &&
+          (!bd.executive_officers || bd.executive_officers.length === 0) &&
+          profile.executive_contacts.length === 0 ? (
+            <p className="text-sm text-[var(--text-muted,#94a3b8)]">
+              No owners, officers, or contacts on file yet.
+            </p>
+          ) : null}
+
+          {bd.direct_owners && bd.direct_owners.length > 0 ? (
+            <PeopleTable
+              title="Direct Owners"
+              items={bd.direct_owners}
+              columns={[
+                {
+                  header: "Name",
+                  cell: (o) => (
+                    <span className="font-semibold text-[var(--text,#0f172a)]">
+                      {o.name ?? "—"}
+                    </span>
+                  ),
+                },
+                { header: "Title", cell: (o) => o.title ?? "—" },
+                {
+                  header: "Ownership",
+                  cell: (o) => o.ownership_pct ?? "—",
+                  className: "whitespace-nowrap",
+                },
+              ]}
+            />
+          ) : null}
+
+          {bd.executive_officers && bd.executive_officers.length > 0 ? (
+            <PeopleTable
+              title="Executive Officers"
+              items={bd.executive_officers.map((o) => ({
+                ...o,
+                contact: matchForFinra(o.name),
+              }))}
+              columns={[
+                {
+                  header: "Name",
+                  cell: (o) => (
+                    <span className="font-semibold text-[var(--text,#0f172a)]">
+                      {o.contact?.name ?? o.name ?? "—"}
+                    </span>
+                  ),
+                },
+                { header: "Title", cell: (o) => o.title ?? "—" },
+                {
+                  header: "Channels",
+                  cell: (o) => (
+                    <ChannelIconCell contact={o.contact} />
+                  ),
+                  className: "whitespace-nowrap",
+                },
+                {
+                  header: "Outreach",
+                  // Only render Outreach when the officer's enriched contact
+                  // has an email — no deliverable address means nothing to send.
+                  cell: (o) =>
+                    o.contact && (o.contact.email || (o.contact.emails?.length ?? 0) > 0) ? (
+                      <OutreachButton
+                        entityKind="broker_dealer"
+                        entityId={bd.id}
+                        entityName={bd.name}
+                        contact={o.contact}
+                      />
+                    ) : null,
+                  className: "whitespace-nowrap",
+                },
+              ]}
+            />
+          ) : null}
+
+          {additionalContacts.length > 0 ? (
+            <PeopleTable
+              title="Additional contacts"
+              items={additionalContacts}
+              columns={[
+                {
+                  header: "Name",
+                  cell: (c) => (
+                    <span className="font-semibold text-[var(--text,#0f172a)]">
+                      {c.name}
+                    </span>
+                  ),
+                },
+                { header: "Title", cell: (c) => c.title ?? "—" },
+                {
+                  header: "Channels",
+                  cell: (c) => (
+                    <ChannelIconCell contact={c} />
+                  ),
+                  className: "whitespace-nowrap",
+                },
+                {
+                  header: "Outreach",
+                  cell: (c) =>
+                    c.email || (c.emails?.length ?? 0) > 0 ? (
+                      <OutreachButton
+                        entityKind="broker_dealer"
+                        entityId={bd.id}
+                        entityName={bd.name}
+                        contact={c}
+                      />
+                    ) : null,
+                  className: "whitespace-nowrap",
+                },
+              ]}
+            />
+          ) : null}
+        </SectionPanel>
+      </div>
+
+      <div ref={rightColRef} className="flex min-w-0 flex-1 flex-col gap-4">
         {/* Assessment */}
         <SectionPanel eyebrow="Assessment" title="Firm profile overview">
           <div className="grid gap-3 md:grid-cols-2">
@@ -972,16 +1268,7 @@ export function BrokerDealerDetailClient({ brokerDealerId }: { brokerDealerId: s
                 <p className="text-[13px] font-semibold text-[var(--text,#0f172a)]">Alternate Names</p>
                 <Pill variant="info">{bd.dba_names.length} names</Pill>
               </div>
-              <div className="mt-2 flex flex-wrap gap-2">
-                {bd.dba_names.map((name) => (
-                  <span
-                    key={name}
-                    className="rounded-full border border-[var(--border,rgba(30,64,175,0.1))] bg-[var(--surface-2,#f1f6fd)] px-3 py-1 text-[11px] text-[var(--text-dim,#475569)]"
-                  >
-                    {name}
-                  </span>
-                ))}
-              </div>
+              <CollapsiblePillList items={bd.dba_names} />
             </div>
           ) : null}
 
@@ -994,16 +1281,7 @@ export function BrokerDealerDetailClient({ brokerDealerId }: { brokerDealerId: s
               ) : null}
             </div>
             {bd.types_of_business && bd.types_of_business.length > 0 ? (
-              <div className="mt-2 flex flex-wrap gap-2">
-                {bd.types_of_business.map((type) => (
-                  <span
-                    key={type}
-                    className="rounded-full border border-[var(--border,rgba(30,64,175,0.1))] bg-[var(--surface-2,#f1f6fd)] px-3 py-1 text-[11px] text-[var(--text-dim,#475569)]"
-                  >
-                    {type}
-                  </span>
-                ))}
-              </div>
+              <CollapsiblePillList items={bd.types_of_business} />
             ) : (
               <p className="mt-2 text-sm text-[var(--text-muted,#94a3b8)]">Not available</p>
             )}
@@ -1042,88 +1320,6 @@ export function BrokerDealerDetailClient({ brokerDealerId }: { brokerDealerId: s
           </div>
 
           <FocusReportSection brokerDealerId={brokerDealerId} onProfileRefresh={reloadProfile} />
-        </SectionPanel>
-
-        {/* People */}
-        <SectionPanel
-          eyebrow="People"
-          title="Owners, officers, and contacts"
-          headerAction={
-            <button
-              type="button"
-              onClick={() => void enrichContacts()}
-              disabled={isEnriching}
-              className={PRIMARY_BTN}
-            >
-              {isEnriching ? (
-                <Loader2 className="h-4 w-4 animate-spin" strokeWidth={2.5} />
-              ) : (
-                <Sparkles className="h-4 w-4" strokeWidth={2} />
-              )}
-              {isEnriching ? "Generating…" : "Generate More Details"}
-            </button>
-          }
-        >
-          {enrichError ? (
-            <div className="mb-3 rounded-2xl border border-[rgba(245,158,11,0.25)] bg-[rgba(245,158,11,0.08)] px-4 py-3 text-sm text-[var(--pill-amber-text,#b45309)]">
-              {enrichError}
-            </div>
-          ) : null}
-
-          {enrichNotice ? (
-            <div className="mb-3 rounded-2xl border border-[rgba(59,130,246,0.25)] bg-[rgba(59,130,246,0.08)] px-4 py-3 text-sm text-[var(--pill-blue-text,#1d4ed8)]">
-              {enrichNotice}
-            </div>
-          ) : null}
-
-          {bd.direct_owners && bd.direct_owners.length > 0 ? (
-            <PeopleSubGroup title="Direct Owners">
-              {bd.direct_owners.map((owner, i) => (
-                <PersonCard
-                  key={`owner-${i}`}
-                  name={owner.name}
-                  title={owner.title}
-                  extra={owner.ownership_pct ? `Ownership: ${owner.ownership_pct}` : null}
-                  contact={matchForFinra(owner.name)}
-                  brokerDealerId={bd.id}
-                  brokerDealerName={bd.name}
-                  onContactUpdated={handleContactUpdated}
-                />
-              ))}
-            </PeopleSubGroup>
-          ) : null}
-
-          {bd.executive_officers && bd.executive_officers.length > 0 ? (
-            <PeopleSubGroup title="Executive Officers">
-              {bd.executive_officers.map((officer, i) => (
-                <PersonCard
-                  key={`officer-${i}`}
-                  name={officer.name}
-                  title={officer.title}
-                  contact={matchForFinra(officer.name)}
-                  brokerDealerId={bd.id}
-                  brokerDealerName={bd.name}
-                  onContactUpdated={handleContactUpdated}
-                />
-              ))}
-            </PeopleSubGroup>
-          ) : null}
-
-          {additionalContacts.length > 0 ? (
-            <PeopleSubGroup title="Additional contacts">
-              {additionalContacts.map((contact) => (
-                <PersonCard
-                  key={`contact-${contact.id}`}
-                  name={contact.name}
-                  title={contact.title}
-                  contact={contact}
-                  brokerDealerId={bd.id}
-                  brokerDealerName={bd.name}
-                  onContactUpdated={handleContactUpdated}
-                />
-              ))}
-            </PeopleSubGroup>
-          ) : null}
         </SectionPanel>
 
         {/* Relationship */}
@@ -1314,7 +1510,6 @@ export function BrokerDealerDetailClient({ brokerDealerId }: { brokerDealerId: s
                           compact
                         />
                       ) : null}
-                      {item.is_competitor ? <Pill variant="competitor">COMPETITOR</Pill> : null}
                     </div>
                   </div>
                 </div>
@@ -1322,87 +1517,111 @@ export function BrokerDealerDetailClient({ brokerDealerId }: { brokerDealerId: s
             )}
           </div>
         </SectionPanel>
-      </div>
 
-      {/* ── Filing history (full width) ── */}
-      <div className="mt-4">
-        <SectionPanel eyebrow="Filing History" title="Chronological filing timeline">
-          <div className="space-y-3">
-            {filingLoading && filingItems.length === 0 ? (
-              <div className="flex items-center justify-center rounded-2xl bg-[var(--surface-2,#f1f6fd)] px-4 py-8 text-sm text-[var(--text-muted,#94a3b8)]">
-                <Loader2 className="mr-2 h-4 w-4 animate-spin" />
-                Loading filings…
-              </div>
-            ) : filingItems.length === 0 ? (
-              <div className="rounded-2xl bg-[var(--surface-2,#f1f6fd)] px-4 py-8 text-center text-sm text-[var(--text-muted,#94a3b8)]">
-                No filing history is available yet.
-              </div>
-            ) : (
-              filingItems.map((item, index) => (
-                <div
-                  key={`${item.label}-${item.filed_at}-${index}`}
-                  className="rounded-2xl border border-[var(--border,rgba(30,64,175,0.1))] px-4 py-4"
-                >
-                  <div className="flex flex-wrap items-start justify-between gap-3">
-                    <div>
-                      <p className="font-semibold text-[var(--text,#0f172a)]">{item.label}</p>
-                      <p className="mt-1 text-sm text-[var(--text-dim,#475569)]">{item.summary}</p>
-                    </div>
-                    {item.priority ? <AlertPriorityBadge priority={item.priority} /> : null}
+        {/* Filing History */}
+        <SectionPanel
+          eyebrow="Filing History"
+          title="Chronological filing timeline"
+          className={filingHistoryOpen ? "xl:flex xl:flex-col xl:flex-1 xl:min-h-0" : undefined}
+          bodyClassName={filingHistoryOpen ? "xl:flex xl:flex-col xl:flex-1 xl:min-h-0" : undefined}
+          headerAction={
+            <button
+              type="button"
+              onClick={() => setFilingHistoryOpen((open) => !open)}
+              aria-expanded={filingHistoryOpen}
+              className="inline-flex items-center gap-1.5 rounded-[10px] border border-[var(--border-2,rgba(30,64,175,0.16))] bg-[var(--surface,#ffffff)] px-3 py-1.5 text-[12px] font-medium text-[var(--text-dim,#475569)] transition hover:bg-[var(--surface-2,#f1f6fd)] hover:text-[var(--text,#0f172a)]"
+            >
+              {filingHistoryOpen ? "Collapse" : "Expand"}
+              {filingHistoryOpen ? (
+                <ChevronUp className="h-4 w-4" strokeWidth={2} aria-hidden />
+              ) : (
+                <ChevronDown className="h-4 w-4" strokeWidth={2} aria-hidden />
+              )}
+            </button>
+          }
+        >
+          {filingHistoryOpen ? (
+            <>
+              <div className="space-y-3 xl:min-h-0 xl:flex-1 xl:overflow-y-auto xl:pr-1">
+                {filingLoading && filingItems.length === 0 ? (
+                  <div className="flex items-center justify-center rounded-2xl bg-[var(--surface-2,#f1f6fd)] px-4 py-8 text-sm text-[var(--text-muted,#94a3b8)]">
+                    <Loader2 className="mr-2 h-4 w-4 animate-spin" />
+                    Loading filings…
                   </div>
-                  <div className="mt-3 flex flex-wrap items-center gap-4 text-sm text-[var(--text-muted,#94a3b8)]">
-                    <span>{formatDate(item.filed_at)}</span>
-                    {item.source_filing_url ? (
-                      <a
-                        href={viewableFilingUrl(item.source_filing_url) ?? item.source_filing_url}
-                        target="_blank"
-                        rel="noreferrer"
-                        className="inline-flex items-center gap-1 text-[var(--accent,#6366f1)] hover:underline"
-                      >
-                        Open filing
-                        <ExternalLink className="h-3 w-3" strokeWidth={2} />
-                      </a>
-                    ) : null}
+                ) : filingItems.length === 0 ? (
+                  <div className="rounded-2xl bg-[var(--surface-2,#f1f6fd)] px-4 py-8 text-center text-sm text-[var(--text-muted,#94a3b8)]">
+                    No filing history is available yet.
+                  </div>
+                ) : (
+                  filingItems.map((item, index) => (
+                    <div
+                      key={`${item.label}-${item.filed_at}-${index}`}
+                      className="rounded-2xl border border-[var(--border,rgba(30,64,175,0.1))] px-4 py-4"
+                    >
+                      <div className="flex flex-wrap items-start justify-between gap-3">
+                        <div>
+                          <p className="font-semibold text-[var(--text,#0f172a)]">{item.label}</p>
+                          <p className="mt-1 text-sm text-[var(--text-dim,#475569)]">{item.summary}</p>
+                        </div>
+                        {item.priority ? <AlertPriorityBadge priority={item.priority} /> : null}
+                      </div>
+                      <div className="mt-3 flex flex-wrap items-center gap-4 text-sm text-[var(--text-muted,#94a3b8)]">
+                        <span>{formatDate(item.filed_at)}</span>
+                        {item.source_filing_url ? (
+                          <a
+                            href={viewableFilingUrl(item.source_filing_url) ?? item.source_filing_url}
+                            target="_blank"
+                            rel="noreferrer"
+                            className="inline-flex items-center gap-1 text-[var(--accent,#6366f1)] hover:underline"
+                          >
+                            Open filing
+                            <ExternalLink className="h-3 w-3" strokeWidth={2} />
+                          </a>
+                        ) : null}
+                      </div>
+                    </div>
+                  ))
+                )}
+              </div>
+              {filingTotal > 0 ? (
+                <div className="mt-4 flex flex-wrap items-center justify-between gap-3 text-sm text-[var(--text-muted,#94a3b8)]">
+                  <span>
+                    Page {filingPage} of {Math.max(filingTotalPages, 1)} · {filingTotal} total filing
+                    {filingTotal === 1 ? "" : "s"}
+                  </span>
+                  <div className="flex items-center gap-2">
+                    <Button
+                      variant="outline"
+                      type="button"
+                      onClick={() => setFilingPage((p) => Math.max(1, p - 1))}
+                      disabled={filingPage <= 1 || filingLoading}
+                    >
+                      <ArrowLeft className="h-4 w-4" />
+                      Previous
+                    </Button>
+                    <Button
+                      variant="outline"
+                      type="button"
+                      onClick={() => setFilingPage((p) => p + 1)}
+                      disabled={filingPage >= filingTotalPages || filingLoading}
+                    >
+                      Next
+                      <ArrowRight className="h-4 w-4" />
+                    </Button>
                   </div>
                 </div>
-              ))
-            )}
-          </div>
-          {filingTotal > 0 ? (
-            <div className="mt-4 flex flex-wrap items-center justify-between gap-3 text-sm text-[var(--text-muted,#94a3b8)]">
-              <span>
-                Page {filingPage} of {Math.max(filingTotalPages, 1)} · {filingTotal} total filing
-                {filingTotal === 1 ? "" : "s"}
-              </span>
-              <div className="flex items-center gap-2">
-                <button
-                  type="button"
-                  onClick={() => setFilingPage((p) => Math.max(1, p - 1))}
-                  disabled={filingPage <= 1 || filingLoading}
-                  className={SECONDARY_BTN}
-                >
-                  <ArrowLeft className="h-4 w-4" />
-                  Previous
-                </button>
-                <button
-                  type="button"
-                  onClick={() => setFilingPage((p) => p + 1)}
-                  disabled={filingPage >= filingTotalPages || filingLoading}
-                  className={SECONDARY_BTN}
-                >
-                  Next
-                  <ArrowRight className="h-4 w-4" />
-                </button>
-              </div>
-            </div>
+              ) : null}
+            </>
           ) : null}
         </SectionPanel>
+      </div>
       </div>
 
       {/* ── Discovered emails (full width) ── */}
       <div className="mt-4">
         <EmailScansSection
-          brokerDealerId={brokerDealerId}
+          entityKind="bd"
+          entityId={Number(brokerDealerId)}
           currentScanId={currentScanId}
           resolvedDomain={resolvedDomain}
           isHydrating={isHydratingScan}
@@ -1451,59 +1670,5 @@ function MiniStat({
   );
 }
 
-// Sub-group wrapper inside the People panel so each list (direct owners,
-// executive officers, additional contacts) has the same heading + spacing.
-function PeopleSubGroup({ title, children }: { title: string; children: React.ReactNode }) {
-  return (
-    <div className="mb-4 last:mb-0">
-      <p className="text-[13px] font-semibold text-[var(--text,#0f172a)]">{title}</p>
-      <div className="mt-2 space-y-2">{children}</div>
-    </div>
-  );
-}
-
-// Single owner / officer / contact row used by every PeopleSubGroup. Keeps
-// the Apollo source + enriched_at footer when present. brokerDealerId +
-// brokerDealerName are forwarded to ContactRow → OutreachButton so the
-// cold-email modal knows which firm the recipient belongs to.
-function PersonCard({
-  name,
-  title,
-  extra,
-  contact,
-  source,
-  brokerDealerId,
-  brokerDealerName,
-  onContactUpdated,
-}: {
-  name: string;
-  title: string;
-  extra?: string | null;
-  contact?: ExecutiveContactItem;
-  source?: string;
-  brokerDealerId: number;
-  brokerDealerName: string;
-  onContactUpdated?: (updated: ExecutiveContactItem) => void;
-}) {
-  return (
-    <div className="rounded-2xl bg-[var(--surface-2,#f1f6fd)] px-4 py-3 text-sm text-[var(--text-dim,#475569)]">
-      <p className="font-semibold text-[var(--text,#0f172a)]">{name}</p>
-      {title ? <p className="mt-1">{title}</p> : null}
-      {extra ? <p className="mt-1 text-xs text-[var(--text-muted,#94a3b8)]">{extra}</p> : null}
-      {contact ? (
-        <ContactRow
-          entityKind="broker-dealer"
-          entityId={brokerDealerId}
-          entityName={brokerDealerName}
-          contact={contact}
-          onContactUpdated={onContactUpdated}
-        />
-      ) : null}
-      {source ? (
-        <p className="mt-1 text-[11px] uppercase tracking-[0.08em] text-[var(--text-muted,#94a3b8)]">
-          {source}
-        </p>
-      ) : null}
-    </div>
-  );
-}
+// CollapsiblePillList now lives in @/components/ui/collapsible-pill-list
+// (shared with the advisor detail page); imported above.

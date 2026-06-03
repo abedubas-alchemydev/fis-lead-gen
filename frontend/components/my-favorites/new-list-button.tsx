@@ -3,6 +3,7 @@
 import { Plus } from "lucide-react";
 import { useEffect, useRef, useState, type FormEvent } from "react";
 
+import { Button } from "@/components/ui/button";
 import { ApiError } from "@/lib/api";
 
 const MAX_NAME_LENGTH = 80;
@@ -70,15 +71,16 @@ export function NewListButton({
         <h3 className="text-[11px] font-semibold uppercase tracking-[0.08em] text-[var(--text-muted,#94a3b8)]">
           Lists
         </h3>
-        <button
+        <Button
           type="button"
+          variant="outline"
+          size="sm"
           onClick={() => setOpen((next) => !next)}
           aria-expanded={open}
-          className="inline-flex h-[26px] items-center gap-1 rounded-md border border-[var(--border-2,rgba(30,64,175,0.16))] bg-[var(--surface,#ffffff)] px-2 text-[11px] font-semibold text-[var(--text-dim,#475569)] transition hover:bg-[var(--surface-2,#f1f6fd)]"
         >
           <Plus className="h-3.5 w-3.5" strokeWidth={2.25} aria-hidden />
           New list
-        </button>
+        </Button>
       </div>
 
       {open ? (
@@ -105,21 +107,22 @@ export function NewListButton({
             className="block w-full rounded-md border border-[var(--border-2,rgba(30,64,175,0.16))] bg-[var(--surface,#ffffff)] px-2.5 py-1.5 text-[13px] text-[var(--text,#0f172a)] placeholder:text-[var(--text-muted,#94a3b8)] focus:border-[var(--accent,#6366f1)] focus:outline-none focus:ring-2 focus:ring-[rgba(99,102,241,0.2)] disabled:opacity-60"
           />
           <div className="flex items-center justify-end gap-1.5">
-            <button
+            <Button
               type="button"
+              variant="ghost"
+              size="sm"
               onClick={close}
               disabled={submitting}
-              className="inline-flex h-[26px] items-center rounded-md border border-transparent px-2 text-[11px] font-semibold text-[var(--text-dim,#475569)] transition hover:bg-[var(--surface-2,#f1f6fd)] disabled:cursor-not-allowed disabled:opacity-60"
             >
               Cancel
-            </button>
-            <button
+            </Button>
+            <Button
               type="submit"
+              size="sm"
               disabled={submitting || value.trim().length === 0}
-              className="inline-flex h-[26px] items-center rounded-md border border-[rgba(99,102,241,0.4)] bg-[rgba(99,102,241,0.08)] px-2.5 text-[11px] font-semibold text-[#4338ca] transition hover:bg-[rgba(99,102,241,0.14)] disabled:cursor-not-allowed disabled:opacity-50"
             >
               {submitting ? "Saving…" : "Save"}
-            </button>
+            </Button>
           </div>
           {error ? (
             <p

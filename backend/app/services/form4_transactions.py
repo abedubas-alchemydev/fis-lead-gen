@@ -328,27 +328,40 @@ class Form4TransactionRepository:
         reporting_owner_cik: str,
         phone: str | None,
         email: str | None,
+        linkedin_url: str | None,
+        apollo_person_id: str | None = None,
     ) -> tuple[int, datetime]:
         """Apply Apollo enrichment to every ``form4_transactions`` row for a person.
 
-        A single Apollo lookup yields phone/email for one reporting
-        person; CIK is the SEC-assigned per-person identifier, so writing
-        WHERE ``reporting_owner_cik = X`` covers all of that person's
-        transactions across every issuer they appear under. ``enriched_at``
-        is always stamped so the FE can distinguish "never enriched" from
-        "enriched, came back empty" without re-firing Apollo.
+        A single Apollo lookup yields phone/email/LinkedIn for one
+        reporting person; CIK is the SEC-assigned per-person identifier,
+        so writing WHERE ``reporting_owner_cik = X`` covers all of that
+        person's transactions across every issuer they appear under.
+        ``enriched_at`` is always stamped so the FE can distinguish
+        "never enriched" from "enriched, came back empty" without
+        re-firing Apollo.
+
+        ``apollo_person_id`` is stamped (when present) so the async
+        phone-reveal webhook can find this person's rows and fill
+        ``enriched_phone`` when Apollo POSTs the number back minutes later.
 
         Returns ``(rowcount, enriched_at)``.
         """
         enriched_at = datetime.now(timezone.utc)
+        values: dict[str, object | None] = {
+            "enriched_phone": phone,
+            "enriched_email": email,
+            "enriched_linkedin_url": linkedin_url,
+            "enriched_at": enriched_at,
+        }
+        # Only overwrite the id when we have one -- a later PDL-only re-enrich
+        # (no Apollo call) shouldn't wipe an id an earlier reveal stamped.
+        if apollo_person_id:
+            values["apollo_person_id"] = apollo_person_id
         stmt = (
             update(Form4Transaction)
             .where(Form4Transaction.reporting_owner_cik == reporting_owner_cik)
-            .values(
-                enriched_phone=phone,
-                enriched_email=email,
-                enriched_at=enriched_at,
-            )
+            .values(**values)
         )
         result = await db.execute(stmt)
         await db.commit()
@@ -401,9 +414,11 @@ def _row_to_consolidated(mapping) -> ConsolidatedPersonRow:
         txn_count=txn_count,
         enriched_phone=mapping["enriched_phone"],
         enriched_email=mapping["enriched_email"],
+        enriched_linkedin_url=mapping["enriched_linkedin_url"],
         enriched_at=mapping["enriched_at"],
         source_filing_url=mapping["source_filing_url"],
         filed_at=mapping["filed_at"],
         reporting_owner_id=mapping["reporting_owner_id"],
         is_favorited=bool(mapping["is_favorited"]),
+        apollo_person_id=mapping["apollo_person_id"],
     )

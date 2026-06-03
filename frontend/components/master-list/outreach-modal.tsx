@@ -3,14 +3,20 @@
 import Link from "next/link";
 import type { Route } from "next";
 import { useEffect, useMemo, useRef, useState } from "react";
+import { createPortal } from "react-dom";
+import clsx from "clsx";
 
+import { Button, buttonBase, buttonSizes } from "@/components/ui/button";
 import {
   ApiError,
+  generateAdhocOutreachDraft,
   generateAdvisorOutreachDraft,
   generateInvestorOutreachDraft,
   generateOutreachDraft,
   getLinkedProviders,
+  getOutreachSignature,
   listVaultFolders,
+  sendAdhocOutreach,
   sendAdvisorOutreach,
   sendInvestorOutreach,
   sendOutreachEmail
@@ -160,6 +166,10 @@ export function OutreachModal({
   const [folderId, setFolderId] = useState<number | null>(null);
   const [subject, setSubject] = useState("");
   const [body, setBody] = useState("");
+  const [footer, setFooter] = useState("");
+  // Set true once the user touches the Footer field so a late signature
+  // fetch can't clobber their edit. Mirrors userOverrodeSenderRef.
+  const userEditedFooterRef = useRef(false);
   const [error, setError] = useState<string | null>(null);
   const [copyState, setCopyState] = useState<"idle" | "subject" | "body">("idle");
   // Toggled when the BE returns 412 <provider>_account_not_linked /
@@ -186,6 +196,16 @@ export function OutreachModal({
   // session -- prevents folder changes from clobbering their choice.
   const userOverrodeSenderRef = useRef(false);
   const session = authClient.useSession();
+
+  // Portal gate. We render the dialog into ``document.body`` (see the
+  // ``createPortal`` at the bottom) so its ``position: fixed`` is sized
+  // by the viewport, not by the firm-detail container — that wrapper
+  // keeps a ``transform`` from its ``animate-fade-in`` (fill-mode both),
+  // which would otherwise become the fixed positioning context and
+  // strand the modal in the middle of the (very tall) page. ``mounted``
+  // defers the portal to the client so SSR/first paint match.
+  const [mounted, setMounted] = useState(false);
+  useEffect(() => setMounted(true), []);
 
   const isMountedRef = useRef(true);
   useEffect(() => {
@@ -249,6 +269,26 @@ export function OutreachModal({
     };
   }, []);
 
+  // Signature fetch — prefills the editable Footer field. Runs in
+  // parallel with the folders/providers fetches. Non-fatal on failure:
+  // the footer just starts empty. The ref guard means a slow response
+  // can't overwrite a footer the user has already edited.
+  useEffect(() => {
+    let cancelled = false;
+    (async () => {
+      try {
+        const result = await getOutreachSignature();
+        if (cancelled || !isMountedRef.current) return;
+        if (!userEditedFooterRef.current) setFooter(result.signature);
+      } catch {
+        // Swallow — empty footer is a fine default.
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+
   const selectedFolder = useMemo(
     () => folders.find((f) => f.id === folderId) ?? null,
     [folders, folderId]
@@ -276,6 +316,10 @@ export function OutreachModal({
   const senderEmail =
     selectedAccount?.email_address ??
     (session.data?.user?.email ?? null);
+  // Drafting works without a recipient address (folder + RAG only), but
+  // sending obviously can't. When the contact has no email on file we let
+  // the user generate + copy a draft and disable Send with an inline note.
+  const recipientHasEmail = !!contact.email;
 
   async function handleGenerate() {
     if (folderId === null) return;
@@ -283,9 +327,10 @@ export function OutreachModal({
     setError(null);
     try {
       // Branch on entityKind so the right /outreach/{kind}-draft endpoint
-      // runs. The wire payloads differ only in their id field names
+      // runs. The firm payloads differ only in their id field names
       // (broker_dealer_id vs advisor_id vs institutional_investor_id),
-      // wrapped by the per-kind helpers in api.ts.
+      // wrapped by the per-kind helpers in api.ts; the adhoc path carries
+      // the recipient email instead of any firm/contact FK.
       let draft;
       if (entityKind === "broker_dealer") {
         draft = await generateOutreachDraft({
@@ -299,11 +344,19 @@ export function OutreachModal({
           advisor_contact_id: contact.id,
           folder_id: folderId
         });
-      } else {
+      } else if (entityKind === "investor") {
         draft = await generateInvestorOutreachDraft({
           institutional_investor_id: entityId,
           investor_contact_id: contact.id,
           folder_id: folderId
+        });
+      } else {
+        draft = await generateAdhocOutreachDraft({
+          folder_id: folderId,
+          // Null (not "") when unknown so the optional EmailStr passes —
+          // the draft endpoint ignores the address anyway.
+          recipient_email: contact.email ?? null,
+          recipient_name: contact.name
         });
       }
       if (!isMountedRef.current) return;
@@ -319,6 +372,12 @@ export function OutreachModal({
 
   async function handleSend() {
     if (!subject.trim() || !body.trim()) return;
+    // Append the (possibly edited) footer beneath the body. Merged on the
+    // client so the BE send contract is unchanged and the audit row
+    // stores exactly what was transmitted.
+    const outgoingBody = footer.trim()
+      ? `${body.trimEnd()}\n\n${footer.trim()}`
+      : body;
     setStage("sending");
     setError(null);
     setLinkActionNeeded(false);
@@ -334,7 +393,7 @@ export function OutreachModal({
           contact_id: contact.id,
           folder_id: folderId ?? 0,
           subject,
-          body,
+          body: outgoingBody,
           // Server derives provider from the resolved account; we still
           // pass ``provider`` for back-compat with older deploys.
           provider: providerId,
@@ -346,18 +405,29 @@ export function OutreachModal({
           advisor_contact_id: contact.id,
           folder_id: folderId ?? 0,
           subject,
-          body,
+          body: outgoingBody,
           provider: providerId,
           sender_account_id: senderAccountId
         });
-      } else {
+      } else if (entityKind === "investor") {
         await sendInvestorOutreach({
           institutional_investor_id: entityId,
           investor_contact_id: contact.id,
           folder_id: folderId ?? 0,
           subject,
-          body,
+          body: outgoingBody,
           provider: providerId,
+          sender_account_id: senderAccountId
+        });
+      } else {
+        // Adhoc: address by recipient email, no firm/contact FK. Folder is
+        // optional here (the sent-history row just shows "—" without one).
+        await sendAdhocOutreach({
+          recipient_email: contact.email ?? "",
+          recipient_name: contact.name,
+          folder_id: folderId,
+          subject,
+          body: outgoingBody,
           sender_account_id: senderAccountId
         });
       }
@@ -443,7 +513,7 @@ export function OutreachModal({
     }
   }
 
-  return (
+  const modal = (
     <div
       role="dialog"
       aria-modal="true"
@@ -457,7 +527,7 @@ export function OutreachModal({
         }}
         className="absolute inset-0 bg-[rgba(15,23,42,0.55)] backdrop-blur-sm"
       />
-      <div className="relative w-full max-w-[640px] rounded-2xl border border-[var(--border,rgba(30,64,175,0.1))] bg-[var(--surface,#ffffff)] p-6 shadow-[0_24px_48px_-16px_rgba(15,23,42,0.45)]">
+      <div className="relative w-full max-w-[960px] max-h-[90vh] overflow-y-auto rounded-2xl border border-[var(--border,rgba(30,64,175,0.1))] bg-[var(--surface,#ffffff)] p-6 shadow-[0_24px_48px_-16px_rgba(15,23,42,0.45)]">
         <div className="flex items-start justify-between gap-4">
           <div>
             <p className="text-[11px] uppercase tracking-[0.18em] text-[var(--text-muted,#94a3b8)]">
@@ -467,23 +537,30 @@ export function OutreachModal({
               id="outreach-modal-title"
               className="mt-1 text-lg font-semibold tracking-tight text-[var(--text,#0f172a)]"
             >
-              {contact.name}{" "}
-              <span className="text-sm font-medium text-[var(--text-muted,#94a3b8)]">
-                - {contact.title}
-              </span>
+              {contact.name}
+              {contact.title ? (
+                <span className="text-sm font-medium text-[var(--text-muted,#94a3b8)]">
+                  {" "}- {contact.title}
+                </span>
+              ) : null}
             </h2>
             <p className="mt-1 text-xs text-[var(--text-muted,#94a3b8)]">
-              At <span className="font-medium text-[var(--text-dim,#475569)]">{entityName}</span>
-              {contact.email ? (
+              {entityName ? (
                 <>
-                  {" "}-{" "}
-                  <a
-                    href={`mailto:${contact.email}`}
-                    className="text-[var(--accent,#6366f1)] underline-offset-4 hover:underline"
-                  >
-                    {contact.email}
-                  </a>
+                  At{" "}
+                  <span className="font-medium text-[var(--text-dim,#475569)]">
+                    {entityName}
+                  </span>
+                  {contact.email ? <>{" "}-{" "}</> : null}
                 </>
+              ) : null}
+              {contact.email ? (
+                <a
+                  href={`mailto:${contact.email}`}
+                  className="text-[var(--accent,#6366f1)] underline-offset-4 hover:underline"
+                >
+                  {contact.email}
+                </a>
               ) : null}
             </p>
             {senderEmail && (stage === "draft" || stage === "sending") ? (
@@ -607,7 +684,11 @@ export function OutreachModal({
                       key={p}
                       type="button"
                       onClick={() => void handleLinkProvider(p)}
-                      className="inline-flex h-8 items-center rounded-xl border border-amber-300 bg-white px-3 text-[11px] font-semibold text-amber-800 transition hover:bg-amber-50"
+                      className={clsx(
+                        buttonBase,
+                        buttonSizes.sm,
+                        "rounded-xl border border-amber-300 bg-white text-[11px] text-amber-800 hover:bg-amber-50",
+                      )}
                     >
                       Connect {PROVIDER_LABEL[p]}
                     </button>
@@ -664,6 +745,27 @@ export function OutreachModal({
                 className="mt-1 block w-full rounded-xl border border-[var(--border,rgba(30,64,175,0.1))] bg-[var(--surface,#ffffff)] px-3 py-2 text-sm leading-6 text-[var(--text,#0f172a)] outline-none transition focus:border-[var(--accent,#6366f1)] focus:ring-2 focus:ring-[var(--accent,#6366f1)]/20 disabled:cursor-not-allowed disabled:opacity-60"
               />
             </div>
+            <div>
+              <div className="flex items-center justify-between">
+                <label className="text-xs font-medium uppercase tracking-[0.18em] text-[var(--text-muted,#94a3b8)]">
+                  Footer
+                </label>
+                <span className="text-[11px] text-[var(--text-muted,#94a3b8)]">
+                  Appended below your message
+                </span>
+              </div>
+              <textarea
+                value={footer}
+                onChange={(event) => {
+                  userEditedFooterRef.current = true;
+                  setFooter(event.target.value);
+                }}
+                disabled={stage === "sending"}
+                rows={4}
+                data-allow-copy
+                className="mt-1 block w-full rounded-xl border border-[var(--border,rgba(30,64,175,0.1))] bg-[var(--surface,#ffffff)] px-3 py-2 text-sm leading-6 text-[var(--text,#0f172a)] outline-none transition focus:border-[var(--accent,#6366f1)] focus:ring-2 focus:ring-[var(--accent,#6366f1)]/20 disabled:cursor-not-allowed disabled:opacity-60"
+              />
+            </div>
           </div>
         ) : null}
 
@@ -711,7 +813,11 @@ export function OutreachModal({
                 onClick={() =>
                   void handleLinkProvider(linkActionProvider ?? providerId)
                 }
-                className="mt-2 inline-flex h-8 items-center rounded-xl bg-danger px-3 text-xs font-semibold text-white transition hover:bg-red-700"
+                className={clsx(
+                  buttonBase,
+                  buttonSizes.sm,
+                  "mt-2 rounded-xl bg-danger text-white hover:bg-red-700",
+                )}
               >
                 Grant {PROVIDER_LABEL[linkActionProvider ?? providerId]} access
               </button>
@@ -719,10 +825,18 @@ export function OutreachModal({
           </div>
         ) : null}
 
+        {(stage === "draft" || stage === "sending") && !recipientHasEmail ? (
+          <div className="mt-4 rounded-xl border border-amber-200 bg-amber-50/70 px-3 py-2 text-xs leading-5 text-[var(--text-dim,#475569)]">
+            This contact has no email on file, so sending is disabled. You can
+            still generate, edit, and copy the draft.
+          </div>
+        ) : null}
+
         <div className="mt-6 flex items-center justify-end gap-3">
           {stage === "draft" ? (
-            <button
+            <Button
               type="button"
+              variant="outline"
               onClick={() => {
                 setSubject("");
                 setBody("");
@@ -730,21 +844,20 @@ export function OutreachModal({
                 setLinkActionNeeded(false);
                 setStage("ready");
               }}
-              className="inline-flex h-10 items-center rounded-xl border border-[var(--border,rgba(30,64,175,0.1))] bg-[var(--surface,#ffffff)] px-4 text-sm font-medium text-[var(--text-dim,#475569)] transition hover:border-[var(--border-2,rgba(30,64,175,0.16))] hover:bg-[var(--surface-2,#f1f6fd)]"
             >
               Regenerate
-            </button>
+            </Button>
           ) : null}
-          <button
+          <Button
             type="button"
+            variant="outline"
             onClick={onClose}
             disabled={stage === "generating" || stage === "sending"}
-            className="inline-flex h-10 items-center rounded-xl border border-[var(--border,rgba(30,64,175,0.1))] bg-[var(--surface,#ffffff)] px-4 text-sm font-medium text-[var(--text-dim,#475569)] transition hover:border-[var(--border-2,rgba(30,64,175,0.16))] hover:bg-[var(--surface-2,#f1f6fd)] disabled:cursor-not-allowed disabled:opacity-60"
           >
             {stage === "draft" || stage === "sent" ? "Done" : "Cancel"}
-          </button>
+          </Button>
           {stage === "ready" || stage === "generating" ? (
-            <button
+            <Button
               type="button"
               onClick={() => void handleGenerate()}
               disabled={
@@ -752,27 +865,35 @@ export function OutreachModal({
                 folders.length === 0 ||
                 folderId === null
               }
-              className="inline-flex h-10 items-center rounded-xl bg-[var(--accent,#6366f1)] px-4 text-sm font-semibold text-white shadow-lg shadow-[var(--accent,#6366f1)]/20 transition hover:bg-[var(--accent-2,#8b5cf6)] disabled:cursor-not-allowed disabled:opacity-60"
             >
               {stage === "generating" ? "Generating..." : "Generate draft"}
-            </button>
+            </Button>
           ) : null}
           {stage === "draft" || stage === "sending" ? (
-            <button
+            <Button
               type="button"
               onClick={() => void handleSend()}
               disabled={
-                stage === "sending" || !subject.trim() || !body.trim()
+                stage === "sending" ||
+                !subject.trim() ||
+                !body.trim() ||
+                !recipientHasEmail
               }
-              className="inline-flex h-10 items-center rounded-xl bg-[var(--accent,#6366f1)] px-4 text-sm font-semibold text-white shadow-lg shadow-[var(--accent,#6366f1)]/20 transition hover:bg-[var(--accent-2,#8b5cf6)] disabled:cursor-not-allowed disabled:opacity-60"
+              title={
+                recipientHasEmail
+                  ? undefined
+                  : "No email on file for this contact — drafting only."
+              }
             >
               {stage === "sending" ? "Sending..." : "Send"}
-            </button>
+            </Button>
           ) : null}
         </div>
       </div>
     </div>
   );
+
+  return mounted ? createPortal(modal, document.body) : null;
 }
 
 function errorMessage(error: unknown): string {

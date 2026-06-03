@@ -1,7 +1,9 @@
 "use client";
 
 import { useEffect, useMemo, useRef, useState } from "react";
+import clsx from "clsx";
 
+import { Button, buttonBase, buttonSizes } from "@/components/ui/button";
 import {
   ApiError,
   findPipelineRun,
@@ -518,7 +520,11 @@ function ModalActions({
           ref={cancelRef}
           type="button"
           onClick={onCancel}
-          className="inline-flex h-10 items-center rounded-xl bg-[var(--accent,#6366f1)] px-4 text-sm font-semibold text-white shadow-lg shadow-[var(--accent,#6366f1)]/20 transition hover:bg-[var(--accent-2,#8b5cf6)]"
+          className={clsx(
+            buttonBase,
+            buttonSizes.md,
+            "bg-[var(--accent,#6366f1)] text-white shadow-lg shadow-[var(--accent,#6366f1)]/20 hover:bg-[var(--accent-2,#8b5cf6)]",
+          )}
         >
           Close
         </button>
@@ -550,18 +556,22 @@ function ModalActions({
         ref={cancelRef}
         type="button"
         onClick={onCancel}
-        className="inline-flex h-10 items-center rounded-xl border border-[var(--border,rgba(30,64,175,0.1))] bg-[var(--surface,#ffffff)] px-4 text-sm font-medium text-[var(--text-dim,#475569)] transition hover:border-[var(--border-2,rgba(30,64,175,0.16))] hover:bg-[var(--surface-2,#f1f6fd)]"
+        className={clsx(
+          buttonBase,
+          buttonSizes.md,
+          "border border-[var(--border,rgba(30,64,175,0.1))] bg-[var(--surface,#ffffff)] font-medium text-[var(--text-dim,#475569)] hover:border-[var(--border-2,rgba(30,64,175,0.16))] hover:bg-[var(--surface-2,#f1f6fd)]",
+        )}
       >
         Cancel
       </button>
-      <button
+      <Button
         type="button"
+        variant="danger"
         onClick={onSubmit}
         disabled={submitDisabled}
-        className="inline-flex h-10 items-center rounded-xl bg-danger px-4 text-sm font-semibold text-white shadow-lg shadow-red-300/40 transition hover:bg-[#c62a2a] disabled:cursor-not-allowed disabled:opacity-60"
       >
         {stage === "failed" ? "Retry Fresh Regen" : "Start Fresh Regen"}
-      </button>
+      </Button>
     </div>
   );
 }

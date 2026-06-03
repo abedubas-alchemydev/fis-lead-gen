@@ -456,6 +456,8 @@ async def list_user_activities(
             .select_from(OutreachSend)
             .join(BrokerDealer, BrokerDealer.id == OutreachSend.broker_dealer_id)
             .where(OutreachSend.user_id == user_id)
+            # Exclude soft-deleted sends so they don't resurface in the feed.
+            .where(OutreachSend.archived_at.is_(None))
         )
         branches.append(
             select(
@@ -477,6 +479,8 @@ async def list_user_activities(
                 InvestmentAdvisor.id == OutreachSend.advisor_id,
             )
             .where(OutreachSend.user_id == user_id)
+            # Exclude soft-deleted sends so they don't resurface in the feed.
+            .where(OutreachSend.archived_at.is_(None))
         )
         branches.append(
             select(
@@ -498,6 +502,8 @@ async def list_user_activities(
                 InstitutionalInvestor.id == OutreachSend.institutional_investor_id,
             )
             .where(OutreachSend.user_id == user_id)
+            # Exclude soft-deleted sends so they don't resurface in the feed.
+            .where(OutreachSend.archived_at.is_(None))
         )
 
     if type in (None, "nav", "search", "input"):

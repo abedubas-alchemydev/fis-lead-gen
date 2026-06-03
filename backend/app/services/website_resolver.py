@@ -201,6 +201,30 @@ _MIN_ACRONYM_LEN: Final = 3
 # ``MA`` / common 2-3 char fillers are not.
 _MIN_WORD_LEN: Final = 5
 
+# Cap on Apollo organizations/search calls per resolution: the legal name
+# plus up to (this − 1) brand aliases. Bounds the extra Apollo traffic the
+# alias-query path adds; a firm's combined dba_names + resolver_aliases is
+# almost always 1–3 entries, so 4 covers the realistic pool while capping
+# pathological alias lists.
+_MAX_APOLLO_QUERIES: Final = 4
+
+# Minimum length for ANY anchor token (full-name prefix, acronym, or word).
+# 1–2 char tokens forward-match nearly any hostname and are the root of
+# acronym false positives: alias ``"M1"`` → token ``"m"`` admitted
+# ``m1.com.sg``; alias ``"XP"`` → token ``"xp"`` admitted ``xp.school``. A
+# floor of 3 keeps legitimate short brand tokens that anchor an entire
+# second-level domain (``AQR`` → ``aqr.com``; ``SIG`` → ``sig.com``).
+_MIN_ANCHOR_TOKEN_LEN: Final = 3
+
+# A bare alias this short (single word, alpha-normalized length ≤ this) is a
+# pure acronym. Searching a provider for it returns the most FAMOUS org
+# sharing the acronym — alias ``"DLA"`` → DLA Piper (law firm); ``"M1"`` → M1
+# Ltd; ``"XP"`` → xp.school — almost never this firm. Such aliases are skipped
+# as Apollo *queries*; they still contribute validation tokens (subject to
+# ``_MIN_ANCHOR_TOKEN_LEN``). Multi-word brand aliases (``"AQR Capital
+# Management"``) are specific enough to be safe and are still queried.
+_MAX_BARE_ACRONYM_QUERY_LEN: Final = 3
+
 # Browser User-Agent for the validator's HEAD/GET reachability check.
 # Many firm sites sit behind Cloudflare / WAFs that 403 the default
 # ``python-httpx/X.X`` UA on the assumption it's a bot. Concrete
@@ -374,6 +398,17 @@ async def resolve_website(
     serper.dev runs ahead of SerpAPI when configured because it's ~50×
     cheaper per query; SerpAPI is the canonical fallback (and is the
     primary search tier when serper.dev is unset).
+
+    Apollo (Tier 1) is queried with the legal name **and** each alias from
+    ``dba_names`` / ``resolver_aliases`` (deduped, capped at
+    ``_MAX_APOLLO_QUERIES``), **excluding bare ≤3-char acronyms** (see
+    ``_MAX_BARE_ACRONYM_QUERY_LEN``) which return famous unrelated orgs.
+    Apollo's structured org→domain index resolves parent/brand names a legal
+    entity name doesn't match — e.g. ``AQR INVESTMENTS, LLC`` returns zero
+    Apollo orgs, but the alias ``AQR Capital Management`` resolves to
+    ``aqr.com``. The search tiers stay on the legal name only: Google doesn't
+    surface those parent sites even for the alias query, and SerpAPI is
+    metered.
     """
     # Merge FINRA-supplied DBAs and LLM-supplied aliases into the same
     # token pool. Provenance is preserved at the column level on the BD
@@ -399,11 +434,51 @@ async def resolve_website(
 
     # Tier 1 — Apollo organizations/search (skipped when ``apollo`` is None
     # — bulk backfills can opt out via ``--no-apollo`` to run SerpAPI-only).
+    #
+    # Query the legal name first, then each known alias (FINRA DBA names +
+    # LLM brand aliases). Apollo's structured org→domain index resolves the
+    # parent/brand names a legal entity name doesn't match at all — e.g. the
+    # legal entity "AQR INVESTMENTS, LLC" returns zero Apollo orgs, but its
+    # alias "AQR Capital Management" resolves straight to aqr.com. The aliases
+    # were already used to *validate* a candidate (firm_tokens); here we also
+    # use them to *query*. Restricted to Apollo on purpose: the SerpAPI/serper
+    # search tiers stay on the legal name because Google doesn't surface these
+    # parent sites even for the alias query (observed for AQR) and SerpAPI is
+    # metered — so we don't multiply paid search calls. The validator still
+    # gates every candidate, so an alias only admits a domain its own token
+    # anchors.
     if apollo is not None:
         providers_attempted += 1
+        # Legal name carries the CRD keyword for disambiguation; brand aliases
+        # are queried bare — a "CRD <n>" keyword would filter out the parent-
+        # brand org, which isn't registered under this firm's CRD. Deduped
+        # case-insensitively and capped at _MAX_APOLLO_QUERIES.
+        apollo_queries: list[tuple[str, str | None]] = [(firm_name, crd)]
+        seen_queries = {firm_name.strip().lower()}
+        for alias in combined_aliases:
+            alias = (alias or "").strip()
+            if not alias or alias.lower() in seen_queries:
+                continue
+            seen_queries.add(alias.lower())
+            # Skip bare short acronyms as queries (see
+            # _MAX_BARE_ACRONYM_QUERY_LEN): a single 1–3 char token returns
+            # the most famous unrelated org sharing the acronym. The alias
+            # still feeds the validation-token pool above, so it can confirm
+            # a candidate — it just can't *fetch* one.
+            if (
+                len(alias.split()) == 1
+                and len(_NON_ALPHA_RE.sub("", alias.lower()))
+                <= _MAX_BARE_ACRONYM_QUERY_LEN
+            ):
+                continue
+            apollo_queries.append((alias, None))
+            if len(apollo_queries) >= _MAX_APOLLO_QUERIES:
+                break
         try:
-            org = await apollo.search_organization(firm_name, crd)
-            if org is not None:
+            for query_name, query_crd in apollo_queries:
+                org = await apollo.search_organization(query_name, query_crd)
+                if org is None:
+                    continue
                 candidate = _candidate_from_apollo(org)
                 if candidate and await _validate(
                     candidate,
@@ -591,7 +666,11 @@ def _firm_tokens(
     seen: set[str] = set()
 
     def _add(token: str | None) -> None:
-        if token and token not in seen:
+        # Drop anchor tokens below _MIN_ANCHOR_TOKEN_LEN. 1–2 char tokens
+        # (e.g. "m" from "M1", "xp" from "XP") forward-match almost any
+        # hostname and are the source of acronym false positives. 3-char
+        # tokens (AQR, SIG) are kept — they anchor full second-level domains.
+        if token and len(token) >= _MIN_ANCHOR_TOKEN_LEN and token not in seen:
             seen.add(token)
             tokens.append(token)
 

@@ -3,6 +3,7 @@
 import { AlertCircle, Check, Inbox, Loader2, Plus, X } from "lucide-react";
 import { useCallback, useEffect, useState, useTransition } from "react";
 
+import { Button } from "@/components/ui/button";
 import { apiRequest } from "@/lib/api";
 import type {
   ClearingPartnerClusteringRunResponse,
@@ -163,18 +164,19 @@ export function SuggestedMergesCard({ onAccepted }: { onAccepted?: () => void })
             ) : null}
           </h2>
           <p className="mt-1.5 text-[13px] leading-5 text-[var(--text-dim,#475569)]">
-            Cluster pass groups raw variants of the same firm
-            (&ldquo;RBC Capital Markets, LLC&rdquo;, &ldquo;RBC Capital Markets
-            LLC&rdquo;, etc.) so they collapse into one Clearing Arrangement
-            entry. Review each cluster and accept to create a competitor
-            provider with the variants as aliases.
+            Duplicate variants of the same firm (&ldquo;RBC Capital Markets,
+            LLC&rdquo;, &ldquo;RBC Capital Markets LLC&rdquo;, etc.) are now
+            grouped automatically in the Clearing Arrangement filter. Use this
+            list to refine a cluster &mdash; accept it to lock in a canonical
+            label, or reject it to split a wrong auto-merge back apart.
           </p>
         </div>
-        <button
+        <Button
           type="button"
+          variant="outline"
           disabled={isPending}
           onClick={runScan}
-          className="inline-flex shrink-0 items-center gap-2 rounded-xl border border-[var(--border-2,rgba(30,64,175,0.16))] bg-transparent px-4 py-2 text-sm font-semibold text-[var(--text,#0f172a)] transition hover:bg-[var(--surface-2,#f1f6fd)] disabled:cursor-not-allowed disabled:opacity-60"
+          className="shrink-0"
         >
           {isPending ? (
             <Loader2 className="h-4 w-4 animate-spin" aria-hidden />
@@ -182,7 +184,7 @@ export function SuggestedMergesCard({ onAccepted }: { onAccepted?: () => void })
             <Plus className="h-4 w-4" aria-hidden />
           )}
           Run scan
-        </button>
+        </Button>
       </div>
 
       {error ? (
@@ -344,17 +346,19 @@ function SuggestionRow({
           />
         </label>
         <div className="ml-auto flex items-center gap-2">
-          <button
+          <Button
             type="button"
+            variant="ghost"
+            size="sm"
             disabled={isPending}
             onClick={() => onReject(suggestion.id)}
-            className="inline-flex items-center gap-1.5 rounded-lg border border-transparent px-3 py-1.5 text-[12px] font-semibold text-[var(--text-dim,#475569)] transition hover:bg-[var(--surface-2,#f1f6fd)] disabled:cursor-not-allowed disabled:opacity-60"
           >
             <X className="h-3.5 w-3.5" strokeWidth={2.5} aria-hidden />
             Reject
-          </button>
-          <button
+          </Button>
+          <Button
             type="button"
+            size="sm"
             disabled={!canAccept}
             onClick={() =>
               onAccept(suggestion.id, {
@@ -364,11 +368,10 @@ function SuggestionRow({
                 priority,
               })
             }
-            className="inline-flex items-center gap-1.5 rounded-lg bg-[var(--accent,#6366f1)] px-3 py-1.5 text-[12px] font-semibold text-white shadow-[0_4px_12px_rgba(99,102,241,0.25)] transition hover:brightness-110 disabled:cursor-not-allowed disabled:opacity-50 disabled:shadow-none"
           >
             <Check className="h-3.5 w-3.5" strokeWidth={2.5} aria-hidden />
             Accept
-          </button>
+          </Button>
         </div>
       </div>
     </div>

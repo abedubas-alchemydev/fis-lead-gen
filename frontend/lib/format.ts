@@ -51,7 +51,7 @@ export const SOURCE_BADGE: Record<
     label: "Enriched",
     tone: "amber",
     tooltip:
-      "Name from Apollo enrichment, not directly from the firm's SEC filing",
+      "Name from third-party enrichment, not directly from the firm's SEC filing",
   },
   finra: {
     label: "FINRA officer",
@@ -89,7 +89,7 @@ export const WEBSITE_SOURCE_BADGE: Record<
   apollo: {
     label: "Enriched",
     tone: "amber",
-    tooltip: "Resolved via Apollo organization data",
+    tooltip: "Resolved via third-party organization data",
   },
   hunter: {
     label: "Hunter",

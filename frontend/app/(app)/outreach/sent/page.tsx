@@ -1,4 +1,4 @@
-import { OutreachSentClient } from "@/components/outreach/outreach-sent-client";
+import { OutreachWorkspaceClient } from "@/components/outreach/outreach-workspace-client";
 import { getRequiredSession } from "@/lib/auth-server";
 
 export const dynamic = "force-dynamic";
@@ -8,7 +8,10 @@ export default async function OutreachSentPage() {
 
   return (
     <div className="px-7 pb-12 pt-7 lg:px-9">
-      <OutreachSentClient isAdmin={session.user.role === "admin"} />
+      <OutreachWorkspaceClient
+        isAdmin={session.user.role === "admin"}
+        currentUserId={session.user.id}
+      />
     </div>
   );
 }

@@ -45,7 +45,15 @@ class InvestorItem(BaseModel):
 
     enriched_phone: str | None
     enriched_email: str | None
+    enriched_linkedin_url: str | None = None
     enriched_at: datetime | None
+
+    # True when an Apollo phone-reveal was requested for this insider
+    # (apollo_person_id stamped) but the number hasn't landed via the async
+    # webhook yet. Lets the FE show a "phone arriving" hint in place of a
+    # blank slot. Always False once a phone is present or when no reveal was
+    # ever requested (PDL-only match, total miss, or entity filer).
+    phone_pending: bool = False
 
     source_filing_url: str | None
     filed_at: datetime
@@ -56,6 +64,12 @@ class InvestorItem(BaseModel):
     # ``is_favorited`` reflects membership in the caller's default list.
     reporting_owner_id: int | None = None
     is_favorited: bool = False
+
+    # True when the reporting owner's name looks like an entity (LLC, LP,
+    # GP, Fund, Holdings, ...) rather than a natural person. Computed
+    # per-response from the name; lets the FE disable the Enrich button
+    # for rows the person-only Apollo/PDL match can never resolve.
+    is_entity: bool = False
 
 
 class InvestorListMeta(BaseModel):
@@ -74,19 +88,30 @@ class InvestorEnrichResponse(BaseModel):
     """Returned by ``POST /investors/{id}/enrich``.
 
     Returns just the enrichment fields — the FE merges them into the
-    consolidated row it already has. ``enriched_at`` is always populated
-    after a successful Apollo call (even when Apollo returns no match)
-    so the FE can distinguish "never enriched" from "enriched, came back
-    empty" and avoid re-triggering on every render. ``txn_id`` echoes the
-    leader transaction id the FE called with so the FE knows which row
-    in its list to patch.
+    consolidated row it already has. ``enriched_at`` is populated after a
+    real Apollo/PDL attempt (even when both come back empty) so the FE can
+    distinguish "never enriched" from "enriched, came back empty" and
+    avoid re-triggering on every render. ``enriched_at`` is **NULL** when
+    ``skip_reason`` is set (e.g. entity filer) — the lookup never actually
+    ran, so caching a timestamp would be misleading. ``txn_id`` echoes the
+    leader transaction id the FE called with so the FE knows which row in
+    its list to patch. ``skip_reason`` is non-NULL only for deliberate
+    short-circuits (currently just ``"entity_filer"``); a real upstream
+    miss returns ``matched=False`` with ``skip_reason=None``.
     """
 
     txn_id: int
     enriched_phone: str | None
     enriched_email: str | None
-    enriched_at: datetime
+    enriched_linkedin_url: str | None = None
+    enriched_at: datetime | None
     matched: bool
+    skip_reason: str | None = None
+    # True when Apollo returned a record and an async phone-reveal was
+    # requested but the number isn't in the sync response — the FE merges
+    # this into the row so the "phone arriving" hint shows immediately after
+    # a click, not just on the next list load.
+    phone_pending: bool = False
 
 
 class InvestorPipelineRunResponse(BaseModel):

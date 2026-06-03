@@ -1,6 +1,7 @@
 "use client";
 
 import { AlertCircle, ArrowRight, Loader2, RefreshCw, Search } from "lucide-react";
+import clsx from "clsx";
 import Link from "next/link";
 import type { Route } from "next";
 import { useRouter } from "next/navigation";
@@ -9,6 +10,7 @@ import { useCallback, useEffect, useMemo, useState } from "react";
 import { EmailExtractorErrorCard } from "@/components/email-extractor/email-extractor-error-card";
 import { EmptyScansState } from "@/components/email-extractor/empty-scans-state";
 import { TopActions } from "@/components/layout/top-actions";
+import { Button, buttonBase, buttonSizes } from "@/components/ui/button";
 import { Pill, type PillVariant } from "@/components/ui/pill";
 import { SectionPanel } from "@/components/ui/section-panel";
 import { apiRequest } from "@/lib/api";
@@ -178,7 +180,7 @@ export default function EmailExtractorHomePage(): React.ReactElement {
         >
           <p className="mb-4 max-w-2xl text-[13px] leading-5 text-[var(--text-dim,#475569)]">
             Submit a domain and fan out to Hunter, Snov, the in-house site crawler,
-            and theHarvester. Live progress and per-row verification + Apollo
+            and theHarvester. Live progress and per-row verification +
             enrichment open on the scan page. Past scans stay below so you don&apos;t
             need to re-run them.
           </p>
@@ -209,7 +211,11 @@ export default function EmailExtractorHomePage(): React.ReactElement {
             <button
               type="submit"
               disabled={submitDisabled}
-              className="inline-flex h-[38px] items-center justify-center gap-1.5 rounded-[10px] bg-gradient-to-br from-[#6366f1] to-[#8b5cf6] px-4 text-[13px] font-semibold text-white shadow-[0_6px_16px_rgba(99,102,241,0.35)] transition hover:shadow-[0_8px_22px_rgba(99,102,241,0.45)] disabled:cursor-not-allowed disabled:opacity-50 disabled:shadow-none"
+              className={clsx(
+                buttonBase,
+                buttonSizes.md,
+                "bg-gradient-to-br from-[#6366f1] to-[#8b5cf6] text-white shadow-[0_6px_16px_rgba(99,102,241,0.35)] hover:shadow-[0_8px_22px_rgba(99,102,241,0.45)] disabled:shadow-none",
+              )}
             >
               {submitting ? (
                 <Loader2 className="h-4 w-4 animate-spin" strokeWidth={2} />
@@ -244,18 +250,18 @@ export default function EmailExtractorHomePage(): React.ReactElement {
         eyebrow="History"
         title="Recent scans"
         headerAction={
-          <button
-            type="button"
+          <Button
+            variant="outline"
+            size="sm"
             onClick={() => void loadRecent()}
             disabled={historyLoading}
-            className="inline-flex items-center gap-1.5 rounded-[6px] border border-[var(--border-2,rgba(30,64,175,0.16))] bg-transparent px-2.5 py-1 text-[11px] font-semibold text-[var(--text-dim,#475569)] transition hover:bg-[var(--surface-2,#f1f6fd)] hover:text-[var(--text,#0f172a)] disabled:cursor-not-allowed disabled:opacity-45"
           >
             <RefreshCw
               className={`h-3.5 w-3.5 ${historyLoading ? "animate-spin" : ""}`}
               strokeWidth={2}
             />
             {historyLoading ? "Refreshing…" : "Refresh"}
-          </button>
+          </Button>
         }
       >
         {historyLoading && recentScans.length === 0 ? (

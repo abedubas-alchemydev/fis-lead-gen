@@ -134,6 +134,41 @@ class Settings(BaseSettings):
     # Stamped on Apollo-owned outcomes only (success + no-result). Transient
     # 5xx / network errors do not engage the cooldown. Set to 0 to disable.
     apollo_enrich_cooldown_hours: int = 24
+    # Apollo's phone-number reveal flow is async: /people/match with
+    # ``reveal_phone_number=true`` returns the person object synchronously
+    # (email + linkedin) but phone_numbers arrive minutes later as a POST
+    # to the ``webhook_url`` we provide on each request. Apollo doesn't
+    # sign webhooks (no HMAC header, per docs), so we secure the callback
+    # by embedding a shared secret in the URL path: every webhook URL we
+    # hand Apollo is ``{public_base_url}/api/v1/webhooks/apollo/{secret}
+    # /phone-reveal``, and the handler constant-time-compares the path
+    # segment to this setting. When ``apollo_webhook_secret`` is unset,
+    # the provider DOES NOT request phone reveal — the feature stays
+    # dormant until both this and ``public_base_url`` are configured.
+    # Director LinkedIn fall-through. Apollo's /people/match returns the
+    # person record *projected through the queried firm*. For an outside
+    # board director (e.g. a retired exec who sits on Vanguard's board but
+    # works elsewhere), Apollo confirms identity at the queried firm but
+    # the firm-projected record often has no linkedin_url — the URL lives
+    # on the person's PRIMARY-employer record. When this is on, a confirmed
+    # match (confidence >= threshold) that came back with no LinkedIn
+    # triggers a second /people/match with first+last only (no org/domain
+    # anchor) to surface the primary record's LinkedIn. The fallback URL is
+    # accepted only when Apollo's own person id matches, so a same-name
+    # stranger can't pollute the row. On by default as part of the "use every
+    # resource for contact coverage" directive — the cost is one extra Apollo
+    # call per no-LinkedIn row, and the id-match guard prevents wrong-person
+    # grafts. Yield is firm-dependent (Apollo's name-only match returns sparse
+    # stubs for some cohorts), but when it can recover a URL we take it.
+    apollo_director_linkedin_fallback: bool = True
+    apollo_webhook_secret: str | None = None
+    # Absolute base URL of the public Cloud Run service, used to construct
+    # the ``webhook_url`` we register with Apollo on each /people/match
+    # call. Distinct from ``backend_audience`` (which is bound to the
+    # Cloud Scheduler OIDC audience and may differ in staging/prod). When
+    # unset, Apollo phone-reveal is skipped — provider falls back to the
+    # current sync-only behaviour.
+    public_base_url: str | None = None
     zoominfo_api_key: str | None = None
     # People Data Labs — the first provider in the discovery chain that
     # actually returns person phones via API (PR #419's audit showed Apollo
@@ -148,18 +183,58 @@ class Settings(BaseSettings):
     # that already clear our threshold — a too-low value would return
     # billed-but-useless matches.
     pdl_min_likelihood: int = 6
-    # Multi-provider contact discovery chain used by the "Generate More Details"
-    # button on the firm detail page. The orchestrator walks providers in the
-    # comma-separated order below; the first result with ``confidence >=
-    # contact_discovery_min_confidence`` wins. PDL leads because it's the
-    # only provider that returns multi-value emails + phones; Apollo / Hunter
-    # / Snov stay as fallbacks (cheap, pay-as-you-go) when PDL misses or has
-    # no key. Keys (``hunter_api_key``, ``snov_client_id``,
-    # ``snov_client_secret``) are declared further down because the existing
-    # email-extractor module already depends on them.
-    contact_discovery_chain: str = "pdl,apollo_match,hunter,snov"
+    # Contact-discovery chain for the "Generate More Details" button on the
+    # firm detail page. The orchestrator runs every provider below
+    # CONCURRENTLY (``asyncio.gather``) and merges the hits that clear
+    # ``contact_discovery_min_confidence`` -- ``linkedin_url`` and the scalar
+    # email/phone take the first non-null in chain order, so order still
+    # decides ties. Because the fan-out calls *every* listed provider on every
+    # officer, a provider that rarely wins is pure cost. The default is
+    # therefore scoped to the providers that fit this cohort (staging audit
+    # 2026-06-02):
+    #   * ``apollo_match`` -- backbone. Matches by name + company (no domain
+    #     needed), supplies phone + LinkedIn at high coverage plus some email,
+    #     and carries the async phone-reveal + director-LinkedIn fallback.
+    #   * ``hunter`` -- email supplement (domain-gated). Reliable email finder;
+    #     only bills when a firm domain exists.
+    #   * ``snov`` -- second email finder (domain-gated). Re-added after fixing
+    #     its silent-timeout failure (dedicated ``snov_request_timeout`` + real
+    #     error logging in ``snov.py``); email is the weak channel, so a second
+    #     source earns its call.
+    # Dropped from the default but still registered in
+    # ``orchestrator._PROVIDERS`` -- re-add to ``CONTACT_DISCOVERY_CHAIN`` (env)
+    # to re-enable with no code change:
+    #   * ``pdl`` -- near-zero match rate on small broker-dealers despite being
+    #     billed per call (6 contact rows total at audit).
+    #   * ``linkedin_search`` -- costs a serper/SerpAPI call per officer in the
+    #     parallel fan-out while Apollo already supplies LinkedIn for ~97% of
+    #     its matches, so it won 0 rows. Re-add (with ``SERPER_API_KEY``) only
+    #     if a LinkedIn-recovery gap reappears.
+    contact_discovery_chain: str = "apollo_match,hunter,snov"
     contact_discovery_min_confidence: float = 60.0
     contact_discovery_timeout: float = 10.0
+    # Snov's name->email finder (`get-emails-from-names`) is asynchronous: the
+    # first call returns "in_progress" and the result lands on a later poll
+    # (see snov.py). This is the overall budget for that poll loop AND the
+    # per-request httpx timeout -- once it elapses Snov is skipped so a slow
+    # search can't stall the parallel discovery fan-out.
+    snov_request_timeout: float = 12.0
+    # Last-resort "web fallback" stage: after the provider chain, for People
+    # still missing a channel, search public LinkedIn URLs (serper/SerpAPI) and
+    # crawl the firm's OWN public site for literal published emails (and, when
+    # ``web_fallback_phones_enabled``, phones co-located with the person). No
+    # LinkedIn-page scraping (auth-walled/ToS) and no email guessing -- only
+    # addresses actually published on the firm site that match the person's
+    # name. Off by default: it adds a per-firm crawl + per-gap-officer search,
+    # so it's opt-in like ``linkedin_search`` (see CONTACT_DISCOVERY_CHAIN note
+    # above). Enable via WEB_FALLBACK_ENABLED once a serper/SerpAPI key is set.
+    web_fallback_enabled: bool = False
+    web_fallback_phones_enabled: bool = False
+    # Confidence stamped on a web-sourced email/phone. 0..100 to match
+    # DiscoveryResult/EmailHit; sits above contact_discovery_min_confidence (60)
+    # so the merge keeps it, below LinkedIn org-confirmed (80). Raising the
+    # min-confidence floor above this disables web emails with no code change.
+    web_fallback_email_confidence: float = 70.0
     gemini_api_key: str | None = None
     gemini_api_base: str = "https://generativelanguage.googleapis.com/v1beta"
     # Production default for the structured-PDF extraction path

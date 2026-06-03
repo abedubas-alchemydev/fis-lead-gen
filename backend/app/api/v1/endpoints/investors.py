@@ -41,7 +41,7 @@ from app.schemas.investors import (
 )
 from app.core.feature_permissions import INVESTORS
 from app.services.auth import ensure_feature, get_current_user
-from app.services.form4_apollo import match_form4_person
+from app.services.form4_apollo import looks_like_entity, match_form4_person
 from app.services.form4_transactions import Form4TransactionRepository
 from app.services.service_models import ConsolidatedPersonRow
 
@@ -100,11 +100,17 @@ def _item_from_consolidated(row: ConsolidatedPersonRow) -> InvestorItem:
         txn_count=row.txn_count,
         enriched_phone=row.enriched_phone,
         enriched_email=row.enriched_email,
+        enriched_linkedin_url=row.enriched_linkedin_url,
         enriched_at=row.enriched_at,
+        # An Apollo reveal is in flight when we have a person id but no
+        # number yet; the FE gates the "phone arriving" hint on a freshness
+        # window so a reveal that never delivers stops showing eventually.
+        phone_pending=bool(row.apollo_person_id) and not row.enriched_phone,
         source_filing_url=row.source_filing_url,
         filed_at=row.filed_at,
         reporting_owner_id=row.reporting_owner_id,
         is_favorited=row.is_favorited,
+        is_entity=looks_like_entity(row.reporting_owner_name),
     )
 
 
@@ -277,16 +283,40 @@ async def enrich_investor(
         full_name=row.reporting_owner_name,
         issuer_name=row.issuer_name,
     )
+
+    # Defense in depth: the FE disables the button for entity rows, but if
+    # a stale tab (or a direct API caller) still POSTs, the service-layer
+    # short-circuit returns ``skip_reason="entity_filer"``. We don't write
+    # ``enriched_at`` for this path — it's deterministic from the name
+    # (computed on every list response), so caching it would be misleading
+    # and would flip the row into the "Re-enrich" state for no reason.
+    if match.skip_reason == "entity_filer":
+        return InvestorEnrichResponse(
+            txn_id=txn_id,
+            enriched_phone=None,
+            enriched_email=None,
+            enriched_at=None,
+            matched=False,
+            skip_reason="entity_filer",
+        )
+
     _, enriched_at = await repository.attach_enrichment_by_person(
         db,
         reporting_owner_cik=row.reporting_owner_cik,
         phone=match.phone,
         email=match.email,
+        linkedin_url=match.linkedin_url,
+        apollo_person_id=match.apollo_person_id,
     )
     return InvestorEnrichResponse(
         txn_id=txn_id,
         enriched_phone=match.phone,
         enriched_email=match.email,
+        enriched_linkedin_url=match.linkedin_url,
         enriched_at=enriched_at,
         matched=match.matched,
+        # Apollo had a record and a reveal was requested, but no number in
+        # the sync body — it'll arrive via the webhook. Drives the FE's
+        # "phone arriving" hint right after the click.
+        phone_pending=bool(match.apollo_person_id) and not match.phone,
     )

@@ -177,7 +177,7 @@ export default async function HomePage() {
               {
                 icon: Zap,
                 title: "Contact Enrichment",
-                desc: "On-demand Apollo.io integration for executive email, phone, and LinkedIn data.",
+                desc: "On-demand enrichment for executive email, phone, and LinkedIn data.",
                 accent: "from-blue/8 to-gold/5",
                 iconBg: "bg-[var(--accent,#6366f1)]/10 text-[var(--accent,#6366f1)]",
               },

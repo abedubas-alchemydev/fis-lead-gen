@@ -63,6 +63,7 @@ from app.services.contact_discovery.base import (
     PhoneHit,
 )
 from app.services.contact_discovery.hunter import HunterProvider
+from app.services.contact_discovery.linkedin_search import LinkedInSearchProvider
 from app.services.contact_discovery.pdl import PdlProvider
 from app.services.contact_discovery.snov import SnovProvider
 
@@ -77,6 +78,7 @@ _PROVIDERS: dict[str, ContactDiscoveryProvider] = {
     "apollo_match": ApolloMatchProvider(),
     "hunter": HunterProvider(),
     "snov": SnovProvider(),
+    "linkedin_search": LinkedInSearchProvider(),
 }
 
 _CACHE_TTL_DAYS = 90
@@ -95,21 +97,38 @@ async def discover_contact(
     *,
     bd_id: int,
     session: AsyncSession,
+    use_cache: bool = True,
+    exclude_providers: frozenset[str] = frozenset(),
 ) -> ExecutiveContact | None:
     """Resolve a broker-dealer officer into a persisted ``ExecutiveContact``.
 
     See module docstring for the chain semantics. The row is added to the
     session but **not** committed — the caller owns the transaction
     boundary.
+
+    ``use_cache=False`` (the user-facing force/refresh button) skips the
+    90-day cache read and re-walks the chain. To avoid stacking a duplicate
+    on repeat forced runs, an existing discovery-owned row for this
+    ``(bd_id, name)`` — regardless of age — is updated in place instead of
+    inserted. Phones are never regressed: a forced run's sync result often
+    has no phone (Apollo reveal is async), so an already-revealed phone is
+    kept.
+
+    ``exclude_providers`` drops the named providers from the chain for this
+    call only. The BD ``/enrich`` endpoint passes ``{"apollo_match"}`` when
+    its company-search phase already issued the identical Apollo
+    /people/match for these officers, so the chain skips it and runs only the
+    email finders (see the endpoint for the rationale).
     """
     parsed = _parse_entity(entity)
     if parsed is None:
         return None
     entity_type, first_name, last_name, org_name, domain, title, cache_name = parsed
 
-    cached = await _find_cached_executive(session, bd_id=bd_id, name=cache_name)
-    if cached is not None:
-        return cached
+    if use_cache:
+        cached = await _find_cached_executive(session, bd_id=bd_id, name=cache_name)
+        if cached is not None:
+            return cached
 
     result = await _walk_chain(
         entity_type,
@@ -118,14 +137,23 @@ async def discover_contact(
         org_name=org_name,
         domain=domain,
         cache_name=cache_name,
+        exclude_providers=exclude_providers,
     )
     if result is None:
         return None
 
+    title_value = title or ("Executive" if entity_type == "person" else "Organization")
+
+    if not use_cache:
+        existing = await _find_executive_any_age(session, bd_id=bd_id, name=cache_name)
+        if existing is not None:
+            _apply_discovery_to_executive(existing, title=title_value, result=result)
+            return existing
+
     row = _build_executive_row(
         bd_id=bd_id,
         name=cache_name,
-        title=title or ("Executive" if entity_type == "person" else "Organization"),
+        title=title_value,
         result=result,
     )
     session.add(row)
@@ -251,6 +279,7 @@ async def _walk_chain(
     org_name: str,
     domain: str | None,
     cache_name: str,
+    exclude_providers: frozenset[str] = frozenset(),
 ) -> DiscoveryResult | None:
     """Fan out to every configured provider in parallel and merge their hits.
 
@@ -263,12 +292,22 @@ async def _walk_chain(
     return ``None``, or fall below the threshold contribute nothing and are
     skipped (mirroring the previous first-hit-wins miss handling). Returns
     ``None`` when no provider clears the threshold.
+
+    Providers named in ``exclude_providers`` are dropped from the chain for
+    this call (a caller that already ran one in an earlier phase), leaving the
+    rest to fan out normally.
     """
     min_confidence = float(settings.contact_discovery_min_confidence)
     chain = [p.strip() for p in settings.contact_discovery_chain.split(",") if p.strip()]
 
     valid: list[tuple[str, ContactDiscoveryProvider]] = []
     for provider_name in chain:
+        if provider_name in exclude_providers:
+            # Caller already ran this provider in an earlier phase (the BD
+            # /enrich company-search issues Apollo /people/match), so
+            # re-running it here would repeat the identical call. The rest of
+            # the chain still fans out.
+            continue
         provider = _PROVIDERS.get(provider_name)
         if provider is None:
             logger.warning("contact_discovery_chain references unknown provider %r", provider_name)
@@ -392,6 +431,15 @@ def _merge_discovery_results(
             linkedin_url = r.linkedin_url
             break
 
+    # apollo_person_id: first non-null in chain order. Only apollo_match
+    # ever sets it; if a future Apollo-shaped provider also populates it,
+    # chain order picks the winner the same way linkedin_url does.
+    apollo_person_id: str | None = None
+    for r in results:
+        if r.apollo_person_id:
+            apollo_person_id = r.apollo_person_id
+            break
+
     email_scalar = _highest_confidence_value(merged_emails)
     phone_scalar = _highest_confidence_value(merged_phones)
 
@@ -405,6 +453,7 @@ def _merge_discovery_results(
         raw={r.provider: r.raw for r in results},
         emails=merged_emails,
         phones=merged_phones,
+        apollo_person_id=apollo_person_id,
     )
 
 
@@ -435,6 +484,32 @@ async def _find_cached_executive(
             ExecutiveContact.bd_id == bd_id,
             ExecutiveContact.name == name,
             ExecutiveContact.enriched_at >= threshold,
+        )
+        .order_by(ExecutiveContact.enriched_at.desc())
+        .limit(1)
+    )
+    return (await session.execute(stmt)).scalars().first()
+
+
+async def _find_executive_any_age(
+    session: AsyncSession,
+    *,
+    bd_id: int,
+    name: str,
+) -> ExecutiveContact | None:
+    """Latest discovery-owned ``ExecutiveContact`` for ``(bd_id, name)``, any age.
+
+    Used by the forced (``use_cache=False``) path to update an existing row
+    in place rather than insert a duplicate. ``focus_report`` rows are
+    excluded — they're higher-trust and coexist with discovery rows (see
+    ``contacts.enrich_contacts``), so we never clobber them.
+    """
+    stmt = (
+        select(ExecutiveContact)
+        .where(
+            ExecutiveContact.bd_id == bd_id,
+            ExecutiveContact.name == name,
+            ExecutiveContact.source != "focus_report",
         )
         .order_by(ExecutiveContact.enriched_at.desc())
         .limit(1)
@@ -506,8 +581,41 @@ def _build_executive_row(
         source=source,
         discovery_source=result.provider[:32],
         discovery_confidence=Decimal(str(round(result.confidence, 2))),
+        apollo_person_id=result.apollo_person_id,
         enriched_at=datetime.now(timezone.utc),
     )
+
+
+def _apply_discovery_to_executive(
+    row: ExecutiveContact,
+    *,
+    title: str,
+    result: DiscoveryResult,
+) -> None:
+    """Refresh an existing executive row in place from a new discovery result.
+
+    Mirrors ``_build_executive_row`` field-for-field, with two don't-regress
+    rules for the forced re-run path: an existing ``phone`` / ``phones``
+    (which may have been filled asynchronously by the Apollo phone-reveal
+    webhook) is kept when this run surfaced none, and ``apollo_person_id`` is
+    preserved when the new result lacks one so a pending reveal can still
+    correlate. ``bd_id`` / ``name`` are the lookup keys and stay put.
+    """
+    source = "apollo" if result.provider.startswith("apollo") else result.provider
+    row.title = title[:255]
+    row.email = result.email or row.email
+    row.linkedin_url = result.linkedin_url or row.linkedin_url
+    if result.phone:
+        row.phone = result.phone
+    if result.phones:
+        row.phones = _array_or_none(result.phones)
+    if result.emails:
+        row.emails = _array_or_none(result.emails)
+    row.source = source
+    row.discovery_source = result.provider[:32]
+    row.discovery_confidence = Decimal(str(round(result.confidence, 2)))
+    row.apollo_person_id = result.apollo_person_id or row.apollo_person_id
+    row.enriched_at = datetime.now(timezone.utc)
 
 
 def _build_investor_row(
@@ -530,6 +638,7 @@ def _build_investor_row(
         source=source,
         discovery_source=result.provider[:32],
         discovery_confidence=Decimal(str(round(result.confidence, 2))),
+        apollo_person_id=result.apollo_person_id,
         enriched_at=datetime.now(timezone.utc),
     )
 
@@ -554,6 +663,7 @@ def _build_advisor_row(
         source=source,
         discovery_source=result.provider[:32],
         discovery_confidence=Decimal(str(round(result.confidence, 2))),
+        apollo_person_id=result.apollo_person_id,
         enriched_at=datetime.now(timezone.utc),
     )
 

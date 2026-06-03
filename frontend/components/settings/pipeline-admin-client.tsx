@@ -12,11 +12,10 @@ import {
   RefreshCw,
 } from "lucide-react";
 
-import { apiRequest, buildApiPath } from "@/lib/api";
+import { Button } from "@/components/ui/button";
+import { apiRequest } from "@/lib/api";
 import type {
   ClearingArrangementItem,
-  CompetitorProviderCreate,
-  CompetitorProvidersResponse,
   DataRefreshResponse,
   PipelineStatusResponse,
   PipelineTriggerResponse,
@@ -37,9 +36,6 @@ const EYEBROW =
 
 const CARD_TITLE =
   "mt-1 text-[15px] font-semibold tracking-[-0.01em] text-[var(--text,#0f172a)]";
-
-const INPUT_CLASS =
-  "w-full rounded-xl border border-[var(--border-2,rgba(30,64,175,0.16))] bg-[var(--surface,#ffffff)] px-3 py-2 text-sm text-[var(--text,#0f172a)] placeholder:text-[var(--text-muted,#94a3b8)] transition focus:border-[var(--accent,#6366f1)] focus:outline-none focus:ring-2 focus:ring-[var(--accent,#6366f1)]/30";
 
 // Status pill catalog — mirrors the priority palette used by /alerts so
 // the "Running" / "Completed" / "Failed" / "Idle" tags read consistently
@@ -91,23 +87,17 @@ const SCORING_FIELDS: ReadonlyArray<readonly [string, keyof ScoringSettingsItem]
 
 export function PipelineAdminClient() {
   const [status, setStatus] = useState<PipelineStatusResponse | null>(null);
-  const [competitors, setCompetitors] = useState<CompetitorProvidersResponse["items"]>([]);
   const [scoring, setScoring] = useState<ScoringSettingsItem | null>(null);
-  const [newCompetitorName, setNewCompetitorName] = useState("");
-  const [newCompetitorAliases, setNewCompetitorAliases] = useState("");
-  const [newCompetitorPriority, setNewCompetitorPriority] = useState(90);
   const [error, setError] = useState<string | null>(null);
   const [isPending, startTransition] = useTransition();
 
   async function loadData() {
     try {
-      const [pipelineStatus, competitorResponse, scoringResponse] = await Promise.all([
+      const [pipelineStatus, scoringResponse] = await Promise.all([
         apiRequest<PipelineStatusResponse>("/api/v1/pipeline/clearing"),
-        apiRequest<CompetitorProvidersResponse>("/api/v1/settings/competitors"),
         apiRequest<ScoringSettingsItem>("/api/v1/settings/scoring")
       ]);
       setStatus(pipelineStatus);
-      setCompetitors(competitorResponse.items);
       setScoring(scoringResponse);
       setError(null);
     } catch (loadError) {
@@ -156,48 +146,6 @@ export function PipelineAdminClient() {
     });
   }
 
-  function createCompetitor() {
-    startTransition(async () => {
-      try {
-        await apiRequest<CompetitorProviderCreate>("/api/v1/settings/competitors", {
-          method: "POST",
-          body: JSON.stringify({
-            name: newCompetitorName,
-            aliases: newCompetitorAliases
-              .split(",")
-              .map((item) => item.trim())
-              .filter(Boolean),
-            priority: newCompetitorPriority
-          })
-        });
-        setNewCompetitorName("");
-        setNewCompetitorAliases("");
-        setNewCompetitorPriority(90);
-        await loadData();
-      } catch (actionError) {
-        setError(actionError instanceof Error ? actionError.message : "Unable to create competitor.");
-      }
-    });
-  }
-
-  function saveCompetitor(id: number, aliases: string[], priority: number, isActive: boolean) {
-    startTransition(async () => {
-      try {
-        await apiRequest(`/api/v1/settings/competitors/${id}`, {
-          method: "PUT",
-          body: JSON.stringify({
-            aliases,
-            priority,
-            is_active: isActive
-          })
-        });
-        await loadData();
-      } catch (actionError) {
-        setError(actionError instanceof Error ? actionError.message : "Unable to update competitor.");
-      }
-    });
-  }
-
   function refreshData() {
     startTransition(async () => {
       try {
@@ -231,7 +179,7 @@ export function PipelineAdminClient() {
             Settings and controlled refresh
           </h1>
           <p className="mt-2 max-w-3xl text-[13px] leading-5 text-[var(--text-dim,#475569)]">
-            Adjust the weighted prospect-scoring model, maintain the competitor provider list, and trigger a controlled refresh of the alert and clearing pipelines.
+            Adjust the weighted prospect-scoring model and trigger a controlled refresh of the alert and clearing pipelines.
           </p>
         </div>
       </div>
@@ -241,35 +189,30 @@ export function PipelineAdminClient() {
         <p className={EYEBROW}>Admin Controls</p>
         <h2 className={CARD_TITLE}>Pipeline actions</h2>
         <div className="mt-5 flex flex-wrap gap-3">
-          <button
-            type="button"
-            disabled={isPending}
-            onClick={refreshData}
-            className="inline-flex items-center gap-2 rounded-xl bg-[var(--accent,#6366f1)] px-4 py-2.5 text-sm font-semibold text-white shadow-[0_6px_16px_rgba(99,102,241,0.35)] transition hover:brightness-110 disabled:cursor-not-allowed disabled:opacity-60 disabled:shadow-none"
-          >
+          <Button type="button" disabled={isPending} onClick={refreshData}>
             {isPending ? (
               <Loader2 className="h-4 w-4 animate-spin" aria-hidden />
             ) : (
               <RefreshCw className="h-4 w-4" aria-hidden />
             )}
             Refresh data
-          </button>
-          <button
+          </Button>
+          <Button
             type="button"
+            variant="outline"
             disabled={isPending}
             onClick={() => runAction("/api/v1/settings/refresh-finra-details")}
-            className="inline-flex items-center gap-2 rounded-xl border border-[var(--border-2,rgba(30,64,175,0.16))] bg-transparent px-4 py-2.5 text-sm font-semibold text-[var(--text,#0f172a)] transition hover:bg-[var(--surface-2,#f1f6fd)] disabled:cursor-not-allowed disabled:opacity-60"
           >
             Refresh FINRA details
-          </button>
-          <button
+          </Button>
+          <Button
             type="button"
+            variant="ghost"
             disabled={isPending}
             onClick={() => runAction("/api/v1/pipeline/clearing/retry-failed")}
-            className="inline-flex items-center gap-2 rounded-xl px-4 py-2.5 text-sm font-semibold text-[var(--text-dim,#475569)] transition hover:bg-[var(--surface-2,#f1f6fd)] disabled:cursor-not-allowed disabled:opacity-60"
           >
             Retry failed
-          </button>
+          </Button>
         </div>
         <p className="mt-3 text-xs text-[var(--text-muted,#94a3b8)]">
           &ldquo;Refresh FINRA details&rdquo; re-scans all firms for updated owners, officers, and business types (bi-monthly recommended).
@@ -410,15 +353,14 @@ export function PipelineAdminClient() {
                 </span>
               </div>
 
-              <button
+              <Button
                 type="button"
                 disabled={isPending || totalScoring !== 100}
                 onClick={saveScoring}
-                className="inline-flex items-center gap-2 rounded-xl bg-[var(--accent,#6366f1)] px-4 py-2 text-sm font-semibold text-white shadow-[0_6px_16px_rgba(99,102,241,0.35)] transition hover:brightness-110 disabled:cursor-not-allowed disabled:opacity-60 disabled:shadow-none"
               >
                 {isPending ? <Loader2 className="h-4 w-4 animate-spin" aria-hidden /> : null}
                 Save scoring
-              </button>
+              </Button>
               {totalScoring !== 100 ? (
                 <p className="text-xs text-[var(--pill-red-text,#b91c1c)]">
                   Weights must sum to exactly 100% before saving.
@@ -431,67 +373,8 @@ export function PipelineAdminClient() {
         </div>
       </div>
 
-      {/* Competitors + Add Competitor — same 2-col grid. */}
-      <div className="grid gap-6 md:grid-cols-[1.1fr_0.9fr]">
-        <div className={CARD}>
-          <p className={EYEBROW}>Competitors</p>
-          <h2 className={CARD_TITLE}>Provider catalog</h2>
-          <div className="mt-4 space-y-3">
-            {competitors.length === 0 ? (
-              <EmptyState
-                compact
-                icon={<Inbox className="h-5 w-5" strokeWidth={1.75} aria-hidden />}
-                title="No providers configured"
-                body="Add your first competitor on the right."
-              />
-            ) : (
-              competitors.map((item) => <CompetitorEditor key={item.id} item={item} onSave={saveCompetitor} />)
-            )}
-          </div>
-        </div>
-
-        <div className={CARD}>
-          <p className={EYEBROW}>Add Competitor</p>
-          <h2 className={CARD_TITLE}>New provider</h2>
-          <div className="mt-4 space-y-3">
-            <FieldLabel label="Provider name">
-              <input
-                value={newCompetitorName}
-                onChange={(event) => setNewCompetitorName(event.target.value)}
-                className={INPUT_CLASS}
-              />
-            </FieldLabel>
-            <FieldLabel label="Aliases">
-              <input
-                value={newCompetitorAliases}
-                onChange={(event) => setNewCompetitorAliases(event.target.value)}
-                placeholder="Comma separated aliases"
-                className={INPUT_CLASS}
-              />
-            </FieldLabel>
-            <FieldLabel label="Priority">
-              <input
-                type="number"
-                value={newCompetitorPriority}
-                onChange={(event) => setNewCompetitorPriority(Number(event.target.value))}
-                className={INPUT_CLASS}
-              />
-            </FieldLabel>
-            <button
-              type="button"
-              disabled={isPending || !newCompetitorName.trim()}
-              onClick={createCompetitor}
-              className="inline-flex items-center gap-2 rounded-xl border border-[var(--border-2,rgba(30,64,175,0.16))] bg-transparent px-4 py-2 text-sm font-semibold text-[var(--text,#0f172a)] transition hover:bg-[var(--surface-2,#f1f6fd)] disabled:cursor-not-allowed disabled:opacity-60"
-            >
-              Add competitor
-            </button>
-          </div>
-        </div>
-      </div>
-
       {/* Suggested merges — clusters of long-tail clearing-partner
-          variants that the BE clustering pass found. Accepting a row
-          appends to the Competitors list above. */}
+          variants that the BE clustering pass found. */}
       <SuggestedMergesCard onAccepted={() => void loadData()} />
     </section>
   );
@@ -590,77 +473,6 @@ function FailureCard({ item }: { item: ClearingArrangementItem }) {
           )}
         </button>
       ) : null}
-    </div>
-  );
-}
-
-function FieldLabel({ label, children }: { label: string; children: React.ReactNode }) {
-  return (
-    <label className="block">
-      <span className="block text-xs font-medium uppercase tracking-[0.06em] text-[var(--text-muted,#94a3b8)]">
-        {label}
-      </span>
-      <div className="mt-1.5">{children}</div>
-    </label>
-  );
-}
-
-function CompetitorEditor({
-  item,
-  onSave
-}: {
-  item: CompetitorProvidersResponse["items"][number];
-  onSave: (id: number, aliases: string[], priority: number, isActive: boolean) => void;
-}) {
-  const [aliases, setAliases] = useState(item.aliases.join(", "));
-  const [priority, setPriority] = useState(item.priority);
-  const [isActive, setIsActive] = useState(item.is_active);
-
-  return (
-    <div className="rounded-xl border border-[var(--border,rgba(30,64,175,0.1))] bg-[var(--surface,#ffffff)] px-4 py-3">
-      <div className="flex items-center justify-between gap-3">
-        <p className="text-sm font-semibold text-[var(--text,#0f172a)]">{item.name}</p>
-        <label className="inline-flex items-center gap-2 text-[11px] font-semibold uppercase tracking-[0.1em] text-[var(--text-muted,#94a3b8)]">
-          Active
-          <input
-            type="checkbox"
-            checked={isActive}
-            onChange={(event) => setIsActive(event.target.checked)}
-            className="h-4 w-4 cursor-pointer accent-[var(--accent,#6366f1)]"
-          />
-        </label>
-      </div>
-      <div className="mt-3 grid gap-2.5">
-        <input
-          value={aliases}
-          onChange={(event) => setAliases(event.target.value)}
-          placeholder="Aliases (comma separated)"
-          className={INPUT_CLASS}
-        />
-        <input
-          type="number"
-          value={priority}
-          onChange={(event) => setPriority(Number(event.target.value))}
-          className={INPUT_CLASS}
-        />
-        <button
-          type="button"
-          onClick={() =>
-            onSave(
-              item.id,
-              aliases
-                .split(",")
-                .map((part) => part.trim())
-                .filter(Boolean),
-              priority,
-              isActive
-            )
-          }
-          className="inline-flex w-fit items-center gap-2 rounded-xl border border-[var(--border-2,rgba(30,64,175,0.16))] bg-transparent px-3 py-1.5 text-xs font-semibold text-[var(--text,#0f172a)] transition hover:bg-[var(--surface-2,#f1f6fd)]"
-        >
-          Save provider
-        </button>
-      </div>
     </div>
   );
 }

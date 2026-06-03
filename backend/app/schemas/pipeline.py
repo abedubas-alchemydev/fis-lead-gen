@@ -103,6 +103,20 @@ class PipelineRunStatusResponse(BaseModel):
     completed_at: datetime | None
 
 
+class ActiveRefreshResponse(BaseModel):
+    """Whether any user-visible refresh pipeline is currently running.
+
+    Powers the dashboard's "refreshing your records" banner — a single
+    boolean is enough for the FE to render or hide it. ``started_at`` is
+    the earliest ``started_at`` among in-flight runs so the FE could key
+    a "new refresh" notification off it if dismiss state ever moves from
+    session-scoped to refresh-scoped.
+    """
+
+    is_active: bool
+    started_at: datetime | None
+
+
 class ClearingProviderShare(BaseModel):
     model_config = ConfigDict(from_attributes=True)
 

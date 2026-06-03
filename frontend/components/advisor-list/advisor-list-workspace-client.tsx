@@ -3,9 +3,10 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import Link from "next/link";
 import type { Route } from "next";
+import clsx from "clsx";
 import { useUrlSyncedState } from "@/lib/use-url-synced-state";
 
-import { ArrowDown, ArrowUp, ChevronDown, Heart, Search, X } from "lucide-react";
+import { ArrowDown, ArrowUp, ChevronDown, Heart, Info, Search, X } from "lucide-react";
 
 import { apiRequest, buildApiPath, getInvestmentAdvisorLatest13fPath } from "@/lib/api";
 import { formatCurrency, formatDate, formatRelativeTime } from "@/lib/format";
@@ -30,6 +31,7 @@ import { RegulatoryAumRangeFilter } from "@/components/advisor-list/filters/regu
 import { RegistrationDateRangeFilter } from "@/components/master-list/filters/registration-date-range-filter";
 import { BulkListPicker } from "@/components/list-picker/bulk-list-picker";
 import { ListPicker } from "@/components/list-picker/list-picker";
+import { Button, buttonBase, buttonSizes } from "@/components/ui/button";
 import { Combo } from "@/components/ui/combo";
 import { Pill } from "@/components/ui/pill";
 import { agencyLabel } from "@/components/master-list/detail/clearing-membership-helpers";
@@ -48,7 +50,7 @@ const COLUMNS = [
   { key: "state", label: "State" },
   { key: "regulatory_aum", label: "Regulatory AUM" },
   { key: "total_clients", label: "Clients" },
-  { key: "files_13f", label: "13F" },
+  { key: "files_13f", label: "13F", title: "Files SEC Form 13F — institutional investor" },
   { key: "memberships", label: "Memberships" },
   { key: "last_filing_date", label: "Last Filing" },
 ] as const;
@@ -399,14 +401,15 @@ export function AdvisorListWorkspaceClient() {
             </h3>
           </div>
           {filtersActive ? (
-            <button
+            <Button
               type="button"
+              variant="outline"
+              size="sm"
               onClick={handleClearFilters}
-              className="inline-flex items-center gap-1.5 rounded-[6px] border border-[var(--border-2,rgba(30,64,175,0.16))] bg-transparent px-2.5 py-1 text-[11px] font-semibold text-[var(--text-dim,#475569)] transition hover:bg-[var(--surface-2,#f1f6fd)] hover:text-[var(--text,#0f172a)]"
             >
               <X aria-hidden className="h-3.5 w-3.5" strokeWidth={2} />
               Clear filters
-            </button>
+            </Button>
           ) : null}
         </div>
 
@@ -660,6 +663,7 @@ export function AdvisorListWorkspaceClient() {
               onChange={(event) =>
                 updateState({ sortBy: event.target.value, page: 1 })
               }
+              aria-label="Sort by"
               className="h-[38px] rounded-[10px] border border-[var(--border,rgba(30,64,175,0.1))] bg-[var(--surface,#ffffff)] px-3 text-[13px] text-[var(--text,#0f172a)] outline-none transition focus:border-[var(--accent,#6366f1)] focus:shadow-[0_0_0_3px_rgba(99,102,241,0.15)]"
             >
               {SORT_OPTIONS.map((option) => (
@@ -682,6 +686,7 @@ export function AdvisorListWorkspaceClient() {
                   page: 1,
                 })
               }
+              aria-label="Direction"
               className="h-[38px] rounded-[10px] border border-[var(--border,rgba(30,64,175,0.1))] bg-[var(--surface,#ffffff)] px-3 text-[13px] text-[var(--text,#0f172a)] outline-none transition focus:border-[var(--accent,#6366f1)] focus:shadow-[0_0_0_3px_rgba(99,102,241,0.15)]"
             >
               <option value="asc">Ascending</option>
@@ -698,6 +703,7 @@ export function AdvisorListWorkspaceClient() {
               onChange={(event) =>
                 updateState({ limit: Number(event.target.value), page: 1 })
               }
+              aria-label="Page size"
               className="h-[38px] rounded-[10px] border border-[var(--border,rgba(30,64,175,0.1))] bg-[var(--surface,#ffffff)] px-3 text-[13px] text-[var(--text,#0f172a)] outline-none transition focus:border-[var(--accent,#6366f1)] focus:shadow-[0_0_0_3px_rgba(99,102,241,0.15)]"
             >
               {[25, 50, 100].map((pageSize) => (
@@ -741,20 +747,25 @@ export function AdvisorListWorkspaceClient() {
               >
                 {selectedIds.size} selected
               </span>
-              <button
+              <Button
                 type="button"
+                variant="outline"
+                size="sm"
                 onClick={() => setSelectedIds(new Set())}
-                className="rounded-[6px] border border-[var(--border-2,rgba(30,64,175,0.16))] bg-transparent px-2.5 py-1 text-[11px] font-semibold text-[var(--text-dim,#475569)] transition hover:bg-[var(--surface-2,#f1f6fd)]"
               >
                 Clear
-              </button>
+              </Button>
               <button
                 ref={bulkActionTriggerRef}
                 type="button"
                 onClick={() => setBulkPickerOpen((v) => !v)}
                 aria-haspopup="dialog"
                 aria-expanded={bulkPickerOpen}
-                className="inline-flex items-center gap-1.5 rounded-[8px] border border-[rgba(99,102,241,0.4)] bg-gradient-to-br from-[#6366f1] to-[#8b5cf6] px-3 py-1.5 text-[12px] font-semibold text-white shadow-[0_6px_16px_rgba(99,102,241,0.35)]"
+                className={clsx(
+                  buttonBase,
+                  buttonSizes.sm,
+                  "border border-[rgba(99,102,241,0.4)] bg-gradient-to-br from-[#6366f1] to-[#8b5cf6] text-white shadow-[0_6px_16px_rgba(99,102,241,0.35)]",
+                )}
               >
                 <Heart className="h-3.5 w-3.5" strokeWidth={2.5} aria-hidden />
                 Save to list
@@ -808,6 +819,7 @@ export function AdvisorListWorkspaceClient() {
                 </th>
                 {COLUMNS.map((column) => {
                   const isSorted = state.sortBy === column.key;
+                  const columnTitle = (column as { title?: string }).title;
                   if (NON_SORTABLE_KEYS.has(column.key)) {
                     return (
                       <th
@@ -823,20 +835,33 @@ export function AdvisorListWorkspaceClient() {
                       key={column.key}
                       className="whitespace-nowrap border-b border-[var(--border,rgba(30,64,175,0.1))] bg-[var(--surface-2,#f1f6fd)] px-5 py-3 text-[11px] font-semibold uppercase tracking-[0.08em] text-[var(--text-muted,#94a3b8)]"
                     >
-                      <button
-                        type="button"
-                        onClick={() => toggleSort(column.key)}
-                        className="inline-flex items-center gap-1 transition hover:text-[var(--text,#0f172a)]"
-                      >
-                        {column.label}
-                        {isSorted ? (
-                          state.sortDir === "asc" ? (
-                            <ArrowUp className="h-3 w-3" strokeWidth={2} />
-                          ) : (
-                            <ArrowDown className="h-3 w-3" strokeWidth={2} />
-                          )
+                      <span className="inline-flex items-center gap-1">
+                        <button
+                          type="button"
+                          onClick={() => toggleSort(column.key)}
+                          className="inline-flex items-center gap-1 transition hover:text-[var(--text,#0f172a)]"
+                        >
+                          {column.label}
+                          {isSorted ? (
+                            state.sortDir === "asc" ? (
+                              <ArrowUp className="h-3 w-3" strokeWidth={2} />
+                            ) : (
+                              <ArrowDown className="h-3 w-3" strokeWidth={2} />
+                            )
+                          ) : null}
+                        </button>
+                        {columnTitle ? (
+                          <span
+                            tabIndex={0}
+                            role="img"
+                            aria-label={columnTitle}
+                            title={columnTitle}
+                            className="inline-flex cursor-help items-center rounded-full outline-none transition hover:text-[var(--text,#0f172a)] focus-visible:ring-2 focus-visible:ring-[var(--accent,#6366f1)]"
+                          >
+                            <Info className="h-3 w-3" strokeWidth={2} aria-hidden />
+                          </span>
                         ) : null}
-                      </button>
+                      </span>
                     </th>
                   );
                 })}

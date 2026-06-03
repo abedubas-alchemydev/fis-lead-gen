@@ -28,13 +28,18 @@ export interface DiscoveredEmailResponse {
   confidence: number | null;
   attribution: string | null;
   bd_id: number | null;
+  advisor_id: number | null;
   enriched_name: string | null;
   enriched_title: string | null;
   enriched_linkedin_url: string | null;
   enriched_company: string | null;
+  enriched_email: string | null;
   enriched_phone: string | null;
   enriched_at: string | null;
   enrichment_status: EnrichmentStatus;
+  // True while an async Apollo phone-reveal callback is still expected, so the
+  // row UI can poll for the number without polling forever.
+  phone_reveal_pending?: boolean;
   created_at: string;
   verifications: EmailVerificationResponse[];
 }
@@ -62,6 +67,7 @@ export interface ScanListItem {
   domain: string;
   person_name: string | null;
   bd_id: number | null;
+  advisor_id: number | null;
   status: RunStatus;
   total_items: number;
   processed_items: number;
@@ -115,6 +121,28 @@ export const TERMINAL_STATUSES: ReadonlySet<RunStatus> = new Set<RunStatus>([
   "failed",
 ]);
 
+// How many recent scans to pull when re-hydrating a firm-detail page's inline
+// "Discovered Emails" panel. We fetch a handful (not just the newest one) so
+// `pickHydratableScan` can skip an empty/failed/still-running retry that would
+// otherwise mask an older run that actually surfaced emails.
+export const SCAN_HYDRATION_LIMIT = 20;
+
+// Choose which scan the inline "Discovered Emails" panel restores when a
+// firm-detail page re-hydrates without an explicit `?scanId=`. This is the
+// common case: Master-List row links and Previous/Next Prospect only carry
+// `?return=`, so the panel falls back to "most recent run for this firm".
+// Prefer the newest scan that actually has emails so a newer empty / failed /
+// still-running retry never makes already-extracted emails "disappear" on
+// navigation. Falls back to the newest scan overall when none surfaced emails,
+// preserving the prior behaviour. `scans` is expected newest-first (the API
+// orders by created_at desc).
+export function pickHydratableScan(
+  scans: ScanListItem[]
+): ScanListItem | null {
+  if (scans.length === 0) return null;
+  return scans.find((scan) => scan.success_count > 0) ?? scans[0];
+}
+
 // ── API wrappers ──────────────────────────────────────────────────────────
 
 export async function getScan(scanId: number): Promise<ScanResponse> {
@@ -127,6 +155,23 @@ export async function listScansForBrokerDealer(
 ): Promise<ScanListItem[]> {
   return apiRequest<ScanListItem[]>(
     buildApiPath("/api/v1/email-extractor/scans", { bd_id: bdId, limit })
+  );
+}
+
+// Generic entity-scoped scan list. Dispatches to either the bd_id or
+// advisor_id query param so the inline "Discovered Emails" section can
+// hydrate from either /master-list/{id} or /advisor-list/{id} without
+// duplicating the wrapper.
+export async function listScansForEntity(
+  entity: { kind: "bd"; id: number } | { kind: "advisor"; id: number },
+  limit = 1
+): Promise<ScanListItem[]> {
+  const params =
+    entity.kind === "bd"
+      ? { bd_id: entity.id, limit }
+      : { advisor_id: entity.id, limit };
+  return apiRequest<ScanListItem[]>(
+    buildApiPath("/api/v1/email-extractor/scans", params)
   );
 }
 

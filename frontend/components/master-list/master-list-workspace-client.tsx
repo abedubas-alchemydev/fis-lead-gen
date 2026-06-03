@@ -3,6 +3,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import Link from "next/link";
 import type { Route } from "next";
+import clsx from "clsx";
 import { useUrlSyncedState } from "@/lib/use-url-synced-state";
 
 import {
@@ -28,6 +29,7 @@ import {
   type MasterListQueryState,
 } from "@/lib/master-list-state";
 import { STATE_NAMES, stateCodeFromName } from "@/lib/states";
+import { buttonBase, buttonSizes } from "@/components/ui/button";
 import { Combo } from "@/components/ui/combo";
 import { BulkListPicker } from "@/components/list-picker/bulk-list-picker";
 import { ListPicker } from "@/components/list-picker/list-picker";
@@ -94,6 +96,7 @@ const CLEARING_TYPE_OPTS = [
   { value: "fully_disclosed", label: "Fully Disclosed" },
   { value: "self_clearing", label: "Self-Clearing" },
   { value: "omnibus", label: "Omnibus" },
+  { value: "non_carrying", label: "Non-Carrying" },
   { value: "unknown", label: "Unknown" },
 ] as const;
 
@@ -127,6 +130,8 @@ function clearingTypeVariant(value: string | null): PillVariant {
   if (value === "fully_disclosed") return "fd";
   if (value === "self_clearing") return "self";
   if (value === "omnibus") return "omni";
+  if (value === "non_carrying") return "noncarry";
+  if (value === "Identifying") return "warm";
   return "unknown";
 }
 
@@ -134,6 +139,8 @@ function clearingTypeLabel(value: string | null): string {
   if (value === "fully_disclosed") return "Fully Disclosed";
   if (value === "self_clearing") return "Self-Clearing";
   if (value === "omnibus") return "Omnibus";
+  if (value === "non_carrying") return "Non-Carrying";
+  if (value === "Identifying") return "Identifying";
   return "Not classified";
 }
 
@@ -149,6 +156,14 @@ function priorityVariant(priority: string | null): PillVariant {
   if (priority === "warm") return "warm";
   if (priority === "cold") return "cold";
   return "unknown";
+}
+
+// Human label for a `?segment=` preset (drives the Active chip when the user
+// lands from a deep-link). Falls back to the raw value so an unmapped segment
+// still reads sensibly rather than rendering blank.
+function segmentLabel(segment: string): string {
+  if (segment === "high_value") return "High Value Participants";
+  return segment;
 }
 
 // ── Pagination helper ─────────────────────────────────────────────────────
@@ -198,6 +213,7 @@ export function MasterListWorkspaceClient() {
   const maxNetCapitalFilter = queryState.maxNetCapital;
   const registeredAfterFilter = queryState.registeredAfter;
   const registeredBeforeFilter = queryState.registeredBefore;
+  const segmentFilter = queryState.segment;
   const listMode = queryState.list;
   const sortBy = queryState.sortBy;
   const sortDir = queryState.sortDir;
@@ -277,6 +293,7 @@ export function MasterListWorkspaceClient() {
         max_net_capital: maxNetCapitalFilter ?? undefined,
         registered_after: registeredAfterFilter ?? undefined,
         registered_before: registeredBeforeFilter ?? undefined,
+        segment: segmentFilter || undefined,
         list: listMode,
         sort_by: sortBy,
         sort_dir: sortDir,
@@ -295,6 +312,7 @@ export function MasterListWorkspaceClient() {
       maxNetCapitalFilter,
       registeredAfterFilter,
       registeredBeforeFilter,
+      segmentFilter,
       listMode,
       sortBy,
       sortDir,
@@ -500,6 +518,7 @@ export function MasterListWorkspaceClient() {
     if (maxNetCapitalFilter !== null) count += 1;
     if (registeredAfterFilter !== null) count += 1;
     if (registeredBeforeFilter !== null) count += 1;
+    if (segmentFilter !== "") count += 1;
     return count;
   }, [
     search,
@@ -513,6 +532,7 @@ export function MasterListWorkspaceClient() {
     maxNetCapitalFilter,
     registeredAfterFilter,
     registeredBeforeFilter,
+    segmentFilter,
   ]);
 
   // Memoized options shape for the multi-select. Sorted by count desc with
@@ -561,10 +581,10 @@ export function MasterListWorkspaceClient() {
         <div className="min-w-0">
           <p className="text-[12px] uppercase tracking-[0.06em] text-[var(--text-muted,#94a3b8)]">
             Enterprise Dashboard{" "}
-            <span className="text-[var(--text-dim,#475569)]">/</span> Master List
+            <span className="text-[var(--text-dim,#475569)]">/</span> Broker Dealers
           </p>
           <h1 className="mt-1 text-[24px] font-bold tracking-[-0.02em] text-[var(--text,#0f172a)]">
-            Broker-Dealer Master List
+            Broker Dealers
           </h1>
         </div>
         {/* .topbar-actions — search + theme + notifications. The search
@@ -738,6 +758,7 @@ export function MasterListWorkspaceClient() {
               onChange={(event) =>
                 updateState({ clearingType: event.target.value, page: 1 })
               }
+              aria-label="Clearing Type"
               className="h-[38px] w-full rounded-[10px] border border-[var(--border,rgba(30,64,175,0.1))] bg-[var(--surface,#ffffff)] px-3 text-[13px] text-[var(--text,#0f172a)] outline-none transition focus:border-[var(--accent,#6366f1)] focus:shadow-[0_0_0_3px_rgba(99,102,241,0.15)]"
             >
               {CLEARING_TYPE_OPTS.map((option) => (
@@ -777,7 +798,7 @@ export function MasterListWorkspaceClient() {
               value={healthFilter}
               onChange={(next) => updateState({ health: next, page: 1 })}
               items={HEALTH_ITEMS}
-              ariaLabel="Financial health"
+              ariaLabel="Financial Health"
             />
           </div>
           <div>
@@ -788,7 +809,7 @@ export function MasterListWorkspaceClient() {
               value={prospectPriorityFilter}
               onChange={(next) => updateState({ prospectPriority: next, page: 1 })}
               items={PRIORITY_ITEMS}
-              ariaLabel="Prospect priority"
+              ariaLabel="Prospect Priority"
             />
           </div>
         </div>
@@ -830,6 +851,14 @@ export function MasterListWorkspaceClient() {
             <span className="text-[11px] font-semibold uppercase tracking-[0.08em] text-[var(--text-muted,#94a3b8)]">
               Active
             </span>
+            {segmentFilter !== "" ? (
+              <Tag
+                title={`Segment: ${segmentLabel(segmentFilter)}`}
+                onDismiss={() => updateState({ segment: "", page: 1 })}
+              >
+                {segmentLabel(segmentFilter)}
+              </Tag>
+            ) : null}
             {stateFilter !== "" ? (
               <Tag onDismiss={() => updateState({ state: "", page: 1 })}>
                 State: {stateFilter}
@@ -966,6 +995,7 @@ export function MasterListWorkspaceClient() {
               onChange={(event) =>
                 updateState({ sortBy: event.target.value, page: 1 })
               }
+              aria-label="Sort by"
               className="h-[38px] rounded-[10px] border border-[var(--border,rgba(30,64,175,0.1))] bg-[var(--surface,#ffffff)] px-3 text-[13px] text-[var(--text,#0f172a)] outline-none transition focus:border-[var(--accent,#6366f1)] focus:shadow-[0_0_0_3px_rgba(99,102,241,0.15)]"
             >
               {columns
@@ -990,6 +1020,7 @@ export function MasterListWorkspaceClient() {
                   page: 1,
                 })
               }
+              aria-label="Direction"
               className="h-[38px] rounded-[10px] border border-[var(--border,rgba(30,64,175,0.1))] bg-[var(--surface,#ffffff)] px-3 text-[13px] text-[var(--text,#0f172a)] outline-none transition focus:border-[var(--accent,#6366f1)] focus:shadow-[0_0_0_3px_rgba(99,102,241,0.15)]"
             >
               <option value="asc">Ascending</option>
@@ -1006,6 +1037,7 @@ export function MasterListWorkspaceClient() {
               onChange={(event) =>
                 updateState({ limit: Number(event.target.value), page: 1 })
               }
+              aria-label="Page size"
               className="h-[38px] rounded-[10px] border border-[var(--border,rgba(30,64,175,0.1))] bg-[var(--surface,#ffffff)] px-3 text-[13px] text-[var(--text,#0f172a)] outline-none transition focus:border-[var(--accent,#6366f1)] focus:shadow-[0_0_0_3px_rgba(99,102,241,0.15)]"
             >
               {[25, 50, 100].map((pageSize) => (
@@ -1059,7 +1091,11 @@ export function MasterListWorkspaceClient() {
                 onClick={() => setBulkPickerOpen((v) => !v)}
                 aria-haspopup="dialog"
                 aria-expanded={bulkPickerOpen}
-                className="inline-flex items-center gap-1.5 rounded-[8px] border border-[rgba(99,102,241,0.4)] bg-gradient-to-br from-[#6366f1] to-[#8b5cf6] px-3 py-1.5 text-[12px] font-semibold text-white shadow-[0_6px_16px_rgba(99,102,241,0.35)]"
+                className={clsx(
+                  buttonBase,
+                  buttonSizes.sm,
+                  "rounded-[8px] border border-[rgba(99,102,241,0.4)] bg-gradient-to-br from-[#6366f1] to-[#8b5cf6] text-[12px] text-white shadow-[0_6px_16px_rgba(99,102,241,0.35)]",
+                )}
               >
                 <Heart className="h-3.5 w-3.5" strokeWidth={2.5} aria-hidden />
                 Save to list
@@ -1257,7 +1293,8 @@ export function MasterListWorkspaceClient() {
                             >
                               {item.current_clearing_partner}
                             </span>
-                          ) : item.current_clearing_type === "self_clearing" ? (
+                          ) : item.current_clearing_type === "self_clearing" ||
+                            item.current_clearing_type === "non_carrying" ? (
                             <span className="text-[var(--text-muted,#94a3b8)]">—</span>
                           ) : (
                             <UnknownCell
@@ -1265,9 +1302,6 @@ export function MasterListWorkspaceClient() {
                               fallback="Not on file"
                             />
                           )}
-                          {item.current_clearing_is_competitor ? (
-                            <Pill variant="competitor">COMPETITOR</Pill>
-                          ) : null}
                         </div>
                       </td>
                       <td className="px-5 py-3.5">

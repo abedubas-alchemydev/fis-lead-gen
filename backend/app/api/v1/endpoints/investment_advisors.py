@@ -27,7 +27,10 @@ from app.schemas.investment_advisor import (
 )
 from app.core.feature_permissions import INVESTMENT_ADVISORS
 from app.services.advisor_refresh_orchestrator import (
+    GAP_FILL_ADVISOR_CONTACTS_PIPELINE_NAME,
+    GAP_FILL_COOLDOWN_DAYS,
     REFRESH_ADVISOR_ALL_PIPELINE_NAME,
+    _run_gap_fill_contacts,
     decide_pipelines,
     required_provider_keys,
     run_advisor_refresh,
@@ -557,6 +560,135 @@ async def refresh_advisor_all(
     return RefreshAdvisorResponse(
         run_id=parent_run.id,
         status=parent_run.status,
+        advisor_id=advisor_id,
+        reason=None,
+    )
+
+
+# ─── Per-advisor contact gap-fill ─────────────────────────────────────────────
+# Standalone endpoint that re-queries the multi-provider discovery chain ONLY
+# for existing advisor_contacts rows missing LinkedIn, email, or phone. Merges
+# the new chain hit into the existing row WITHOUT clobbering data we already
+# have. Distinct from refresh-all so the user can opt in explicitly when
+# provider coverage was partial on the first enrichment.
+
+async def _run_gap_fill_contacts_background(
+    run_id: int, advisor_id: int, trigger_source: str
+) -> None:
+    """Defensive wrapper so an unhandled exception in the background task
+    doesn't leave the PipelineRun stuck on ``queued``."""
+    try:
+        await _run_gap_fill_contacts(run_id, advisor_id, trigger_source)
+    except Exception:
+        logger.exception(
+            "advisor gap-fill-contacts background task failed (run_id=%s advisor_id=%s)",
+            run_id,
+            advisor_id,
+        )
+
+
+@router.post(
+    "/{advisor_id}/gap-fill-contacts",
+    response_model=RefreshAdvisorResponse,
+)
+async def gap_fill_advisor_contacts(
+    advisor_id: int,
+    background_tasks: BackgroundTasks,
+    response: Response,
+    force: bool = False,
+    current_user: AuthenticatedUser = Depends(_require_investment_advisors),
+    db: AsyncSession = Depends(get_db_session),
+) -> RefreshAdvisorResponse:
+    """Re-query the discovery chain for existing ``advisor_contacts`` rows
+    that are missing LinkedIn, email, or phone, and merge any new hits in
+    place WITHOUT overwriting existing data.
+
+    The base enrichment path (``POST /refresh-all`` → ``SUB_ENRICH_CONTACTS``)
+    has a hard idempotency guard: once any contact row exists, it never re-
+    fires. This endpoint is the explicit opt-in retry for cases where the
+    initial enrichment got a partial result from one provider but another
+    provider might have the missing channels now.
+
+    Gated by a 30-day cooldown on ``advisor.last_gap_fill_attempt_at``,
+    shared with ``scripts/gap_fill_investment_advisors.py`` so a manual
+    trigger and the nightly bulk runner pay into the same fairness budget.
+    """
+    advisor = await db.get(InvestmentAdvisor, advisor_id)
+    if advisor is None:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Investment advisor not found.",
+        )
+
+    last_attempt = advisor.last_gap_fill_attempt_at
+    if last_attempt is not None and last_attempt.tzinfo is None:
+        last_attempt = last_attempt.replace(tzinfo=timezone.utc)
+    cooldown_cutoff = datetime.now(timezone.utc) - timedelta(days=GAP_FILL_COOLDOWN_DAYS)
+    # ``force`` (the user-facing "Generate More Details" button) bypasses the
+    # cost cooldown so the action always re-runs, matching the broker-dealer
+    # enrich button. Automated / bulk callers omit it and keep the cooldown.
+    if not force and last_attempt is not None and last_attempt >= cooldown_cutoff:
+        days_remaining = max(
+            1,
+            GAP_FILL_COOLDOWN_DAYS
+            - (datetime.now(timezone.utc) - last_attempt).days,
+        )
+        raise HTTPException(
+            status_code=status.HTTP_429_TOO_MANY_REQUESTS,
+            detail=(
+                f"Gap-fill cooldown active. Try again in {days_remaining} day(s)."
+            ),
+            headers={"Retry-After": str(days_remaining * 86400)},
+        )
+
+    advisor_marker = f'"advisor_id": {advisor_id}'
+
+    # Attach to an in-flight gap-fill run for this advisor rather than queueing
+    # a second concurrent job (same shape as refresh-all's in-flight guard).
+    in_flight_stmt = (
+        select(PipelineRun)
+        .where(PipelineRun.pipeline_name == GAP_FILL_ADVISOR_CONTACTS_PIPELINE_NAME)
+        .where(PipelineRun.status.in_(("queued", "running")))
+        .where(PipelineRun.notes.ilike(f"%{advisor_marker}%"))
+        .order_by(PipelineRun.id.desc())
+        .limit(1)
+    )
+    in_flight = (await db.execute(in_flight_stmt)).scalar_one_or_none()
+    if in_flight is not None and _is_recent_run(in_flight.started_at):
+        response.status_code = status.HTTP_202_ACCEPTED
+        return RefreshAdvisorResponse(
+            run_id=in_flight.id,
+            status="in_flight",
+            advisor_id=advisor_id,
+            reason="A gap-fill run is already in flight for this advisor.",
+        )
+
+    trigger_source = f"manual_gap_fill:{current_user.email}"
+    run = PipelineRun(
+        pipeline_name=GAP_FILL_ADVISOR_CONTACTS_PIPELINE_NAME,
+        trigger_source=trigger_source,
+        status="queued",
+        total_items=1,
+        processed_items=0,
+        success_count=0,
+        failure_count=0,
+        notes=json.dumps({"advisor_id": advisor_id, "stage": "queued"}),
+    )
+    db.add(run)
+    await db.commit()
+    await db.refresh(run)
+
+    background_tasks.add_task(
+        _run_gap_fill_contacts_background,
+        run.id,
+        advisor_id,
+        trigger_source,
+    )
+
+    response.status_code = status.HTTP_202_ACCEPTED
+    return RefreshAdvisorResponse(
+        run_id=run.id,
+        status=run.status,
         advisor_id=advisor_id,
         reason=None,
     )

@@ -8,6 +8,7 @@ from app.api.v1.endpoints import (
     clearing_memberships_admin,
     contacts,
     email_extractor,
+    extraction_analytics,
     favorite_lists,
     favorites,
     health,
@@ -22,6 +23,7 @@ from app.api.v1.endpoints import (
     vault,
     vault_files,
     visits,
+    webhooks_apollo,
 )
 
 api_router = APIRouter()
@@ -37,8 +39,12 @@ api_router.include_router(investors.router, tags=["investors"])
 api_router.include_router(pipeline.router, tags=["pipeline"])
 api_router.include_router(pipeline.scheduled_router, tags=["pipeline"])
 api_router.include_router(pipeline.admin_destructive_router, tags=["pipeline"])
+api_router.include_router(pipeline.status_router, tags=["pipeline"])
 api_router.include_router(settings.router, tags=["settings"])
 api_router.include_router(stats.router, tags=["stats"])
+api_router.include_router(
+    extraction_analytics.router, tags=["extraction-analytics"]
+)
 api_router.include_router(email_extractor.router, tags=["email-extractor"])
 api_router.include_router(favorites.router, tags=["favorites"])
 api_router.include_router(favorite_lists.router, tags=["favorite-lists"])
@@ -50,3 +56,4 @@ api_router.include_router(contacts.router, tags=["contacts"])
 api_router.include_router(users_admin.router, tags=["users-admin"])
 api_router.include_router(clearing_memberships_admin.router)
 api_router.include_router(chatbot.router, tags=["chatbot"])
+api_router.include_router(webhooks_apollo.router, tags=["webhooks"])

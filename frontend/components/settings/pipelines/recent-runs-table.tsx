@@ -7,6 +7,7 @@ import type {
   PipelineRunItem,
   PipelineStatusResponse,
 } from "@/lib/types";
+import { Button } from "@/components/ui/button";
 
 const MAX_ROWS = 5;
 
@@ -62,14 +63,15 @@ export function RecentRunsTable({ refreshKey = 0 }: RecentRunsTableProps) {
             scheduled).
           </p>
         </div>
-        <button
+        <Button
           type="button"
+          variant="outline"
+          size="sm"
           onClick={() => void load()}
           disabled={loading}
-          className="inline-flex items-center gap-2 rounded-xl border border-[var(--border-2,rgba(30,64,175,0.16))] bg-transparent px-3 py-2 text-xs font-semibold text-[var(--text,#0f172a)] transition hover:bg-[var(--surface-2,#f1f6fd)] disabled:cursor-not-allowed disabled:opacity-60"
         >
           {loading ? "Refreshing…" : "Refresh"}
-        </button>
+        </Button>
       </div>
 
       {error ? (

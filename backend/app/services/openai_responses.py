@@ -79,7 +79,7 @@ class OpenAIClearingExtraction(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     clearing_partner: str | None = Field(default=None, max_length=255)
-    clearing_type: Literal["fully_disclosed", "self_clearing", "omnibus", "unknown"]
+    clearing_type: Literal["fully_disclosed", "self_clearing", "omnibus", "non_carrying", "unknown"]
     agreement_date: str | None = Field(default=None, description="ISO date in YYYY-MM-DD format when present.")
     confidence_score: float = Field(ge=0.0, le=1.0)
     rationale: str = Field(min_length=1, max_length=1000)
@@ -90,7 +90,7 @@ class OpenAIClassificationExtraction(BaseModel):
     """Text-only clearing classification, mirrors GeminiClassificationExtraction."""
     model_config = ConfigDict(extra="forbid")
 
-    classification: Literal["fully_disclosed", "self_clearing", "omnibus", "unknown"]
+    classification: Literal["fully_disclosed", "self_clearing", "omnibus", "non_carrying", "unknown"]
     confidence_score: float = Field(ge=0.0, le=1.0)
     rationale: str = Field(min_length=1, max_length=1000)
 

@@ -65,6 +65,15 @@ class InvestmentAdvisor(Base):
     direct_owners: Mapped[list | None] = mapped_column(JSONB(none_as_null=True), nullable=True)
     indirect_owners: Mapped[list | None] = mapped_column(JSONB(none_as_null=True), nullable=True)
     executive_officers: Mapped[list | None] = mapped_column(JSONB(none_as_null=True), nullable=True)
+    # Form ADV Schedule D Section 1.B "Other Business Names" — alternate /
+    # trade names the firm conducts advisory business under. Sourced from the
+    # IAPD per-firm JSON (``iacontent.basicInformation.otherNames``) by the
+    # refresh orchestrator / backfill script, filtered to drop the firm's own
+    # primary + legal name. The IA analog of ``broker_dealers.dba_names``.
+    # ``none_as_null=True`` keeps a Python ``None`` write from landing as the
+    # JSONB scalar ``'null'``. Deliberately NOT in the bulk ingest upsert so a
+    # re-ingest never clobbers the enriched value.
+    other_business_names: Mapped[list | None] = mapped_column(JSONB(none_as_null=True), nullable=True)
     firm_operations_text: Mapped[str | None] = mapped_column(Text, nullable=True)
     # 13F denormalized flags. ``files_13f`` is the hard filter scope on
     # the master-list endpoint; updated by the daily 13F monitor pipeline.
@@ -72,6 +81,13 @@ class InvestmentAdvisor(Base):
     latest_13f_filing_date: Mapped[date | None] = mapped_column(Date, nullable=True)
     last_enrich_attempt_at: Mapped[datetime | None] = mapped_column(
         DateTime(timezone=True), nullable=True
+    )
+    # Stamped by the bulk gap-fill runner
+    # (``scripts/gap_fill_investment_advisors.py``) on every advisor it
+    # visits — pass or fail. 30-day cooldown stops the next pass from
+    # re-firing Gemini/Apollo on firms whose source had nothing to give.
+    last_gap_fill_attempt_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True, index=True
     )
     # Stamped by the clearing-agency-membership importer for every advisor it
     # evaluates. NULL = never checked (FE renders nothing); non-NULL with no

@@ -122,3 +122,86 @@ async def test_dedupes_same_email_from_two_pages() -> None:
 
     result = await _crawler().run("example.com")
     assert [d.email for d in result.emails] == ["hello@example.com"]
+
+
+# ──────────────────────────── phones + page text (web-fallback) ────────────────────────────
+
+
+@respx.mock
+async def test_finds_tel_link_and_text_phone() -> None:
+    respx.get("https://example.com/robots.txt").mock(return_value=httpx.Response(200, text=""))
+    respx.get("https://example.com/").mock(
+        return_value=httpx.Response(
+            200,
+            headers={"content-type": "text/html"},
+            text=(
+                "<html><body>"
+                '<a href="tel:+1 (212) 555-0100">Call us</a>'
+                "<p>Toll free 800-555-1212 today.</p>"
+                "</body></html>"
+            ),
+        )
+    )
+    for path in ("/contact", "/about", "/team", "/staff", "/people"):
+        respx.get(f"https://example.com{path}").mock(return_value=httpx.Response(404))
+
+    result = await _crawler().run("example.com")
+    by_value = {p.value: p for p in result.phones}
+    # Both numbers normalize to canonical US format.
+    assert set(by_value) == {"(212) 555-0100", "(800) 555-1212"}
+    assert by_value["(212) 555-0100"].confidence == 0.75  # tel: link
+    assert by_value["(800) 555-1212"].confidence == 0.6  # plain text
+    assert all(p.attribution == "https://example.com/" for p in result.phones)
+
+
+@respx.mock
+async def test_long_digit_runs_not_matched_as_phone() -> None:
+    """Separatorless digit runs (CRD numbers, ids, big amounts) are not phones."""
+    respx.get("https://example.com/robots.txt").mock(return_value=httpx.Response(200, text=""))
+    respx.get("https://example.com/").mock(
+        return_value=httpx.Response(
+            200,
+            headers={"content-type": "text/html"},
+            text="<html><body><p>Member CRD# 1234567 since 2009. SIPC 1000000000.</p></body></html>",
+        )
+    )
+    for path in ("/contact", "/about", "/team", "/staff", "/people"):
+        respx.get(f"https://example.com{path}").mock(return_value=httpx.Response(404))
+
+    result = await _crawler().run("example.com")
+    assert result.phones == []
+
+
+@respx.mock
+async def test_phones_and_pages_empty_by_default() -> None:
+    respx.get("https://example.com/robots.txt").mock(return_value=httpx.Response(200, text=""))
+    respx.get("https://example.com/").mock(
+        return_value=httpx.Response(
+            200, headers={"content-type": "text/html"}, text="<html><body><p>Hi</p></body></html>"
+        )
+    )
+    for path in ("/contact", "/about", "/team", "/staff", "/people"):
+        respx.get(f"https://example.com{path}").mock(return_value=httpx.Response(404))
+
+    result = await _crawler().run("example.com")
+    assert result.phones == []
+    # collect_page_text defaults False → no retained page text.
+    assert result.pages == []
+
+
+@respx.mock
+async def test_collect_page_text_retains_pages_when_enabled() -> None:
+    respx.get("https://example.com/robots.txt").mock(return_value=httpx.Response(200, text=""))
+    respx.get("https://example.com/").mock(
+        return_value=httpx.Response(
+            200,
+            headers={"content-type": "text/html"},
+            text="<html><body><p>Jane Smith — Managing Director</p></body></html>",
+        )
+    )
+    for path in ("/contact", "/about", "/team", "/staff", "/people"):
+        respx.get(f"https://example.com{path}").mock(return_value=httpx.Response(404))
+
+    result = await SiteCrawler(request_delay_seconds=0.0, collect_page_text=True).run("example.com")
+    assert [p.url for p in result.pages] == ["https://example.com/"]
+    assert "jane smith" in result.pages[0].text.lower()

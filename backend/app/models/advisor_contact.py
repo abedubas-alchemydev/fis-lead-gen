@@ -39,6 +39,13 @@ class AdvisorContact(Base):
     discovery_confidence: Mapped[Decimal | None] = mapped_column(Numeric(5, 2), nullable=True)
     emails: Mapped[list | None] = mapped_column(JSONB, nullable=True)
     phones: Mapped[list | None] = mapped_column(JSONB, nullable=True)
+    # Apollo's MongoDB-style person.id from the sync /people/match response.
+    # Stamped on rows whose initial chain hit came from Apollo so the async
+    # phone-reveal webhook (which only carries Apollo's person_id, not our
+    # row id) can locate the row to merge phones into.
+    apollo_person_id: Mapped[str | None] = mapped_column(
+        String(64), nullable=True, index=True
+    )
     enriched_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), nullable=False, server_default=func.now()
     )

@@ -8,6 +8,9 @@ import { useRouter, useSearchParams } from "next/navigation";
 import {
   AlertTriangle,
   ArrowUpRight,
+  Check,
+  Clock,
+  Linkedin,
   Loader2,
   MailPlus,
   Phone,
@@ -27,8 +30,10 @@ import {
   hasActiveFilters,
 } from "@/lib/investors-state";
 import { STATE_NAMES, stateCodeFromName } from "@/lib/states";
+import { Button } from "@/components/ui/button";
 import { Combo } from "@/components/ui/combo";
 import { ListPicker } from "@/components/list-picker/list-picker";
+import { OutreachModal } from "@/components/master-list/outreach-modal";
 import { Tag } from "@/components/ui/tag";
 import { ThemeToggle } from "@/components/ui/theme-toggle";
 import { TransactionValueRangeFilter } from "@/components/investors/filters/transaction-value-range-filter";
@@ -285,11 +290,14 @@ export function InvestorsClient() {
     });
   }
 
-  async function handleEnrich(id: number) {
-    setEnrichingId(id);
-    setError(null);
-    try {
-      const result: InvestorEnrichResponse = await enrichInvestor(id);
+  // Run the contact lookup for one row and merge the result in place,
+  // returning the response so callers can react to the outcome. Loading
+  // UI + error surfacing are the caller's concern — the Re-enrich button
+  // (handleEnrich) shows the per-row spinner; the Outreach button reads
+  // back the found email for its just-in-time lookup.
+  const runEnrich = useCallback(
+    async (id: number): Promise<InvestorEnrichResponse> => {
+      const result = await enrichInvestor(id);
       setItems((current) =>
         current.map((row) =>
           row.id === id
@@ -297,14 +305,27 @@ export function InvestorsClient() {
                 ...row,
                 enriched_phone: result.enriched_phone,
                 enriched_email: result.enriched_email,
+                enriched_linkedin_url: result.enriched_linkedin_url,
                 enriched_at: result.enriched_at,
+                phone_pending: result.phone_pending,
               }
             : row,
         ),
       );
-      if (!result.matched) {
-        setError("No contact match returned by Apollo for this person.");
-      }
+      return result;
+    },
+    [],
+  );
+
+  async function handleEnrich(id: number) {
+    setEnrichingId(id);
+    setError(null);
+    try {
+      await runEnrich(id);
+      // CLIENT REQUEST: every row presents as actionable, so we don't
+      // surface the "no contact match" / "entity filer" outcomes as a
+      // negative banner. A successful match still updates the row in place;
+      // genuine request failures still fall through to the catch below.
     } catch (e) {
       setError(e instanceof Error ? e.message : "Enrichment failed.");
     } finally {
@@ -448,14 +469,15 @@ export function InvestorsClient() {
             </h3>
           </div>
           {filtersActive ? (
-            <button
+            <Button
               type="button"
+              variant="outline"
+              size="sm"
               onClick={handleClearFilters}
-              className="inline-flex items-center gap-1.5 rounded-[6px] border border-[var(--border-2,rgba(30,64,175,0.16))] bg-transparent px-2.5 py-1 text-[11px] font-semibold text-[var(--text-dim,#475569)] transition hover:bg-[var(--surface-2,#f1f6fd)] hover:text-[var(--text,#0f172a)]"
             >
               <X aria-hidden className="h-3.5 w-3.5" strokeWidth={2} />
               Clear filters
-            </button>
+            </Button>
           ) : null}
         </div>
 
@@ -747,6 +769,16 @@ export function InvestorsClient() {
                         row={row}
                         enriching={enrichingId === row.id}
                         onEnrich={() => void handleEnrich(row.id)}
+                        onLookupEmail={async () => {
+                          try {
+                            return (await runEnrich(row.id)).enriched_email;
+                          } catch {
+                            // Silent: the demo feed never surfaces lookup
+                            // failures as banners. No email → modal opens
+                            // with no recipient (drafting still works).
+                            return null;
+                          }
+                        }}
                       />
                     ))}
                   </div>
@@ -817,11 +849,21 @@ function InvestorRow({
   row,
   enriching,
   onEnrich,
+  onLookupEmail,
 }: {
   row: InvestorItem;
   enriching: boolean;
   onEnrich: () => void;
+  onLookupEmail: () => Promise<string | null>;
 }) {
+  const [outreachOpen, setOutreachOpen] = useState(false);
+  // Recipient address handed to the compose modal. Seeded per Outreach
+  // click: the row's existing email when present, else whatever the
+  // just-in-time lookup returns (real address or null — never a fake).
+  const [outreachEmail, setOutreachEmail] = useState<string | null>(null);
+  // True while the on-click contact lookup is in flight, so the Outreach
+  // button can spin without also spinning the Re-enrich button.
+  const [preparingOutreach, setPreparingOutreach] = useState(false);
   const adChipClass =
     row.ad_code === "A"
       ? "border-emerald-200 bg-emerald-50 text-emerald-700"
@@ -841,9 +883,49 @@ function InvestorRow({
     .filter((s) => s && s.trim().length > 0)
     .join(" • ");
   const hasEnrichment = !!row.enriched_at;
+  // "Phone arriving…" hint. The BE sets phone_pending when an Apollo
+  // reveal was requested (it has a person id) but the number hasn't landed
+  // via the async webhook. Gate on a freshness window so a reveal that
+  // never delivers stops showing "arriving…" after an hour instead of
+  // nagging forever — a phone that does arrive replaces the hint on the
+  // next list load (phone_pending flips false once a number is present).
+  const PHONE_PENDING_WINDOW_MS = 60 * 60 * 1000;
+  const recentlyEnriched =
+    !!row.enriched_at &&
+    Date.now() - Date.parse(row.enriched_at) < PHONE_PENDING_WINDOW_MS;
+  const phonePending =
+    row.phone_pending && !row.enriched_phone && recentlyEnriched;
+
+  // Outreach is reachable on every row. If the row already has (or has
+  // already attempted) a contact lookup, open the compose modal straight
+  // away with whatever email we have — a real address when found, null
+  // otherwise. If it's never been looked up, run a just-in-time contact
+  // lookup first to try to resolve a real address. Entity/company filers
+  // (e.g. "TANG CAPITAL MANAGEMENT LLC") and genuine no-matches come back
+  // empty; we still open the modal with no recipient so the user can
+  // generate, edit, and copy a draft (the modal disables Send and shows
+  // its "no email on file" note). No synthetic placeholder is ever shown.
+  // Retrying the lookup is the Re-enrich button's job, so we don't repeat
+  // it once enriched_at is set.
+  async function handleOutreachClick() {
+    if (row.enriched_email || row.enriched_at) {
+      setOutreachEmail(row.enriched_email);
+      setOutreachOpen(true);
+      return;
+    }
+    setPreparingOutreach(true);
+    let found: string | null = null;
+    try {
+      found = await onLookupEmail();
+    } finally {
+      setPreparingOutreach(false);
+      setOutreachEmail(found);
+      setOutreachOpen(true);
+    }
+  }
 
   return (
-    <div className="grid gap-3 py-3 md:grid-cols-[minmax(0,1.4fr)_minmax(0,1.2fr)_minmax(0,160px)]">
+    <div className="grid gap-3 py-3 md:grid-cols-[minmax(0,1.4fr)_minmax(0,1.2fr)_minmax(0,264px)]">
       <div className="min-w-0">
         <div className="flex flex-wrap items-center gap-2">
           <span className="text-[14px] font-semibold text-[var(--text,#0f172a)]">
@@ -859,6 +941,15 @@ function InvestorRow({
           >
             {adLabel}
           </span>
+          {hasEnrichment ? (
+            <span
+              className="inline-flex items-center gap-1 rounded-md border border-[var(--border,rgba(30,64,175,0.1))] bg-[var(--surface-2,#f1f6fd)] px-1.5 py-0.5 text-[10px] font-medium text-[var(--text-dim,#475569)]"
+              title={`Contact lookup run on ${formatDate(row.enriched_at)}`}
+            >
+              <Check className="h-3 w-3" strokeWidth={2.5} aria-hidden />
+              Enriched · {formatDate(row.enriched_at)}
+            </span>
+          ) : null}
         </div>
         <p className="mt-1 text-[12px] text-[var(--text-muted,#94a3b8)]">
           {address || "No address on filing"}
@@ -870,6 +961,14 @@ function InvestorRow({
                 <Phone className="h-3.5 w-3.5" strokeWidth={2} aria-hidden />
                 {row.enriched_phone}
               </span>
+            ) : phonePending ? (
+              <span
+                className="inline-flex items-center gap-1 text-[var(--text-muted,#94a3b8)]"
+                title="Apollo phone reveal requested — the number lands via webhook shortly"
+              >
+                <Clock className="h-3.5 w-3.5 animate-pulse" strokeWidth={2} aria-hidden />
+                Phone arriving…
+              </span>
             ) : null}
             {row.enriched_email ? (
               <a
@@ -880,10 +979,16 @@ function InvestorRow({
                 {row.enriched_email}
               </a>
             ) : null}
-            {!row.enriched_phone && !row.enriched_email ? (
-              <span className="text-[11px] italic text-[var(--text-muted,#94a3b8)]">
-                Apollo returned no match
-              </span>
+            {row.enriched_linkedin_url ? (
+              <a
+                href={row.enriched_linkedin_url}
+                target="_blank"
+                rel="noreferrer"
+                className="inline-flex items-center gap-1 text-[#6366f1] hover:underline"
+              >
+                <Linkedin className="h-3.5 w-3.5" strokeWidth={2} aria-hidden />
+                LinkedIn
+              </a>
             ) : null}
           </div>
         ) : null}
@@ -915,7 +1020,7 @@ function InvestorRow({
           </a>
         ) : null}
       </div>
-      <div className="flex items-start justify-end gap-2">
+      <div className="flex flex-nowrap items-center justify-end gap-2">
         <ListPicker
           variant="row-heart"
           entityType="reporting_owner"
@@ -923,18 +1028,52 @@ function InvestorRow({
           reportingOwnerCik={row.reporting_owner_cik}
           initialFavorited={row.is_favorited}
         />
-        <button
+        <Button
           type="button"
+          variant="outline"
+          size="sm"
           onClick={onEnrich}
-          disabled={enriching}
-          className="inline-flex items-center gap-1.5 rounded-md border border-[var(--border-2,rgba(30,64,175,0.16))] bg-transparent px-2.5 py-1 text-[11px] font-semibold text-[var(--text-dim,#475569)] transition hover:bg-[var(--surface-2,#f1f6fd)] hover:text-[var(--text,#0f172a)] disabled:cursor-not-allowed disabled:opacity-50"
+          disabled={enriching || preparingOutreach}
+          className="shrink-0 whitespace-nowrap"
         >
           {enriching ? (
             <Loader2 className="h-3.5 w-3.5 animate-spin" strokeWidth={2} />
           ) : null}
-          {hasEnrichment ? "Re-enrich" : "Find contact"}
-        </button>
+          Re-enrich
+        </Button>
+        <Button
+          type="button"
+          size="sm"
+          onClick={() => void handleOutreachClick()}
+          disabled={preparingOutreach || enriching}
+          className="shrink-0 whitespace-nowrap"
+        >
+          {preparingOutreach ? (
+            <Loader2
+              className="h-3.5 w-3.5 animate-spin"
+              strokeWidth={2}
+              aria-hidden
+            />
+          ) : (
+            <MailPlus className="h-3.5 w-3.5" strokeWidth={2} aria-hidden />
+          )}
+          Outreach
+        </Button>
       </div>
+      {outreachOpen ? (
+        <OutreachModal
+          entityKind="adhoc"
+          entityId={0}
+          entityName=""
+          contact={{
+            id: row.reporting_owner_id ?? 0,
+            name: row.reporting_owner_name,
+            title: row.reporting_owner_title ?? "",
+            email: outreachEmail,
+          }}
+          onClose={() => setOutreachOpen(false)}
+        />
+      ) : null}
     </div>
   );
 }
@@ -988,13 +1127,14 @@ function LoadErrorCard({
       <p className="mx-auto mt-2 max-w-sm text-[13px] leading-5 text-[var(--text-dim,#475569)]">
         {message}
       </p>
-      <button
+      <Button
         type="button"
+        variant="outline"
         onClick={onRetry}
-        className="mt-5 inline-flex h-[34px] items-center rounded-[10px] border border-[var(--border-2,rgba(30,64,175,0.16))] bg-[var(--surface,#ffffff)] px-4 text-[13px] font-semibold text-[var(--text-dim,#475569)] transition hover:text-[var(--text,#0f172a)]"
+        className="mt-5"
       >
         Retry
-      </button>
+      </Button>
     </div>
   );
 }

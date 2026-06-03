@@ -8,12 +8,14 @@ and fires the corresponding sub-pipelines via the existing
 ``last_gap_fill_attempt_at`` is within the last ``COOLDOWN_DAYS``
 unless ``--reset-cooldown`` is passed.
 
-All six sub-pipelines participate -- financials, health-check
+All seven sub-pipelines participate -- financials, health-check
 (FINRA Form BD + search metadata), clearing extraction, contact
-enrichment, filings refresh, and website resolution. ``decide_pipelines``
-gates each one; this script defaults to aggressive mode so the gates
-also fire on sentinel values and detail-page-only fields, not just
-strict ``IS NULL``.
+enrichment, filings refresh, website resolution, and FOCUS-contact
+extraction (the X-17A-5 "PERSON TO CONTACT" block -> a focus_report
+ExecutiveContact; the only automated source of BD filing-contact
+emails). ``decide_pipelines`` gates each one; this script defaults to
+aggressive mode so the gates also fire on sentinel values and
+detail-page-only fields, not just strict ``IS NULL``.
 
 Designed to run unattended for hours. Interruptible with Ctrl+C; the
 cooldown stamp is set per-BD so a rerun resumes automatically.
@@ -262,6 +264,7 @@ async def main() -> None:
     from app.services.extraction_status import RETRYABLE_TRANSIENT_STATUSES
     from app.services.refresh_all_orchestrator import (
         SUB_ENRICH,
+        SUB_FOCUS_CONTACT,
         SUB_HEALTH_CHECK,
         SUB_REFRESH_CLEARING,
         SUB_REFRESH_FILINGS,
@@ -280,6 +283,7 @@ async def main() -> None:
         SUB_ENRICH: "enrich",
         SUB_REFRESH_FILINGS: "filings",
         SUB_RESOLVE_WEBSITE: "website",
+        SUB_FOCUS_CONTACT: "focus-contact",
     }
 
     cutoff = datetime.now(timezone.utc) - timedelta(days=COOLDOWN_DAYS)
@@ -329,6 +333,20 @@ async def main() -> None:
         contact_ids: set[int] = set(
             (await db.execute(select(ExecutiveContact.bd_id).distinct())).scalars().all()
         )
+        # BDs that already carry a FOCUS-report filing contact. Gates the
+        # focus-contact sub-pipeline: a BD outside this set still needs one
+        # extracted (the only automated source of BD filing-contact emails).
+        focus_contact_ids: set[int] = set(
+            (
+                await db.execute(
+                    select(ExecutiveContact.bd_id)
+                    .where(ExecutiveContact.source == "focus_report")
+                    .distinct()
+                )
+            )
+            .scalars()
+            .all()
+        )
 
     if args.limit is not None and args.limit > 0:
         eligible = eligible[: args.limit]
@@ -366,6 +384,7 @@ async def main() -> None:
         SUB_REFRESH_CLEARING: "clearing",
         SUB_ENRICH: "enrich",
         SUB_REFRESH_FILINGS: "filings",
+        SUB_FOCUS_CONTACT: "focus",
     }
 
     def _bucket(bd: BrokerDealer) -> str:
@@ -373,7 +392,12 @@ async def main() -> None:
 
     for bd in eligible:
         has_contacts = bd.id in contact_ids
-        report = gap_report_for(bd, has_contacts, aggressive=aggressive)
+        report = gap_report_for(
+            bd,
+            has_contacts,
+            aggressive=aggressive,
+            has_focus_contact=bd.id in focus_contact_ids,
+        )
         bucket = _bucket(bd)
         had_any = False
         for sub, cols in report.items():
@@ -467,7 +491,11 @@ async def main() -> None:
             try:
                 has_contacts = bd.id in contact_ids
                 decision = decide_pipelines(
-                    bd, has_contacts, scope="all", aggressive=aggressive
+                    bd,
+                    has_contacts,
+                    scope="all",
+                    aggressive=aggressive,
+                    has_focus_contact=bd.id in focus_contact_ids,
                 )
                 to_run = decision.to_run
                 to_skip = decision.to_skip

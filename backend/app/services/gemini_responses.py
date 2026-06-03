@@ -7,6 +7,7 @@ import logging
 import re
 import secrets
 from collections import OrderedDict
+from collections.abc import Awaitable, Callable
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Literal
@@ -20,6 +21,12 @@ from app.core.config import settings
 logger = logging.getLogger(__name__)
 
 _GEMINI_KEY_SHAPE = re.compile(r"^AIzaSy[A-Za-z0-9_\-]{33}$")
+
+# Status codes that should retry rather than raise immediately. The Gemini
+# generate-content path used this set inline; ``_request_with_retries`` now
+# centralizes it so the Files API upload / status poll share the same
+# transient-failure classification.
+_RETRYABLE_STATUS_CODES: frozenset[int] = frozenset({408, 409, 429, 500, 502, 503, 504})
 
 # ─────────────────────── Files API LRU (ADR-0001 phase 2) ───────────────────
 #
@@ -101,11 +108,32 @@ class GeminiExtractionError(RuntimeError):
     pass
 
 
+# Substrings Gemini returns in the 400 body when the PDF is unparseable —
+# most often the SEC EDGAR zero-page X-17A-5 artifacts (see [[gemini-no-
+# pages-error]] memory). Used by summarize_pdf to convert these to None
+# rather than raising into a 502 — Doxie can then say "this filing
+# appears to be empty" in plain language. Lowercased comparison so
+# upstream casing changes don't slip past.
+_UNPARSEABLE_PDF_MARKERS: tuple[str, ...] = (
+    "the document has no pages",
+    "could not process the document",
+    "unable to process",
+    "no content to summarize",
+)
+
+
+def _is_unparseable_pdf_error(exc: GeminiExtractionError) -> bool:
+    """True iff the error message matches one of the known "PDF can't be
+    read" cases. Keeps the matcher in one place so callers stay tidy."""
+    text = str(exc).lower()
+    return any(marker in text for marker in _UNPARSEABLE_PDF_MARKERS)
+
+
 class GeminiClearingExtraction(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     clearing_partner: str | None = Field(default=None, max_length=255)
-    clearing_type: Literal["fully_disclosed", "self_clearing", "omnibus", "unknown"]
+    clearing_type: Literal["fully_disclosed", "self_clearing", "omnibus", "non_carrying", "unknown"]
     agreement_date: str | None = Field(default=None, description="ISO date in YYYY-MM-DD format when present.")
     confidence_score: float = Field(ge=0.0, le=1.0)
     rationale: str = Field(min_length=1, max_length=1000)
@@ -138,7 +166,7 @@ class GeminiClassificationExtraction(BaseModel):
     """
     model_config = ConfigDict(extra="forbid")
 
-    classification: Literal["fully_disclosed", "self_clearing", "omnibus", "unknown"]
+    classification: Literal["fully_disclosed", "self_clearing", "omnibus", "non_carrying", "unknown"]
     confidence_score: float = Field(ge=0.0, le=1.0)
     rationale: str = Field(min_length=1, max_length=1000)
 
@@ -195,6 +223,29 @@ class GeminiAdvisorPerson(BaseModel):
     )
 
 
+# Form ADV Item 5.D.(2) per-category client-count keys. Mirrors the canonical
+# snake_case taxonomy in ``app.services.iapd._CLIENT_TYPE_HEADERS`` (the fixed
+# 13-row Form ADV Item 5.D table) — kept in sync by hand to avoid a cross-module
+# import. Enumerated as FIXED schema properties on purpose: Gemini's controlled
+# generation is unreliable with dynamic / additionalProperties keys, so we list
+# every key rather than ask for an open-ended object.
+_ADV_CLIENT_COUNT_KEYS: tuple[str, ...] = (
+    "individuals",
+    "high_net_worth_individuals",
+    "banking_or_thrift_institutions",
+    "investment_companies",
+    "business_development_companies",
+    "pooled_investment_vehicles",
+    "pension_and_profit_sharing_plans",
+    "charitable_organizations",
+    "state_or_municipal_government_entities",
+    "other_investment_advisers",
+    "insurance_companies",
+    "sovereign_wealth_funds",
+    "other",
+)
+
+
 class GeminiAdvisorProfileExtraction(BaseModel):
     """Structured extraction of the investment-advisor profile fields from a
     Form ADV (IAPD) or BrokerCheck PDF. One call fills the People panel
@@ -208,6 +259,12 @@ class GeminiAdvisorProfileExtraction(BaseModel):
     client_types: list[str] = Field(
         default_factory=list,
         description="Form ADV Item 5.D client categories, e.g. 'Investment companies'.",
+    )
+    # Item 5.D.(2) per-category counts. Values may be null (category not served
+    # / not reported); the apply step filters to positive integers before write.
+    client_counts: dict[str, int | None] | None = Field(
+        default=None,
+        description="Form ADV Item 5.D.(2) per-category client counts; snake_case category key -> integer count.",
     )
     registration_date: str | None = Field(default=None, description="ISO date YYYY-MM-DD")
     formation_date: str | None = Field(default=None, description="ISO date YYYY-MM-DD")
@@ -245,7 +302,7 @@ class GeminiResponsesClient:
                 "clearing_partner": {"type": ["STRING", "NULL"]},
                 "clearing_type": {
                     "type": "STRING",
-                    "enum": ["fully_disclosed", "self_clearing", "omnibus", "unknown"],
+                    "enum": ["fully_disclosed", "self_clearing", "omnibus", "non_carrying", "unknown"],
                 },
                 "agreement_date": {"type": ["STRING", "NULL"]},
                 "confidence_score": {"type": "NUMBER"},
@@ -335,7 +392,7 @@ class GeminiResponsesClient:
             "properties": {
                 "classification": {
                     "type": "STRING",
-                    "enum": ["fully_disclosed", "self_clearing", "omnibus", "unknown"],
+                    "enum": ["fully_disclosed", "self_clearing", "omnibus", "non_carrying", "unknown"],
                 },
                 "confidence_score": {"type": "NUMBER"},
                 "rationale": {"type": "STRING"},
@@ -567,6 +624,14 @@ class GeminiResponsesClient:
                 "direct_owners": {"type": "ARRAY", "items": person},
                 "indirect_owners": {"type": "ARRAY", "items": person},
                 "client_types": {"type": "ARRAY", "items": {"type": "STRING"}},
+                "client_counts": {
+                    "type": ["OBJECT", "NULL"],
+                    "properties": {
+                        key: {"type": ["INTEGER", "NULL"]}
+                        for key in _ADV_CLIENT_COUNT_KEYS
+                    },
+                    "propertyOrdering": list(_ADV_CLIENT_COUNT_KEYS),
+                },
                 "registration_date": {"type": ["STRING", "NULL"]},
                 "formation_date": {"type": ["STRING", "NULL"]},
                 "firm_operations_text": {"type": ["STRING", "NULL"]},
@@ -579,6 +644,7 @@ class GeminiResponsesClient:
                 "direct_owners",
                 "indirect_owners",
                 "client_types",
+                "client_counts",
                 "registration_date",
                 "formation_date",
                 "firm_operations_text",
@@ -652,6 +718,153 @@ class GeminiResponsesClient:
             if isinstance(item, dict):
                 results.append(GeminiFinancialExtraction.model_validate(self._normalize_text_fields(item)))
         return results
+
+    async def summarize_pdf(
+        self,
+        *,
+        pdf_bytes_base64: str,
+        prompt: str,
+        temperature: float = 0.2,
+    ) -> str | None:
+        """Free-form prose summarization of a PDF.
+
+        Distinct from the ``extract_*`` methods on this client — those
+        return JSON-schema-constrained Pydantic shapes for the structured
+        clearing / financial / advisor pipelines. ``summarize_pdf`` skips
+        the schema and returns plain text so Doxie's chat tools can run a
+        narrative summary in response to a user question.
+
+        Returns ``None`` when Gemini rejects the input as unparseable —
+        most commonly the SEC EDGAR zero-page X-17A-5 artifacts that
+        surface as "The document has no pages." 400s. Callers should
+        treat ``None`` as "this filing can't be summarised" and surface
+        a friendly message rather than raising.
+
+        Uses the same Files-API-vs-inline router as the structured
+        extractors so a 20+ MB PDF flows through the same memory-efficient
+        upload path; uses the existing ``gemini_inline_pdf_max_size_mb``
+        size ceiling. The optional ``temperature`` arg lets a caller bias
+        toward more deterministic phrasing (lower) or more natural
+        narrative (higher); default 0.2 matches the structured-extract
+        style.
+        """
+        if not settings.gemini_api_key:
+            raise GeminiConfigurationError("GEMINI_API_KEY is not configured.")
+
+        threshold_bytes = settings.gemini_files_api_threshold_mb * 1024 * 1024
+        max_bytes = settings.gemini_inline_pdf_max_size_mb * 1024 * 1024
+        pdf_size_bytes = self._pdf_byte_size_from_b64(pdf_bytes_base64)
+
+        if pdf_size_bytes > max_bytes:
+            raise GeminiExtractionError(
+                f"PDF size {pdf_size_bytes} bytes exceeds "
+                f"gemini_inline_pdf_max_size_mb={settings.gemini_inline_pdf_max_size_mb} MB."
+            )
+
+        if pdf_size_bytes <= threshold_bytes:
+            payload = self._build_prose_payload(
+                pdf_bytes_base64=pdf_bytes_base64,
+                prompt=prompt,
+                temperature=temperature,
+            )
+        else:
+            # Files API path for larger PDFs. Decode once, upload, run
+            # the call referencing the file URI, then clean up — matches
+            # the schema-less variant of the existing _dispatch_pdf_extract.
+            pdf_bytes = base64.b64decode(pdf_bytes_base64)
+            file_name, file_uri = await self._upload_pdf_to_files_api(pdf_bytes)
+            try:
+                payload = self._build_files_api_prose_payload(
+                    file_uri=file_uri,
+                    prompt=prompt,
+                    temperature=temperature,
+                )
+                try:
+                    response = await self._post_with_retries(payload)
+                except GeminiExtractionError as exc:
+                    if _is_unparseable_pdf_error(exc):
+                        return None
+                    raise
+                return self._extract_response_text(response).strip() or None
+            finally:
+                await self._delete_files_api_file(file_name)
+
+        try:
+            response = await self._post_with_retries(payload)
+        except GeminiExtractionError as exc:
+            # See [[gemini-no-pages-error]] in memory — zero-page PDFs
+            # from SEC EDGAR raise "The document has no pages." (400).
+            # Treat as "unsummarisable" so Doxie returns a friendly
+            # "this filing appears to be empty" instead of 502'ing.
+            if _is_unparseable_pdf_error(exc):
+                return None
+            raise
+
+        text = self._extract_response_text(response).strip()
+        return text or None
+
+    def _build_prose_payload(
+        self,
+        *,
+        pdf_bytes_base64: str,
+        prompt: str,
+        temperature: float,
+    ) -> dict[str, object]:
+        """Inline-base64 payload for prose summarisation (no JSON schema)."""
+        return {
+            "contents": [
+                {
+                    "role": "user",
+                    "parts": [
+                        {"text": prompt},
+                        {
+                            "inline_data": {
+                                "mime_type": "application/pdf",
+                                "data": pdf_bytes_base64,
+                            }
+                        },
+                    ],
+                }
+            ],
+            "generationConfig": {
+                # Cap output so a runaway response doesn't blow the chat
+                # budget. 2048 tokens ≈ 1500 words, plenty for any
+                # filing summary the chat would surface inline.
+                "maxOutputTokens": 2048,
+                "temperature": temperature,
+                "topP": 0.95,
+            },
+        }
+
+    def _build_files_api_prose_payload(
+        self,
+        *,
+        file_uri: str,
+        prompt: str,
+        temperature: float,
+    ) -> dict[str, object]:
+        """Files-API equivalent of ``_build_prose_payload`` for larger PDFs."""
+        return {
+            "contents": [
+                {
+                    "role": "user",
+                    "parts": [
+                        {"text": prompt},
+                        {
+                            "file_data": {
+                                "mime_type": "application/pdf",
+                                "file_uri": file_uri,
+                            }
+                        },
+                    ],
+                }
+            ],
+            "generationConfig": {
+                "maxOutputTokens": 2048,
+                "temperature": temperature,
+                "topP": 0.95,
+            },
+        }
 
     def _build_payload(self, *, pdf_bytes_base64: str, prompt: str, schema: dict[str, object]) -> dict[str, object]:
 
@@ -960,11 +1173,11 @@ class GeminiResponsesClient:
             "Content-Type": f"multipart/related; boundary={boundary}",
         }
         try:
-            async with httpx.AsyncClient(timeout=self.timeout) as client:
-                response = await client.post(
-                    self._files_api_upload_url(), headers=headers, content=body
-                )
-            response.raise_for_status()
+            response = await self._request_with_retries(
+                request=lambda client: client.post(
+                    self._files_api_upload_url(), headers=headers, content=body,
+                ),
+            )
         except httpx.HTTPStatusError as exc:
             detail = exc.response.text.strip()
             raise GeminiExtractionError(
@@ -999,9 +1212,9 @@ class GeminiResponsesClient:
         for _ in range(attempts):
             await asyncio.sleep(delay_seconds)
             try:
-                async with httpx.AsyncClient(timeout=self.timeout) as client:
-                    response = await client.get(url, headers=headers)
-                response.raise_for_status()
+                response = await self._request_with_retries(
+                    request=lambda client: client.get(url, headers=headers),
+                )
             except httpx.HTTPError as exc:
                 raise GeminiExtractionError(
                     f"Files API status poll failed for {file_name}."
@@ -1041,32 +1254,78 @@ class GeminiResponsesClient:
                 "Files API delete network error for %s: %s", file_name, exc
             )
 
-    async def _post_with_retries(self, payload: dict[str, object]) -> dict[str, object]:
-        url = f"{self.base_url}/models/{settings.gemini_pdf_model}:generateContent"
-        headers = {"x-goog-api-key": settings.gemini_api_key}
-        last_error: Exception | None = None
+    async def _request_with_retries(
+        self,
+        *,
+        request: Callable[[httpx.AsyncClient], Awaitable[httpx.Response]],
+        retryable_status_codes: frozenset[int] = _RETRYABLE_STATUS_CODES,
+    ) -> httpx.Response:
+        """Execute ``request`` against a fresh ``httpx.AsyncClient`` with
+        exponential backoff retries on transient failures.
+
+        Retries on:
+          - any ``httpx.HTTPError`` (network / timeout / protocol — the
+            "Files API upload failed due to a network error" shape we
+            observed in production when a single TLS blip aborted a
+            multi-MB ADV upload mid-stream)
+          - ``httpx.HTTPStatusError`` whose status code is in
+            ``retryable_status_codes`` (408/409/429/500/502/503/504)
+
+        Non-retryable status codes (4xx other than 408/409/429) bubble up
+        immediately so the caller can surface the original status + body
+        to the operator.
+
+        After ``self.max_retries`` attempts, re-raises the last seen
+        exception unmodified — the caller wraps it into a
+        ``GeminiExtractionError`` with whatever message fits the call
+        site (Files API upload vs status poll vs generate-content).
+
+        Side-effect note: a partial-success upload (server saw the
+        bytes, the response then dropped) that we then retry will leave
+        an orphan in Gemini's Files API. Files TTL to ~48 hours per
+        provider docs, so the orphan self-cleans. No cleanup needed
+        here.
+        """
+        last_status_error: httpx.HTTPStatusError | None = None
+        last_network_error: httpx.HTTPError | None = None
 
         for attempt in range(1, self.max_retries + 1):
             try:
                 async with httpx.AsyncClient(timeout=self.timeout) as client:
-                    response = await client.post(url, headers=headers, json=payload)
+                    response = await request(client)
                 response.raise_for_status()
-                return response.json()
+                return response
             except httpx.HTTPStatusError as exc:
-                last_error = exc
-                if exc.response.status_code not in {408, 409, 429, 500, 502, 503, 504} or attempt == self.max_retries:
-                    detail = exc.response.text.strip()
-                    raise GeminiExtractionError(
-                        f"Gemini request failed with status {exc.response.status_code}: {detail or 'No response body.'}"
-                    ) from exc
+                last_status_error = exc
+                if exc.response.status_code not in retryable_status_codes:
+                    raise
             except httpx.HTTPError as exc:
-                last_error = exc
-                if attempt == self.max_retries:
-                    raise GeminiExtractionError("Gemini request failed due to a network error.") from exc
+                last_network_error = exc
 
-            await asyncio.sleep(min(2**attempt, 8))
+            if attempt < self.max_retries:
+                await asyncio.sleep(min(2 ** attempt, 8))
 
-        raise GeminiExtractionError("Gemini request failed after retries.") from last_error
+        if last_status_error is not None:
+            raise last_status_error
+        assert last_network_error is not None
+        raise last_network_error
+
+    async def _post_with_retries(self, payload: dict[str, object]) -> dict[str, object]:
+        url = f"{self.base_url}/models/{settings.gemini_pdf_model}:generateContent"
+        headers = {"x-goog-api-key": settings.gemini_api_key}
+        try:
+            response = await self._request_with_retries(
+                request=lambda client: client.post(url, headers=headers, json=payload),
+            )
+        except httpx.HTTPStatusError as exc:
+            detail = exc.response.text.strip()
+            raise GeminiExtractionError(
+                f"Gemini request failed with status {exc.response.status_code}: "
+                f"{detail or 'No response body.'}"
+            ) from exc
+        except httpx.HTTPError as exc:
+            raise GeminiExtractionError("Gemini request failed due to a network error.") from exc
+        return response.json()
 
     def _extract_response_text(self, payload: dict[str, object]) -> str:
         candidates = payload.get("candidates", [])

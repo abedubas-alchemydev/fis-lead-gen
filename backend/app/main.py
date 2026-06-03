@@ -19,6 +19,36 @@ from app.services.pipeline_reaper import reap_stale_refresh_runs
 if sys.platform == "win32":
     asyncio.set_event_loop_policy(asyncio.WindowsSelectorEventLoopPolicy())
 
+
+def _configure_root_logging() -> None:
+    """Send root-logger output to stdout so application ``logger.info`` calls
+    surface in Cloud Run logs.
+
+    Without this, only the ``uvicorn`` / ``uvicorn.access`` loggers (which
+    configure their own handlers) write anywhere visible; every
+    ``logging.getLogger(__name__).info(...)`` call from app code is silently
+    dropped because root has no handler. Result: the only signal you can
+    grep for in Cloud Run is the access log + uncaught exception tracebacks,
+    which makes incidents like "did the webhook actually update any rows?"
+    much harder to diagnose than they need to be.
+
+    ``basicConfig(force=False)`` is a no-op when root already has handlers
+    (the case under pytest's ``caplog`` fixture and any future uvicorn
+    config that wires root). Library namespaces that are gratuitously noisy
+    at INFO are bumped to WARNING so the signal stays usable.
+    """
+    logging.basicConfig(
+        level=logging.INFO,
+        format="%(levelname)s [%(name)s] %(message)s",
+        stream=sys.stdout,
+        force=False,
+    )
+    for noisy in ("sqlalchemy.engine", "httpx", "httpcore", "asyncio"):
+        logging.getLogger(noisy).setLevel(logging.WARNING)
+
+
+_configure_root_logging()
+
 logger = logging.getLogger(__name__)
 
 

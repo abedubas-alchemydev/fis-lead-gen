@@ -125,7 +125,7 @@ class TestEmptyInputShortCircuit:
 class TestCanonicalValues:
     @pytest.mark.parametrize(
         "label",
-        ["fully_disclosed", "self_clearing", "omnibus", "unknown"],
+        ["fully_disclosed", "self_clearing", "omnibus", "non_carrying", "unknown"],
     )
     @pytest.mark.asyncio
     async def test_each_label_round_trips(

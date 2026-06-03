@@ -43,6 +43,12 @@ export interface MasterListQueryState {
   // FastAPI date validator accepts.
   registeredAfter: string | null;
   registeredBefore: string | null;
+  // Named-segment preset applied via deep-link — e.g. the dashboard "High
+  // Value Participants" KPI tile / Top Prospects card link to
+  // `?segment=high_value`. Resolves to a backend OR-predicate (net-capital
+  // band OR a business type) the per-field filters can't express. "" = none.
+  // Treated as a filter (shows an Active chip, counts toward "Clear all").
+  segment: string;
   list: ListMode;
   sortBy: string;
   sortDir: SortDir;
@@ -66,6 +72,7 @@ export const MASTER_LIST_STATE_DEFAULTS: MasterListQueryState = {
   maxNetCapital: null,
   registeredAfter: null,
   registeredBefore: null,
+  segment: "",
   list: "primary",
   sortBy: "latest_net_capital",
   sortDir: "desc",
@@ -74,6 +81,10 @@ export const MASTER_LIST_STATE_DEFAULTS: MasterListQueryState = {
   source: "master-list",
 };
 
+// Recognised `?segment=` presets. Anything else parses back to "" (no
+// segment) so a stale/garbage value can't pin the list to an unknown filter.
+// Mirrors the backend Query `pattern="^high_value$"`.
+const SEGMENTS: ReadonlyArray<string> = ["high_value"];
 const LIST_MODES: ReadonlyArray<ListMode> = ["primary", "alternative", "all"];
 const SORT_DIRS: ReadonlyArray<SortDir> = ["asc", "desc"];
 const ALLOWED_LIMITS: ReadonlyArray<number> = [25, 50, 100];
@@ -155,6 +166,12 @@ export function fromSearchParams(sp: SearchParamsLike): MasterListQueryState {
     maxNetCapital: parseNonNegativeFloat(sp.get("max_net_capital")),
     registeredAfter: sp.get("registered_after") || null,
     registeredBefore: sp.get("registered_before") || null,
+    segment: (() => {
+      const raw = sp.get("segment");
+      return raw && (SEGMENTS as ReadonlyArray<string>).includes(raw)
+        ? raw
+        : MASTER_LIST_STATE_DEFAULTS.segment;
+    })(),
     list:
       list && (LIST_MODES as ReadonlyArray<string>).includes(list)
         ? (list as ListMode)
@@ -221,6 +238,9 @@ export function toSearchParams(state: MasterListQueryState): URLSearchParams {
   }
   if (state.registeredBefore !== null) {
     sp.set("registered_before", state.registeredBefore);
+  }
+  if (state.segment !== MASTER_LIST_STATE_DEFAULTS.segment) {
+    sp.set("segment", state.segment);
   }
   if (state.list !== MASTER_LIST_STATE_DEFAULTS.list) {
     sp.set("list", state.list);
@@ -304,9 +324,9 @@ export function encodeReturnParam(state: MasterListQueryState): string {
 // True when at least one filter key differs from its default. Filter
 // keys are the user-facing query controls (search, state, health,
 // prospect priority, clearing partner / type, types of business,
-// net-capital range, registration-date range). Sort, list mode, page
-// size, page, and source are workspace/navigation state — not filters
-// — so they don't count toward "is anything filtered?".
+// net-capital range, registration-date range, segment preset). Sort, list
+// mode, page size, page, and source are workspace/navigation state — not
+// filters — so they don't count toward "is anything filtered?".
 export function hasActiveFilters(state: MasterListQueryState): boolean {
   return (
     state.search !== MASTER_LIST_STATE_DEFAULTS.search ||
@@ -319,7 +339,8 @@ export function hasActiveFilters(state: MasterListQueryState): boolean {
     state.minNetCapital !== null ||
     state.maxNetCapital !== null ||
     state.registeredAfter !== null ||
-    state.registeredBefore !== null
+    state.registeredBefore !== null ||
+    state.segment !== MASTER_LIST_STATE_DEFAULTS.segment
   );
 }
 
@@ -346,6 +367,7 @@ export function clearAllFilters(
     maxNetCapital: null,
     registeredAfter: null,
     registeredBefore: null,
+    segment: MASTER_LIST_STATE_DEFAULTS.segment,
     page: 1,
   };
 }

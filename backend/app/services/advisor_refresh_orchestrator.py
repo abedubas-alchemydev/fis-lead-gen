@@ -60,7 +60,19 @@ from app.services.brokercheck_pdf import (
     FinraPdfFetchError,
     FinraPdfNotFound,
 )
-from app.services.contact_discovery.orchestrator import discover_advisor_contact
+from app.services.contact_discovery.gap_fill_common import (
+    apply_gap_fill,
+    is_gap_row,
+)
+from app.services.contact_discovery.orchestrator import (
+    _build_advisor_row,
+    _walk_chain,
+    discover_advisor_contact,
+)
+from app.services.contact_discovery.web_fallback import (
+    GapPerson,
+    discover_web_fallback,
+)
 from app.services.edgar import EdgarService, build_edgar_filing_url
 from app.services.finra_pdf_service import fetch_brokercheck_pdf
 from app.services.gemini_responses import (
@@ -191,6 +203,67 @@ def _parse_iapd_us_date(value: str | None) -> date | None:
         return None
 
 
+def extract_other_business_names(
+    iacontent: dict | None, *, primary_name: str | None, legal_name: str | None
+) -> list[str] | None:
+    """Pull Form ADV Schedule D Section 1.B "Other Business Names" out of the
+    IAPD per-firm ``iacontent`` payload.
+
+    The IA analog of ``FinraService._parse_dba_names`` for broker dealers.
+    The names live at ``iacontent.basicInformation.otherNames`` (a list of
+    strings); we fall back to a top-level ``otherNames`` key in case the API
+    flattens it. Returns ``None`` when nothing usable remains — the parser
+    fails closed so a wrong path guess degrades to "no data" rather than an
+    error.
+
+    The ``otherNames`` array routinely repeats the firm's own primary
+    business name (Item 1.B-1) as its first element, so we drop any entry
+    matching the firm's ``primary_name`` OR ``legal_name`` (case- and
+    whitespace-insensitive) and de-dupe on the same normalization.
+    """
+    if not iacontent:
+        return None
+
+    basic = iacontent.get("basicInformation")
+    raw = basic.get("otherNames") if isinstance(basic, dict) else None
+    if raw is None:
+        raw = iacontent.get("otherNames")
+    if not isinstance(raw, list):
+        return None
+
+    # Strip a leading ``d/b/a`` / ``DBA`` marker per item, mirroring the BD
+    # parser — harmless even though IAPD rarely includes it.
+    cleaned_items: list[str] = []
+    for entry in raw:
+        item = str(entry).strip()
+        if not item:
+            continue
+        lower = item.lower()
+        for marker in ("d/b/a ", "dba "):
+            if lower.startswith(marker):
+                item = item[len(marker):].strip()
+                break
+        if item:
+            cleaned_items.append(item)
+
+    # Drop the firm's own primary + legal name, then de-dupe (all on the same
+    # case/whitespace-insensitive normalization).
+    drop = {
+        " ".join(n.lower().split())
+        for n in (primary_name, legal_name)
+        if n
+    }
+    seen: set[str] = set()
+    out: list[str] = []
+    for name in cleaned_items:
+        norm = " ".join(name.lower().split())
+        if not norm or norm in drop or norm in seen:
+            continue
+        seen.add(norm)
+        out.append(name)
+    return out or None
+
+
 RefreshScope = Literal["all"]
 
 logger = logging.getLogger(__name__)
@@ -205,6 +278,17 @@ SUB_REFRESH_FILINGS = "investment_advisor_refresh_filings"
 SUB_ENRICH_CONTACTS = "investment_advisor_enrich_contacts"
 SUB_REFRESH_IAPD_SUMMARY = "investment_advisor_refresh_iapd_summary"
 
+# Standalone pipeline name for the manual per-advisor contact gap-fill flow.
+# Not a child of REFRESH_ADVISOR_ALL — the endpoint creates ONE PipelineRun and
+# the runner finalizes it directly, so no parent/child split is needed.
+GAP_FILL_ADVISOR_CONTACTS_PIPELINE_NAME = "investment_advisor_gap_fill_contacts"
+
+# Standalone pipeline name for the bulk roster-backfill flow (Job B): walk the
+# executive_officers roster and materialise a per-officer advisor_contacts row,
+# bypassing the _run_enrich_contacts idempotency guard. Driven by
+# scripts/backfill_advisor_roster_contacts.py.
+BACKFILL_ROSTER_CONTACTS_PIPELINE_NAME = "investment_advisor_backfill_roster_contacts"
+
 # Short human labels used in the parent's notes.summary toast string.
 _SUB_LABEL: dict[str, str] = {
     SUB_REFRESH_OWNERS_OFFICERS: "owners",
@@ -213,6 +297,12 @@ _SUB_LABEL: dict[str, str] = {
     SUB_ENRICH_CONTACTS: "contacts",
     SUB_REFRESH_IAPD_SUMMARY: "iapd",
 }
+
+# How many days the manual gap-fill endpoint waits before allowing another
+# attempt on the same advisor. Matches scripts/gap_fill_investment_advisors.py
+# COOLDOWN_DAYS so an ad-hoc trigger and the nightly bulk runner share one
+# fairness budget.
+GAP_FILL_COOLDOWN_DAYS = 30
 
 
 # How many officers we hand to the discovery chain per advisor. Cooldown bounds
@@ -386,6 +476,15 @@ or a FINRA BrokerCheck firm report). Extract the following about THIS firm:
 6. formation_date — the date the firm was formed/organized (YYYY-MM-DD) if stated.
 7. firm_operations_text — a concise (1-3 sentence) plain-English summary of what \
    the firm does, drawn from its described advisory business.
+8. client_counts — Form ADV Item 5.D.(2): the NUMBER of clients in each \
+   category, returned as an object whose keys are EXACTLY these snake_case \
+   names: individuals, high_net_worth_individuals, banking_or_thrift_institutions, \
+   investment_companies, business_development_companies, pooled_investment_vehicles, \
+   pension_and_profit_sharing_plans, charitable_organizations, \
+   state_or_municipal_government_entities, other_investment_advisers, \
+   insurance_companies, sovereign_wealth_funds, other. Use the integer from the \
+   5.D.(2) "Number of Clients" column. Use null for any category the firm does \
+   not serve or does not report a number for. Do NOT invent or estimate counts.
 
 IMPORTANT:
 - A person can be both an owner and an officer; list them under each section \
@@ -644,6 +743,20 @@ async def _apply_adv_extraction(
                 advisor.client_types = [c.strip() for c in extraction.client_types if c and c.strip()]
                 if advisor.client_types:
                     written.append("client types")
+
+            if extraction.client_counts and not advisor.client_counts:
+                # Keep only positive integer counts — Gemini returns null for
+                # categories the firm doesn't serve, and bool is an int subclass
+                # so it's excluded explicitly. Stored snake_case to match the FE
+                # render (key.replace("_", " ")) in advisor-detail-client.tsx.
+                counts = {
+                    key: int(val)
+                    for key, val in extraction.client_counts.items()
+                    if isinstance(val, int) and not isinstance(val, bool) and val > 0
+                }
+                if counts:
+                    advisor.client_counts = counts
+                    written.append("client counts")
 
             if extraction.firm_operations_text and not advisor.firm_operations_text:
                 advisor.firm_operations_text = extraction.firm_operations_text.strip()[:_FIRM_OPERATIONS_MAX_CHARS]
@@ -1113,6 +1226,11 @@ async def _run_enrich_contacts(
                     if row is not None:
                         resolved_names.add(entry["display_name"])
                         with_channels += 1
+                    # Commit each discovered row immediately so its
+                    # apollo_person_id is persisted before Apollo's async
+                    # phone-reveal callback races in (the webhook 200s on a
+                    # no-match and Apollo won't retry).
+                    await db.commit()
 
                 # Backfill: any officer the chain couldn't resolve still gets a
                 # names-only row so the People panel shows the full roster. Skip
@@ -1173,14 +1291,18 @@ async def _run_enrich_contacts(
 async def _run_refresh_iapd_summary(
     parent_run_id: int, advisor_id: int, trigger_source: str
 ) -> tuple[str, str]:
-    """Fetch the IAPD per-firm summary JSON and backfill ``registration_date``.
+    """Fetch the IAPD per-firm summary JSON and backfill ``registration_date``
+    and ``other_business_names`` from the same payload.
 
     Form ADV doesn't print SEC registration date on the PDF cover page (the
     Gemini ADV pass returns NULL for this field on most firms), and the IAPD
     bulk compilation CSV doesn't have a registration-date column. The public
     adviserinfo.sec.gov firm profile page consumes a per-firm JSON API that
     surfaces ``registrationStatus[0].effectiveDate`` for every SEC-registered
-    advisor — that's our authoritative source for this one field.
+    advisor — that's our authoritative source for this one field. The same
+    payload also carries Form ADV Schedule D Section 1.B "Other Business
+    Names" (``basicInformation.otherNames``), so we parse both here for the
+    price of one fetch and write whichever the firm has.
 
     Form ADV also doesn't ask for a formation date, so this endpoint doesn't
     carry one either; this sub-pipeline doesn't touch ``formation_date``.
@@ -1196,6 +1318,8 @@ async def _run_refresh_iapd_summary(
                 await _finalize_child(child_id, status="failed", success=0, failure=1, summary=summary)
                 return "failed", summary
             crd = advisor.crd_number
+            primary_name = advisor.name
+            legal_name = advisor.legal_name
 
         if not crd:
             summary = "No CRD on record; cannot fetch IAPD summary."
@@ -1212,8 +1336,14 @@ async def _run_refresh_iapd_summary(
         reg_dt: date | None = None
         if statuses and isinstance(statuses[0], dict):
             reg_dt = _parse_iapd_us_date(statuses[0].get("effectiveDate"))
-        if reg_dt is None:
-            summary = "IAPD summary parsed but had no registrationStatus effectiveDate."
+        # Parse other-names from the SAME payload, BEFORE any reg-date
+        # short-circuit — firms that file ADV but have no effectiveDate must
+        # still get their other_business_names written.
+        other_names = extract_other_business_names(
+            iacontent, primary_name=primary_name, legal_name=legal_name
+        )
+        if reg_dt is None and other_names is None:
+            summary = "IAPD summary parsed but had no effectiveDate or other business names."
             await _finalize_child(child_id, status="completed_with_errors", success=0, failure=1, summary=summary)
             return "completed_with_errors", summary
 
@@ -1224,15 +1354,22 @@ async def _run_refresh_iapd_summary(
                 summary = "Advisor row disappeared between fetch and write."
                 await _finalize_child(child_id, status="failed", success=0, failure=1, summary=summary)
                 return "failed", summary
-            if advisor.registration_date is None:
+            # Don't-overwrite guard per field: a later nightly pass must never
+            # clobber a value already on the row (manual correction or earlier
+            # fill) — the same rule the registration_date write has always used.
+            if reg_dt is not None and advisor.registration_date is None:
                 advisor.registration_date = reg_dt
                 wrote.append("registration_date")
+            if other_names is not None and advisor.other_business_names is None:
+                advisor.other_business_names = other_names
+                wrote.append("other_business_names")
+            if wrote:
                 await db.commit()
 
         if wrote:
-            summary = f"Wrote {', '.join(wrote)} from IAPD ({reg_dt.isoformat()})."
+            summary = f"Wrote {', '.join(wrote)} from IAPD summary."
         else:
-            summary = f"registration_date already set; IAPD value {reg_dt.isoformat()} not overwritten."
+            summary = "IAPD summary had no new data to write (fields already set)."
         await _finalize_child(child_id, status="completed", success=1, failure=0, summary=summary)
         return "completed", summary
     except Exception as exc:
@@ -1249,6 +1386,534 @@ _RUNNERS = {
     SUB_ENRICH_CONTACTS: _run_enrich_contacts,
     SUB_REFRESH_IAPD_SUMMARY: _run_refresh_iapd_summary,
 }
+
+
+# ---------------------------------------------------------------------------
+# Per-advisor contact gap-fill
+# ---------------------------------------------------------------------------
+#
+# _run_enrich_contacts has a hard idempotency guard: once any advisor_contacts
+# row exists, it returns without touching data. That's right for the cooldown-
+# gated refresh-all path -- nobody wants the orchestrator silently re-firing
+# paid provider calls on every detail-page visit. The downside: if provider
+# coverage was partial on the first enrichment (Apollo had email, PDL didn't
+# have LinkedIn, etc.), those gaps are now frozen forever.
+#
+# This sub-pipeline is the explicit out: an opt-in, ad-hoc retry that
+# re-queries the full chain ONLY for rows missing one or more of
+# (linkedin_url, email, phone), and merges the new chain hit INTO the
+# existing row without clobbering anything we already have. Triggered via
+# POST /investment-advisors/{id}/gap-fill-contacts; gated by a 30-day
+# cooldown on advisor.last_gap_fill_attempt_at (shared with the bulk runner
+# at scripts/gap_fill_investment_advisors.py so both flows pay into the same
+# fairness budget).
+
+
+# ``_is_gap_row`` and ``_apply_gap_fill`` are thin aliases over the
+# generic helpers in ``contact_discovery.gap_fill_common``. The same
+# merge semantics apply to executive_contacts / advisor_contacts /
+# investor_contacts, so keeping one source of truth there avoids
+# triplicating ~250 LOC across the three per-kind gap-fill runners.
+# The apollo_person_id stamping (added in PR #586 for the async phone-
+# reveal webhook) lives in gap_fill_common.apply_gap_fill so the BD and
+# II runners pick it up automatically.
+_is_gap_row = is_gap_row
+_apply_gap_fill = apply_gap_fill
+
+
+async def _run_gap_fill_contacts(
+    run_id: int, advisor_id: int, trigger_source: str
+) -> None:
+    """Run the per-advisor contact gap-fill job to terminal state.
+
+    Iterates existing ``advisor_contacts`` rows for the advisor, filters to
+    those where :func:`_is_gap_row` returns True, re-runs ``_walk_chain``
+    for each gap row, and merges the result via :func:`_apply_gap_fill`.
+    Stamps ``advisor.last_gap_fill_attempt_at`` and finalizes the
+    PipelineRun row in place. Errors are swallowed into a ``failed``
+    terminal state so the background task never leaves the parent stuck
+    on ``queued``.
+    """
+    async with SessionLocal() as db:
+        run = await db.get(PipelineRun, run_id)
+        if run is not None:
+            run.status = "running"
+            await db.commit()
+
+    try:
+        async with SessionLocal() as db:
+            advisor = await db.get(InvestmentAdvisor, advisor_id)
+            if advisor is None:
+                await _finalize_gap_fill_run(
+                    run_id,
+                    status="failed",
+                    success=0,
+                    failure=1,
+                    summary="Advisor row disappeared between queue and run.",
+                )
+                return
+            firm_name = advisor.name
+            domain = _canonicalize_domain(_domain_from_website(advisor.website))
+            chain_org_name = _normalize_org_name(firm_name)
+            executive_officers = advisor.executive_officers
+
+            rows_stmt = (
+                select(AdvisorContact)
+                .where(AdvisorContact.advisor_id == advisor_id)
+                .order_by(AdvisorContact.id.asc())
+            )
+            rows = list((await db.execute(rows_stmt)).scalars().all())
+
+        # PHASE 1 — seed discovery from the officer roster. Discover any officer
+        # that doesn't already have a contact row (true parity with the BD
+        # "Generate More Details" button, so the action also works on advisors
+        # with no contacts yet, and picks up officers added since the last
+        # Refresh). Dedupe against existing rows by (first, last) lowercased.
+        existing_keys: set[tuple[str, str]] = set()
+        for r in rows:
+            split = _split_officer_name(r.name)
+            if split is not None:
+                existing_keys.add((split[0].lower(), split[1].lower()))
+
+        officer_list = executive_officers if isinstance(executive_officers, list) else []
+        officer_work: list[dict[str, str]] = []
+        seen_keys: set[tuple[str, str]] = set()
+        for officer in officer_list:
+            if not isinstance(officer, dict):
+                continue
+            display_name = str(officer.get("name") or "").strip()
+            split = _split_officer_name(display_name)
+            if split is None:
+                continue
+            key = (split[0].lower(), split[1].lower())
+            if key in existing_keys or key in seen_keys:
+                continue
+            seen_keys.add(key)
+            title = str(officer.get("title") or "").strip() or "Executive Officer"
+            officer_work.append(
+                {
+                    "display_name": display_name,
+                    "first_name": split[0],
+                    "last_name": split[1],
+                    "title": title,
+                }
+            )
+            if len(officer_work) >= _MAX_OFFICERS_TO_ENRICH:
+                break
+
+        discovered = 0
+        names_only = 0
+        if officer_work:
+            now = datetime.now(timezone.utc)
+            async with SessionLocal() as db:
+                for entry in officer_work:
+                    entity = {
+                        "type": "person",
+                        "first_name": entry["first_name"],
+                        "last_name": entry["last_name"],
+                        "org_name": chain_org_name,
+                        "domain": domain,
+                        "title": entry["title"],
+                    }
+                    row = await discover_advisor_contact(
+                        entity, advisor_id=advisor_id, session=db
+                    )
+                    if row is not None:
+                        discovered += 1
+                    else:
+                        # Chain miss — still surface the person as a names-only
+                        # row so the panel shows the full roster; a later run
+                        # can gap-fill them if a provider learns their channels.
+                        db.add(
+                            AdvisorContact(
+                                advisor_id=advisor_id,
+                                name=entry["display_name"][:255],
+                                title=entry["title"][:255],
+                                email=None,
+                                phone=None,
+                                linkedin_url=None,
+                                source="adv",
+                                enriched_at=now,
+                            )
+                        )
+                        names_only += 1
+                    # Commit each row as we go so its apollo_person_id is
+                    # persisted within seconds of the reveal request — before
+                    # Apollo's async phone-reveal callback races in. The webhook
+                    # 200s on a no-match and Apollo won't retry, so a row
+                    # committed late permanently loses its revealed phone.
+                    await db.commit()
+
+        # PHASE 2 — gap-fill the PRE-EXISTING rows that are missing a channel.
+        # Rows discovered above came straight from the chain, so they're not
+        # re-queried here.
+        gap_rows = [r for r in rows if _is_gap_row(r)]
+        filled = 0
+        if gap_rows:
+            # Snapshot (id, name) up front so we never touch an ORM object that
+            # a prior per-row commit expired (expire_on_commit). Each row is
+            # re-fetched and committed individually below — same reveal-race
+            # reasoning as Phase 1.
+            gap_targets = [(r.id, r.name) for r in gap_rows]
+            async with SessionLocal() as db:
+                for row_id, row_name in gap_targets:
+                    split = _split_officer_name(row_name)
+                    if split is None:
+                        continue
+                    first_name, last_name = split
+                    merged = await _walk_chain(
+                        "person",
+                        first_name=first_name,
+                        last_name=last_name,
+                        org_name=chain_org_name or row_name,
+                        domain=domain,
+                        cache_name=row_name,
+                    )
+                    if merged is None:
+                        continue
+                    row = await db.get(AdvisorContact, row_id)
+                    if row is None:
+                        continue
+                    if _apply_gap_fill(row, merged):
+                        row.enriched_at = datetime.now(timezone.utc)
+                        filled += 1
+                        await db.commit()
+
+        # PHASE 3 — last-resort web fallback for People STILL missing a channel
+        # after the provider chain (covers both pre-existing gap rows and the
+        # names-only rows seeded in Phase 1). Crawls the firm site once + searches
+        # public LinkedIn URLs, merging non-destructively via _apply_gap_fill.
+        # Off by default and intentionally SILENT: it adds nothing to the run
+        # summary, so the client sees the same generic progress -- merged channels
+        # simply appear on the People icons. Server logs record the count for ops.
+        if settings.web_fallback_enabled:
+            async with SessionLocal() as db:
+                wf_rows = list(
+                    (
+                        await db.execute(
+                            select(AdvisorContact)
+                            .where(AdvisorContact.advisor_id == advisor_id)
+                            .order_by(AdvisorContact.id.asc())
+                        )
+                    )
+                    .scalars()
+                    .all()
+                )
+                wf_people = [
+                    GapPerson(row_id=r.id, first_name=split[0], last_name=split[1])
+                    for r in wf_rows
+                    if _is_gap_row(r) and (split := _split_officer_name(r.name)) is not None
+                ]
+                if wf_people:
+                    wf_results = await discover_web_fallback(
+                        domain=domain,
+                        org_name=chain_org_name or firm_name,
+                        people=wf_people,
+                    )
+                    wf_filled = 0
+                    for wf_row_id, wf_merged in wf_results.items():
+                        row = await db.get(AdvisorContact, wf_row_id)
+                        if row is not None and _apply_gap_fill(row, wf_merged):
+                            row.enriched_at = datetime.now(timezone.utc)
+                            wf_filled += 1
+                            await db.commit()
+                    if wf_filled:
+                        logger.info(
+                            "advisor %s: web fallback filled %d of %d gap row(s)",
+                            advisor_id,
+                            wf_filled,
+                            len(wf_people),
+                        )
+
+        await _stamp_gap_fill_attempt(advisor_id)
+        new_rows = discovered + names_only
+        summary = (
+            f"Discovered {new_rows} new officer(s) ({discovered} with channels); "
+            f"gap-filled {filled} of {len(gap_rows)} existing contact(s)."
+        )[:180]
+        await _finalize_gap_fill_run(
+            run_id, status="completed", success=1, failure=0, summary=summary
+        )
+    except Exception as exc:
+        logger.exception(
+            "advisor gap-fill-contacts failed for advisor %s", advisor_id
+        )
+        await _finalize_gap_fill_run(
+            run_id,
+            status="failed",
+            success=0,
+            failure=1,
+            summary=f"{type(exc).__name__}: {str(exc)[:180]}",
+        )
+
+
+async def run_gap_fill_advisor_contacts_background(
+    run_id: int, advisor_id: int, trigger_source: str
+) -> None:
+    """Defensive wrapper around :func:`_run_gap_fill_contacts` so an
+    unhandled exception in the background task doesn't leave the
+    PipelineRun stuck on ``queued``. Mirror of the BD/II variants in
+    ``services.bd_contact_gap_fill`` / ``services.investor_contact_gap_fill``
+    -- the existing private wrapper in
+    ``api.v1.endpoints.investment_advisors`` (used by the per-advisor
+    route) predates these and is kept for backward-compat."""
+    try:
+        await _run_gap_fill_contacts(run_id, advisor_id, trigger_source)
+    except Exception:
+        logger.exception(
+            "advisor gap-fill-contacts background task failed "
+            "(run_id=%s advisor_id=%s)",
+            run_id,
+            advisor_id,
+        )
+
+
+async def _stamp_gap_fill_attempt(advisor_id: int) -> None:
+    """Stamp ``last_gap_fill_attempt_at`` so the bulk runner and this
+    endpoint share one fairness budget per advisor."""
+    async with SessionLocal() as db:
+        advisor = await db.get(InvestmentAdvisor, advisor_id)
+        if advisor is not None:
+            advisor.last_gap_fill_attempt_at = datetime.now(timezone.utc)
+            await db.commit()
+
+
+async def _finalize_gap_fill_run(
+    run_id: int,
+    *,
+    status: str,
+    success: int,
+    failure: int,
+    summary: str,
+) -> None:
+    """Write the terminal state onto the gap-fill PipelineRun. Mirrors
+    :func:`_finalize_child` but works on a standalone (non-parented) run."""
+    async with SessionLocal() as db:
+        run = await db.get(PipelineRun, run_id)
+        if run is None:
+            return
+        run.status = status
+        run.processed_items = success + failure
+        run.success_count = success
+        run.failure_count = failure
+        run.completed_at = datetime.now(timezone.utc)
+        existing_notes: dict = {}
+        if run.notes:
+            try:
+                existing_notes = json.loads(run.notes)
+            except json.JSONDecodeError:
+                existing_notes = {}
+        existing_notes["summary"] = summary
+        run.notes = json.dumps(existing_notes)
+        await db.commit()
+
+
+# ---------------------------------------------------------------------------
+# Per-advisor roster backfill (Job B)
+# ---------------------------------------------------------------------------
+#
+# The gap-fill path above only re-queries advisor_contacts rows that already
+# exist. But for most advisors the contact roster was never materialised:
+# _run_enrich_contacts ran once (often before the executive_officers JSONB was
+# extracted), created a single org-level row, and the idempotency guard then
+# froze the advisor at ~1 contact forever. The result on staging: 2,951
+# advisors carry a full officer roster on the IA row, yet advisor_contacts
+# averages ~1.0 rows/advisor.
+#
+# This sub-pipeline is the backfill: it walks the executive_officers roster
+# and, for each officer, EITHER gap-fills the matching existing row OR creates
+# the missing one via the discovery chain. It deliberately bypasses the
+# idempotency guard (that's the whole point), but it's still non-destructive:
+# existing rows are only gap-filled (never overwritten), and officers are
+# de-duped against existing rows by parsed (first, last) so re-runs don't
+# create duplicates. Same 30-day cooldown stamp as gap-fill so the bulk runner
+# and the per-advisor flows share one fairness budget.
+
+
+def _roster_match_key(name: str) -> tuple[str, str] | None:
+    """Parse a contact/officer name into a lowercased ``(first, last)`` dedupe
+    key. Handles both the Form ADV ``"LAST, FIRST, MIDDLE"`` roster form and
+    the title-cased ``"First Last"`` form discovered rows are stored under, so
+    a roster officer matches the row a prior enrichment already wrote for them.
+    Returns ``None`` when the name can't be split into both halves."""
+    split = _split_officer_name(name)
+    if split is None:
+        return None
+    first, last = split
+    return (first.lower(), last.lower())
+
+
+async def _run_backfill_roster_contacts(
+    run_id: int, advisor_id: int, trigger_source: str
+) -> None:
+    """Materialise the full officer roster into ``advisor_contacts``.
+
+    For each officer on ``InvestmentAdvisor.executive_officers``: run the
+    discovery chain once, then either gap-fill the existing matching row or
+    create the missing one (a names-only row when the chain found nothing, so
+    the People panel still shows the full roster). Bypasses the
+    ``_run_enrich_contacts`` idempotency guard; non-destructive and idempotent
+    on re-run via ``(first, last)`` de-dupe. Stamps
+    ``last_gap_fill_attempt_at`` and finalizes the PipelineRun in place."""
+    async with SessionLocal() as db:
+        run = await db.get(PipelineRun, run_id)
+        if run is not None:
+            run.status = "running"
+            await db.commit()
+
+    try:
+        async with SessionLocal() as db:
+            advisor = await db.get(InvestmentAdvisor, advisor_id)
+            if advisor is None:
+                await _finalize_gap_fill_run(
+                    run_id,
+                    status="failed",
+                    success=0,
+                    failure=1,
+                    summary="Advisor row disappeared between queue and run.",
+                )
+                return
+            firm_name = advisor.name
+            domain = _canonicalize_domain(_domain_from_website(advisor.website))
+            chain_org_name = _normalize_org_name(firm_name)
+            roster = (
+                advisor.executive_officers
+                if isinstance(advisor.executive_officers, list)
+                else []
+            )
+            existing_rows = list(
+                (
+                    await db.execute(
+                        select(AdvisorContact).where(
+                            AdvisorContact.advisor_id == advisor_id
+                        )
+                    )
+                ).scalars().all()
+            )
+
+        # Parse + cap the roster work list up front.
+        work: list[dict[str, str]] = []
+        for officer in roster:
+            if not isinstance(officer, dict):
+                continue
+            display_name = str(officer.get("name") or "").strip()
+            split = _split_officer_name(display_name)
+            if split is None:
+                continue
+            first_name, last_name = split
+            title = str(officer.get("title") or "").strip() or "Executive Officer"
+            work.append(
+                {
+                    "display_name": display_name,
+                    "first_name": first_name,
+                    "last_name": last_name,
+                    "title": title,
+                }
+            )
+            if len(work) >= _MAX_OFFICERS_TO_ENRICH:
+                break
+
+        if not work:
+            await _stamp_gap_fill_attempt(advisor_id)
+            await _finalize_gap_fill_run(
+                run_id,
+                status="completed",
+                success=1,
+                failure=0,
+                summary="No roster officers to backfill.",
+            )
+            return
+
+        # Map existing rows by parsed (first, last) so a roster officer
+        # matches whatever row a prior enrichment already wrote for them
+        # (whether stored as "Andre Perold" or "PEROLD, ANDRE, FRANCOIS").
+        existing_by_key: dict[tuple[str, str], int] = {}
+        for row in existing_rows:
+            key = _roster_match_key(row.name)
+            if key is not None and key not in existing_by_key:
+                existing_by_key[key] = row.id
+
+        created = 0
+        filled = 0
+        chain_hits = 0
+        created_keys: set[tuple[str, str]] = set()
+        now = datetime.now(timezone.utc)
+
+        async with SessionLocal() as db:
+            for entry in work:
+                key = (entry["first_name"].lower(), entry["last_name"].lower())
+                existing_id = existing_by_key.get(key)
+                # A duplicate roster entry we already created this run — skip
+                # so we never write the same person twice.
+                if existing_id is None and key in created_keys:
+                    continue
+
+                merged = await _walk_chain(
+                    "person",
+                    first_name=entry["first_name"],
+                    last_name=entry["last_name"],
+                    org_name=chain_org_name or entry["display_name"],
+                    domain=domain,
+                    cache_name=f"{entry['first_name']} {entry['last_name']}",
+                )
+                if merged is not None:
+                    chain_hits += 1
+
+                if existing_id is not None:
+                    row = await db.get(AdvisorContact, existing_id)
+                    if row is not None and merged is not None and _apply_gap_fill(row, merged):
+                        row.enriched_at = now
+                        filled += 1
+                    continue
+
+                # No existing row for this officer — create one.
+                if merged is not None:
+                    db.add(
+                        _build_advisor_row(
+                            advisor_id=advisor_id,
+                            name=f"{entry['first_name']} {entry['last_name']}",
+                            title=entry["title"],
+                            result=merged,
+                        )
+                    )
+                else:
+                    db.add(
+                        AdvisorContact(
+                            advisor_id=advisor_id,
+                            name=entry["display_name"][:255],
+                            title=entry["title"][:255],
+                            email=None,
+                            phone=None,
+                            linkedin_url=None,
+                            source="adv",
+                            enriched_at=now,
+                        )
+                    )
+                created += 1
+                created_keys.add(key)
+
+            if created or filled:
+                await db.commit()
+
+        await _stamp_gap_fill_attempt(advisor_id)
+        summary = (
+            f"Roster backfill: created {created}, gap-filled {filled} "
+            f"({chain_hits} chain hit(s) over {len(work)} roster officer(s))."
+        )[:180]
+        await _finalize_gap_fill_run(
+            run_id, status="completed", success=1, failure=0, summary=summary
+        )
+    except Exception as exc:
+        logger.exception(
+            "advisor roster-backfill failed for advisor %s", advisor_id
+        )
+        await _finalize_gap_fill_run(
+            run_id,
+            status="failed",
+            success=0,
+            failure=1,
+            summary=f"{type(exc).__name__}: {str(exc)[:180]}",
+        )
 
 
 # ---------------------------------------------------------------------------
@@ -1376,7 +2041,14 @@ __all__ = [
     "SUB_REFRESH_FILINGS",
     "SUB_ENRICH_CONTACTS",
     "SUB_REFRESH_IAPD_SUMMARY",
+    "GAP_FILL_ADVISOR_CONTACTS_PIPELINE_NAME",
+    "GAP_FILL_COOLDOWN_DAYS",
+    "BACKFILL_ROSTER_CONTACTS_PIPELINE_NAME",
     "decide_pipelines",
     "required_provider_keys",
     "run_advisor_refresh",
+    "_is_gap_row",
+    "_apply_gap_fill",
+    "_run_gap_fill_contacts",
+    "_run_backfill_roster_contacts",
 ]

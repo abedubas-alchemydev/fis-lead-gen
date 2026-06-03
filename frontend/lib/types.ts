@@ -154,9 +154,10 @@ export type DashboardStats = {
   total_active_bds: number;
   new_bds_30_days: number;
   deficiency_alerts: number;
-  // BE boundary field — mirrors FastAPI response shape. Counts firms with
-  // latest_net_capital in the [$5M, $100M] band (the "High Value Participant"
-  // business rule); decoupled from the ACG ICP scorer's lead_priority.
+  // BE boundary field — mirrors FastAPI response shape. Counts firms in the
+  // "High Value Participant" segment: latest_net_capital in the [$5M, $100M]
+  // band OR the OTC corporate-equity retailing business type. Decoupled from
+  // the ACG ICP scorer's lead_priority.
   high_value_participants: number;
 };
 
@@ -244,7 +245,12 @@ export type InvestorItem = {
 
   enriched_phone: string | null;
   enriched_email: string | null;
+  enriched_linkedin_url: string | null;
   enriched_at: string | null;
+  // True when an Apollo phone-reveal was requested but the number hasn't
+  // landed via the async webhook yet. Drives the "Phone arriving…" hint;
+  // always false once a phone is present or no reveal was ever requested.
+  phone_pending: boolean;
 
   source_filing_url: string | null;
   filed_at: string;
@@ -255,6 +261,11 @@ export type InvestorItem = {
   // membership in the caller's default list.
   reporting_owner_id: number | null;
   is_favorited: boolean;
+
+  // True when the reporting owner's name looks like an entity (LLC / LP /
+  // GP / Fund / Holdings / ...) rather than a natural person — Apollo and
+  // PDL only enrich people, so the Enrich button is disabled for these.
+  is_entity: boolean;
 };
 
 export type InvestorListResponse = {
@@ -271,8 +282,18 @@ export type InvestorEnrichResponse = {
   txn_id: number;
   enriched_phone: string | null;
   enriched_email: string | null;
-  enriched_at: string;
+  enriched_linkedin_url: string | null;
+  // NULL when ``skip_reason`` is set (the lookup didn't actually run);
+  // ISO timestamp on a real attempt regardless of match outcome.
+  enriched_at: string | null;
   matched: boolean;
+  // Non-null only for deliberate short-circuits. Today the only value is
+  // "entity_filer" — name looks like an org so we never hit Apollo/PDL.
+  skip_reason: string | null;
+  // True when Apollo returned a record + a reveal was requested but no
+  // number came back in the sync body — merged into the row so the
+  // "Phone arriving…" hint shows immediately after a click.
+  phone_pending: boolean;
 };
 
 export type AlertsBulkReadResponse = {
@@ -570,19 +591,6 @@ export type DataRefreshResponse = {
   refreshed_broker_dealers: number;
 };
 
-export type FocusCeoExtractionResponse = {
-  ceo_name: string | null;
-  ceo_title: string | null;
-  ceo_phone: string | null;
-  ceo_email: string | null;
-  net_capital: number | null;
-  report_date: string | null;
-  source_pdf_url: string | null;
-  confidence_score: number;
-  extraction_status: string;
-  extraction_notes: string | null;
-};
-
 // ── Vault folders + Outreach drafts ───────────────────────────────────────
 // Mirrors backend/app/schemas/vault.py. Each folder is a named service
 // (e.g. "Custody") plus a freeform description AND a permanent
@@ -651,6 +659,14 @@ export type OutreachDraft = {
   body: string;
 };
 
+export type OptimizeInstructionsRequest = {
+  text: string;
+};
+
+export type OptimizeInstructionsResponse = {
+  optimized_text: string;
+};
+
 export type OutreachSendRequest = {
   broker_dealer_id: number;
   contact_id: number;
@@ -671,6 +687,14 @@ export type OutreachSendResponse = {
   gmail_message_id: string;
   sent_at: string;
   status: string;
+};
+
+// Per-user outreach signature (footer). `signature` is "" when unset, so
+// callers can treat "no footer" and "empty footer" the same. Read by the
+// compose surfaces to prefill the editable Footer field and by the
+// account-settings editor; written by the editor.
+export type OutreachSignature = {
+  signature: string;
 };
 
 // Per-user "sent outreach" history. Body is omitted from list payload to
@@ -695,11 +719,42 @@ export type OutreachSendItem = {
   provider: EmailProviderId;
   gmail_message_id: string | null;
   error: string | null;
-  broker_dealer_id: number;
-  broker_dealer_name: string;
-  contact_id: number;
+  // Polymorphic across firm types. firm_type discriminates which
+  // (id, name) pair is populated:
+  //   - "broker_dealer"  -> broker_dealer_id / broker_dealer_name
+  //   - "advisor"        -> advisor_id / advisor_name
+  //   - "institutional_investor" -> institutional_investor_id /
+  //                                  institutional_investor_name
+  //   - "adhoc"          -> all firm fields null; recipient_email is
+  //                          the actual destination address
+  firm_type?: "broker_dealer" | "advisor" | "institutional_investor" | "adhoc";
+  broker_dealer_id: number | null;
+  broker_dealer_name: string | null;
+  advisor_id?: number | null;
+  advisor_name?: string | null;
+  institutional_investor_id?: number | null;
+  institutional_investor_name?: string | null;
+  contact_type?:
+    | "executive_contact"
+    | "advisor_contact"
+    | "investor_contact"
+    | "adhoc";
+  contact_id: number | null;
+  advisor_contact_id?: number | null;
+  investor_contact_id?: number | null;
   contact_name: string;
   contact_email: string | null;
+  // Adhoc destination: populated only on firm_type="adhoc" rows.
+  // Contact-based rows leave these null and the FE falls back to
+  // contact_email / contact_name.
+  recipient_email?: string | null;
+  recipient_name?: string | null;
+  // Multi-recipient compose-send (POST /outreach/compose-send) audit:
+  // comma-joined address lists. Null on single-recipient / contact rows.
+  // to_emails is set only when there was more than one To.
+  to_emails?: string | null;
+  cc_emails?: string | null;
+  bcc_emails?: string | null;
   folder_id: number | null;
   folder_name: string | null;
   // Populated only when the admin "all users" scope is requested. Null
@@ -707,6 +762,111 @@ export type OutreachSendItem = {
   user_id?: string | null;
   sender_name?: string | null;
   sender_email?: string | null;
+};
+
+// ── /outreach/sent?tab=create surface ───────────────────────────────
+// The new Create tab lets the user start a send from scratch. Picks a
+// recipient via autocomplete (search across all 3 contact tables) OR
+// types a free-form email; the latter posts to /outreach/adhoc-send,
+// the former dispatches to the matching per-entity endpoint.
+
+export type RecipientSearchResult = {
+  entity_kind: "broker_dealer" | "advisor" | "institutional_investor";
+  entity_id: number;
+  entity_name: string;
+  contact_id: number;
+  contact_name: string;
+  contact_title: string | null;
+  contact_email: string;
+};
+
+export type RecipientSearchResponse = {
+  items: RecipientSearchResult[];
+};
+
+// Firm-hit row in the recipient autocomplete. Picking one opens the
+// firm-contacts modal (see FirmContactsResponse). contact_count only
+// counts contacts with an email -- a firm whose contacts all lack
+// emails can't be sent to and isn't returned by the backend.
+export type FirmSearchResult = {
+  entity_kind: "broker_dealer" | "advisor" | "institutional_investor";
+  entity_id: number;
+  entity_name: string;
+  contact_count: number;
+};
+
+export type FirmSearchResponse = {
+  items: FirmSearchResult[];
+};
+
+// Email-bearing contacts at one firm. Drives the firm-contacts modal
+// opened when the user picks a firm row in the autocomplete (or after
+// picking a firm in the favorites drill-down).
+export type FirmContactsResponse = {
+  entity_kind: "broker_dealer" | "advisor" | "institutional_investor";
+  entity_id: number;
+  entity_name: string;
+  items: RecipientSearchResult[];
+};
+
+// Favorite-list row in the recipient autocomplete. Picking one opens
+// the favorite-firms modal (drill-down 1: firms in the list). Picking
+// a firm in that modal swaps to the firm-contacts view (drill-down 2).
+export type FavoriteSearchResult = {
+  list_id: number;
+  name: string;
+  firm_count: number;
+};
+
+export type FavoriteSearchResponse = {
+  items: FavoriteSearchResult[];
+};
+
+export type FavoriteFirmsResponse = {
+  list_id: number;
+  name: string;
+  items: FirmSearchResult[];
+};
+
+export type OutreachAdhocSendRequest = {
+  recipient_email: string;
+  recipient_name?: string | null;
+  subject: string;
+  body: string;
+  sender_account_id?: string | null;
+  folder_id?: number | null;
+};
+
+// One visible To recipient on a compose-send: address + optional name.
+export type OutreachComposeRecipient = {
+  email: string;
+  name?: string | null;
+};
+
+// POST /api/v1/outreach/compose-send — one email to a To/Cc/Bcc set, like
+// a normal mail client. To & Cc are visible to each other; Bcc is hidden.
+// The server de-dupes addresses across the three buckets (To > Cc > Bcc).
+// folder_id is optional service metadata (no folder required to send).
+export type OutreachComposeSendRequest = {
+  to: OutreachComposeRecipient[];
+  cc: string[];
+  bcc: string[];
+  subject: string;
+  body: string;
+  sender_account_id?: string | null;
+  folder_id?: number | null;
+};
+
+// POST /api/v1/outreach/adhoc-draft — drafts a cold email for the
+// free-form-email path on /outreach/sent?tab=create. Folder is required
+// (the FE only enables the Generate button once a Service is picked).
+export type OutreachAdhocDraftRequest = {
+  folder_id: number;
+  // Optional: the draft never reads the address (folder + name only), so
+  // the firm-detail People section can draft for contacts with no email
+  // yet. The send path still requires a real address.
+  recipient_email?: string | null;
+  recipient_name?: string | null;
 };
 
 // GET /api/v1/outreach/linked-providers — used by the Outreach modal to
@@ -901,7 +1061,13 @@ export type InvestmentAdvisorListItem = {
   clearing_membership_checked_at: string | null;
 };
 
-export type InvestmentAdvisorDetail = InvestmentAdvisorListItem;
+export type InvestmentAdvisorDetail = InvestmentAdvisorListItem & {
+  // Form ADV Schedule D §1.B "Other Business Names" (IAPD
+  // basicInformation.otherNames), filtered to drop the firm's own
+  // primary/legal name. Detail-only — not on the list item. Rendered as
+  // "Alternative Names" on the advisor detail page.
+  other_business_names: string[] | null;
+};
 
 export type InvestmentAdvisorListMeta = {
   page: number;

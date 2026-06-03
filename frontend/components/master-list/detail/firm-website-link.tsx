@@ -7,7 +7,6 @@ import { Pill, type PillVariant } from "@/components/ui/pill";
 import {
   resolveWebsite,
   type ResolveWebsiteResponse,
-  type WebsiteSource,
 } from "@/lib/api";
 import { WEBSITE_SOURCE_BADGE, type WebsiteSourceTone } from "@/lib/format";
 
@@ -23,6 +22,11 @@ import { WEBSITE_SOURCE_BADGE, type WebsiteSourceTone } from "@/lib/format";
 //      POST /broker-dealers/{id}/resolve-website. On a non-null response,
 //      swap the fallback for the Globe link + a small source pill (smooth
 //      fade). On null/error, keep the Google fallback unchanged.
+//   3. If `website` is null but a `fallbackDomain` is supplied (e.g. a domain
+//      derived from a FOCUS-extracted filing contact's email — the same
+//      domain that lights up the Email Extractor), render it with a muted
+//      "From filing" badge ahead of the spinner/empty states. The background
+//      resolver still runs and upgrades it to a confirmed website if found.
 //
 // The mount-fired call is deduped via a ref so StrictMode's dev double-
 // invoke can't fire it twice. We only fire once per page mount; a refresh
@@ -38,6 +42,21 @@ const TONE_TO_VARIANT: Record<WebsiteSourceTone, PillVariant> = {
   // Pill `unknown` variant is muted slate — visually signals the
   // "loosest validation tier" that serpapi (web search) occupies.
   gray: "unknown",
+};
+
+// Shape of a WEBSITE_SOURCE_BADGE entry, reused for the synthetic
+// filing-derived badge below.
+type DomainBadge = { label: string; tone: WebsiteSourceTone; tooltip: string };
+
+// Lowest-confidence provenance: the domain was inferred from the email of a
+// contact extracted from this firm's SEC filing (e.g. via "Extract FOCUS
+// Data"), not from a confirmed website lookup. Muted slate signals the
+// loosest validation tier.
+const FILING_BADGE: DomainBadge = {
+  label: "From filing",
+  tone: "gray",
+  tooltip:
+    "Inferred from the email domain of a contact found in this firm's SEC filing — not a verified website.",
 };
 
 function GoogleFallback({ firmName }: { firmName: string }) {
@@ -57,10 +76,10 @@ function GoogleFallback({ firmName }: { firmName: string }) {
 
 function ResolvedLink({
   website,
-  source,
+  badge,
 }: {
   website: string;
-  source: WebsiteSource | null;
+  badge: DomainBadge | null;
 }) {
   const href = website.startsWith("http") ? website : `https://${website}`;
   const display =
@@ -70,8 +89,6 @@ function ResolvedLink({
       .replace(/\/+$/, "")
       .split("/")[0]
       ?.toLowerCase() ?? website;
-
-  const badge = source ? WEBSITE_SOURCE_BADGE[source] : null;
 
   return (
     <span className="inline-flex items-center gap-2">
@@ -112,7 +129,7 @@ function NoWebsiteNote() {
   return (
     <span
       className="inline-flex items-center gap-1.5 text-[13px] text-[var(--text-dim,#475569)] italic"
-      title="We checked Apollo, Hunter, and Google. Many small broker-dealers don't publish a public website."
+      title="We checked Hunter and Google. Many small broker-dealers don't publish a public website."
     >
       <Globe className="h-3.5 w-3.5 opacity-60" strokeWidth={2} />
       No public website on file
@@ -124,12 +141,18 @@ export function FirmWebsiteLink({
   firmId,
   firmName,
   website,
+  fallbackDomain = null,
 }: {
   firmId: number;
   firmName: string;
   website: string | null;
+  // Lowest-priority display fallback (e.g. a domain derived from a FOCUS-
+  // extracted filing contact's email). Shown only when no website is
+  // persisted or resolved; does not suppress the background resolver.
+  fallbackDomain?: string | null;
 }) {
   const persisted = (website ?? "").trim();
+  const fallback = (fallbackDomain ?? "").trim();
   const [resolved, setResolved] = useState<ResolveWebsiteResponse | null>(null);
   // Initial isResolving=true when we'll fire the lazy lookup; this avoids a
   // one-frame flash of the "No public website on file" note before the
@@ -161,15 +184,29 @@ export function FirmWebsiteLink({
       });
   }, [firmId, persisted]);
 
-  // Domain side: persisted → ResolvedLink; otherwise resolved → ResolvedLink;
-  // otherwise resolving → spinner; otherwise (lookup ran, no result) →
-  // polite "No public website on file" note. The Google fallback always
-  // renders alongside as a manual escape hatch.
+  // Domain side precedence: persisted → resolver hit → filing-derived
+  // fallback → resolving spinner → polite "No public website on file" note.
+  // The filing fallback sits ahead of the spinner/empty states so a firm with
+  // no resolvable website still reflects the domain that lit up the Email
+  // Extractor; the background resolver keeps running and upgrades it to a
+  // confirmed website if it finds one. The Google fallback always renders
+  // alongside as a manual escape hatch.
   let domainSide: JSX.Element | null = null;
   if (persisted) {
-    domainSide = <ResolvedLink website={persisted} source={null} />;
+    domainSide = <ResolvedLink website={persisted} badge={null} />;
   } else if (resolved?.website) {
-    domainSide = <ResolvedLink website={resolved.website} source={resolved.website_source} />;
+    domainSide = (
+      <ResolvedLink
+        website={resolved.website}
+        badge={
+          resolved.website_source
+            ? WEBSITE_SOURCE_BADGE[resolved.website_source]
+            : null
+        }
+      />
+    );
+  } else if (fallback) {
+    domainSide = <ResolvedLink website={fallback} badge={FILING_BADGE} />;
   } else if (isResolving) {
     domainSide = <ResolvingSpinner />;
   } else if (lookupDone) {

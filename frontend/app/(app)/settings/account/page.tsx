@@ -2,6 +2,7 @@ import { headers } from "next/headers";
 import { KeyRound } from "lucide-react";
 
 import { ChangePasswordForm } from "@/components/settings/change-password-form";
+import { OutreachSignatureForm } from "@/components/settings/outreach-signature-form";
 import { auth } from "@/lib/auth";
 import { getRequiredSession } from "@/lib/auth-server";
 
@@ -63,6 +64,21 @@ export default async function AccountSettingsPage() {
             </div>
           </div>
         )}
+      </section>
+
+      <section className="mt-8 max-w-xl rounded-2xl border border-[var(--border,rgba(30,64,175,0.1))] bg-[var(--surface,#ffffff)] p-7 shadow-[var(--shadow-card,0_1px_2px_rgba(15,23,42,0.04),0_4px_14px_rgba(15,23,42,0.05))]">
+        <header className="mb-5">
+          <p className="text-[11px] font-semibold uppercase tracking-[0.1em] text-[var(--text-muted,#94a3b8)]">
+            Outreach
+          </p>
+          <h2 className="mt-1 text-lg font-bold tracking-[-0.01em] text-[var(--text,#0f172a)]">
+            Email signature
+          </h2>
+          <p className="mt-2 text-[13px] leading-5 text-[var(--text-dim,#475569)]">
+            A footer appended beneath the body of the outreach emails you send.
+          </p>
+        </header>
+        <OutreachSignatureForm />
       </section>
     </div>
   );

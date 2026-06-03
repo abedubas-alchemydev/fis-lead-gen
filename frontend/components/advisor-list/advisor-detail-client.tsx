@@ -1,20 +1,31 @@
 "use client";
 
-import { useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import clsx from "clsx";
 import Link from "next/link";
 import type { Route } from "next";
 import { useRouter, useSearchParams } from "next/navigation";
 
-import { ArrowLeft, ArrowRight, ExternalLink, Globe, Search } from "lucide-react";
+import {
+  ArrowLeft,
+  ArrowRight,
+  ExternalLink,
+  Globe,
+  Loader2,
+  RefreshCw,
+  Search,
+  Sparkles,
+} from "lucide-react";
 
 import {
   apiRequest,
   buildApiPath,
+  gapFillAdvisorContacts,
   getPipelineRunStatus,
   refreshAdvisor,
 } from "@/lib/api";
-import { PageSpinner } from "@/components/ui/spinner";
-import { joinPipelineLabels } from "@/lib/refresh-pipeline-labels";
+import { Button, buttonBase, buttonSizes } from "@/components/ui/button";
+import { DetailPageSkeleton } from "@/components/ui/detail-page-skeleton";
 import {
   buildAdvisorListUrl,
   encodeReturnParam,
@@ -23,21 +34,24 @@ import {
   type AdvisorListQueryState,
 } from "@/lib/advisor-list-state";
 import { formatCurrency, formatDate } from "@/lib/format";
+import { EmailScansSection } from "@/components/email-extractor/email-scans-section";
+import {
+  listScansForEntity,
+  pickHydratableScan,
+  SCAN_HYDRATION_LIMIT,
+} from "@/lib/email-extractor";
 import { ListPicker } from "@/components/list-picker/list-picker";
 import { OutreachButton } from "@/components/master-list/outreach-button";
+import { ChannelIconCell } from "@/components/advisor-list/channel-icon-cell";
+import { PeopleTable } from "@/components/master-list/detail/people-table";
 import { Pill } from "@/components/ui/pill";
 import { agencyLabel } from "@/components/master-list/detail/clearing-membership-helpers";
 import { SectionPanel } from "@/components/ui/section-panel";
+import { CollapsiblePillList } from "@/components/ui/collapsible-pill-list";
 import type {
-  AdvisorContactItem,
   InvestmentAdvisorListResponse,
   InvestmentAdvisorProfileResponse,
 } from "@/lib/types";
-
-// Secondary button preset — copied from broker-dealer-detail-client.tsx so the
-// Previous/Next nav buttons match the master-list detail page exactly.
-const SECONDARY_BTN =
-  "inline-flex items-center justify-center gap-2 rounded-[10px] border border-[var(--border-2,rgba(30,64,175,0.16))] bg-[var(--surface,#ffffff)] px-4 py-2 text-[13px] font-medium text-[var(--text-dim,#475569)] transition hover:bg-[var(--surface-2,#f1f6fd)] hover:text-[var(--text,#0f172a)] disabled:cursor-not-allowed disabled:opacity-45";
 
 // Compact website display: strip protocol/www/trailing slash and take the
 // first path segment. Mirrors ResolvedLink in firm-website-link.tsx.
@@ -105,108 +119,206 @@ export function AdvisorDetailClient({ advisorId }: { advisorId: string }) {
   const [prevId, setPrevId] = useState<number | null>(null);
   const [nextId, setNextId] = useState<number | null>(null);
 
-  // Refresh-on-visit gating. Mirrors broker-dealer-detail-client.tsx — we
-  // POST /refresh-all on mount so the BE's per-pipeline gates can fill any
-  // missing column (executive_officers, website) before we render. The
-  // /profile fetch below is gated on `refreshState.phase === "ready"` so
-  // the user sees the loading screen until the orchestrator's child
-  // pipelines finish (or short-circuit). Errors fall through to "ready" —
-  // refresh is best-effort, never blocks the page indefinitely.
-  type RefreshPhase =
-    | { phase: "queuing" }
-    | { phase: "polling"; runId: number; pipelinesRunning: string[] }
-    | { phase: "ready" };
-  const [refreshState, setRefreshState] = useState<RefreshPhase>({ phase: "queuing" });
+  // Manual refresh button state. The advisor detail page used to POST
+  // /refresh-all on every mount; the bulk gap-fill runner now pre-fills
+  // every 13F-filer advisor row, so the page is a pure DB read by
+  // default. The Refresh button below remains as the escape hatch for
+  // forcing the per-firm orchestrator when an operator wants
+  // fresh-from-source data.
+  const [isRefreshing, setIsRefreshing] = useState(false);
+  const [refreshError, setRefreshError] = useState<string | null>(null);
 
-  // Refresh-on-visit: POST /refresh-all and poll the parent PipelineRun
-  // until terminal. Same handler shape + 180s poll deadline as the BD
-  // detail page (see broker-dealer-detail-client.tsx, PR #482).
-  useEffect(() => {
-    const numericId = Number(advisorId);
-    if (!Number.isFinite(numericId)) {
-      setRefreshState({ phase: "ready" });
-      return;
-    }
-    let active = true;
-    let pollTimer: ReturnType<typeof setTimeout> | null = null;
+  // Inline "Discovered Emails" section state. Mirrors the BD detail page:
+  // `currentScanId` is the single source of truth, seeded from `?scanId=`
+  // (deep-link / post-Find-Emails refresh) or the most-recent scan for
+  // this advisor on first load. See hydration + URL-sync effects below.
+  const [currentScanId, setCurrentScanId] = useState<number | null>(null);
+  const [isHydratingScan, setIsHydratingScan] = useState(true);
 
-    function parsePipelinesRunning(notes: string | null): string[] {
-      if (!notes) return [];
-      try {
-        const parsed = JSON.parse(notes) as { ran?: unknown };
-        if (Array.isArray(parsed.ran)) {
-          return parsed.ran.filter((x): x is string => typeof x === "string");
-        }
-      } catch {
-        /* notes isn't structured JSON yet (early in lifecycle) */
-      }
-      return [];
-    }
+  // Gap-fill button state. Distinct from Refresh because gap-fill only
+  // targets advisor_contacts rows missing channels and is gated by a 30-day
+  // cooldown — the 429 surfaces via gapFillError.
+  const [isGapFilling, setIsGapFilling] = useState(false);
+  const [gapFillError, setGapFillError] = useState<string | null>(null);
+  const [gapFillNotice, setGapFillNotice] = useState<string | null>(null);
+  // Apollo phone reveals land asynchronously (~1-3 min after a gap-fill run);
+  // this timer drives a few extra /profile re-fetches so they appear without a
+  // manual reload. Cleared on advisor switch / unmount.
+  const latePhonePollRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
-    async function pollUntilTerminal(runId: number) {
-      const deadline = Date.now() + 180_000;
-      const TERMINAL = new Set(["completed", "completed_with_errors", "failed"]);
-      while (active && Date.now() < deadline) {
-        try {
-          const detail = await getPipelineRunStatus(runId);
-          if (!active) return;
-          if (TERMINAL.has(detail.status)) {
-            setRefreshState({ phase: "ready" });
-            return;
-          }
-          setRefreshState({
-            phase: "polling",
-            runId,
-            pipelinesRunning: parsePipelinesRunning(detail.notes),
-          });
-        } catch {
-          // Transient poll error — wait and try again.
-        }
-        await new Promise<void>((resolve) => {
-          pollTimer = setTimeout(resolve, 2000);
-        });
-      }
-      if (active) setRefreshState({ phase: "ready" });
-    }
+  // Filings list renders collapsed to the most-recent few; "Show all"
+  // expands the full in-memory list. Reset when switching advisors (the
+  // component instance persists across Prev/Next — only advisorId changes).
+  const [showAllFilings, setShowAllFilings] = useState(false);
 
-    async function run() {
-      try {
-        const result = await refreshAdvisor(numericId, "all");
-        if (!active) return;
-        if (result.status === "skipped" || result.run_id === null) {
-          setRefreshState({ phase: "ready" });
-          return;
-        }
-        setRefreshState({
-          phase: "polling",
-          runId: result.run_id,
-          pipelinesRunning: [],
-        });
-        await pollUntilTerminal(result.run_id);
-      } catch {
-        // 429 / 503 / network — fall through so the page renders.
-        if (active) setRefreshState({ phase: "ready" });
-      }
-    }
-    void run();
-
-    return () => {
-      active = false;
-      if (pollTimer !== null) clearTimeout(pollTimer);
-    };
+  // Fetch /profile immediately on mount. Errors surface via setError so
+  // a failed first load shows the error page. `reloadProfile` is the
+  // re-fetch helper the manual Refresh button calls; it lets the caller
+  // decide what to do with any error (the button swallows transients
+  // into a notice rather than blanking the page).
+  const reloadProfile = useCallback(async () => {
+    const response = await apiRequest<InvestmentAdvisorProfileResponse>(
+      `/api/v1/investment-advisors/${advisorId}/profile`,
+    );
+    setData(response);
+    setError(null);
   }, [advisorId]);
 
   useEffect(() => {
-    // Wait for refresh-on-visit to finish before fetching /profile.
-    if (refreshState.phase !== "ready") return;
-    apiRequest<InvestmentAdvisorProfileResponse>(
-      `/api/v1/investment-advisors/${advisorId}/profile`,
-    )
-      .then(setData)
-      .catch((err) => {
-        setError(err instanceof Error ? err.message : "Failed to load advisor");
-      });
-  }, [advisorId, refreshState.phase]);
+    let active = true;
+    async function loadProfile() {
+      try {
+        const response = await apiRequest<InvestmentAdvisorProfileResponse>(
+          `/api/v1/investment-advisors/${advisorId}/profile`,
+        );
+        if (active) {
+          setData(response);
+          setError(null);
+        }
+      } catch (err) {
+        if (active) {
+          setError(err instanceof Error ? err.message : "Failed to load advisor");
+        }
+      }
+    }
+    void loadProfile();
+    return () => {
+      active = false;
+    };
+  }, [advisorId]);
+
+  // Collapse the filings list and clear any gap-fill notice/error whenever we
+  // navigate to another advisor (the instance may persist across Prev/Next, so
+  // reset rather than rely on remount).
+  useEffect(() => {
+    setShowAllFilings(false);
+    setGapFillNotice(null);
+    setGapFillError(null);
+    return () => {
+      if (latePhonePollRef.current) {
+        clearTimeout(latePhonePollRef.current);
+        latePhonePollRef.current = null;
+      }
+    };
+  }, [advisorId]);
+
+  // Manual refresh handler. POST /refresh-all on click, poll the parent
+  // PipelineRun until terminal (180s deadline, matches the BD detail
+  // page), then re-fetch /profile so the user picks up whatever fresh
+  // data the orchestrator wrote. Errors surface via refreshError; a
+  // transient failure leaves the stale view intact.
+  const runManualRefresh = useCallback(async () => {
+    const numericId = Number(advisorId);
+    if (!Number.isFinite(numericId)) return;
+    setIsRefreshing(true);
+    setRefreshError(null);
+    try {
+      const result = await refreshAdvisor(numericId, "all");
+      if (result.status !== "skipped" && result.run_id !== null) {
+        const runId = result.run_id;
+        const deadline = Date.now() + 180_000;
+        const TERMINAL = new Set([
+          "completed",
+          "completed_with_errors",
+          "failed",
+        ]);
+        while (Date.now() < deadline) {
+          try {
+            const detail = await getPipelineRunStatus(runId);
+            if (TERMINAL.has(detail.status)) break;
+          } catch {
+            /* transient poll error — keep waiting */
+          }
+          await new Promise<void>((resolve) => setTimeout(resolve, 2000));
+        }
+      }
+      await reloadProfile();
+    } catch (err) {
+      setRefreshError(err instanceof Error ? err.message : "Refresh failed.");
+    } finally {
+      setIsRefreshing(false);
+    }
+  }, [advisorId, reloadProfile]);
+
+  // "Generate More Details" handler. POST /gap-fill-contacts with force (the
+  // user-facing button always re-runs past the cost cooldown, matching the BD
+  // enrich button), poll the run until terminal (300s deadline -- headroom so
+  // the "Generating…" loader keeps spanning the run's optional final
+  // web-fallback stage; the user just sees the same generic progress), then
+  // reload /profile so the new emails/phones/LinkedIn URLs land in the icon
+  // popovers. Error / notice strings show inline in the People panel.
+  const runGapFill = useCallback(async () => {
+    const numericId = Number(advisorId);
+    if (!Number.isFinite(numericId)) return;
+    setIsGapFilling(true);
+    setGapFillError(null);
+    setGapFillNotice(null);
+    try {
+      const result = await gapFillAdvisorContacts(numericId, true);
+      if (result.run_id !== null) {
+        const runId = result.run_id;
+        const deadline = Date.now() + 300_000;
+        const TERMINAL = new Set([
+          "completed",
+          "completed_with_errors",
+          "failed",
+        ]);
+        while (Date.now() < deadline) {
+          try {
+            const detail = await getPipelineRunStatus(runId);
+            if (TERMINAL.has(detail.status)) {
+              let summary = `Gap-fill ${detail.status}.`;
+              if (detail.notes) {
+                try {
+                  const parsed = JSON.parse(detail.notes) as {
+                    summary?: unknown;
+                  };
+                  if (typeof parsed.summary === "string") {
+                    summary = parsed.summary;
+                  }
+                } catch {
+                  /* notes wasn't JSON — fall back to the default. */
+                }
+              }
+              setGapFillNotice(summary);
+              break;
+            }
+          } catch {
+            /* transient poll error — keep waiting */
+          }
+          await new Promise<void>((resolve) => setTimeout(resolve, 2000));
+        }
+      } else {
+        setGapFillNotice(result.reason ?? "Gap-fill skipped.");
+      }
+      await reloadProfile();
+      // Apollo phone reveals arrive async (~1-3 min) via the webhook; re-fetch
+      // the profile a few more times so the numbers appear without a manual
+      // reload. Non-blocking — the button is already done at this point.
+      if (latePhonePollRef.current) clearTimeout(latePhonePollRef.current);
+      let phonePollAttempts = 0;
+      const pollLatePhones = () => {
+        latePhonePollRef.current = setTimeout(() => {
+          phonePollAttempts += 1;
+          void reloadProfile().catch(() => {
+            /* transient — keep polling */
+          });
+          if (phonePollAttempts < 5) {
+            pollLatePhones();
+          } else {
+            latePhonePollRef.current = null;
+          }
+        }, 30_000);
+      };
+      pollLatePhones();
+    } catch (err) {
+      setGapFillError(
+        err instanceof Error ? err.message : "Gap-fill failed.",
+      );
+    } finally {
+      setIsGapFilling(false);
+    }
+  }, [advisorId, reloadProfile]);
 
   // Restore the user's filter/sort state on back-nav, falling back to
   // the bare list URL if no return envelope was passed.
@@ -307,34 +419,79 @@ export function AdvisorDetailClient({ advisorId }: { advisorId: string }) {
     };
   }, [advisorId, returnState]);
 
+  // Hydrate the inline "Discovered Emails" section. Two sources, in
+  // precedence order:
+  //   1. `?scanId=` in the URL — wins, so deep-links and post-Find-Emails
+  //      refreshes re-open the same scan.
+  //   2. Most-recent scan *with emails* for this advisor (via
+  //      pickHydratableScan) — so the user sees prior emails on first load
+  //      without re-running, and a newer empty/failed retry never masks an
+  //      older run that has results.
+  // Reads `window.location.search` directly so this effect doesn't have
+  // to depend on the reactive `searchParams` (the URL-sync effect below
+  // would otherwise feed back into this and re-fetch on every change).
+  useEffect(() => {
+    const numericId = Number(advisorId);
+    if (!Number.isFinite(numericId)) {
+      setIsHydratingScan(false);
+      return;
+    }
+
+    const urlScanId = new URLSearchParams(window.location.search).get(
+      "scanId",
+    );
+    if (urlScanId) {
+      const parsed = Number(urlScanId);
+      if (Number.isFinite(parsed)) {
+        setCurrentScanId(parsed);
+        setIsHydratingScan(false);
+        return;
+      }
+    }
+
+    let active = true;
+    setIsHydratingScan(true);
+    setCurrentScanId(null);
+    listScansForEntity({ kind: "advisor", id: numericId }, SCAN_HYDRATION_LIMIT)
+      .then((scans) => {
+        if (!active) return;
+        const preferred = pickHydratableScan(scans);
+        if (preferred) {
+          setCurrentScanId(preferred.id);
+        }
+      })
+      .catch(() => {
+        /* swallow — empty state will render */
+      })
+      .finally(() => {
+        if (active) setIsHydratingScan(false);
+      });
+
+    return () => {
+      active = false;
+    };
+  }, [advisorId]);
+
+  // Persist the active scan in the URL so a refresh re-opens the same
+  // scan inside the inline section. Guards against a feedback loop by
+  // checking whether `?scanId=` already matches before replacing.
+  useEffect(() => {
+    if (currentScanId === null) return;
+    const desired = String(currentScanId);
+    if (searchParams.get("scanId") === desired) return;
+    const params = new URLSearchParams(searchParams.toString());
+    params.set("scanId", desired);
+    router.replace(
+      `/advisor-list/${advisorId}?${params.toString()}` as Route,
+    );
+  }, [currentScanId, advisorId, searchParams, router]);
+
   // Same-shape /advisor-list/{id} link that preserves the return envelope so
   // chaining Next/Previous keeps the user's filtered context.
   const buildAdjacentHref = (id: number): Route => {
     const base = `/advisor-list/${id}`;
     return (returnEnvelope ? `${base}?return=${returnEnvelope}` : base) as Route;
   };
-
-  // Refresh-on-visit gate. Show loading screen while the BE orchestrator
-  // is queuing or running. Once ready, the /profile fetch above populates
-  // and the existing render path runs.
-  if (refreshState.phase === "queuing") {
-    return (
-      <div className="px-7 pb-12 pt-7 lg:px-9">
-        <PageSpinner label="Preparing fresh data for this advisor…" />
-      </div>
-    );
-  }
-  if (refreshState.phase === "polling") {
-    const label =
-      refreshState.pipelinesRunning.length > 0
-        ? `Refreshing ${joinPipelineLabels(refreshState.pipelinesRunning)}…`
-        : "Refreshing advisor data…";
-    return (
-      <div className="px-7 pb-12 pt-7 lg:px-9">
-        <PageSpinner label={label} />
-      </div>
-    );
-  }
 
   if (error) {
     return (
@@ -347,28 +504,7 @@ export function AdvisorDetailClient({ advisorId }: { advisorId: string }) {
   }
 
   if (data === null) {
-    return (
-      <div className="px-7 pb-12 pt-7 lg:px-9">
-        <div
-          className="rounded-2xl border border-[var(--border,rgba(30,64,175,0.1))] bg-[var(--surface,#ffffff)] p-8"
-          style={{
-            boxShadow:
-              "var(--shadow-card, 0 1px 2px rgba(15,23,42,0.04), 0 4px 14px rgba(15,23,42,0.05))",
-          }}
-        >
-          <div className="h-6 w-56 animate-pulse rounded bg-[var(--surface-2,#f1f6fd)]" />
-          <div className="mt-4 h-4 w-full animate-pulse rounded bg-[var(--surface-2,#f1f6fd)]" />
-          <div className="mt-8 grid gap-4 xl:grid-cols-2">
-            {Array.from({ length: 4 }).map((_, i) => (
-              <div
-                key={i}
-                className="h-64 animate-pulse rounded-2xl bg-[var(--surface-2,#f1f6fd)]"
-              />
-            ))}
-          </div>
-        </div>
-      </div>
-    );
+    return <DetailPageSkeleton />;
   }
 
   const { advisor, contacts, filings } = data;
@@ -379,6 +515,31 @@ export function AdvisorDetailClient({ advisorId }: { advisorId: string }) {
   const advisoryActivities = advisor.advisory_activities ?? [];
   const clientTypes = advisor.client_types ?? [];
   const clientCounts = advisor.client_counts ?? null;
+  // Filings render collapsed to the 6 most-recent; the rest expand on demand.
+  const FILINGS_COLLAPSED = 6;
+  const visibleFilings = showAllFilings
+    ? filings
+    : filings.slice(0, FILINGS_COLLAPSED);
+
+  // Resolve the firm domain for the inline Find-emails section: prefer the
+  // advisor's website, fall back to the first contact email's domain.
+  // Advisor contacts carry a multi-value `emails[]` array (not the single
+  // `email` field used on BD contacts) so the lookup walks both shapes.
+  const websiteDomain = advisor.website
+    ? advisor.website
+        .replace(/^https?:\/\//i, "")
+        .replace(/\/+$/, "")
+        .split("/")[0]
+        ?.toLowerCase() ?? null
+    : null;
+  const contactEmail =
+    contacts.find((c) => (c.emails ?? [])[0]?.value)?.emails?.[0]?.value ??
+    contacts.find((c) => c.email)?.email ??
+    null;
+  const emailDomain = contactEmail
+    ? contactEmail.split("@")[1]?.toLowerCase() ?? null
+    : null;
+  const resolvedDomain = websiteDomain || emailDomain;
 
   return (
     <div className="px-7 pb-12 pt-7 animate-fade-in lg:px-9">
@@ -407,6 +568,14 @@ export function AdvisorDetailClient({ advisorId }: { advisorId: string }) {
               entityType="advisor"
               initialFavorited={data.is_favorited}
             />
+            {advisor.files_13f ? (
+              <Pill variant="healthy">13F filer</Pill>
+            ) : null}
+            {advisor.member_agencies.map((code) => (
+              <Pill key={code} variant="member">
+                {agencyLabel(code)} member
+              </Pill>
+            ))}
           </div>
           {advisor.legal_name && advisor.legal_name !== advisor.name ? (
             <p className="mt-1 text-[13px] text-[var(--text-dim,#475569)]">
@@ -482,46 +651,55 @@ export function AdvisorDetailClient({ advisorId }: { advisorId: string }) {
             ) : null}
           </div>
         </div>
+        <div className="flex shrink-0 items-center gap-2.5">
+          <Button
+            type="button"
+            variant="outline"
+            onClick={() => void runManualRefresh()}
+            disabled={isRefreshing || isGapFilling}
+          >
+            {isRefreshing ? (
+              <Loader2 className="h-4 w-4 animate-spin" strokeWidth={2.5} />
+            ) : (
+              <RefreshCw className="h-4 w-4" strokeWidth={2} />
+            )}
+            {isRefreshing ? "Refreshing…" : "Refresh"}
+          </Button>
+        </div>
       </div>
 
-      {/* ── Status pills row ────────────────────────────────────────────── */}
-      {advisor.files_13f || advisor.member_agencies.length > 0 ? (
-        <div className="mb-5 flex flex-wrap items-center gap-2">
-          {advisor.files_13f ? <Pill variant="healthy">13F filer</Pill> : null}
-          {advisor.member_agencies.map((code) => (
-            <Pill key={code} variant="member">
-              {agencyLabel(code)} member
-            </Pill>
-          ))}
+      {refreshError ? (
+        <div className="mb-3 rounded-2xl border border-[rgba(239,68,68,0.25)] bg-[rgba(239,68,68,0.08)] px-4 py-2.5 text-[13px] text-[var(--pill-red-text,#b91c1c)]">
+          {refreshError}
         </div>
       ) : null}
 
-      {/* ── Prev / Back / Next nav row ──────────────────────────────────── */}
+      {/* ── Adjacent-advisor nav — mirrors the master-list detail page ── */}
       <div className="mb-5 flex items-center justify-between gap-3">
-        <button
+        <Button
           type="button"
+          variant="outline"
           disabled={!prevId}
           onClick={() => prevId && router.push(buildAdjacentHref(prevId))}
-          className={SECONDARY_BTN}
         >
-          <ArrowLeft className="h-4 w-4" strokeWidth={2} aria-hidden />
+          <ArrowLeft className="h-4 w-4" strokeWidth={2} />
           Previous
-        </button>
+        </Button>
         <Link
           href={backHref}
           className="text-[12px] uppercase tracking-[0.08em] text-[var(--text-muted,#94a3b8)] transition hover:text-[var(--text,#0f172a)]"
         >
-          Back to advisors
+          Back to Investment Advisors
         </Link>
-        <button
+        <Button
           type="button"
+          variant="outline"
           disabled={!nextId}
           onClick={() => nextId && router.push(buildAdjacentHref(nextId))}
-          className={SECONDARY_BTN}
         >
           Next
-          <ArrowRight className="h-4 w-4" strokeWidth={2} aria-hidden />
-        </button>
+          <ArrowRight className="h-4 w-4" strokeWidth={2} />
+        </Button>
       </div>
 
       {/* ── KPI strip ───────────────────────────────────────────────────── */}
@@ -544,8 +722,9 @@ export function AdvisorDetailClient({ advisorId }: { advisorId: string }) {
         />
       </div>
 
-      {/* ── 2-column section grid ───────────────────────────────────────── */}
-      <div className="grid gap-4 xl:grid-cols-2">
+      {/* ── 2-column section layout — independent flex columns (no height-locking) ───────────────────────────────────────── */}
+      <div className="flex flex-col gap-4 xl:flex-row">
+      <div className="flex min-w-0 flex-1 flex-col gap-4">
         {/* Form ADV details */}
         <SectionPanel
           eyebrow="Form ADV"
@@ -633,46 +812,45 @@ export function AdvisorDetailClient({ advisorId }: { advisorId: string }) {
           ) : null}
         </SectionPanel>
 
-        {/* Firm overview */}
-        <SectionPanel eyebrow="Overview" title="Registration & filings">
-          <div className="grid gap-3 md:grid-cols-2">
-            <MiniStat
-              label="Status"
-              value={advisor.status || "—"}
-              compact
-            />
-            <MiniStat
-              label="Registration date"
-              value={formatDate(advisor.registration_date)}
-              compact
-            />
-            {/* Formation date intentionally not rendered: Form ADV doesn't
-                ask for it and the IAPD per-firm payload doesn't carry one,
-                so the column would be "Not available" for nearly every IA.
-                Field remains on the schema/model — re-enable if a corporate-
-                records source (OpenCorporates / state SOS) is ever wired. */}
-            <MiniStat
-              label="Source"
-              value={advisor.matched_source || "—"}
-              compact
-            />
-          </div>
-
-          {advisor.filings_index_url ? (
-            <a
-              href={advisor.filings_index_url}
-              target="_blank"
-              rel="noopener noreferrer"
-              className="mt-4 inline-flex items-center gap-1.5 rounded-[10px] border border-[var(--border-2,rgba(30,64,175,0.16))] bg-[var(--surface,#ffffff)] px-3 py-1.5 text-[12px] font-medium text-[var(--text-dim,#475569)] transition hover:bg-[var(--surface-2,#f1f6fd)] hover:text-[var(--text,#0f172a)]"
-            >
-              <ExternalLink className="h-3.5 w-3.5" strokeWidth={2} />
-              EDGAR filings index
-            </a>
-          ) : null}
-        </SectionPanel>
-
         {/* People */}
         <SectionPanel eyebrow="People" title="Owners, officers, and contacts">
+          <div className="mb-4 flex flex-wrap items-center justify-between gap-3">
+            <p className="text-xs text-[var(--text-muted,#94a3b8)]">
+              {isGapFilling
+                ? "Discovering contacts across providers… this can take a moment."
+                : "Discover additional executive contacts for this firm."}
+            </p>
+            <button
+              type="button"
+              onClick={() => void runGapFill()}
+              disabled={isGapFilling || isRefreshing}
+              className={clsx(
+                buttonBase,
+                buttonSizes.md,
+                "shrink-0 bg-gradient-to-br from-[#6366f1] to-[#8b5cf6] text-white shadow-[0_6px_16px_rgba(99,102,241,0.35)] hover:brightness-110",
+              )}
+            >
+              {isGapFilling ? (
+                <Loader2 className="h-4 w-4 animate-spin" strokeWidth={2.5} />
+              ) : (
+                <Sparkles className="h-4 w-4" strokeWidth={2} />
+              )}
+              {isGapFilling ? "Generating…" : "Generate More Details"}
+            </button>
+          </div>
+
+          {gapFillError ? (
+            <div className="mb-3 rounded-2xl border border-[rgba(245,158,11,0.25)] bg-[rgba(245,158,11,0.08)] px-4 py-3 text-sm text-[var(--pill-amber-text,#b45309)]">
+              {gapFillError}
+            </div>
+          ) : null}
+
+          {gapFillNotice ? (
+            <div className="mb-3 rounded-2xl border border-[rgba(59,130,246,0.25)] bg-[rgba(59,130,246,0.08)] px-4 py-3 text-sm text-[var(--pill-blue-text,#1d4ed8)]">
+              {gapFillNotice}
+            </div>
+          ) : null}
+
           {directOwners.length === 0 &&
           executiveOfficers.length === 0 &&
           indirectOwners.length === 0 &&
@@ -705,7 +883,49 @@ export function AdvisorDetailClient({ advisorId }: { advisorId: string }) {
             />
           ) : null}
 
-          {executiveOfficers.length > 0 ? (
+          {/* Executive officers — one merged table. When contacts are
+              populated (enrichment chain has run), drive from advisor_contacts
+              so names come out title-cased and the Channels/Outreach columns
+              show. Pre-enrichment, fall back to the raw Form ADV officer
+              list so the page still shows the roster. The two sources are
+              the same 27 people for a fully-enriched advisor; the chain's
+              names-only fallback guarantees parity even when no provider
+              matched a given officer. */}
+          {contacts.length > 0 ? (
+            <PeopleTable
+              title="Executive officers"
+              items={contacts}
+              columns={[
+                {
+                  header: "Name",
+                  cell: (c) => (
+                    <span className="font-semibold text-[var(--text,#0f172a)]">
+                      {c.name}
+                    </span>
+                  ),
+                },
+                { header: "Title", cell: (c) => c.title ?? "—" },
+                {
+                  header: "Channels",
+                  cell: (c) => <ChannelIconCell contact={c} />,
+                  className: "whitespace-nowrap",
+                },
+                {
+                  header: "Outreach",
+                  cell: (c) =>
+                    c.email || (c.emails?.length ?? 0) > 0 ? (
+                      <OutreachButton
+                        entityKind="advisor"
+                        entityId={Number(advisorId)}
+                        entityName={advisor.name}
+                        contact={c}
+                      />
+                    ) : null,
+                  className: "whitespace-nowrap",
+                },
+              ]}
+            />
+          ) : executiveOfficers.length > 0 ? (
             <PeopleTable
               title="Executive officers"
               items={executiveOfficers}
@@ -745,41 +965,59 @@ export function AdvisorDetailClient({ advisorId }: { advisorId: string }) {
               ]}
             />
           ) : null}
+        </SectionPanel>
+      </div>
 
-          {contacts.length > 0 ? (
-            <PeopleTable
-              title="Enriched contacts"
-              items={contacts}
-              columns={[
-                {
-                  header: "Name",
-                  cell: (c) => (
-                    <span className="font-semibold text-[var(--text,#0f172a)]">
-                      {c.name}
-                    </span>
-                  ),
-                },
-                { header: "Title", cell: (c) => c.title ?? "—" },
-                {
-                  header: "Channels",
-                  cell: (c) => <ContactChannelsCell contact={c} />,
-                  className: "break-all",
-                },
-                {
-                  header: "Outreach",
-                  cell: (c) =>
-                    c.email ? (
-                      <OutreachButton
-                        entityKind="advisor"
-                        entityId={Number(advisorId)}
-                        entityName={advisor.name}
-                        contact={c}
-                      />
-                    ) : null,
-                  className: "whitespace-nowrap",
-                },
-              ]}
+      <div className="flex min-w-0 flex-1 flex-col gap-4">
+        {/* Firm overview */}
+        <SectionPanel eyebrow="Overview" title="Registration & filings">
+          <div className="grid gap-3 md:grid-cols-2">
+            <MiniStat
+              label="Status"
+              value={advisor.status || "—"}
+              compact
             />
+            <MiniStat
+              label="Registration date"
+              value={formatDate(advisor.registration_date)}
+              compact
+            />
+            {/* Formation date intentionally not rendered: Form ADV doesn't
+                ask for it and the IAPD per-firm payload doesn't carry one,
+                so the column would be "Not available" for nearly every IA.
+                Field remains on the schema/model — re-enable if a corporate-
+                records source (OpenCorporates / state SOS) is ever wired. */}
+            <MiniStat
+              label="Source"
+              value={advisor.matched_source || "—"}
+              compact
+            />
+          </div>
+
+          {advisor.filings_index_url ? (
+            <a
+              href={advisor.filings_index_url}
+              target="_blank"
+              rel="noopener noreferrer"
+              className="mt-4 inline-flex items-center gap-1.5 rounded-[10px] border border-[var(--border-2,rgba(30,64,175,0.16))] bg-[var(--surface,#ffffff)] px-3 py-1.5 text-[12px] font-medium text-[var(--text-dim,#475569)] transition hover:bg-[var(--surface-2,#f1f6fd)] hover:text-[var(--text,#0f172a)]"
+            >
+              <ExternalLink className="h-3.5 w-3.5" strokeWidth={2} />
+              EDGAR filings index
+            </a>
+          ) : null}
+
+          {/* Alternative Names — Form ADV Schedule D §1.B "Other Business
+              Names" from the IAPD per-firm payload (basicInformation.otherNames),
+              filtered to drop the firm's own primary/legal name. Hidden when the
+              firm has none so the card stays compact. */}
+          {advisor.other_business_names && advisor.other_business_names.length > 0 ? (
+            <div className="mt-4">
+              <div className="flex items-center gap-2">
+                <p className="text-[13px] font-semibold text-[var(--text,#0f172a)]">Alternative Names</p>
+                <Pill variant="info">{advisor.other_business_names.length} names</Pill>
+              </div>
+              <CollapsiblePillList items={advisor.other_business_names} />
+            </div>
           ) : null}
         </SectionPanel>
 
@@ -791,7 +1029,7 @@ export function AdvisorDetailClient({ advisorId }: { advisorId: string }) {
             </div>
           ) : (
             <div className="space-y-2">
-              {filings.map((filing) => (
+              {visibleFilings.map((filing) => (
                 <div
                   key={filing.id}
                   className="rounded-2xl border border-[var(--border,rgba(30,64,175,0.1))] px-4 py-3"
@@ -827,9 +1065,34 @@ export function AdvisorDetailClient({ advisorId }: { advisorId: string }) {
                   </div>
                 </div>
               ))}
+              {filings.length > FILINGS_COLLAPSED ? (
+                <Button
+                  type="button"
+                  variant="outline"
+                  size="sm"
+                  onClick={() => setShowAllFilings((prev) => !prev)}
+                >
+                  {showAllFilings
+                    ? "Show fewer"
+                    : `Show all (${filings.length})`}
+                </Button>
+              ) : null}
             </div>
           )}
         </SectionPanel>
+      </div>
+      </div>
+
+      {/* ── Discovered emails (full width) ── */}
+      <div className="mt-4">
+        <EmailScansSection
+          entityKind="advisor"
+          entityId={Number(advisorId)}
+          currentScanId={currentScanId}
+          resolvedDomain={resolvedDomain}
+          isHydrating={isHydratingScan}
+          onScanCreated={setCurrentScanId}
+        />
       </div>
     </div>
   );
@@ -876,168 +1139,3 @@ function MiniStat({
   );
 }
 
-// The People panel renders up to four groups (direct owners, executive
-// officers, indirect owners, enriched contacts). For large IAs each group can
-// have dozens of rows (Vanguard: 61 direct owners, 27 officers), so we render
-// each group as its own paginated table. State lives in the table so the
-// surrounding panel doesn't have to track per-group page indices.
-const PEOPLE_TABLE_PAGE_SIZE = 10;
-
-type PeopleColumn<T> = {
-  header: string;
-  cell: (item: T) => React.ReactNode;
-  className?: string;
-};
-
-function PeopleTable<T>({
-  title,
-  items,
-  columns,
-  pageSize = PEOPLE_TABLE_PAGE_SIZE,
-}: {
-  title: string;
-  items: readonly T[];
-  columns: readonly PeopleColumn<T>[];
-  pageSize?: number;
-}) {
-  const [page, setPage] = useState(0);
-  const total = items.length;
-  const totalPages = Math.max(1, Math.ceil(total / pageSize));
-  // ``items`` may shrink on a parent re-render — clamp the active page so we
-  // never slice past the end after the source list got shorter.
-  const safePage = Math.min(page, totalPages - 1);
-  const start = safePage * pageSize;
-  const visible = items.slice(start, start + pageSize);
-  const showPager = total > pageSize;
-
-  return (
-    <div className="mb-5 last:mb-0">
-      <div className="mb-2 flex flex-wrap items-center justify-between gap-3">
-        <p className="text-[13px] font-semibold text-[var(--text,#0f172a)]">
-          {total > 0 ? `${title} (${total})` : title}
-        </p>
-        {showPager ? (
-          <div className="flex items-center gap-2 text-xs text-[var(--text-muted,#94a3b8)]">
-            <button
-              type="button"
-              onClick={() => setPage((p) => Math.max(0, p - 1))}
-              disabled={safePage === 0}
-              className="rounded-md px-2 py-1 hover:bg-[var(--surface-2,#f1f6fd)] disabled:cursor-not-allowed disabled:opacity-40 disabled:hover:bg-transparent"
-              aria-label={`Previous page of ${title}`}
-            >
-              Prev
-            </button>
-            <span aria-live="polite">
-              {start + 1}–{Math.min(start + pageSize, total)} of {total}
-            </span>
-            <button
-              type="button"
-              onClick={() => setPage((p) => Math.min(totalPages - 1, p + 1))}
-              disabled={safePage >= totalPages - 1}
-              className="rounded-md px-2 py-1 hover:bg-[var(--surface-2,#f1f6fd)] disabled:cursor-not-allowed disabled:opacity-40 disabled:hover:bg-transparent"
-              aria-label={`Next page of ${title}`}
-            >
-              Next
-            </button>
-          </div>
-        ) : null}
-      </div>
-      <div className="overflow-hidden rounded-2xl border border-[var(--border,rgba(30,64,175,0.1))]">
-        <table className="w-full text-sm">
-          <thead className="bg-[var(--surface-2,#f1f6fd)] text-left text-xs uppercase tracking-wide text-[var(--text-muted,#94a3b8)]">
-            <tr>
-              {columns.map((c) => (
-                <th
-                  key={c.header}
-                  className={`px-4 py-2 font-semibold ${c.className ?? ""}`}
-                >
-                  {c.header}
-                </th>
-              ))}
-            </tr>
-          </thead>
-          <tbody>
-            {visible.map((item, i) => (
-              <tr
-                key={start + i}
-                className="border-t border-[var(--border,rgba(30,64,175,0.1))] text-[var(--text-dim,#475569)]"
-              >
-                {columns.map((c) => (
-                  <td
-                    key={c.header}
-                    className={`px-4 py-2 align-top ${c.className ?? ""}`}
-                  >
-                    {c.cell(item)}
-                  </td>
-                ))}
-              </tr>
-            ))}
-          </tbody>
-        </table>
-      </div>
-    </div>
-  );
-}
-
-// Multi-channel cell renderer for the Enriched contacts table. Mirrors the
-// pattern from master-list/detail/contact-row.tsx so the IA surface shows
-// the same emails[] / phones[] / linkedin_url payload the BD surface does
-// — chips for personal email + non-work phone type, work phones unbadged,
-// LinkedIn as an external-link icon. Returns an em-dash when none of the
-// three are populated so empty rows still anchor the row height.
-function ContactChannelsCell({ contact }: { contact: AdvisorContactItem }) {
-  const emails = contact.emails ?? [];
-  const phones = contact.phones ?? [];
-  const linkedinUrl = contact.linkedin_url;
-
-  if (emails.length === 0 && phones.length === 0 && !linkedinUrl) {
-    return <span className="text-[var(--text-muted,#94a3b8)]">—</span>;
-  }
-
-  return (
-    <div className="flex flex-col gap-1 text-xs">
-      {emails.map((email, i) => (
-        <span key={`email-${i}`} className="inline-flex items-center gap-1">
-          <a
-            href={`mailto:${email.value}`}
-            className="text-[var(--accent,#6366f1)] transition hover:underline"
-          >
-            {email.value}
-          </a>
-          {email.type === "personal" ? (
-            <span className="rounded-full bg-[var(--surface-2,#f1f6fd)] px-1.5 py-0.5 text-[10px] uppercase tracking-[0.08em] text-[var(--text-muted,#94a3b8)]">
-              personal
-            </span>
-          ) : null}
-        </span>
-      ))}
-      {phones.map((phone, i) => (
-        <span key={`phone-${i}`} className="inline-flex items-center gap-1">
-          <a
-            href={`tel:${phone.value}`}
-            className="text-[var(--text-dim,#475569)] transition hover:underline"
-          >
-            {phone.value}
-          </a>
-          {phone.type !== "work" ? (
-            <span className="rounded-full bg-[var(--surface-2,#f1f6fd)] px-1.5 py-0.5 text-[10px] uppercase tracking-[0.08em] text-[var(--text-muted,#94a3b8)]">
-              {phone.type}
-            </span>
-          ) : null}
-        </span>
-      ))}
-      {linkedinUrl ? (
-        <a
-          href={linkedinUrl}
-          target="_blank"
-          rel="noopener noreferrer"
-          className="inline-flex items-center gap-1 text-[var(--accent,#6366f1)] transition hover:underline"
-          aria-label="Open LinkedIn profile in new tab"
-        >
-          <ExternalLink className="h-3 w-3" strokeWidth={2} />
-          LinkedIn
-        </a>
-      ) : null}
-    </div>
-  );
-}

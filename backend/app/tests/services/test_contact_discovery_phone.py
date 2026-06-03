@@ -105,7 +105,10 @@ async def test_snov_person_phone_is_always_none_by_design(patch_settings: None) 
     respx.post(snov.EMAIL_FINDER_URL).mock(
         return_value=httpx.Response(
             200,
-            json={"data": {"email": "bryan@example.com", "probability": 80}},
+            json={
+                "data": {"emails": [{"email": "bryan@example.com", "emailStatus": "valid"}]},
+                "status": {"identifier": "complete"},
+            },
         )
     )
 

@@ -42,34 +42,58 @@ NEW_EXAMPLE_LABELS = (
 )
 
 
-# No-customer-accounts example labels (Examples 9-11) cover the failure
-# pattern from staging pipeline_run 365: M&A advisory firms, Section
-# 15(c)(3)-1 / (k)(2)(i) exemption reports, and "does not carry customer
-# accounts" boilerplate. Without this set the prompt sends those firms
-# back as ``unknown`` / partner=null with low confidence and they land
-# as ``needs_review``; the rule + examples teach the model to return
-# ``self_clearing`` with confidence >= 0.85 instead.
+# No-customer-accounts example labels (Examples 9 and 11) cover firms
+# that genuinely have no clearing relationship — M&A advisory and
+# "does not carry customer accounts" boilerplate. Without this set the
+# prompt sends those firms back as ``unknown`` / partner=null with low
+# confidence and they land as ``needs_review``; the rule + examples
+# teach the model to return ``non_carrying`` with confidence >= 0.85
+# instead (distinct from self_clearing, which means the firm holds
+# securities for OTHER broker-dealers).
+#
+# Example 10 was a (k)(2)(i)/15c3-3 example that incorrectly directed
+# the model to return ``self_clearing`` for (k)(2)(ii) introducing
+# brokers. Reclassified to ``fully_disclosed`` in the FINRA/FOCUS
+# clearing-mismatch fix (2026-05-29) — see ``K2II_EXAMPLE_LABEL`` and
+# ``test_k2ii_example_pins_fully_disclosed_null_partner`` below.
 NO_CUSTOMER_ACCOUNTS_EXAMPLE_LABELS = (
     "Example 9 — M&A advisory only",
-    "Example 10 — Section 15(c)(3)-1",
     'Example 11 — "Does not carry customer accounts"',
+)
+
+
+# Example 10 is now the (k)(2)(ii) introducing-broker case. The model
+# must NOT treat (k)(2)(ii) as a self-clearing signal — every firm
+# claiming this exemption has a clearing partner by definition. The
+# example pins the expected output to ``fully_disclosed`` with
+# ``partner=null`` and ``confidence_score=0.5`` so a downstream FINRA
+# reconciliation step fills in the partner name.
+K2II_EXAMPLE_LABEL = (
+    "Example 10 — (k)(2)(ii) introducing-broker exemption "
+    "(partner not named in FOCUS)"
 )
 
 
 # Distinguishing fragments of the special-case rule. Pinning each
 # fragment separately gives a precise failure mode if a future refactor
-# trims one of the trigger phrases (M&A advisory / 15(c)(3)-1 /
-# does-not-carry-customer-accounts boilerplate), each of which gates a
-# different real-world filing pattern.
+# trims one of the trigger phrases. The fragments include both the
+# legitimate self-clearing triggers (M&A advisory / 15(c)(3)-1 / (k)(1)
+# / (k)(2)(i)) and the explicit (k)(2)(ii) exclusion clause — the
+# latter is load-bearing for the FINRA/FOCUS clearing-mismatch fix
+# (2026-05-29): removing it re-introduces the bug where introducing
+# brokers are misclassified as self-clearing.
 NO_CUSTOMER_ACCOUNTS_RULE_FRAGMENTS = (
     "Special-case rule",
-    "does not carry customer accounts",
-    "does not hold customer funds",
+    "no customer accounts at all",
     "M&A advisory",
     "Section 15(c)(3)-1",
-    "(k)(2)(i)",
-    "self_clearing",
+    "(k)(1) exemption",
+    "(k)(2)(i) exemption",
+    "non_carrying",
     "confidence_score >= 0.85",
+    "(k)(2)(ii) is NOT a self-clearing signal",
+    "introducing-broker exemption",
+    "Never return self_clearing for a (k)(2)(ii) firm",
 )
 
 
@@ -112,13 +136,16 @@ class TestBuildPrompt:
         assert "Example 2 — Self-Clearing" in prompt
         assert "Example 3 — Unknown/Ambiguous" in prompt
 
-    def test_clearing_type_enum_unchanged(self, service: LlmParserService) -> None:
-        """The downstream ``ClearingExtractionResult`` and rollup logic
-        depend on the exact set ``fully_disclosed | self_clearing |
-        omnibus | unknown``. Adding examples must not introduce a new
-        enum value into the schema instructions."""
+    def test_clearing_type_enum_includes_non_carrying(self, service: LlmParserService) -> None:
+        """The clearing-type enum is the five-value canonical set
+        ``fully_disclosed | self_clearing | omnibus | non_carrying |
+        unknown``. ``non_carrying`` was added so no-customer-account firms
+        stop being mislabeled ``self_clearing``."""
         prompt = service.build_prompt()
-        assert "'fully_disclosed', 'self_clearing', 'omnibus', or 'unknown'" in prompt
+        assert (
+            "'fully_disclosed', 'self_clearing', 'omnibus', 'non_carrying', or "
+            "'unknown'" in prompt
+        )
 
     @pytest.mark.parametrize("fragment", NO_CUSTOMER_ACCOUNTS_RULE_FRAGMENTS)
     def test_contains_no_customer_accounts_rule_fragments(
@@ -142,15 +169,20 @@ class TestBuildPrompt:
         prompt = service.build_prompt()
         assert label in prompt, f"missing example label: {label!r}"
 
-    def test_no_customer_accounts_examples_pin_self_clearing_partner_null(
+    def test_no_customer_accounts_examples_pin_non_carrying_partner_null(
         self, service: LlmParserService
     ) -> None:
-        """Each Example 9/10/11 worked output must show
-        ``"clearing_type": "self_clearing"`` with ``"clearing_partner":
-        null`` — that is the exact downstream shape the
-        ``partner_required`` flip in ``extract_structured_data`` relies
-        on (a self_clearing row with null partner is the only NULL-partner
-        case that lands as ``parsed`` instead of ``needs_review``)."""
+        """Examples 9 and 11 (M&A advisory + "does not carry customer
+        accounts" boilerplate) worked outputs must show
+        ``"clearing_type": "non_carrying"`` with ``"clearing_partner":
+        null`` — these firms have no customer accounts at all and are
+        distinct from self_clearing (which means the firm holds securities
+        for OTHER broker-dealers). The partner-gate exemption + the
+        clearing_validator rely on this shape so no-customer-account firms
+        stop being mislabeled self_clearing. Example 10 — the (k)(2)(ii)
+        introducing case — is intentionally excluded; see
+        ``test_k2ii_example_pins_fully_disclosed_null_partner``.
+        """
         prompt = service.build_prompt()
         for label in NO_CUSTOMER_ACCOUNTS_EXAMPLE_LABELS:
             label_idx = prompt.index(label)
@@ -163,12 +195,49 @@ class TestBuildPrompt:
                 if cut > 0:
                     tail = tail[:cut]
                     break
-            assert '"clearing_type": "self_clearing"' in tail, (
-                f"{label!r} expected output is not self_clearing"
+            assert '"clearing_type": "non_carrying"' in tail, (
+                f"{label!r} expected output is not non_carrying"
             )
             assert '"clearing_partner": null' in tail, (
                 f"{label!r} expected output does not pin clearing_partner=null"
             )
+
+    def test_k2ii_example_label_present(self, service: LlmParserService) -> None:
+        """The (k)(2)(ii) introducing-broker example must be in the prompt
+        so the model has a worked template for the most common cause of
+        misclassification we saw in the 2026-05-28 audit (38 of 50
+        mismatches were introducing brokers labeled Self-Clearing)."""
+        prompt = service.build_prompt()
+        assert K2II_EXAMPLE_LABEL in prompt, (
+            f"missing (k)(2)(ii) example label: {K2II_EXAMPLE_LABEL!r}"
+        )
+
+    def test_k2ii_example_pins_fully_disclosed_null_partner(
+        self, service: LlmParserService
+    ) -> None:
+        """The (k)(2)(ii) example must pin
+        ``clearing_type='fully_disclosed'`` with ``clearing_partner=null``
+        and ``confidence_score=0.5``. The downstream FINRA Form BD
+        reconciler relies on the NULL-partner-with-fully_disclosed shape
+        to know which rows it should fill in — collapsing this to
+        ``self_clearing`` re-introduces the bug audited on 2026-05-28."""
+        prompt = service.build_prompt()
+        label_idx = prompt.index(K2II_EXAMPLE_LABEL)
+        tail = prompt[label_idx:]
+        for next_marker in ("\nExample ", "\nNow analyze"):
+            cut = tail.find(next_marker, 1)
+            if cut > 0:
+                tail = tail[:cut]
+                break
+        assert '"clearing_type": "fully_disclosed"' in tail, (
+            "(k)(2)(ii) example expected output is not fully_disclosed"
+        )
+        assert '"clearing_partner": null' in tail, (
+            "(k)(2)(ii) example expected output does not pin clearing_partner=null"
+        )
+        assert '"confidence_score": 0.5' in tail, (
+            "(k)(2)(ii) example expected output does not pin confidence_score=0.5"
+        )
 
 
 class TestBuildPromptWithOcrText:
