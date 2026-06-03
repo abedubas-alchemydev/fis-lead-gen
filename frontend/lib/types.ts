@@ -154,9 +154,10 @@ export type DashboardStats = {
   total_active_bds: number;
   new_bds_30_days: number;
   deficiency_alerts: number;
-  // BE boundary field — mirrors FastAPI response shape. Counts firms with
-  // latest_net_capital in the [$5M, $100M] band (the "High Value Participant"
-  // business rule); decoupled from the ACG ICP scorer's lead_priority.
+  // BE boundary field — mirrors FastAPI response shape. Counts firms in the
+  // "High Value Participant" segment: latest_net_capital in the [$5M, $100M]
+  // band OR the OTC corporate-equity retailing business type. Decoupled from
+  // the ACG ICP scorer's lead_priority.
   high_value_participants: number;
 };
 

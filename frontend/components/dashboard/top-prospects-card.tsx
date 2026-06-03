@@ -9,7 +9,10 @@ import { apiRequest } from "@/lib/api";
 import { formatCurrency } from "@/lib/format";
 import type { BrokerDealerListItem, BrokerDealerListResponse } from "@/lib/types";
 
-// "High Value Participant" band — must match the KPI tile + count_high_value_participants.
+// Net-capital band for the per-row progress ring only. The list itself is the
+// broader High Value Participant segment (band OR the OTC equity-retailing
+// business type — see the fetch below); a segment firm can therefore sit
+// outside this band, in which case bandPosition clamps the ring to 0/100%.
 const HIGH_VALUE_MIN = 5_000_000;
 const HIGH_VALUE_MAX = 100_000_000;
 
@@ -62,12 +65,15 @@ export function TopProspectsCard() {
 
     async function load() {
       try {
-        // Pulls the same "High Value Participant" band the KPI tile counts
-        // ($5M ≤ latest_net_capital ≤ $100M), sorted largest-first. Decoupled
-        // from the ACG ICP scorer — see fix/high-value-participants-redefine
-        // where the KPI moved off lead_priority='hot'.
+        // Pulls the same "High Value Participant" segment the KPI tile counts
+        // (net-capital $5M–$100M OR the OTC corporate-equity retailing business
+        // type — see backend high_value_participant_filter), sorted
+        // largest-first. `list=all` keeps deficient firms in so the card's
+        // universe matches count_high_value_participants exactly. Decoupled
+        // from the ACG ICP scorer (the KPI moved off lead_priority='hot' in
+        // fix/high-value-participants-redefine).
         const response = await apiRequest<BrokerDealerListResponse>(
-          `/api/v1/broker-dealers?min_net_capital=${HIGH_VALUE_MIN}&max_net_capital=${HIGH_VALUE_MAX}&sort_by=latest_net_capital&sort_dir=desc&limit=5`
+          `/api/v1/broker-dealers?segment=high_value&list=all&sort_by=latest_net_capital&sort_dir=desc&limit=5`
         );
         if (!active) return;
         setItems(response.items);
@@ -98,12 +104,12 @@ export function TopProspectsCard() {
             Top High Value Participants
           </h3>
           <p className="mt-0.5 text-[12px] text-[var(--text-muted,#94a3b8)]">
-            Net Capital between $5M and $100M, largest first
+            Net Capital $5M–$100M or OTC equity retailers, largest first
           </p>
         </div>
         {/* .link-btn: 12px, weight 600, color var(--accent)=#6366f1. */}
         <Link
-          href={`/master-list?min_net_capital=${HIGH_VALUE_MIN}&max_net_capital=${HIGH_VALUE_MAX}`}
+          href="/master-list?segment=high_value&list=all"
           className="inline-flex items-center gap-1 text-[12px] font-semibold text-[#6366f1] transition hover:text-[#a5b4fc]"
         >
           View all
@@ -140,7 +146,7 @@ export function TopProspectsCard() {
       ) : (
         <div>
           {items.map((item, idx) => {
-            const color = "#6366f1"; // single accent — all rows are inside the band
+            const color = "#6366f1"; // single accent for every row in the segment
             const pct = bandPosition(item.latest_net_capital);
             const dashArray = `${(pct / 100) * 88} 88`;
             return (

@@ -285,8 +285,8 @@ export function DashboardHomeClient() {
               value={highValueParticipants}
               tone="amber"
               icon={KpiIconTarget}
-              helper="Net Capital between $5M and $100M"
-              href="/master-list?min_net_capital=5000000&max_net_capital=100000000"
+              helper="Net Capital $5M–$100M or OTC equity retailers"
+              href="/master-list?segment=high_value&list=all"
             />
           </div>
         </div>

@@ -158,6 +158,14 @@ function priorityVariant(priority: string | null): PillVariant {
   return "unknown";
 }
 
+// Human label for a `?segment=` preset (drives the Active chip when the user
+// lands from a deep-link). Falls back to the raw value so an unmapped segment
+// still reads sensibly rather than rendering blank.
+function segmentLabel(segment: string): string {
+  if (segment === "high_value") return "High Value Participants";
+  return segment;
+}
+
 // ── Pagination helper ─────────────────────────────────────────────────────
 // Produces the sequence shown in the mockup: [1, 2, 3, …, last]. Ellipses
 // are string literals so React can key them distinctly from page numbers.
@@ -205,6 +213,7 @@ export function MasterListWorkspaceClient() {
   const maxNetCapitalFilter = queryState.maxNetCapital;
   const registeredAfterFilter = queryState.registeredAfter;
   const registeredBeforeFilter = queryState.registeredBefore;
+  const segmentFilter = queryState.segment;
   const listMode = queryState.list;
   const sortBy = queryState.sortBy;
   const sortDir = queryState.sortDir;
@@ -284,6 +293,7 @@ export function MasterListWorkspaceClient() {
         max_net_capital: maxNetCapitalFilter ?? undefined,
         registered_after: registeredAfterFilter ?? undefined,
         registered_before: registeredBeforeFilter ?? undefined,
+        segment: segmentFilter || undefined,
         list: listMode,
         sort_by: sortBy,
         sort_dir: sortDir,
@@ -302,6 +312,7 @@ export function MasterListWorkspaceClient() {
       maxNetCapitalFilter,
       registeredAfterFilter,
       registeredBeforeFilter,
+      segmentFilter,
       listMode,
       sortBy,
       sortDir,
@@ -507,6 +518,7 @@ export function MasterListWorkspaceClient() {
     if (maxNetCapitalFilter !== null) count += 1;
     if (registeredAfterFilter !== null) count += 1;
     if (registeredBeforeFilter !== null) count += 1;
+    if (segmentFilter !== "") count += 1;
     return count;
   }, [
     search,
@@ -520,6 +532,7 @@ export function MasterListWorkspaceClient() {
     maxNetCapitalFilter,
     registeredAfterFilter,
     registeredBeforeFilter,
+    segmentFilter,
   ]);
 
   // Memoized options shape for the multi-select. Sorted by count desc with
@@ -838,6 +851,14 @@ export function MasterListWorkspaceClient() {
             <span className="text-[11px] font-semibold uppercase tracking-[0.08em] text-[var(--text-muted,#94a3b8)]">
               Active
             </span>
+            {segmentFilter !== "" ? (
+              <Tag
+                title={`Segment: ${segmentLabel(segmentFilter)}`}
+                onDismiss={() => updateState({ segment: "", page: 1 })}
+              >
+                {segmentLabel(segmentFilter)}
+              </Tag>
+            ) : null}
             {stateFilter !== "" ? (
               <Tag onDismiss={() => updateState({ state: "", page: 1 })}>
                 State: {stateFilter}
