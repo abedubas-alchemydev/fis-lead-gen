@@ -6,6 +6,7 @@ import contextlib
 import ipaddress
 import logging
 import tempfile
+import time
 from collections.abc import Iterator
 from datetime import date
 from pathlib import Path
@@ -228,6 +229,45 @@ def _validate_sec_url(url: str) -> None:
     if ip.is_private or ip.is_loopback or ip.is_link_local or ip.is_reserved or ip.is_multicast:
         raise ValueError(f"IP literal {host!r} targets a private or reserved range.")
 
+
+def _sec_retry_after_seconds(response: httpx.Response, attempt: int) -> float:
+    """Seconds to wait before retrying a SEC ``429 Too Many Requests``.
+
+    SEC EDGAR throttles by source IP at ~10 req/s, shared across the whole
+    Cloud Run project. When that budget is momentarily exhausted, SEC/Akamai
+    answers with a 429 and (usually) a ``Retry-After`` header. Honor it so a
+    request-path call rides out the throttle instead of giving up after the
+    thin default backoff and surfacing a raw error to the user. Mirrors the
+    proven handling in ``services/edgar.py``.
+
+    Falls back to capped exponential backoff when the header is absent or
+    malformed. Capped at 60s so a hostile / bogus header cannot wedge a
+    request-path call for minutes.
+    """
+    raw = response.headers.get("retry-after")
+    if raw:
+        try:
+            return min(float(raw), 60.0)
+        except ValueError:
+            pass
+    return float(min(2**attempt, 30))
+
+
+# In-process cache for the per-firm submissions document (the
+# ``data.sec.gov/submissions/CIK{...}.json`` payload). Because SEC throttles
+# the shared Cloud Run egress IP, the focus-report endpoint cannot re-fetch
+# SEC on every click — rapid clicks plus concurrent extraction jobs blow the
+# 10 req/s budget and the user gets a 429. Caching the parsed submissions doc
+# for a few minutes absorbs repeat clicks and same-firm concurrency while
+# staying well under SEC's daily filing cadence. Mirrors the _FILINGS_CACHE
+# pattern in services/edgar.py. Keyed by the submissions URL; values are
+# (monotonic_stamped_at, payload) tuples. Per-process (per Cloud Run worker),
+# size-bounded so a long-lived instance cannot grow one entry per firm forever.
+_SUBMISSIONS_CACHE: dict[str, tuple[float, dict[str, object]]] = {}
+_SUBMISSIONS_CACHE_TTL_SECONDS = 10 * 60
+_SUBMISSIONS_CACHE_MAX_ENTRIES = 1024
+
+
 async def _fetch_edgar_index_json(url: str) -> dict[str, object]:
     """Module-level twin of ``PdfDownloaderService._get_json_with_retries``.
 
@@ -257,6 +297,14 @@ async def _fetch_edgar_index_json(url: str) -> dict[str, object]:
                 follow_redirects=False,
             ) as client:
                 response = await client.get(url)
+            if response.status_code == 429:
+                # SEC throttle: honor Retry-After and retry rather than
+                # collapsing the 429 into the generic backoff below (which
+                # ignores the header and caps at 8s). See _sec_retry_after_seconds.
+                if attempt == settings.sec_request_max_retries:
+                    response.raise_for_status()
+                await asyncio.sleep(_sec_retry_after_seconds(response, attempt))
+                continue
             response.raise_for_status()
             payload = response.json()
             if not isinstance(payload, dict):
@@ -352,7 +400,7 @@ class PdfDownloaderService:
         if not broker_dealer.filings_index_url:
             return []
 
-        submissions_payload = await self._get_json_with_retries(broker_dealer.filings_index_url)
+        submissions_payload = await self._get_submissions_json_cached(broker_dealer.filings_index_url)
         filings = list(self._iter_submission_filings(submissions_payload, broker_dealer.filings_index_url or ""))
         filings_section = submissions_payload.get("filings")
         additional_files = filings_section.get("files", []) if isinstance(filings_section, dict) else []
@@ -476,7 +524,7 @@ class PdfDownloaderService:
         if not broker_dealer.filings_index_url:
             return None
 
-        submissions_payload = await self._get_json_with_retries(broker_dealer.filings_index_url)
+        submissions_payload = await self._get_submissions_json_cached(broker_dealer.filings_index_url)
         filing = await self._find_latest_x17a5_filing(broker_dealer, submissions_payload)
         if filing is None:
             return None
@@ -647,6 +695,14 @@ class PdfDownloaderService:
                     follow_redirects=False,
                 ) as client:
                     response = await client.get(url)
+                if response.status_code == 429:
+                    # SEC throttle: honor Retry-After and retry rather than
+                    # collapsing the 429 into the generic backoff below (which
+                    # ignores the header and caps at 8s). See _sec_retry_after_seconds.
+                    if attempt == settings.sec_request_max_retries:
+                        response.raise_for_status()
+                    await asyncio.sleep(_sec_retry_after_seconds(response, attempt))
+                    continue
                 response.raise_for_status()
                 payload = response.json()
                 if not isinstance(payload, dict):
@@ -659,6 +715,36 @@ class PdfDownloaderService:
                 await asyncio.sleep(min(2**attempt, 8))
 
         raise RuntimeError("Unable to retrieve SEC JSON payload.") from last_error
+
+    async def _get_submissions_json_cached(self, url: str) -> dict[str, object]:
+        """Fetch a per-firm submissions JSON doc with a short in-process cache.
+
+        Thin wrapper over ``_get_json_with_retries`` for the *top-level*
+        ``data.sec.gov/submissions/CIK{...}.json`` document — the single call
+        that backs the focus-report button and the financial pipelines. The
+        cache is what stops a rage-clicked focus-report link (or two pipelines
+        touching the same firm) from each re-hitting SEC and tripping the
+        shared-IP 429. The paginated history sub-files and the per-accession
+        ``index.json`` are intentionally NOT cached here — they still go
+        through ``_get_json_with_retries`` directly. See ``_SUBMISSIONS_CACHE``.
+        """
+        now = time.monotonic()
+        cached = _SUBMISSIONS_CACHE.get(url)
+        if cached is not None and (now - cached[0]) < _SUBMISSIONS_CACHE_TTL_SECONDS:
+            return cached[1]
+
+        payload = await self._get_json_with_retries(url)
+
+        # Evict the oldest entry when the cache is full and this is a new key.
+        # O(n) over a tiny bounded dict, and only when saturated.
+        if (
+            len(_SUBMISSIONS_CACHE) >= _SUBMISSIONS_CACHE_MAX_ENTRIES
+            and url not in _SUBMISSIONS_CACHE
+        ):
+            oldest_url = min(_SUBMISSIONS_CACHE, key=lambda key: _SUBMISSIONS_CACHE[key][0])
+            _SUBMISSIONS_CACHE.pop(oldest_url, None)
+        _SUBMISSIONS_CACHE[url] = (now, payload)
+        return payload
 
     async def _download_bytes_with_retries(self, url: str) -> bytes:
         _validate_sec_url(url)
@@ -683,6 +769,14 @@ class PdfDownloaderService:
                     follow_redirects=False,
                 ) as client:
                     async with client.stream("GET", url) as response:
+                        if response.status_code == 429:
+                            # SEC throttle: honor Retry-After before reading the
+                            # body, instead of the generic 8s backoff below.
+                            # See _sec_retry_after_seconds.
+                            if attempt == settings.sec_request_max_retries:
+                                response.raise_for_status()
+                            await asyncio.sleep(_sec_retry_after_seconds(response, attempt))
+                            continue
                         response.raise_for_status()
                         content_type = response.headers.get("content-type", "").lower()
                         if "pdf" not in content_type and not url.lower().endswith(".pdf"):
@@ -736,6 +830,14 @@ class PdfDownloaderService:
                     follow_redirects=False,
                 ) as client:
                     async with client.stream("GET", url) as response:
+                        if response.status_code == 429:
+                            # SEC throttle: honor Retry-After before reading the
+                            # body, instead of the generic 8s backoff below.
+                            # See _sec_retry_after_seconds.
+                            if attempt == settings.sec_request_max_retries:
+                                response.raise_for_status()
+                            await asyncio.sleep(_sec_retry_after_seconds(response, attempt))
+                            continue
                         response.raise_for_status()
                         content_type = response.headers.get("content-type", "").lower()
                         if "pdf" not in content_type and not url.lower().endswith(".pdf"):

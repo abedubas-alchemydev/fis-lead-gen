@@ -6,6 +6,7 @@ import logging
 import re
 from datetime import date, datetime, time, timedelta, timezone
 
+import httpx
 from fastapi import APIRouter, BackgroundTasks, Body, Depends, HTTPException, Query, status
 from fastapi.responses import Response
 from pydantic import BaseModel, Field
@@ -321,6 +322,27 @@ async def download_focus_report_pdf(
     with pdf_tempdir(prefix="focus_report_endpoint_") as tmp_dir:
         try:
             record = await downloader.download_latest_x17a5_pdf(broker_dealer, tmp_dir)
+        except httpx.HTTPStatusError as exc:
+            # SEC EDGAR throttles our shared Cloud Run egress IP (~10 req/s,
+            # project-wide). Surface a clean, retryable 503 — carrying the
+            # upstream Retry-After when present — instead of leaking the raw
+            # httpx error into the browser tab. The focus-report link opens
+            # this endpoint directly (a plain <a> in the detail page), so
+            # whatever this returns is exactly what the user sees.
+            if exc.response is not None and exc.response.status_code == 429:
+                retry_after = exc.response.headers.get("retry-after", "30")
+                raise HTTPException(
+                    status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+                    detail=(
+                        "SEC EDGAR is rate-limiting requests right now. "
+                        "Please wait a few seconds and try again."
+                    ),
+                    headers={"Retry-After": retry_after},
+                ) from exc
+            raise HTTPException(
+                status_code=status.HTTP_502_BAD_GATEWAY,
+                detail=f"Could not fetch FOCUS report from SEC: {exc}",
+            ) from exc
         except Exception as exc:  # noqa: BLE001
             raise HTTPException(
                 status_code=status.HTTP_502_BAD_GATEWAY,
