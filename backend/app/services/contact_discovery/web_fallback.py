@@ -35,7 +35,11 @@ from app.services.contact_discovery.base import (
     PhoneHit,
 )
 from app.services.contact_discovery.linkedin_search import LinkedInSearchProvider
-from app.services.email_extractor.site_crawler import SiteCrawler
+from app.services.email_extractor.site_crawler import (
+    PHONE_RE,
+    SiteCrawler,
+    _clean_phone,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -124,6 +128,36 @@ def email_matches_person(local_part: str, first: str, last: str) -> bool:
     return False
 
 
+# A scraped phone is attached to a person only when it appears within this many
+# characters of a mention of them (first+last name co-occurrence, or a matched
+# email) in the page's flattened text. Same-page-but-far numbers are firm office
+# lines, not the person's -- the live test showed every office number on a team
+# page landing on every banker without this guard.
+_PHONE_PROXIMITY_CHARS = 160
+
+
+def _person_anchor_positions(
+    text: str, first: str, last: str, emails: set[str]
+) -> list[int]:
+    """Char offsets in ``text`` (lowercased) where this person is mentioned.
+
+    An anchor is either (a) a first-name occurrence within 40 chars of a
+    last-name occurrence (a real name mention like ``birgir brynjolfsson`` or
+    ``brynjolfsson, birgir``), or (b) any occurrence of one of their matched
+    emails. A phone is kept only when it sits near one of these anchors.
+    """
+    anchors: list[int] = []
+    if first and last:
+        f_pos = [m.start() for m in re.finditer(re.escape(first), text)]
+        l_pos = [m.start() for m in re.finditer(re.escape(last), text)]
+        for lp in l_pos:
+            if any(abs(fp - lp) <= 40 for fp in f_pos):
+                anchors.append(lp)
+    for em in emails:
+        anchors.extend(m.start() for m in re.finditer(re.escape(em), text))
+    return anchors
+
+
 async def discover_web_fallback(
     *,
     domain: str | None,
@@ -150,7 +184,6 @@ async def discover_web_fallback(
     # ---- crawl the firm site ONCE; distribute across all gap people ----
     crawled_emails: list[tuple[str, str]] = []  # (local_part, full_email)
     page_texts: dict[str, str] = {}
-    phones_by_page: dict[str, list[str]] = {}
 
     norm_domain = (domain or "").strip().lower().lstrip(".")
     if norm_domain.startswith("www."):
@@ -175,11 +208,6 @@ async def discover_web_fallback(
             if phones_enabled:
                 for page in getattr(crawl, "pages", []) or []:
                     page_texts[page.url] = (page.text or "").lower()
-                for pdraft in getattr(crawl, "phones", []) or []:
-                    if pdraft.attribution and pdraft.value:
-                        phones_by_page.setdefault(pdraft.attribution, []).append(
-                            pdraft.value
-                        )
 
     out: dict[int, DiscoveryResult] = {}
     for person in people:
@@ -210,27 +238,36 @@ async def discover_web_fallback(
                 EmailHit(value=full, type="work", confidence=conf, source=_PROVIDER_NAME)
             )
 
-        # (c) phones co-located with this person (opt-in, precision-first)
+        # (c) phones PROXIMATE to this person (opt-in, precision-first). A number
+        # must sit within _PHONE_PROXIMITY_CHARS of a mention of this person on
+        # the page. A team/contact page lists everyone's name plus all office
+        # lines, so same-page co-location alone stamps every office number onto
+        # every person; proximity keeps only a number next to THIS person (their
+        # direct line), if any. tel: links (not in visible text) are dropped here
+        # by design -- they can't be tied to a specific person without the DOM.
         phone_hits: list[PhoneHit] = []
         if phones_enabled and page_texts:
             seen_phone: set[str] = set()
-            for url, text in page_texts.items():
-                name_present = first.lower() in text and last.lower() in text
-                email_present = any(em in text for em in matched_emails)
-                if not (name_present or email_present):
+            for text in page_texts.values():
+                anchors = _person_anchor_positions(
+                    text, first.lower(), last.lower(), matched_emails
+                )
+                if not anchors:
                     continue
-                for value in phones_by_page.get(url, []):
-                    if value in seen_phone:
+                for m in PHONE_RE.finditer(text):
+                    value = _clean_phone(m.group())
+                    if not value or value in seen_phone:
                         continue
-                    seen_phone.add(value)
-                    phone_hits.append(
-                        PhoneHit(
-                            value=value,
-                            type="work",
-                            confidence=conf,
-                            source=_PROVIDER_NAME,
+                    if any(abs(m.start() - a) <= _PHONE_PROXIMITY_CHARS for a in anchors):
+                        seen_phone.add(value)
+                        phone_hits.append(
+                            PhoneHit(
+                                value=value,
+                                type="work",
+                                confidence=conf,
+                                source=_PROVIDER_NAME,
+                            )
                         )
-                    )
 
         if not (linkedin_url or email_hits or phone_hits):
             continue
