@@ -84,6 +84,11 @@ from app.services.chatbot_urls import (
     ii_list_url,
     investors_url,
 )
+from app.services.dual_registration import (
+    DUAL_REGISTRATION_LIMIT_DEFAULT,
+    DUAL_REGISTRATION_LIMIT_MAX,
+    list_dual_registered_firms,
+)
 from app.services.finra_pdf_service import (
     FinraPdfFetchError,
     FinraPdfNotFound,
@@ -232,6 +237,15 @@ def _clamp_web_limit(raw: Any) -> int:
     except (TypeError, ValueError):
         n = WEB_RESEARCH_LIMIT_DEFAULT
     return max(1, min(n, WEB_RESEARCH_LIMIT_MAX))
+
+
+def _clamp_dual_limit(raw: Any) -> int:
+    """Clamp helper for find_dual_registered_firms."""
+    try:
+        n = int(raw) if raw is not None else DUAL_REGISTRATION_LIMIT_DEFAULT
+    except (TypeError, ValueError):
+        n = DUAL_REGISTRATION_LIMIT_DEFAULT
+    return max(1, min(n, DUAL_REGISTRATION_LIMIT_MAX))
 
 
 def _opt_str(args: Mapping[str, Any], key: str) -> str | None:
@@ -2380,6 +2394,63 @@ async def _execute_research_term(
     )
 
 
+def _project_dual_firm(firm: Any) -> dict[str, Any]:
+    """Project a dual-registered firm with deep-links to both records."""
+    out = {
+        "firm_name": firm.name,
+        "crd_number": firm.crd_number,
+        "cik": firm.cik,
+        "city": firm.city,
+        "state": firm.state,
+        "lead_priority": firm.lead_priority,
+        "broker_dealer_id": firm.broker_dealer_id,
+        "advisor_id": firm.advisor_id,
+        # Primary deep-link (broker-dealer detail) + the matching advisor page.
+        "link": bd_detail_url(firm.broker_dealer_id),
+        "advisor_link": (
+            ia_detail_url(firm.advisor_id)
+            if firm.advisor_id is not None
+            else None
+        ),
+    }
+    return _jsonable(out)
+
+
+async def _execute_find_dual_registered_firms(
+    user: AuthenticatedUser,
+    db: AsyncSession,
+    args: Mapping[str, Any],
+) -> dict[str, Any]:
+    """List firms registered as BOTH a broker-dealer and an investment adviser.
+
+    Gated on MASTER_LIST — the result is a broker-dealer list annotated with
+    each firm's matching advisor record (and a deep-link to it). Firms are
+    matched on a shared CRD; optional state / name-substring filters.
+    """
+    denial = _check_feature(user, MASTER_LIST)
+    if denial is not None:
+        return denial
+
+    try:
+        firms, total = await list_dual_registered_firms(
+            db,
+            state=_opt_str(args, "state"),
+            search=_opt_str(args, "search"),
+            limit=_clamp_dual_limit(args.get("limit")),
+        )
+    except Exception:
+        logger.exception("doxie find_dual_registered_firms failed")
+        return {
+            "error": "tool_error",
+            "message": "Couldn't look up dual-registered firms right now.",
+        }
+
+    return {
+        "items": [_project_dual_firm(f) for f in firms],
+        "total_matched": total,
+    }
+
+
 # ── Tool declarations ────────────────────────────────────────────────────
 
 _SEARCH_PARAMETERS_SCHEMA: dict[str, Any] = {
@@ -2844,6 +2915,34 @@ _RESEARCH_TERM_PARAMETERS_SCHEMA: dict[str, Any] = {
 }
 
 
+_DUAL_REGISTRATION_PARAMETERS_SCHEMA: dict[str, Any] = {
+    "type": "object",
+    "properties": {
+        "state": {
+            "type": "string",
+            "description": (
+                "Optional 2-letter US state code to limit results to firms "
+                "based there (e.g. 'NY', 'TX')."
+            ),
+        },
+        "search": {
+            "type": "string",
+            "description": "Optional firm-name substring to narrow results.",
+        },
+        "limit": {
+            "type": "integer",
+            "minimum": 1,
+            "maximum": DUAL_REGISTRATION_LIMIT_MAX,
+            "description": (
+                f"Max firms to return. Defaults to "
+                f"{DUAL_REGISTRATION_LIMIT_DEFAULT}, capped at "
+                f"{DUAL_REGISTRATION_LIMIT_MAX}."
+            ),
+        },
+    },
+}
+
+
 TOOL_REGISTRY: dict[str, Tool] = {
     "search_broker_dealers": Tool(
         name="search_broker_dealers",
@@ -3153,5 +3252,20 @@ TOOL_REGISTRY: dict[str, Tool] = {
         timeout_s=WEB_RESEARCH_TOOL_TIMEOUT_S,
         # cacheable defaults True — the 60s LRU dedups a term re-asked within
         # one chat, sparing the provider and the DB.
+    ),
+    "find_dual_registered_firms": Tool(
+        name="find_dual_registered_firms",
+        description=(
+            "List firms registered as BOTH a broker-dealer (BD) and an "
+            "investment adviser (RIA) — i.e. dual-registrants. Use this for "
+            "questions like 'which firms are both an RIA and a BD', 'show me "
+            "dual-registered firms in Texas', or 'which broker-dealers are "
+            "also advisers'. Firms are matched on a shared CRD. Optional "
+            "state and firm-name filters. Each result deep-links to both the "
+            "broker-dealer and the advisor record."
+        ),
+        parameters_schema=_DUAL_REGISTRATION_PARAMETERS_SCHEMA,
+        feature_key=MASTER_LIST,
+        execute=_execute_find_dual_registered_firms,
     ),
 }

@@ -1000,6 +1000,8 @@ def test_tool_registry_has_expected_names() -> None:
         "get_app_help",
         # Doxie web-research / learned-term glossary tool.
         "research_term",
+        # Doxie BD<->IA dual-registration tool.
+        "find_dual_registered_firms",
     }
 
 
@@ -2678,3 +2680,88 @@ class TestResearchTerm:
         await tool.execute(bd_user, db_stub, {"query": "x", "limit": 999})
 
         assert captured["limit"] == chatbot_tools.WEB_RESEARCH_LIMIT_MAX
+
+
+class TestFindDualRegisteredFirms:
+    """Lists firms registered as both a BD and an RIA (matched on CRD).
+    Gated on MASTER_LIST; the cross-table query is mocked here."""
+
+    async def test_returns_items_with_both_links(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        bd_user: AuthenticatedUser,
+        db_stub: object,
+    ) -> None:
+        from types import SimpleNamespace
+
+        firm = SimpleNamespace(
+            name="Dually Inc",
+            crd_number="12345",
+            cik="0001",
+            city="New York",
+            state="NY",
+            lead_priority="hot",
+            broker_dealer_id=7,
+            advisor_id=42,
+        )
+        monkeypatch.setattr(
+            chatbot_tools,
+            "list_dual_registered_firms",
+            AsyncMock(return_value=([firm], 1)),
+        )
+
+        tool = chatbot_tools.TOOL_REGISTRY["find_dual_registered_firms"]
+        result = await tool.execute(bd_user, db_stub, {})
+
+        assert result["total_matched"] == 1
+        item = result["items"][0]
+        assert item["firm_name"] == "Dually Inc"
+        assert item["link"] == "/master-list/7"
+        assert item["advisor_link"] == "/advisor-list/42"
+
+    async def test_no_access_user_denied(
+        self, no_access_user: AuthenticatedUser, db_stub: object
+    ) -> None:
+        tool = chatbot_tools.TOOL_REGISTRY["find_dual_registered_firms"]
+        result = await tool.execute(no_access_user, db_stub, {})
+        assert result["error"] == "no_access"
+
+    async def test_empty_result(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        bd_user: AuthenticatedUser,
+        db_stub: object,
+    ) -> None:
+        monkeypatch.setattr(
+            chatbot_tools,
+            "list_dual_registered_firms",
+            AsyncMock(return_value=([], 0)),
+        )
+        tool = chatbot_tools.TOOL_REGISTRY["find_dual_registered_firms"]
+        result = await tool.execute(bd_user, db_stub, {})
+        assert result["items"] == []
+        assert result["total_matched"] == 0
+
+    async def test_filters_and_limit_forwarded_and_clamped(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        bd_user: AuthenticatedUser,
+        db_stub: object,
+    ) -> None:
+        captured: dict[str, Any] = {}
+
+        async def fake(
+            db: Any, *, state: Any = None, search: Any = None, limit: int = 10
+        ) -> tuple[list[Any], int]:
+            captured.update(state=state, search=search, limit=limit)
+            return [], 0
+
+        monkeypatch.setattr(chatbot_tools, "list_dual_registered_firms", fake)
+        tool = chatbot_tools.TOOL_REGISTRY["find_dual_registered_firms"]
+        await tool.execute(
+            bd_user, db_stub, {"state": "tx", "search": " Acme ", "limit": 999}
+        )
+
+        assert captured["state"] == "tx"
+        assert captured["search"] == "Acme"
+        assert captured["limit"] == chatbot_tools.DUAL_REGISTRATION_LIMIT_MAX
