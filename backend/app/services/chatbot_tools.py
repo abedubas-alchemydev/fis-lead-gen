@@ -64,6 +64,11 @@ from app.services.chatbot_app_knowledge import (
     find_topics,
     list_all_features,
 )
+from app.services.chatbot_learned_terms import (
+    get_learned_term,
+    normalize_term,
+    upsert_learned_term,
+)
 from app.services.chatbot_semantic import (
     ChatbotSemanticService,
     ENTITY_TYPE_BROKER_DEALER,
@@ -99,6 +104,7 @@ from app.services.sec_pdf_fetcher import (
     fetch_sec_pdf_bytes,
 )
 from app.services.vault_retrieval import retrieve_chunks
+from app.services.web_research import search_web
 
 logger = logging.getLogger(__name__)
 
@@ -115,6 +121,14 @@ CLIENT_TYPE_LIST_CAP = 10
 # more than returning 25 fuzzy name matches.
 LIST_FILTER_LIMIT_DEFAULT = 10
 LIST_FILTER_LIMIT_MAX = 25
+# research_term (Doxie's learned-term glossary + web lookup). Fewer sources
+# than the search tools — a definition needs a couple of citations, not a list.
+WEB_RESEARCH_LIMIT_DEFAULT = 4
+WEB_RESEARCH_LIMIT_MAX = 6
+# search_web bounds each provider call to ~6s, but the SerpAPI fallback adds
+# one ~2s retry; give the tool headroom above the 5s TOOL_EXECUTION_TIMEOUT_S
+# default so a fallback search isn't chopped mid-call.
+WEB_RESEARCH_TOOL_TIMEOUT_S = 15.0
 
 
 @dataclass(frozen=True)
@@ -209,6 +223,15 @@ def _clamp_filter_limit(raw: Any) -> int:
     except (TypeError, ValueError):
         n = LIST_FILTER_LIMIT_DEFAULT
     return max(1, min(n, LIST_FILTER_LIMIT_MAX))
+
+
+def _clamp_web_limit(raw: Any) -> int:
+    """Clamp helper for research_term (fewer sources than the search tools)."""
+    try:
+        n = int(raw) if raw is not None else WEB_RESEARCH_LIMIT_DEFAULT
+    except (TypeError, ValueError):
+        n = WEB_RESEARCH_LIMIT_DEFAULT
+    return max(1, min(n, WEB_RESEARCH_LIMIT_MAX))
 
 
 def _opt_str(args: Mapping[str, Any], key: str) -> str | None:
@@ -2273,6 +2296,90 @@ async def _execute_get_app_help(
     }
 
 
+async def _execute_research_term(
+    user: AuthenticatedUser,
+    db: AsyncSession,
+    args: Mapping[str, Any],
+) -> dict[str, Any]:
+    """Define an unfamiliar term, learning it for next time.
+
+    No feature-permission gate — like ``get_app_help``, every authenticated
+    user may ask Doxie to define a term they (or Doxie) don't know.
+
+    Flow: normalize the term and check the persisted glossary first; on a
+    hit, return the stored definition with no web call. On a miss, research
+    the public web (serper -> SerpAPI), persist the result so the term is
+    "learned" for every future chat, and return it. If neither the glossary
+    nor the web yields anything, return an ``unavailable`` error so Doxie can
+    fall back to its own knowledge.
+    """
+    query = _opt_str(args, "query") or _opt_str(args, "term")
+    if not query:
+        return {
+            "error": "invalid_args",
+            "message": (
+                "Argument 'query' is required — pass the term or concept "
+                "to look up."
+            ),
+        }
+
+    # 1) Glossary first — what Doxie has already learned. A lookup failure
+    #    must not sink the request; fall through to a fresh web search.
+    try:
+        existing = await get_learned_term(db, normalize_term(query))
+    except Exception:
+        logger.exception("research_term glossary lookup failed")
+        existing = None
+    if existing is not None:
+        return _jsonable(
+            {
+                "query": query,
+                "answer": existing.definition,
+                "source_url": existing.source_url,
+                "source": "glossary",
+            }
+        )
+
+    # 2) Miss → research the public web.
+    web = await search_web(query, limit=_clamp_web_limit(args.get("limit")))
+    results = web.get("results") or []
+    definition = web.get("answer") or (
+        results[0]["snippet"] if results else None
+    )
+    if not definition:
+        return {
+            "error": "unavailable",
+            "message": (
+                "Couldn't look that term up on the web right now. Answer "
+                "from your own knowledge if you can; otherwise tell the "
+                "user you weren't able to research it."
+            ),
+        }
+
+    # 3) Learn it — persist for next time. A storage failure must not sink
+    #    the answer we already have, so swallow and still return.
+    try:
+        await upsert_learned_term(
+            db,
+            term=query,
+            definition=definition,
+            source_url=results[0]["url"] if results else None,
+            source=web.get("provider"),
+            user_id=user.id,
+        )
+    except Exception:
+        logger.exception("research_term glossary upsert failed")
+
+    return _jsonable(
+        {
+            "query": query,
+            "answer": definition,
+            "results": results,
+            "source": "public_web",
+        }
+    )
+
+
 # ── Tool declarations ────────────────────────────────────────────────────
 
 _SEARCH_PARAMETERS_SCHEMA: dict[str, Any] = {
@@ -2711,6 +2818,32 @@ _APP_HELP_PARAMETERS_SCHEMA: dict[str, Any] = {
 }
 
 
+_RESEARCH_TERM_PARAMETERS_SCHEMA: dict[str, Any] = {
+    "type": "object",
+    "properties": {
+        "query": {
+            "type": "string",
+            "description": (
+                "The unfamiliar term, acronym, or concept to define — e.g. "
+                "'SOFR', 'Reg BI', 'T+1 settlement', 'CCP'. Pass the term "
+                "itself, not a full sentence."
+            ),
+        },
+        "limit": {
+            "type": "integer",
+            "minimum": 1,
+            "maximum": WEB_RESEARCH_LIMIT_MAX,
+            "description": (
+                f"Max sources to return. Defaults to "
+                f"{WEB_RESEARCH_LIMIT_DEFAULT}, capped at "
+                f"{WEB_RESEARCH_LIMIT_MAX}."
+            ),
+        },
+    },
+    "required": ["query"],
+}
+
+
 TOOL_REGISTRY: dict[str, Tool] = {
     "search_broker_dealers": Tool(
         name="search_broker_dealers",
@@ -2995,5 +3128,30 @@ TOOL_REGISTRY: dict[str, Tool] = {
         # on it.
         feature_key="dashboard",
         execute=_execute_get_app_help,
+    ),
+    "research_term": Tool(
+        name="research_term",
+        description=(
+            "Define an unfamiliar financial or technical TERM, acronym, or "
+            "concept. Doxie checks its learned glossary first, then the "
+            "public web, and remembers the result. Call this FIRST whenever "
+            "the user's request hinges on a term you don't fully know (e.g. "
+            "'SOFR', 'Reg BI', 'T+1 settlement', 'CCP') or the question is "
+            "ambiguous, BEFORE using the data tools. Returns a short "
+            "definition and a few cited sources. Do NOT use it to look up a "
+            "specific firm's data, filings, financials, or contacts — the "
+            "database tools own that."
+        ),
+        parameters_schema=_RESEARCH_TERM_PARAMETERS_SCHEMA,
+        # ``feature_key`` is informational only — the execute function never
+        # gates on permissions (it omits _check_feature, like get_app_help),
+        # so every authenticated user can have Doxie define a term.
+        feature_key="dashboard",
+        execute=_execute_research_term,
+        # A web round-trip plus the SerpAPI single-retry can exceed the 5s
+        # default; give headroom so a fallback search isn't chopped mid-call.
+        timeout_s=WEB_RESEARCH_TOOL_TIMEOUT_S,
+        # cacheable defaults True — the 60s LRU dedups a term re-asked within
+        # one chat, sparing the provider and the DB.
     ),
 }

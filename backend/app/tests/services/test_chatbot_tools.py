@@ -998,6 +998,8 @@ def test_tool_registry_has_expected_names() -> None:
         "ask_vault",
         # Phase 4 PR #1 — app-knowledge tool.
         "get_app_help",
+        # Doxie web-research / learned-term glossary tool.
+        "research_term",
     }
 
 
@@ -2477,3 +2479,202 @@ class TestGetAppHelp:
         result = await tool.execute(bd_user, db_stub, {"topic": "Master List"})
         # Should not raise.
         json.dumps(result)
+
+
+class TestResearchTerm:
+    """research_term is ungated (every user can define a term) and *learns*:
+    a glossary hit short-circuits the web, while a miss researches the web
+    and persists the result. ``search_web`` and the glossary repo helpers
+    are monkeypatched here — no network, no DB."""
+
+    async def test_missing_query_returns_invalid_args(
+        self, bd_user: AuthenticatedUser, db_stub: object
+    ) -> None:
+        tool = chatbot_tools.TOOL_REGISTRY["research_term"]
+        result = await tool.execute(bd_user, db_stub, {})
+        assert result["error"] == "invalid_args"
+
+    async def test_glossary_hit_short_circuits_web(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        bd_user: AuthenticatedUser,
+        db_stub: object,
+    ) -> None:
+        from types import SimpleNamespace
+
+        hit = SimpleNamespace(
+            definition="A benchmark overnight rate.",
+            source_url="https://example.test/sofr",
+        )
+        monkeypatch.setattr(
+            chatbot_tools, "get_learned_term", AsyncMock(return_value=hit)
+        )
+        web = AsyncMock()
+        monkeypatch.setattr(chatbot_tools, "search_web", web)
+        upsert = AsyncMock()
+        monkeypatch.setattr(chatbot_tools, "upsert_learned_term", upsert)
+
+        tool = chatbot_tools.TOOL_REGISTRY["research_term"]
+        result = await tool.execute(bd_user, db_stub, {"query": "SOFR"})
+
+        assert result["source"] == "glossary"
+        assert result["answer"] == "A benchmark overnight rate."
+        web.assert_not_awaited()
+        upsert.assert_not_awaited()
+
+    async def test_miss_researches_web_and_persists(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        bd_user: AuthenticatedUser,
+        db_stub: object,
+    ) -> None:
+        monkeypatch.setattr(
+            chatbot_tools, "get_learned_term", AsyncMock(return_value=None)
+        )
+        monkeypatch.setattr(
+            chatbot_tools,
+            "search_web",
+            AsyncMock(
+                return_value={
+                    "results": [
+                        {
+                            "title": "T+1",
+                            "url": "https://sec.gov/t1",
+                            "snippet": "Settles next business day.",
+                        }
+                    ],
+                    "answer": "T+1 settles one business day after trade.",
+                    "provider": "serpapi",
+                }
+            ),
+        )
+        upsert = AsyncMock()
+        monkeypatch.setattr(chatbot_tools, "upsert_learned_term", upsert)
+
+        tool = chatbot_tools.TOOL_REGISTRY["research_term"]
+        result = await tool.execute(
+            bd_user, db_stub, {"query": "T+1 settlement"}
+        )
+
+        assert result["source"] == "public_web"
+        assert result["answer"] == "T+1 settles one business day after trade."
+        upsert.assert_awaited_once()
+        kwargs = upsert.await_args.kwargs
+        assert kwargs["term"] == "T+1 settlement"
+        assert kwargs["definition"] == "T+1 settles one business day after trade."
+        assert kwargs["source"] == "serpapi"
+        assert kwargs["source_url"] == "https://sec.gov/t1"
+
+    async def test_unavailable_when_glossary_and_web_empty(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        bd_user: AuthenticatedUser,
+        db_stub: object,
+    ) -> None:
+        monkeypatch.setattr(
+            chatbot_tools, "get_learned_term", AsyncMock(return_value=None)
+        )
+        monkeypatch.setattr(
+            chatbot_tools,
+            "search_web",
+            AsyncMock(
+                return_value={"results": [], "answer": None, "provider": None}
+            ),
+        )
+        upsert = AsyncMock()
+        monkeypatch.setattr(chatbot_tools, "upsert_learned_term", upsert)
+
+        tool = chatbot_tools.TOOL_REGISTRY["research_term"]
+        result = await tool.execute(bd_user, db_stub, {"query": "zzz"})
+
+        assert result["error"] == "unavailable"
+        upsert.assert_not_awaited()
+
+    async def test_term_alias_and_snippet_fallback(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        bd_user: AuthenticatedUser,
+        db_stub: object,
+    ) -> None:
+        """The 'term' arg aliases 'query', and when the web result has no
+        high-confidence answer the top snippet is used as the definition."""
+        monkeypatch.setattr(
+            chatbot_tools, "get_learned_term", AsyncMock(return_value=None)
+        )
+        monkeypatch.setattr(
+            chatbot_tools,
+            "search_web",
+            AsyncMock(
+                return_value={
+                    "results": [
+                        {
+                            "title": "CCP",
+                            "url": "https://example.test/ccp",
+                            "snippet": "A central counterparty clears trades.",
+                        }
+                    ],
+                    "answer": None,
+                    "provider": "serper",
+                }
+            ),
+        )
+        monkeypatch.setattr(chatbot_tools, "upsert_learned_term", AsyncMock())
+
+        tool = chatbot_tools.TOOL_REGISTRY["research_term"]
+        result = await tool.execute(bd_user, db_stub, {"term": "CCP"})
+
+        assert result["query"] == "CCP"
+        assert result["answer"] == "A central counterparty clears trades."
+
+    async def test_ungated_for_no_access_user(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        no_access_user: AuthenticatedUser,
+        db_stub: object,
+    ) -> None:
+        monkeypatch.setattr(
+            chatbot_tools, "get_learned_term", AsyncMock(return_value=None)
+        )
+        monkeypatch.setattr(
+            chatbot_tools,
+            "search_web",
+            AsyncMock(
+                return_value={
+                    "results": [],
+                    "answer": "A definition.",
+                    "provider": "serper",
+                }
+            ),
+        )
+        monkeypatch.setattr(chatbot_tools, "upsert_learned_term", AsyncMock())
+
+        tool = chatbot_tools.TOOL_REGISTRY["research_term"]
+        result = await tool.execute(
+            no_access_user, db_stub, {"query": "anything"}
+        )
+
+        assert result.get("error") != "no_access"
+        assert result["source"] == "public_web"
+
+    async def test_limit_clamped_to_max(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        bd_user: AuthenticatedUser,
+        db_stub: object,
+    ) -> None:
+        captured: dict[str, int] = {}
+
+        async def fake_search_web(query: str, *, limit: int) -> dict[str, Any]:
+            captured["limit"] = limit
+            return {"results": [], "answer": "x", "provider": "serper"}
+
+        monkeypatch.setattr(
+            chatbot_tools, "get_learned_term", AsyncMock(return_value=None)
+        )
+        monkeypatch.setattr(chatbot_tools, "search_web", fake_search_web)
+        monkeypatch.setattr(chatbot_tools, "upsert_learned_term", AsyncMock())
+
+        tool = chatbot_tools.TOOL_REGISTRY["research_term"]
+        await tool.execute(bd_user, db_stub, {"query": "x", "limit": 999})
+
+        assert captured["limit"] == chatbot_tools.WEB_RESEARCH_LIMIT_MAX

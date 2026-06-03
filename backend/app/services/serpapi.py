@@ -194,12 +194,21 @@ class SerpAPIClient:
                 domain = (urlparse(kg_url).hostname or "").lower()
                 if domain:
                     title = kg.get("title")
+                    # KG ``description`` is the cleanest definition text for
+                    # the chatbot's research_term tool. Additive: the website
+                    # resolver ignores ``snippet``, so this is backward-compatible.
+                    description = kg.get("description")
                     results.append(
                         SerpResult(
                             url=kg_url,
                             domain=domain,
                             title=str(title) if isinstance(title, str) else "",
                             is_high_confidence=True,
+                            snippet=(
+                                str(description)
+                                if isinstance(description, str)
+                                else ""
+                            ),
                         )
                     )
 
@@ -216,12 +225,18 @@ class SerpAPIClient:
                 domain = (urlparse(ab_url).hostname or "").lower()
                 if domain:
                     title = ab.get("title")
+                    # Answer-box direct-answer text is a strong definition
+                    # source for research_term. Additive (resolver ignores it).
+                    ab_text = ab.get("snippet") or ab.get("answer")
                     results.append(
                         SerpResult(
                             url=ab_url,
                             domain=domain,
                             title=str(title) if isinstance(title, str) else "",
                             is_high_confidence=True,
+                            snippet=(
+                                str(ab_text) if isinstance(ab_text, str) else ""
+                            ),
                         )
                     )
 
