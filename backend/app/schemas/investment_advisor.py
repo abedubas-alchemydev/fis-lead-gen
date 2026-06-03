@@ -69,15 +69,19 @@ class InvestmentAdvisorListItem(BaseModel):
 
 
 class InvestmentAdvisorDetail(InvestmentAdvisorListItem):
-    """Detail view — same shape as the list item for now.
+    """Detail view — the list item plus detail-only fields.
 
     PR 3 will extend this with ``advisory_summary``, narrative text from
     Form ADV Part 2, and richer Schedule A/B owner data once the LLM
-    extractor is in place. Keeping the detail/list shapes identical for
-    PR 1 keeps the FE detail-page placeholder simple.
+    extractor is in place.
     """
 
-    pass
+    # Form ADV Schedule D Section 1.B "Other Business Names" — alternate /
+    # trade names the firm conducts advisory business under (the IA analog of
+    # BD ``dba_names``). Rendered as "Alternative Names" on the detail page.
+    # Detail-only: the master-list grid has no column for it, so it stays off
+    # ``InvestmentAdvisorListItem`` to keep list payloads lean.
+    other_business_names: list[str] | None = None
 
 
 class InvestmentAdvisorListMeta(BaseModel):

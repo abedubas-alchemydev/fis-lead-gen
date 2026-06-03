@@ -1035,7 +1035,13 @@ export type InvestmentAdvisorListItem = {
   clearing_membership_checked_at: string | null;
 };
 
-export type InvestmentAdvisorDetail = InvestmentAdvisorListItem;
+export type InvestmentAdvisorDetail = InvestmentAdvisorListItem & {
+  // Form ADV Schedule D §1.B "Other Business Names" (IAPD
+  // basicInformation.otherNames), filtered to drop the firm's own
+  // primary/legal name. Detail-only — not on the list item. Rendered as
+  // "Alternative Names" on the advisor detail page.
+  other_business_names: string[] | null;
+};
 
 export type InvestmentAdvisorListMeta = {
   page: number;

@@ -203,6 +203,67 @@ def _parse_iapd_us_date(value: str | None) -> date | None:
         return None
 
 
+def extract_other_business_names(
+    iacontent: dict | None, *, primary_name: str | None, legal_name: str | None
+) -> list[str] | None:
+    """Pull Form ADV Schedule D Section 1.B "Other Business Names" out of the
+    IAPD per-firm ``iacontent`` payload.
+
+    The IA analog of ``FinraService._parse_dba_names`` for broker dealers.
+    The names live at ``iacontent.basicInformation.otherNames`` (a list of
+    strings); we fall back to a top-level ``otherNames`` key in case the API
+    flattens it. Returns ``None`` when nothing usable remains — the parser
+    fails closed so a wrong path guess degrades to "no data" rather than an
+    error.
+
+    The ``otherNames`` array routinely repeats the firm's own primary
+    business name (Item 1.B-1) as its first element, so we drop any entry
+    matching the firm's ``primary_name`` OR ``legal_name`` (case- and
+    whitespace-insensitive) and de-dupe on the same normalization.
+    """
+    if not iacontent:
+        return None
+
+    basic = iacontent.get("basicInformation")
+    raw = basic.get("otherNames") if isinstance(basic, dict) else None
+    if raw is None:
+        raw = iacontent.get("otherNames")
+    if not isinstance(raw, list):
+        return None
+
+    # Strip a leading ``d/b/a`` / ``DBA`` marker per item, mirroring the BD
+    # parser — harmless even though IAPD rarely includes it.
+    cleaned_items: list[str] = []
+    for entry in raw:
+        item = str(entry).strip()
+        if not item:
+            continue
+        lower = item.lower()
+        for marker in ("d/b/a ", "dba "):
+            if lower.startswith(marker):
+                item = item[len(marker):].strip()
+                break
+        if item:
+            cleaned_items.append(item)
+
+    # Drop the firm's own primary + legal name, then de-dupe (all on the same
+    # case/whitespace-insensitive normalization).
+    drop = {
+        " ".join(n.lower().split())
+        for n in (primary_name, legal_name)
+        if n
+    }
+    seen: set[str] = set()
+    out: list[str] = []
+    for name in cleaned_items:
+        norm = " ".join(name.lower().split())
+        if not norm or norm in drop or norm in seen:
+            continue
+        seen.add(norm)
+        out.append(name)
+    return out or None
+
+
 RefreshScope = Literal["all"]
 
 logger = logging.getLogger(__name__)
@@ -1230,14 +1291,18 @@ async def _run_enrich_contacts(
 async def _run_refresh_iapd_summary(
     parent_run_id: int, advisor_id: int, trigger_source: str
 ) -> tuple[str, str]:
-    """Fetch the IAPD per-firm summary JSON and backfill ``registration_date``.
+    """Fetch the IAPD per-firm summary JSON and backfill ``registration_date``
+    and ``other_business_names`` from the same payload.
 
     Form ADV doesn't print SEC registration date on the PDF cover page (the
     Gemini ADV pass returns NULL for this field on most firms), and the IAPD
     bulk compilation CSV doesn't have a registration-date column. The public
     adviserinfo.sec.gov firm profile page consumes a per-firm JSON API that
     surfaces ``registrationStatus[0].effectiveDate`` for every SEC-registered
-    advisor — that's our authoritative source for this one field.
+    advisor — that's our authoritative source for this one field. The same
+    payload also carries Form ADV Schedule D Section 1.B "Other Business
+    Names" (``basicInformation.otherNames``), so we parse both here for the
+    price of one fetch and write whichever the firm has.
 
     Form ADV also doesn't ask for a formation date, so this endpoint doesn't
     carry one either; this sub-pipeline doesn't touch ``formation_date``.
@@ -1253,6 +1318,8 @@ async def _run_refresh_iapd_summary(
                 await _finalize_child(child_id, status="failed", success=0, failure=1, summary=summary)
                 return "failed", summary
             crd = advisor.crd_number
+            primary_name = advisor.name
+            legal_name = advisor.legal_name
 
         if not crd:
             summary = "No CRD on record; cannot fetch IAPD summary."
@@ -1269,8 +1336,14 @@ async def _run_refresh_iapd_summary(
         reg_dt: date | None = None
         if statuses and isinstance(statuses[0], dict):
             reg_dt = _parse_iapd_us_date(statuses[0].get("effectiveDate"))
-        if reg_dt is None:
-            summary = "IAPD summary parsed but had no registrationStatus effectiveDate."
+        # Parse other-names from the SAME payload, BEFORE any reg-date
+        # short-circuit — firms that file ADV but have no effectiveDate must
+        # still get their other_business_names written.
+        other_names = extract_other_business_names(
+            iacontent, primary_name=primary_name, legal_name=legal_name
+        )
+        if reg_dt is None and other_names is None:
+            summary = "IAPD summary parsed but had no effectiveDate or other business names."
             await _finalize_child(child_id, status="completed_with_errors", success=0, failure=1, summary=summary)
             return "completed_with_errors", summary
 
@@ -1281,15 +1354,22 @@ async def _run_refresh_iapd_summary(
                 summary = "Advisor row disappeared between fetch and write."
                 await _finalize_child(child_id, status="failed", success=0, failure=1, summary=summary)
                 return "failed", summary
-            if advisor.registration_date is None:
+            # Don't-overwrite guard per field: a later nightly pass must never
+            # clobber a value already on the row (manual correction or earlier
+            # fill) — the same rule the registration_date write has always used.
+            if reg_dt is not None and advisor.registration_date is None:
                 advisor.registration_date = reg_dt
                 wrote.append("registration_date")
+            if other_names is not None and advisor.other_business_names is None:
+                advisor.other_business_names = other_names
+                wrote.append("other_business_names")
+            if wrote:
                 await db.commit()
 
         if wrote:
-            summary = f"Wrote {', '.join(wrote)} from IAPD ({reg_dt.isoformat()})."
+            summary = f"Wrote {', '.join(wrote)} from IAPD summary."
         else:
-            summary = f"registration_date already set; IAPD value {reg_dt.isoformat()} not overwritten."
+            summary = "IAPD summary had no new data to write (fields already set)."
         await _finalize_child(child_id, status="completed", success=1, failure=0, summary=summary)
         return "completed", summary
     except Exception as exc:
