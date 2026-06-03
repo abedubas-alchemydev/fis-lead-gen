@@ -219,6 +219,22 @@ class Settings(BaseSettings):
     # per-request httpx timeout -- once it elapses Snov is skipped so a slow
     # search can't stall the parallel discovery fan-out.
     snov_request_timeout: float = 12.0
+    # Last-resort "web fallback" stage: after the provider chain, for People
+    # still missing a channel, search public LinkedIn URLs (serper/SerpAPI) and
+    # crawl the firm's OWN public site for literal published emails (and, when
+    # ``web_fallback_phones_enabled``, phones co-located with the person). No
+    # LinkedIn-page scraping (auth-walled/ToS) and no email guessing -- only
+    # addresses actually published on the firm site that match the person's
+    # name. Off by default: it adds a per-firm crawl + per-gap-officer search,
+    # so it's opt-in like ``linkedin_search`` (see CONTACT_DISCOVERY_CHAIN note
+    # above). Enable via WEB_FALLBACK_ENABLED once a serper/SerpAPI key is set.
+    web_fallback_enabled: bool = False
+    web_fallback_phones_enabled: bool = False
+    # Confidence stamped on a web-sourced email/phone. 0..100 to match
+    # DiscoveryResult/EmailHit; sits above contact_discovery_min_confidence (60)
+    # so the merge keeps it, below LinkedIn org-confirmed (80). Raising the
+    # min-confidence floor above this disables web emails with no code change.
+    web_fallback_email_confidence: float = 70.0
     gemini_api_key: str | None = None
     gemini_api_base: str = "https://generativelanguage.googleapis.com/v1beta"
     # Production default for the structured-PDF extraction path

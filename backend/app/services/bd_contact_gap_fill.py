@@ -16,6 +16,7 @@ from datetime import datetime, timezone
 
 from sqlalchemy import select
 
+from app.core.config import settings
 from app.db.session import SessionLocal
 from app.models.broker_dealer import BrokerDealer
 from app.models.executive_contact import ExecutiveContact
@@ -31,6 +32,10 @@ from app.services.contact_discovery.gap_fill_common import (
     is_gap_row,
 )
 from app.services.contact_discovery.orchestrator import _walk_chain
+from app.services.contact_discovery.web_fallback import (
+    GapPerson,
+    discover_web_fallback,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -135,6 +140,49 @@ async def _run_gap_fill_bd_contacts(
                     filled += 1
             if filled:
                 await db.commit()
+
+        # PHASE 3 — last-resort web fallback for rows STILL missing a channel
+        # after the chain. Off by default and SILENT (no summary clause): merged
+        # channels appear on the People icons and the count is logged for ops.
+        # Mirrors the advisor gap-fill Phase 3.
+        if settings.web_fallback_enabled:
+            async with SessionLocal() as db:
+                wf_rows = list(
+                    (
+                        await db.execute(
+                            select(ExecutiveContact)
+                            .where(ExecutiveContact.bd_id == bd_id)
+                            .order_by(ExecutiveContact.id.asc())
+                        )
+                    )
+                    .scalars()
+                    .all()
+                )
+                wf_people = [
+                    GapPerson(row_id=r.id, first_name=split[0], last_name=split[1])
+                    for r in wf_rows
+                    if is_gap_row(r) and (split := _split_officer_name(r.name)) is not None
+                ]
+                if wf_people:
+                    wf_results = await discover_web_fallback(
+                        domain=domain,
+                        org_name=chain_org_name or firm_name,
+                        people=wf_people,
+                    )
+                    wf_filled = 0
+                    for wf_row_id, wf_merged in wf_results.items():
+                        row = await db.get(ExecutiveContact, wf_row_id)
+                        if row is not None and apply_gap_fill(row, wf_merged):
+                            row.enriched_at = datetime.now(timezone.utc)
+                            wf_filled += 1
+                            await db.commit()
+                    if wf_filled:
+                        logger.info(
+                            "broker-dealer %s: web fallback filled %d of %d gap row(s)",
+                            bd_id,
+                            wf_filled,
+                            len(wf_people),
+                        )
 
         await _stamp_attempt(bd_id)
         summary = (

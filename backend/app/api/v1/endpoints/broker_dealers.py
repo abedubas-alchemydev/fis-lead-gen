@@ -61,8 +61,11 @@ from app.services.user_lists import (
     record_visit,
     remove_favorite,
 )
+from app.services.advisor_refresh_orchestrator import _split_officer_name
 from app.services.contact_discovery.apollo_match import ApolloMatchProvider
+from app.services.contact_discovery.gap_fill_common import apply_gap_fill, is_gap_row
 from app.services.contact_discovery.orchestrator import discover_contact
+from app.services.contact_discovery.web_fallback import GapPerson, discover_web_fallback
 from app.services.contacts import (
     ApolloLookupError,
     ContactEnrichmentUnavailableError,
@@ -633,6 +636,45 @@ async def enrich_broker_dealer_contacts(
                 existing_names.add(_normalise_name(entity["cache_name"]))
         if discovered:
             contacts = await contact_service.list_contacts(db, broker_dealer.id)
+
+        # PHASE 3 — last-resort web fallback (off by default). For any contact
+        # still missing a channel after the chain, crawl the firm site once +
+        # search public LinkedIn URLs and merge non-destructively. Silent: the
+        # refreshed contact list reflects new channels with no separate client
+        # signal. Re-query the rows fresh so we never touch a commit-expired ORM
+        # object from the Phase-2 loop above.
+        if settings.web_fallback_enabled:
+            wf_rows = list(
+                (
+                    await db.execute(
+                        select(ExecutiveContact)
+                        .where(ExecutiveContact.bd_id == broker_dealer.id)
+                        .order_by(ExecutiveContact.id.asc())
+                    )
+                )
+                .scalars()
+                .all()
+            )
+            wf_people = [
+                GapPerson(row_id=r.id, first_name=split[0], last_name=split[1])
+                for r in wf_rows
+                if is_gap_row(r) and (split := _split_officer_name(r.name)) is not None
+            ]
+            if wf_people:
+                wf_results = await discover_web_fallback(
+                    domain=domain,
+                    org_name=broker_dealer.name,
+                    people=wf_people,
+                )
+                wf_changed = False
+                for wf_row_id, wf_merged in wf_results.items():
+                    row = await db.get(ExecutiveContact, wf_row_id)
+                    if row is not None and apply_gap_fill(row, wf_merged):
+                        row.enriched_at = datetime.now(timezone.utc)
+                        wf_changed = True
+                if wf_changed:
+                    await db.commit()
+                    contacts = await contact_service.list_contacts(db, broker_dealer.id)
 
     return [ExecutiveContactItem.model_validate(item) for item in contacts]
 
