@@ -326,6 +326,37 @@ jobs:
             --set-secrets=DATABASE_URL=DATABASE_URL_BACKEND_STAGING:latest,GEMINI_API_KEY=GEMINI_API_KEY:latest,APOLLO_API_KEY=APOLLO_API_KEY:latest,APOLLO_WEBHOOK_SECRET=APOLLO_WEBHOOK_SECRET:latest,SERPAPI_API_KEY=SERPAPI_API_KEY:latest,HUNTER_API_KEY=HUNTER_API_KEY:latest,SNOV_CLIENT_ID=SNOV_CLIENT_ID:latest,SNOV_CLIENT_SECRET=SNOV_CLIENT_SECRET:latest,PDL_API_KEY=PDL_API_KEY:latest \
             --labels=commit-sha=${{ env.SHORT_SHA }},environment=staging,kind=batch-job
 
+      # Cloud Run Job that runs scripts/standalone_extract_new_bds.py against
+      # the staging Neon DB to ingest net-new broker-dealers FINRA registered
+      # since our last load. A Cloud Scheduler cron (nightly 04:00 ET,
+      # America/New_York) invokes this job so fresh BDs are in the master list
+      # by morning — one-time scheduler setup + ops notes in
+      # docs/runbooks/extract-new-bds.md. The script is standalone (no app.*
+      # imports) and only needs DATABASE_URL: it probes FINRA's public
+      # BrokerCheck endpoints from MAX(crd_number)+1 and self-terminates after
+      # --max-misses consecutive non-BD CRDs, so one run/night catches up the
+      # gap. Lighter than the gap-fill/backfill jobs (1Gi/1cpu, 1h timeout) —
+      # it's a sequential CRD probe, not a full per-firm enrichment. Reuses the
+      # backend image (same SHA); only the CMD differs. Staging-only by design:
+      # no parallel prod job resource, so a push to main can't run it on prod.
+      - name: Deploy extract-new-bds Cloud Run Job (staging)
+        if: env.ENV == 'staging'
+        run: |
+          gcloud run jobs deploy fis-extract-new-bds-staging \
+            --image=${{ vars.GCP_REGISTRY }}/backend:${{ env.SHORT_SHA }} \
+            --region=${{ vars.GCP_REGION }} \
+            --project=${{ vars.GCP_PROJECT_ID }} \
+            --command=python \
+            --args=scripts/standalone_extract_new_bds.py,--apply \
+            --task-timeout=3600 \
+            --memory=1Gi \
+            --cpu=1 \
+            --max-retries=0 \
+            --parallelism=1 \
+            --tasks=1 \
+            --set-secrets=DATABASE_URL=DATABASE_URL_BACKEND_STAGING:latest \
+            --labels=commit-sha=${{ env.SHORT_SHA }},environment=staging,kind=batch-job
+
       - name: Deploy frontend to Cloud Run
         run: |
           # Re-establish SMTP env on every staging deploy so an accidental clear can't silently break better-auth emails.
