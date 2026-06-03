@@ -277,3 +277,55 @@ async def test_knowledge_graph_missing_website_skipped() -> None:
     assert len(results) == 1
     assert results[0].is_high_confidence is False
     assert results[0].url == "https://www.example.test/"
+
+
+@respx.mock
+async def test_knowledge_graph_description_populates_snippet() -> None:
+    """The KG ``description`` is the cleanest definition source for the
+    chatbot's research_term tool, so it must flow into ``SerpResult.snippet``.
+    Additive — the website resolver ignores ``snippet``, so populating it
+    here doesn't change resolver behaviour."""
+    payload: dict[str, object] = {
+        "knowledge_graph": {
+            "title": "SOFR",
+            "website": "https://www.newyorkfed.org/sofr",
+            "description": (
+                "SOFR is a broad measure of the cost of borrowing cash "
+                "overnight collateralized by Treasury securities."
+            ),
+        },
+        "organic_results": [_organic("https://example.test/", "SOFR")],
+    }
+    respx.get(_SEARCH_URL).mock(return_value=httpx.Response(200, json=payload))
+    client = SerpAPIClient(_API_KEY)
+
+    results = await client.search_firm("SOFR")
+
+    assert results[0].is_high_confidence is True
+    assert results[0].snippet.startswith("SOFR is a broad measure")
+
+
+@respx.mock
+async def test_answer_box_snippet_populates_snippet() -> None:
+    """Answer-box direct-answer text flows into ``SerpResult.snippet`` so
+    research_term gets a ready-made definition."""
+    payload: dict[str, object] = {
+        "answer_box": {
+            "title": "Reg BI",
+            "link": "https://www.sec.gov/regulation-best-interest",
+            "snippet": (
+                "Regulation Best Interest establishes a best-interest "
+                "standard of conduct for broker-dealers."
+            ),
+        },
+        "organic_results": [
+            _organic("https://www.sec.gov/regulation-best-interest", "Reg BI")
+        ],
+    }
+    respx.get(_SEARCH_URL).mock(return_value=httpx.Response(200, json=payload))
+    client = SerpAPIClient(_API_KEY)
+
+    results = await client.search_firm("Reg BI")
+
+    assert results[0].is_high_confidence is True
+    assert results[0].snippet.startswith("Regulation Best Interest")

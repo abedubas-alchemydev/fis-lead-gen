@@ -97,7 +97,13 @@ DOXIE_TOOL_USAGE_PROMPT = (
     "works — what a feature does, where to find something, or what a "
     "domain concept (Form 4, Form ADV, X-17A-5/FOCUS, 13F, clearing "
     "partner) means in the app — call the get_app_help tool with the "
-    "user's topic and embed the returned route as the reply's deep-link."
+    "user's topic and embed the returned route as the reply's deep-link.\n\n"
+    "If the user's request hinges on a financial or technical term you "
+    "don't fully know — or the question is ambiguous — call research_term "
+    "FIRST to define it, then continue to the database tools if the request "
+    "needs app data. When the definition comes from research_term, cite one "
+    "source briefly as a markdown link. Never use research_term for a "
+    "specific firm's data, filings, or contacts — the database tools own that."
 )
 
 
