@@ -47,6 +47,7 @@ import { PeopleTable } from "@/components/master-list/detail/people-table";
 import { Pill } from "@/components/ui/pill";
 import { agencyLabel } from "@/components/master-list/detail/clearing-membership-helpers";
 import { SectionPanel } from "@/components/ui/section-panel";
+import { CollapsiblePillList } from "@/components/ui/collapsible-pill-list";
 import type {
   InvestmentAdvisorListResponse,
   InvestmentAdvisorProfileResponse,
@@ -1003,6 +1004,20 @@ export function AdvisorDetailClient({ advisorId }: { advisorId: string }) {
               <ExternalLink className="h-3.5 w-3.5" strokeWidth={2} />
               EDGAR filings index
             </a>
+          ) : null}
+
+          {/* Alternative Names — Form ADV Schedule D §1.B "Other Business
+              Names" from the IAPD per-firm payload (basicInformation.otherNames),
+              filtered to drop the firm's own primary/legal name. Hidden when the
+              firm has none so the card stays compact. */}
+          {advisor.other_business_names && advisor.other_business_names.length > 0 ? (
+            <div className="mt-4">
+              <div className="flex items-center gap-2">
+                <p className="text-[13px] font-semibold text-[var(--text,#0f172a)]">Alternative Names</p>
+                <Pill variant="info">{advisor.other_business_names.length} names</Pill>
+              </div>
+              <CollapsiblePillList items={advisor.other_business_names} />
+            </div>
           ) : null}
         </SectionPanel>
 
