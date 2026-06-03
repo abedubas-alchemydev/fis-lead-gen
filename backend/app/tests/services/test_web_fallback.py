@@ -270,3 +270,55 @@ async def test_phones_enabled_attaches_colocated_not_switchboard(
     assert "(800) 555-9999" not in phones  # lone switchboard → not attached
     assert results[1].phones[0].source == "web_fallback"
     assert results[1].phones[0].confidence == 70.0
+
+
+@pytest.mark.asyncio
+async def test_phone_far_from_name_on_same_page_not_attached(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The live-test case: a direct line next to the person attaches, but the
+    firm's office numbers listed far down the SAME page do not."""
+    monkeypatch.setattr(settings, "web_fallback_phones_enabled", True)
+    filler = " " + ("about our firm and history " * 9)  # > proximity window
+    page = (
+        "Jane Smith, Partner. Direct (212) 555-0100."
+        + filler
+        + "Contact our offices: New York (800) 555-9999, Florida (954) 555-1212."
+    )
+    crawl = CrawlResult(pages=[PageText(url="https://acme.com/team", text=page)])
+    results = await discover_web_fallback(
+        domain="acme.com",
+        org_name="Acme",
+        people=[GapPerson(1, "Jane", "Smith")],
+        crawler=FakeCrawler(crawl),
+        linkedin=FakeLinkedIn(),
+    )
+    phones = [h.value for h in results[1].phones]
+    assert phones == ["(212) 555-0100"]  # only the number next to her name
+    assert "(800) 555-9999" not in phones  # office line, far down the page
+    assert "(954) 555-1212" not in phones
+
+
+@pytest.mark.asyncio
+async def test_two_people_one_page_each_gets_their_own_number(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Two bankers on one team page each get only the number next to their own
+    name -- no blanket stamping of every number onto everyone."""
+    monkeypatch.setattr(settings, "web_fallback_phones_enabled", True)
+    filler = " " + ("lorem ipsum dolor sit amet consectetur " * 6)  # > window
+    page = (
+        "Jane Smith, Partner. Direct line (212) 555-0100."
+        + filler
+        + "Bob Jones, Partner. Direct line (646) 555-0200."
+    )
+    crawl = CrawlResult(pages=[PageText(url="https://acme.com/team", text=page)])
+    results = await discover_web_fallback(
+        domain="acme.com",
+        org_name="Acme",
+        people=[GapPerson(1, "Jane", "Smith"), GapPerson(2, "Bob", "Jones")],
+        crawler=FakeCrawler(crawl),
+        linkedin=FakeLinkedIn(),
+    )
+    assert [h.value for h in results[1].phones] == ["(212) 555-0100"]
+    assert [h.value for h in results[2].phones] == ["(646) 555-0200"]
