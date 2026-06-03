@@ -279,6 +279,81 @@ async def test_count_and_data_statements_share_the_same_filters(
 
 
 # ─────────────────────────────────────────────────────────────────────────────
+# ids filter (Doxie semantic-search deep-link) — repository SQL shape
+# ─────────────────────────────────────────────────────────────────────────────
+
+
+@pytest.mark.asyncio
+async def test_ids_filter_emits_in_predicate(
+    repository: BrokerDealerRepository,
+) -> None:
+    """An ``ids`` set produces ``broker_dealers.id IN (...)`` so the list
+    resolves to exactly the firms Doxie cited."""
+    session = _StagedSession()
+
+    await repository.list_broker_dealers(
+        session, **_default_kwargs(), ids=[42, 43]
+    )
+
+    where = _captured_where_sql(session)
+    assert "broker_dealers.id in (42, 43)" in where
+
+
+@pytest.mark.asyncio
+async def test_ids_bypasses_primary_list_mode_deficiency_filter(
+    repository: BrokerDealerRepository,
+) -> None:
+    """``ids`` is authoritative: under the default ``primary`` list mode it
+    must NOT add the ``is_deficient = false`` filter, or a deficient firm in
+    the cited set would silently vanish from the deep-linked list."""
+    session = _StagedSession()
+
+    await repository.list_broker_dealers(
+        session,
+        **{**_default_kwargs(), "list_mode": "primary"},
+        ids=[42],
+    )
+
+    where = _captured_where_sql(session)
+    assert "broker_dealers.id in (42)" in where
+    assert "is_deficient" not in where
+
+
+@pytest.mark.asyncio
+async def test_primary_list_mode_keeps_deficiency_filter_without_ids(
+    repository: BrokerDealerRepository,
+) -> None:
+    """Regression: with no ids, ``primary`` still applies its deficiency
+    filter — the bypass is scoped strictly to the ids deep-link."""
+    session = _StagedSession()
+
+    await repository.list_broker_dealers(
+        session, **{**_default_kwargs(), "list_mode": "primary"}
+    )
+
+    where = _captured_where_sql(session)
+    assert "is_deficient" in where
+
+
+@pytest.mark.asyncio
+async def test_empty_ids_list_applies_no_id_predicate(
+    repository: BrokerDealerRepository,
+) -> None:
+    """An empty ``ids`` list is "no deep-link", not "match nothing" — it must
+    leave the query untouched (and let list-mode apply as normal)."""
+    session = _StagedSession()
+
+    await repository.list_broker_dealers(
+        session, **{**_default_kwargs(), "list_mode": "primary"}, ids=[]
+    )
+
+    where = _captured_where_sql(session)
+    assert "broker_dealers.id in" not in where
+    # list-mode still governs when there's no id set.
+    assert "is_deficient" in where
+
+
+# ─────────────────────────────────────────────────────────────────────────────
 # Endpoint-layer tests (FastAPI Query validation + parameter passthrough)
 # ─────────────────────────────────────────────────────────────────────────────
 
@@ -475,3 +550,55 @@ async def test_range_filters_combine_with_state_filter(
     where = _captured_where_sql(session)
     assert "broker_dealers.state in ('ny')" in where
     assert "broker_dealers.latest_net_capital >= 2500000.0" in where
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Endpoint-layer tests for the ids deep-link param
+# ─────────────────────────────────────────────────────────────────────────────
+
+
+async def test_endpoint_parses_repeat_key_ids(stubbed_endpoint) -> None:
+    """The FE emits repeat-key ``?ids=42&ids=43`` via buildApiPath; the
+    endpoint forwards a parsed ``list[int]`` to the repository."""
+    async with _client() as client:
+        response = await client.get(
+            "/api/v1/broker-dealers", params=[("ids", "42"), ("ids", "43")]
+        )
+    assert response.status_code == 200, response.text
+    kwargs = stubbed_endpoint.await_args.kwargs
+    assert kwargs["ids"] == [42, 43]
+
+
+async def test_endpoint_parses_comma_joined_ids(stubbed_endpoint) -> None:
+    """A comma-joined ``?ids=42,43`` (Doxie deep-link / hand-edited URL) is
+    accepted too, so the link resolves regardless of which form it arrives in."""
+    async with _client() as client:
+        response = await client.get(
+            "/api/v1/broker-dealers", params={"ids": "42,43"}
+        )
+    assert response.status_code == 200, response.text
+    kwargs = stubbed_endpoint.await_args.kwargs
+    assert kwargs["ids"] == [42, 43]
+
+
+async def test_endpoint_drops_invalid_and_duplicate_ids(stubbed_endpoint) -> None:
+    """Malformed / non-positive / duplicate tokens are dropped silently
+    rather than 422-ing the whole list; first-occurrence order is kept."""
+    async with _client() as client:
+        response = await client.get(
+            "/api/v1/broker-dealers",
+            params=[("ids", "42"), ("ids", "abc"), ("ids", "-1"), ("ids", "42")],
+        )
+    assert response.status_code == 200, response.text
+    kwargs = stubbed_endpoint.await_args.kwargs
+    assert kwargs["ids"] == [42]
+
+
+async def test_endpoint_omitted_ids_is_empty_list(stubbed_endpoint) -> None:
+    """No ``ids`` param → empty list reaches the repo (no id predicate),
+    preserving the unfiltered-list behavior."""
+    async with _client() as client:
+        response = await client.get("/api/v1/broker-dealers")
+    assert response.status_code == 200, response.text
+    kwargs = stubbed_endpoint.await_args.kwargs
+    assert kwargs["ids"] == []

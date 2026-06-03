@@ -338,6 +338,7 @@ class BrokerDealerRepository:
         registered_after: date | None = None,
         registered_before: date | None = None,
         segment: str | None = None,
+        ids: list[int] | None = None,
     ) -> BrokerDealerListResponse:
         filters = []
         if search:
@@ -442,7 +443,14 @@ class BrokerDealerRepository:
         if segment == "high_value":
             filters.append(high_value_participant_filter())
 
-        if list_mode == "primary":
+        # An explicit id set (Doxie semantic-search deep-link) is
+        # authoritative: the user asked to see exactly these firms, so we
+        # filter to them and skip the primary/alternative list-mode
+        # deficiency filter that would otherwise silently drop a deficient
+        # one. Every other filter (state, net-capital, …) still ANDs on top.
+        if ids:
+            filters.append(BrokerDealer.id.in_(ids))
+        elif list_mode == "primary":
             filters.append(BrokerDealer.is_deficient.is_(False))
         elif list_mode == "alternative":
             filters.append(or_(BrokerDealer.is_deficient.is_(True), BrokerDealer.health_status == "at_risk"))

@@ -28,6 +28,13 @@ export type DetailSource = "master-list" | "favorites" | "visited";
 
 export interface MasterListQueryState {
   search: string;
+  // Explicit firm-id set from a Doxie semantic-search "see all" deep-link
+  // (`?ids=1&ids=2`). Authoritative: the BE filters to exactly these firms
+  // and bypasses the list-mode filter, so a concept search lands on the same
+  // rows Doxie cited — which no name (`q`) search could reproduce. Empty =
+  // not a deep-link. Treated as a filter (Active chip + counts toward
+  // "Clear all").
+  ids: number[];
   state: string;
   health: string;
   prospectPriority: string;
@@ -62,6 +69,7 @@ export interface MasterListQueryState {
 // all renders identically to the pre-PR behavior.
 export const MASTER_LIST_STATE_DEFAULTS: MasterListQueryState = {
   search: "",
+  ids: [],
   state: "",
   health: "All",
   prospectPriority: "All",
@@ -115,6 +123,27 @@ function parseMultiParam(sp: SearchParamsLike, key: string): string[] {
     .filter((entry) => entry.length > 0);
 }
 
+// Parses the `ids` deep-link param (Doxie semantic-search results). Reads the
+// repeat-key form (`?ids=1&ids=2`) `toSearchParams` emits, and tolerates a
+// comma-joined value (`?ids=1,2`) so a BE-built or hand-edited link still
+// resolves. Non-numeric / non-positive tokens are dropped, dupes collapsed,
+// first-occurrence order preserved — mirrors `_parse_ids` on the backend.
+function parseIds(sp: SearchParamsLike): number[] {
+  const seen = new Set<number>();
+  const out: number[] = [];
+  for (const raw of sp.getAll("ids")) {
+    for (const part of raw.split(",")) {
+      const trimmed = part.trim();
+      if (trimmed.length === 0) continue;
+      const parsed = Number.parseInt(trimmed, 10);
+      if (!Number.isFinite(parsed) || parsed <= 0 || seen.has(parsed)) continue;
+      seen.add(parsed);
+      out.push(parsed);
+    }
+  }
+  return out;
+}
+
 function parseIntInRange(
   raw: string | null,
   fallback: number,
@@ -148,6 +177,7 @@ export function fromSearchParams(sp: SearchParamsLike): MasterListQueryState {
 
   return {
     search: sp.get("q") ?? MASTER_LIST_STATE_DEFAULTS.search,
+    ids: parseIds(sp),
     state: sp.get("state") ?? MASTER_LIST_STATE_DEFAULTS.state,
     health: sp.get("health") ?? MASTER_LIST_STATE_DEFAULTS.health,
     prospectPriority:
@@ -204,6 +234,11 @@ export function toSearchParams(state: MasterListQueryState): URLSearchParams {
 
   if (state.search !== MASTER_LIST_STATE_DEFAULTS.search) {
     sp.set("q", state.search);
+  }
+  // Repeat-key per id (`?ids=1&ids=2`) — same shape parseIds reads and the
+  // backend accepts. Never comma-joined: URLSearchParams would %2C-encode it.
+  if (state.ids.length > 0) {
+    state.ids.forEach((id) => sp.append("ids", String(id)));
   }
   if (state.state !== MASTER_LIST_STATE_DEFAULTS.state) {
     sp.set("state", state.state);
@@ -330,6 +365,7 @@ export function encodeReturnParam(state: MasterListQueryState): string {
 export function hasActiveFilters(state: MasterListQueryState): boolean {
   return (
     state.search !== MASTER_LIST_STATE_DEFAULTS.search ||
+    state.ids.length > 0 ||
     state.state !== MASTER_LIST_STATE_DEFAULTS.state ||
     state.health !== MASTER_LIST_STATE_DEFAULTS.health ||
     state.prospectPriority !== MASTER_LIST_STATE_DEFAULTS.prospectPriority ||
@@ -357,6 +393,7 @@ export function clearAllFilters(
   return {
     ...state,
     search: MASTER_LIST_STATE_DEFAULTS.search,
+    ids: [],
     state: MASTER_LIST_STATE_DEFAULTS.state,
     health: MASTER_LIST_STATE_DEFAULTS.health,
     prospectPriority: MASTER_LIST_STATE_DEFAULTS.prospectPriority,

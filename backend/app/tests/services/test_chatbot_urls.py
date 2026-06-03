@@ -111,6 +111,26 @@ class TestBdListUrl:
         ):
             assert fragment in out
 
+    def test_single_id_emits_ids_param(self) -> None:
+        # semantic_firm_search deep-links to the exact firms it cited.
+        assert bd_list_url(ids=[42]) == "/master-list?ids=42"
+
+    def test_multi_id_uses_repeat_keys(self) -> None:
+        # Repeat-key (not comma-joined) so it round-trips cleanly through
+        # URLSearchParams, which would otherwise %2C-encode a comma. Order
+        # is preserved so the link mirrors Doxie's listed order.
+        out = bd_list_url(ids=[24051, 23969, 22635])
+        assert out == "/master-list?ids=24051&ids=23969&ids=22635"
+
+    def test_empty_ids_omitted(self) -> None:
+        # No ids → bare route, never a stray ``?ids=``.
+        assert bd_list_url(ids=[]) == "/master-list"
+
+    def test_ids_combine_with_other_filters(self) -> None:
+        out = bd_list_url(ids=[7], state="CA")
+        assert "ids=7" in out
+        assert "state=CA" in out
+
 
 class TestBdDetailUrl:
     def test_numeric_id(self) -> None:
@@ -241,6 +261,7 @@ def test_internal_route_prefixes_sorted_and_unique() -> None:
     # allowlisted prefixes; otherwise a link would render as external.
     for url in (
         bd_list_url(state="NY"),
+        bd_list_url(ids=[1, 2]),
         bd_detail_url(1),
         ia_list_url(state="NY"),
         ia_detail_url(1),

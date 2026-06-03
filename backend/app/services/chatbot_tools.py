@@ -938,10 +938,15 @@ async def _execute_semantic_firm_search(
         # gates or stale-row filtering. Helpful for Doxie to mention
         # when the result set is truncated.
         "candidates_considered": len(bd_ids),
-        # Pass the user's natural-language query through as a name search
-        # on the master list. Won't always match what the embedding
-        # matched on, but it's the most useful fallback link we can offer.
-        "list_link": bd_list_url(q=query_or_error),
+        # Deep-link to exactly the firms we cited. Semantic hits are a
+        # specific id set that no name/``q`` search can reproduce (``q`` is
+        # a substring match, not an embedding lookup), so passing the query
+        # through as ``q`` lands the user on an empty list. Stamp the ids
+        # straight onto the URL instead — the master list filters to them
+        # and shows an "N selected firms" chip. See ``bd_list_url(ids=...)``.
+        "list_link": bd_list_url(
+            ids=[it["id"] for it in items if it.get("id") is not None]
+        ),
     }
 
 

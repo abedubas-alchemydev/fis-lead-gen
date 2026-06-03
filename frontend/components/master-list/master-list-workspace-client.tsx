@@ -204,6 +204,7 @@ export function MasterListWorkspaceClient() {
 
   const stateFilter = queryState.state;
   const search = queryState.search;
+  const idsFilter = queryState.ids;
   const healthFilter = queryState.health;
   const prospectPriorityFilter = queryState.prospectPriority;
   const clearingTypeFilter = queryState.clearingType;
@@ -278,6 +279,10 @@ export function MasterListWorkspaceClient() {
     () =>
       buildApiPath("/api/v1/broker-dealers", {
         search,
+        // Repeat-key id set from a Doxie semantic-search deep-link. The BE
+        // treats it as authoritative (filters to exactly these firms,
+        // bypasses list-mode), so the user lands on the rows Doxie cited.
+        ids: idsFilter.length > 0 ? idsFilter.map(String) : undefined,
         state: stateFilter ? [stateCodeFromName(stateFilter) ?? stateFilter] : undefined,
         health: healthFilter === "All" ? undefined : [healthFilter],
         lead_priority: prospectPriorityFilter === "All" ? undefined : [prospectPriorityFilter],
@@ -302,6 +307,7 @@ export function MasterListWorkspaceClient() {
       }),
     [
       search,
+      idsFilter,
       stateFilter,
       healthFilter,
       prospectPriorityFilter,
@@ -508,6 +514,7 @@ export function MasterListWorkspaceClient() {
   const activeFilterCount = useMemo(() => {
     let count = 0;
     if (search !== "") count += 1;
+    if (idsFilter.length > 0) count += 1;
     if (stateFilter !== "") count += 1;
     if (healthFilter !== "All") count += 1;
     if (prospectPriorityFilter !== "All") count += 1;
@@ -522,6 +529,7 @@ export function MasterListWorkspaceClient() {
     return count;
   }, [
     search,
+    idsFilter,
     stateFilter,
     healthFilter,
     prospectPriorityFilter,
@@ -851,6 +859,17 @@ export function MasterListWorkspaceClient() {
             <span className="text-[11px] font-semibold uppercase tracking-[0.08em] text-[var(--text-muted,#94a3b8)]">
               Active
             </span>
+            {idsFilter.length > 0 ? (
+              <Tag
+                title={`Showing ${idsFilter.length} specific firm${
+                  idsFilter.length === 1 ? "" : "s"
+                } from a Doxie result — dismiss to see the full list`}
+                onDismiss={() => updateState({ ids: [], page: 1 })}
+              >
+                {idsFilter.length} selected firm
+                {idsFilter.length === 1 ? "" : "s"}
+              </Tag>
+            ) : null}
             {segmentFilter !== "" ? (
               <Tag
                 title={`Segment: ${segmentLabel(segmentFilter)}`}

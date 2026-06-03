@@ -125,6 +125,36 @@ def _parse_states(state: list[str] | None) -> list[str]:
     return parsed
 
 
+def _parse_ids(ids: list[str] | None) -> list[int]:
+    """Parse the ``ids`` deep-link param into a deduped list of positive ints.
+
+    Accepts both repeat-key (``?ids=1&ids=2``) and comma-joined
+    (``?ids=1,2``) forms — the FE emits repeat-key via ``buildApiPath``, but
+    a Doxie deep-link or hand-edited URL may comma-join. Non-integer and
+    non-positive tokens are dropped silently so one malformed id can't 422
+    the whole list; first-occurrence order is preserved.
+    """
+    if not ids:
+        return []
+
+    seen: set[int] = set()
+    parsed: list[int] = []
+    for value in ids:
+        for part in value.split(","):
+            part = part.strip()
+            if not part:
+                continue
+            try:
+                as_int = int(part)
+            except ValueError:
+                continue
+            if as_int <= 0 or as_int in seen:
+                continue
+            seen.add(as_int)
+            parsed.append(as_int)
+    return parsed
+
+
 def _build_internal_filing_history(
     *,
     recent_alerts,
@@ -208,6 +238,10 @@ async def list_broker_dealers(
     clearing_partner_filter: list[str] | None = Query(default=None, alias="clearing_partner"),
     clearing_type_filter: list[str] | None = Query(default=None, alias="clearing_type"),
     types_of_business_filter: list[str] | None = Query(default=None, alias="types_of_business"),
+    # Explicit firm-id set (Doxie semantic-search deep-link). Repeat-key or
+    # comma-joined; parsed + validated by ``_parse_ids``. Authoritative —
+    # the repo filters to exactly these ids and skips the list-mode filter.
+    ids: list[str] | None = Query(default=None),
     min_net_capital: float | None = Query(default=None, ge=0),
     max_net_capital: float | None = Query(default=None, ge=0),
     registered_after: date | None = Query(default=None),
@@ -264,6 +298,7 @@ async def list_broker_dealers(
         registered_after=registered_after,
         registered_before=registered_before,
         segment=segment,
+        ids=_parse_ids(ids),
         list_mode=list_mode,
         sort_by=sort_by,
         sort_dir=sort_dir,

@@ -694,11 +694,11 @@ class TestSemanticFirmSearch:
         assert item["name"] == "Acme Securities LLC"
         assert item["similarity"] == 0.91
         assert "Acme Securities LLC" in item["match_snippet"]
-        # Each hit carries a deep-link; the wrapper carries a
-        # list-link that re-runs the natural-language query as a name
-        # search on the master list (best-effort fallback for the user).
+        # Each hit carries a per-firm deep-link; the wrapper carries a
+        # list-link that deep-links to exactly the cited firms by id (a
+        # name/q search can't reproduce an embedding result set).
         assert item["link"] == "/master-list/42"
-        assert result["list_link"] == "/master-list?q=small+introducing+brokers"
+        assert result["list_link"] == "/master-list?ids=42"
 
     async def test_empty_hits_returns_helpful_note(
         self,
@@ -765,6 +765,9 @@ class TestSemanticFirmSearch:
         # truncation.
         assert [it["id"] for it in result["items"]] == [42]
         assert result["candidates_considered"] == 2
+        # The deep-link only cites firms that actually rendered — the stale
+        # id 999 is excluded, so the user never lands on a missing firm.
+        assert result["list_link"] == "/master-list?ids=42"
 
     async def test_empty_query_returns_invalid_args(
         self,
