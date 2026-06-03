@@ -142,27 +142,10 @@ export function useInputGuards(): void {
         return;
       }
 
-      // Disable F12 / devtools shortcuts. We can't actually prevent the
-      // browser menu from opening devtools, but stopping the shortcuts
-      // raises the friction floor.
-      if (key === "F12") {
-        e.preventDefault();
-        maybeToast("shortcut", "This shortcut is disabled.");
-        logEvent("shortcut_blocked", { key: "F12" });
-        return;
-      }
-      if (ctrlOrMeta && e.shiftKey && (key === "I" || key === "i" || key === "J" || key === "j" || key === "C" || key === "c")) {
-        e.preventDefault();
-        maybeToast("shortcut", "This shortcut is disabled.");
-        logEvent("shortcut_blocked", { key: `Ctrl+Shift+${key.toUpperCase()}` });
-        return;
-      }
-      if (ctrlOrMeta && (key === "U" || key === "u")) {
-        e.preventDefault();
-        maybeToast("shortcut", "View source is disabled.");
-        logEvent("shortcut_blocked", { key: "Ctrl+U" });
-        return;
-      }
+      // NOTE: F12 / Ctrl+Shift+I/J/C / Ctrl+U (devtools + view-source) are
+      // intentionally NOT blocked — developer tools are allowed in every
+      // environment. The watermark, copy/selection, and print/screenshot
+      // guards below remain the active content-protection layer.
       if (ctrlOrMeta && (key === "S" || key === "s")) {
         e.preventDefault();
         maybeToast("shortcut", "Saving the page is disabled.");
