@@ -19,8 +19,9 @@ import secrets
 from dataclasses import dataclass
 from datetime import date, datetime
 from decimal import Decimal
+from types import SimpleNamespace
 from typing import Any
-from unittest.mock import AsyncMock
+from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
@@ -996,6 +997,10 @@ def test_tool_registry_has_expected_names() -> None:
         "summarize_institutional_investor_filing",
         "summarize_form4_filing",
         "ask_vault",
+        # Full-vault read access — browse folders/files + read a whole file.
+        "list_vault_folders",
+        "list_vault_files",
+        "get_vault_file",
         # Phase 4 PR #1 — app-knowledge tool.
         "get_app_help",
         # Doxie web-research / learned-term glossary tool.
@@ -1964,35 +1969,65 @@ class TestSummarizeBrokerCheckPdf:
 # ── ask_vault ────────────────────────────────────────────────────────────
 
 
+def _make_vault_folder(**overrides: Any) -> Any:
+    """SimpleNamespace shim for a ``VaultFolder`` ORM row."""
+    defaults: dict[str, Any] = {
+        "id": 1,
+        "user_id": "owner",
+        "name": "Compliance",
+        "description": "Playbooks and internal memos.",
+        "outreach_instructions": "",
+        "default_sender_account_id": None,
+        "created_at": datetime(2026, 5, 1, 9, 0),
+        "updated_at": datetime(2026, 6, 1, 12, 0),
+    }
+    defaults.update(overrides)
+    return SimpleNamespace(**defaults)
+
+
+def _make_vault_file(**overrides: Any) -> Any:
+    """SimpleNamespace shim for a ``VaultFolderFile`` ORM row."""
+    defaults: dict[str, Any] = {
+        "id": 10,
+        "folder_id": 1,
+        "original_filename": "compliance_playbook.pdf",
+        "mime_type": "application/pdf",
+        "size_bytes": 12345,
+        "processing_status": "ready",
+        "extracted_text": "Step 1: confirm clearing partner before outreach.",
+        "created_at": datetime(2026, 5, 2, 10, 0),
+    }
+    defaults.update(overrides)
+    return SimpleNamespace(**defaults)
+
+
 class TestAskVault:
-    async def test_happy_path_owner_match(
+    async def test_happy_path_single_folder(
         self,
         monkeypatch: pytest.MonkeyPatch,
         vault_user: AuthenticatedUser,
         db_stub: object,
     ) -> None:
-        # Mock the DB owner check + the retrieve_chunks call. The owner
-        # query is a raw select(VaultFolder.user_id); we shim
-        # db.execute to return the calling user's id.
-        from unittest.mock import MagicMock
+        # folder_id given → one owner-check execute, then retrieval scoped
+        # to exactly that folder.
+        from app.services.vault_retrieval import RetrievedVaultChunk
 
         owner_result = MagicMock()
         owner_result.scalar_one_or_none.return_value = vault_user.id
-
         db_mock = MagicMock()
         db_mock.execute = AsyncMock(return_value=owner_result)
 
-        from app.services.vault_retrieval import RetrievedChunk
-
         async def fake_retrieve(
-            *, folder_id: int, query: str, db: Any, top_k: int
+            *, folder_ids: Any, query: str, db: Any, top_k: int
         ) -> list[Any]:
-            assert folder_id == 7
+            assert folder_ids == [7]
             assert "playbook" in query
             return [
-                RetrievedChunk(
+                RetrievedVaultChunk(
                     chunk_id=1,
                     file_id=10,
+                    folder_id=7,
+                    folder_name="Compliance",
                     chunk_index=0,
                     text="Step 1: confirm clearing partner before outreach.",
                     original_filename="compliance_playbook.pdf",
@@ -2000,7 +2035,9 @@ class TestAskVault:
                 ),
             ]
 
-        monkeypatch.setattr(chatbot_tools, "retrieve_chunks", fake_retrieve)
+        monkeypatch.setattr(
+            chatbot_tools, "retrieve_chunks_for_folders", fake_retrieve
+        )
 
         tool = chatbot_tools.TOOL_REGISTRY["ask_vault"]
         result = await tool.execute(
@@ -2009,11 +2046,82 @@ class TestAskVault:
             {"query": "what's our outreach playbook?", "folder_id": 7},
         )
         assert result["total_matched"] == 1
+        assert result["scope"] == 7
         item = result["items"][0]
         assert item["original_filename"] == "compliance_playbook.pdf"
+        assert item["folder_name"] == "Compliance"
         assert item["similarity"] == 0.87
         # Vault link is the bare /vault page (no per-folder route yet).
         assert result["link"] == "/vault"
+
+    async def test_default_searches_all_owned_folders(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        vault_user: AuthenticatedUser,
+        db_stub: object,
+    ) -> None:
+        """No folder_id → resolve the caller's folder ids and search them
+        all (the cross-folder default)."""
+        from app.services.vault_retrieval import RetrievedVaultChunk
+
+        ids_result = MagicMock()
+        ids_result.scalars.return_value.all.return_value = [1, 2, 3]
+        db_mock = MagicMock()
+        db_mock.execute = AsyncMock(return_value=ids_result)
+
+        async def fake_retrieve(
+            *, folder_ids: Any, query: str, db: Any, top_k: int
+        ) -> list[Any]:
+            assert folder_ids == [1, 2, 3]
+            return [
+                RetrievedVaultChunk(
+                    chunk_id=2,
+                    file_id=20,
+                    folder_id=2,
+                    folder_name="Stock Loan",
+                    chunk_index=1,
+                    text="Rates updated quarterly.",
+                    original_filename="rate_sheet.xlsx",
+                    similarity=0.5,
+                ),
+            ]
+
+        monkeypatch.setattr(
+            chatbot_tools, "retrieve_chunks_for_folders", fake_retrieve
+        )
+
+        tool = chatbot_tools.TOOL_REGISTRY["ask_vault"]
+        result = await tool.execute(
+            vault_user, db_mock, {"query": "securities lending rates"}
+        )
+        assert result["scope"] == "all_folders"
+        assert result["total_matched"] == 1
+        assert result["items"][0]["folder_name"] == "Stock Loan"
+
+    async def test_no_folders_returns_empty_with_note(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        vault_user: AuthenticatedUser,
+        db_stub: object,
+    ) -> None:
+        """A user with an empty vault gets an explicit empty result (not an
+        error) and retrieval is never attempted."""
+        ids_result = MagicMock()
+        ids_result.scalars.return_value.all.return_value = []
+        db_mock = MagicMock()
+        db_mock.execute = AsyncMock(return_value=ids_result)
+
+        called = AsyncMock()
+        monkeypatch.setattr(
+            chatbot_tools, "retrieve_chunks_for_folders", called
+        )
+
+        tool = chatbot_tools.TOOL_REGISTRY["ask_vault"]
+        result = await tool.execute(vault_user, db_mock, {"query": "anything"})
+        assert result["total_matched"] == 0
+        assert result["items"] == []
+        assert "note" in result
+        called.assert_not_called()
 
     async def test_non_owner_returns_opaque_not_found(
         self,
@@ -2023,16 +2131,15 @@ class TestAskVault:
     ) -> None:
         """Cross-tenant attempt looks identical to 'folder doesn't exist'
         — never reveal the existence of someone else's folder."""
-        from unittest.mock import MagicMock
-
         owner_result = MagicMock()
         owner_result.scalar_one_or_none.return_value = "some-other-user"
-
         db_mock = MagicMock()
         db_mock.execute = AsyncMock(return_value=owner_result)
 
         called = AsyncMock()
-        monkeypatch.setattr(chatbot_tools, "retrieve_chunks", called)
+        monkeypatch.setattr(
+            chatbot_tools, "retrieve_chunks_for_folders", called
+        )
 
         tool = chatbot_tools.TOOL_REGISTRY["ask_vault"]
         result = await tool.execute(
@@ -2043,15 +2150,11 @@ class TestAskVault:
 
     async def test_missing_folder_returns_not_found(
         self,
-        monkeypatch: pytest.MonkeyPatch,
         vault_user: AuthenticatedUser,
         db_stub: object,
     ) -> None:
-        from unittest.mock import MagicMock
-
         owner_result = MagicMock()
         owner_result.scalar_one_or_none.return_value = None
-
         db_mock = MagicMock()
         db_mock.execute = AsyncMock(return_value=owner_result)
 
@@ -2067,9 +2170,7 @@ class TestAskVault:
         db_stub: object,
     ) -> None:
         tool = chatbot_tools.TOOL_REGISTRY["ask_vault"]
-        result = await tool.execute(
-            vault_user, db_stub, {"query": "  ", "folder_id": 7}
-        )
+        result = await tool.execute(vault_user, db_stub, {"query": "  "})
         assert result["error"] == "invalid_args"
 
     async def test_403_returns_no_access(
@@ -2078,9 +2179,238 @@ class TestAskVault:
         db_stub: object,
     ) -> None:
         tool = chatbot_tools.TOOL_REGISTRY["ask_vault"]
-        result = await tool.execute(
-            no_access_user, db_stub, {"query": "x", "folder_id": 7}
+        result = await tool.execute(no_access_user, db_stub, {"query": "x"})
+        assert result["error"] == "no_access"
+
+
+class TestListVaultFolders:
+    async def test_lists_folders_with_file_counts(
+        self,
+        vault_user: AuthenticatedUser,
+        db_stub: object,
+    ) -> None:
+        folders_result = MagicMock()
+        folders_result.scalars.return_value.all.return_value = [
+            _make_vault_folder(id=1, name="Compliance"),
+            _make_vault_folder(id=2, name="Stock Loan"),
+        ]
+        counts_result = MagicMock()
+        counts_result.all.return_value = [
+            SimpleNamespace(folder_id=1, total=3, ready=2),
+            SimpleNamespace(folder_id=2, total=1, ready=1),
+        ]
+        db_mock = MagicMock()
+        db_mock.execute = AsyncMock(side_effect=[folders_result, counts_result])
+
+        tool = chatbot_tools.TOOL_REGISTRY["list_vault_folders"]
+        result = await tool.execute(vault_user, db_mock, {})
+        assert result["total"] == 2
+        by_id = {it["folder_id"]: it for it in result["items"]}
+        assert by_id[1]["name"] == "Compliance"
+        assert by_id[1]["file_count"] == 3
+        assert by_id[1]["ready_file_count"] == 2
+        assert by_id[2]["file_count"] == 1
+        assert result["link"] == "/vault"
+
+    async def test_empty_vault_returns_no_items(
+        self,
+        vault_user: AuthenticatedUser,
+        db_stub: object,
+    ) -> None:
+        folders_result = MagicMock()
+        folders_result.scalars.return_value.all.return_value = []
+        db_mock = MagicMock()
+        db_mock.execute = AsyncMock(return_value=folders_result)
+
+        tool = chatbot_tools.TOOL_REGISTRY["list_vault_folders"]
+        result = await tool.execute(vault_user, db_mock, {})
+        assert result["items"] == []
+        assert result["total"] == 0
+
+    async def test_403_returns_no_access(
+        self,
+        no_access_user: AuthenticatedUser,
+        db_stub: object,
+    ) -> None:
+        tool = chatbot_tools.TOOL_REGISTRY["list_vault_folders"]
+        result = await tool.execute(no_access_user, db_stub, {})
+        assert result["error"] == "no_access"
+
+
+class TestListVaultFiles:
+    async def test_all_files_default(
+        self,
+        vault_user: AuthenticatedUser,
+        db_stub: object,
+    ) -> None:
+        files_result = MagicMock()
+        files_result.all.return_value = [
+            (_make_vault_file(id=10, folder_id=1), "Compliance"),
+            (
+                _make_vault_file(
+                    id=11, folder_id=2, original_filename="rates.xlsx"
+                ),
+                "Stock Loan",
+            ),
+        ]
+        db_mock = MagicMock()
+        db_mock.execute = AsyncMock(return_value=files_result)
+
+        tool = chatbot_tools.TOOL_REGISTRY["list_vault_files"]
+        result = await tool.execute(vault_user, db_mock, {})
+        assert result["scope"] == "all_folders"
+        assert result["total"] == 2
+        item = result["items"][0]
+        assert item["file_id"] == 10
+        assert item["folder_name"] == "Compliance"
+        assert item["processing_status"] == "ready"
+
+    async def test_folder_scoped_checks_ownership(
+        self,
+        vault_user: AuthenticatedUser,
+        db_stub: object,
+    ) -> None:
+        owner_result = MagicMock()
+        owner_result.scalar_one_or_none.return_value = vault_user.id
+        files_result = MagicMock()
+        files_result.all.return_value = [
+            (_make_vault_file(id=10, folder_id=7), "Custody"),
+        ]
+        db_mock = MagicMock()
+        db_mock.execute = AsyncMock(side_effect=[owner_result, files_result])
+
+        tool = chatbot_tools.TOOL_REGISTRY["list_vault_files"]
+        result = await tool.execute(vault_user, db_mock, {"folder_id": 7})
+        assert result["scope"] == 7
+        assert result["total"] == 1
+        assert result["items"][0]["folder_name"] == "Custody"
+
+    async def test_folder_scoped_non_owner_not_found(
+        self,
+        vault_user: AuthenticatedUser,
+        db_stub: object,
+    ) -> None:
+        owner_result = MagicMock()
+        owner_result.scalar_one_or_none.return_value = "other-user"
+        db_mock = MagicMock()
+        db_mock.execute = AsyncMock(return_value=owner_result)
+
+        tool = chatbot_tools.TOOL_REGISTRY["list_vault_files"]
+        result = await tool.execute(vault_user, db_mock, {"folder_id": 7})
+        assert result["error"] == "not_found"
+
+    async def test_403_returns_no_access(
+        self,
+        no_access_user: AuthenticatedUser,
+        db_stub: object,
+    ) -> None:
+        tool = chatbot_tools.TOOL_REGISTRY["list_vault_files"]
+        result = await tool.execute(no_access_user, db_stub, {})
+        assert result["error"] == "no_access"
+
+
+class TestGetVaultFile:
+    async def test_reads_full_text(
+        self,
+        vault_user: AuthenticatedUser,
+        db_stub: object,
+    ) -> None:
+        file_obj = _make_vault_file(
+            id=10, folder_id=1, extracted_text="Full document body here."
         )
+        row_result = MagicMock()
+        row_result.first.return_value = (file_obj, vault_user.id, "Compliance")
+        db_mock = MagicMock()
+        db_mock.execute = AsyncMock(return_value=row_result)
+
+        tool = chatbot_tools.TOOL_REGISTRY["get_vault_file"]
+        result = await tool.execute(vault_user, db_mock, {"file_id": 10})
+        assert result["file_id"] == 10
+        assert result["folder_name"] == "Compliance"
+        assert result["extracted_text"] == "Full document body here."
+        assert result["text_truncated"] is False
+        assert "note" not in result
+
+    async def test_long_text_is_truncated_and_flagged(
+        self,
+        vault_user: AuthenticatedUser,
+        db_stub: object,
+    ) -> None:
+        cap = chatbot_tools.VAULT_FILE_TEXT_MAX_CHARS
+        file_obj = _make_vault_file(extracted_text="x" * (cap + 500))
+        row_result = MagicMock()
+        row_result.first.return_value = (file_obj, vault_user.id, "Compliance")
+        db_mock = MagicMock()
+        db_mock.execute = AsyncMock(return_value=row_result)
+
+        tool = chatbot_tools.TOOL_REGISTRY["get_vault_file"]
+        result = await tool.execute(vault_user, db_mock, {"file_id": 10})
+        assert result["text_truncated"] is True
+        assert len(result["extracted_text"]) == cap
+
+    async def test_not_ready_file_includes_note(
+        self,
+        vault_user: AuthenticatedUser,
+        db_stub: object,
+    ) -> None:
+        file_obj = _make_vault_file(
+            processing_status="extracting", extracted_text=None
+        )
+        row_result = MagicMock()
+        row_result.first.return_value = (file_obj, vault_user.id, "Compliance")
+        db_mock = MagicMock()
+        db_mock.execute = AsyncMock(return_value=row_result)
+
+        tool = chatbot_tools.TOOL_REGISTRY["get_vault_file"]
+        result = await tool.execute(vault_user, db_mock, {"file_id": 10})
+        assert "note" in result
+        assert result["extracted_text"] == ""
+
+    async def test_non_owner_not_found(
+        self,
+        vault_user: AuthenticatedUser,
+        db_stub: object,
+    ) -> None:
+        file_obj = _make_vault_file()
+        row_result = MagicMock()
+        row_result.first.return_value = (file_obj, "other-user", "Compliance")
+        db_mock = MagicMock()
+        db_mock.execute = AsyncMock(return_value=row_result)
+
+        tool = chatbot_tools.TOOL_REGISTRY["get_vault_file"]
+        result = await tool.execute(vault_user, db_mock, {"file_id": 10})
+        assert result["error"] == "not_found"
+
+    async def test_missing_file_returns_not_found(
+        self,
+        vault_user: AuthenticatedUser,
+        db_stub: object,
+    ) -> None:
+        row_result = MagicMock()
+        row_result.first.return_value = None
+        db_mock = MagicMock()
+        db_mock.execute = AsyncMock(return_value=row_result)
+
+        tool = chatbot_tools.TOOL_REGISTRY["get_vault_file"]
+        result = await tool.execute(vault_user, db_mock, {"file_id": 9999})
+        assert result["error"] == "not_found"
+
+    async def test_missing_file_id_returns_invalid_args(
+        self,
+        vault_user: AuthenticatedUser,
+        db_stub: object,
+    ) -> None:
+        tool = chatbot_tools.TOOL_REGISTRY["get_vault_file"]
+        result = await tool.execute(vault_user, db_stub, {})
+        assert result["error"] == "invalid_args"
+
+    async def test_403_returns_no_access(
+        self,
+        no_access_user: AuthenticatedUser,
+        db_stub: object,
+    ) -> None:
+        tool = chatbot_tools.TOOL_REGISTRY["get_vault_file"]
+        result = await tool.execute(no_access_user, db_stub, {"file_id": 10})
         assert result["error"] == "no_access"
 
 

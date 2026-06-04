@@ -207,6 +207,26 @@ class _FunctionCall:
     args: dict[str, Any]
 
 
+def _function_declaration(tool: Tool) -> dict[str, Any]:
+    """Build one Gemini ``functionDeclaration`` for a tool.
+
+    ``parameters`` is OMITTED entirely for no-argument tools (schemas with
+    an empty ``properties``). Gemini's REST API rejects a ``parameters``
+    object whose ``properties`` is empty ("should be non-empty"), and that
+    400 would sink the WHOLE turn — not just the offending tool — so a
+    single no-arg tool like ``list_vault_folders`` could otherwise break
+    the entire chatbot. A declaration with no ``parameters`` is the
+    documented way to declare a no-arg function.
+    """
+    declaration: dict[str, Any] = {
+        "name": tool.name,
+        "description": tool.description,
+    }
+    if tool.parameters_schema.get("properties"):
+        declaration["parameters"] = tool.parameters_schema
+    return declaration
+
+
 class ChatbotService:
     """Stateless wrapper around Gemini's ``generateContent`` with tools."""
 
@@ -341,11 +361,7 @@ class ChatbotService:
             payload["tools"] = [
                 {
                     "functionDeclarations": [
-                        {
-                            "name": tool.name,
-                            "description": tool.description,
-                            "parameters": tool.parameters_schema,
-                        }
+                        _function_declaration(tool)
                         for tool in tools.values()
                     ]
                 }

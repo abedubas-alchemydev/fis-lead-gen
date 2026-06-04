@@ -33,7 +33,7 @@ from pathlib import Path
 from typing import Any, Awaitable, Callable, Mapping
 
 from fastapi import HTTPException
-from sqlalchemy import select
+from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.feature_permissions import (
@@ -48,6 +48,7 @@ from app.models.advisor_filing import AdvisorFiling
 from app.models.form4_transaction import Form4Transaction
 from app.models.investor_filing import InvestorFiling
 from app.models.vault_folder import VaultFolder
+from app.models.vault_folder_file import VaultFolderFile
 from app.schemas.auth import AuthenticatedUser
 from app.schemas.broker_dealer import (
     BrokerDealerListItem,
@@ -108,7 +109,9 @@ from app.services.sec_pdf_fetcher import (
     fetch_filing_pdf_bytes,
     fetch_sec_pdf_bytes,
 )
-from app.services.vault_retrieval import retrieve_chunks
+from app.services.vault_retrieval import (
+    retrieve_chunks_for_folders,
+)
 from app.services.web_research import search_web
 
 logger = logging.getLogger(__name__)
@@ -480,6 +483,17 @@ PDF_TOOL_TIMEOUT_S = 30.0
 # when each chunk is ~500 tokens).
 VAULT_TOP_K_MAX = 8
 VAULT_TOP_K_DEFAULT = 5
+# Vault browse caps. A user rarely has more than a handful of folders /
+# files; the ceiling just stops a runaway list from flooding the prompt.
+VAULT_FOLDER_LIST_CAP = 50
+VAULT_FILE_LIST_CAP = 50
+# Folder-description snippet length in the folder listing — the full
+# description can be up to 20k chars, far more than the model needs to
+# pick the right folder.
+VAULT_DESC_SNIPPET_CHARS = 240
+# get_vault_file returns a whole document's extracted text. Cap it so one
+# large file can't blow the prompt budget; the tool flags when truncated.
+VAULT_FILE_TEXT_MAX_CHARS = 20_000
 
 
 # Form 4 / Investors tab — values mirror the FE's days preset whitelist
@@ -2089,18 +2103,20 @@ async def _execute_ask_vault(
     db: AsyncSession,
     args: Mapping[str, Any],
 ) -> dict[str, Any]:
-    """RAG against a Vault folder's chunk index.
+    """Semantic search over the user's Vault chunk index.
 
-    Reuses the existing ``vault_retrieval.retrieve_chunks`` primitive
-    which already does pgvector cosine top-K over
-    ``vault_folder_chunk``. The chat tool requires the caller to pass a
-    ``folder_id`` and enforces per-user ownership in this layer (the
-    retrieval module itself doesn't gate on user_id — it trusts the
-    endpoint / tool to have already checked).
+    Embeds the question once and runs pgvector cosine top-K over
+    ``vault_folder_chunk``. ``folder_id`` is OPTIONAL: pass it to scope
+    to a single folder, or omit it to search across ALL the caller's
+    vault folders (the default — mirrors how the database search tools
+    span the whole corpus rather than one container).
 
-    A future iteration could let Doxie auto-pick the user's most-recent
-    folder when ``folder_id`` is omitted, but for now we keep it
-    explicit so the model never silently queries the wrong corpus.
+    Per-user ownership is enforced here, never in the retrieval layer:
+    a specific ``folder_id`` the caller doesn't own returns not_found
+    (opaque, matching vault_files.py), and the whole-vault path only ever
+    spans folders owned by the caller (so it can't leak another user's
+    files). Admins may target a specific foreign ``folder_id`` but their
+    whole-vault search is still scoped to their own folders.
     """
     denial = _check_feature(user, VAULT)
     if denial is not None:
@@ -2113,45 +2129,63 @@ async def _execute_ask_vault(
             "message": "Argument 'query' is required and must be non-empty.",
         }
 
-    try:
-        folder_id = int(args.get("folder_id"))
-    except (TypeError, ValueError):
-        return {
-            "error": "invalid_args",
-            "message": (
-                "Argument 'folder_id' must be an integer. The user can "
-                "find their folder id under /vault."
-            ),
-        }
+    folder_id: int | None = None
+    if args.get("folder_id") is not None:
+        try:
+            folder_id = int(args["folder_id"])
+        except (TypeError, ValueError):
+            return {
+                "error": "invalid_args",
+                "message": (
+                    "Argument 'folder_id' must be an integer, or omit it to "
+                    "search every folder. Folder ids come from "
+                    "list_vault_folders."
+                ),
+            }
 
-    # Enforce per-user folder ownership — vault folders are single-user
-    # (no shared lists). Admins are allowed through the feature gate
-    # but still don't auto-bypass folder ownership; an explicit ask
-    # for someone else's folder returns not_found so the model treats
-    # it as a missing folder rather than a 403.
+    # Resolve the (owned) folder ids to search.
     try:
-        owner_check = await db.execute(
-            select(VaultFolder.user_id).where(VaultFolder.id == folder_id)
-        )
-        owner_id = owner_check.scalar_one_or_none()
+        if folder_id is not None:
+            owner_id = (
+                await db.execute(
+                    select(VaultFolder.user_id).where(VaultFolder.id == folder_id)
+                )
+            ).scalar_one_or_none()
+            if owner_id is None or (owner_id != user.id and user.role != "admin"):
+                return {
+                    "error": "not_found",
+                    "message": f"No vault folder with id={folder_id}.",
+                }
+            folder_ids: list[int] = [folder_id]
+            scope: object = folder_id
+        else:
+            folder_ids = list(
+                (
+                    await db.execute(
+                        select(VaultFolder.id).where(
+                            VaultFolder.user_id == user.id
+                        )
+                    )
+                ).scalars().all()
+            )
+            scope = "all_folders"
     except Exception:
         logger.exception("doxie tool failed", extra={"tool": "ask_vault"})
         return {
             "error": "tool_error",
             "message": "Lookup failed; ask the user to try again.",
         }
-    if owner_id is None:
+
+    if not folder_ids:
         return {
-            "error": "not_found",
-            "message": f"No vault folder with id={folder_id}.",
-        }
-    if owner_id != user.id and user.role != "admin":
-        # Opaque message — don't reveal that the folder exists for
-        # someone else. Same shape vault_files.py uses for cross-tenant
-        # protection.
-        return {
-            "error": "not_found",
-            "message": f"No vault folder with id={folder_id}.",
+            "items": [],
+            "total_matched": 0,
+            "scope": scope,
+            "link": VAULT_URL,
+            "note": (
+                "The user has no vault folders yet. They can create one and "
+                "upload files under /vault."
+            ),
         }
 
     try:
@@ -2161,8 +2195,8 @@ async def _execute_ask_vault(
     top_k = max(1, min(raw_top_k, VAULT_TOP_K_MAX))
 
     try:
-        chunks = await retrieve_chunks(
-            folder_id=folder_id, query=query, db=db, top_k=top_k
+        chunks = await retrieve_chunks_for_folders(
+            folder_ids=folder_ids, query=query, db=db, top_k=top_k
         )
     except Exception:
         logger.exception("doxie tool failed", extra={"tool": "ask_vault"})
@@ -2170,7 +2204,7 @@ async def _execute_ask_vault(
             "error": "tool_error",
             "message": (
                 "Vault retrieval failed; ask the user to try again or "
-                "check that the folder finished embedding."
+                "check that their files finished embedding."
             ),
         }
 
@@ -2179,18 +2213,264 @@ async def _execute_ask_vault(
             {
                 "text": ch.text,
                 "original_filename": ch.original_filename,
+                # folder_name/id so the model can cite WHICH folder a passage
+                # came from when the search spans the whole vault.
+                "folder_name": ch.folder_name,
+                "folder_id": ch.folder_id,
                 "chunk_index": ch.chunk_index,
                 "similarity": round(ch.similarity, 4),
             }
             for ch in chunks
         ],
         "total_matched": len(chunks),
-        # Link to the Vault landing page — the folder UI lives under
-        # /vault and shows file lists; deep-link could point at the
-        # specific folder route once it lands, but bare /vault is fine.
+        # What we searched: a specific folder id, or "all_folders".
+        "scope": scope,
         "link": VAULT_URL,
-        "folder_id": folder_id,
     }
+
+
+async def _execute_list_vault_folders(
+    user: AuthenticatedUser,
+    db: AsyncSession,
+    args: Mapping[str, Any],
+) -> dict[str, Any]:
+    """List the calling user's Vault folders with file counts.
+
+    The discovery entry point for the vault tools — Doxie calls this to
+    learn what folders exist (and their ids) before searching or reading.
+    Scoped to the caller's own folders; admins see their own vault too
+    (no cross-user listing).
+    """
+    denial = _check_feature(user, VAULT)
+    if denial is not None:
+        return denial
+
+    try:
+        folders = list(
+            (
+                await db.execute(
+                    select(VaultFolder)
+                    .where(VaultFolder.user_id == user.id)
+                    .order_by(
+                        VaultFolder.updated_at.desc(), VaultFolder.id.desc()
+                    )
+                    .limit(VAULT_FOLDER_LIST_CAP)
+                )
+            ).scalars().all()
+        )
+        counts: dict[int, tuple[int, int]] = {}
+        if folders:
+            count_rows = (
+                await db.execute(
+                    select(
+                        VaultFolderFile.folder_id,
+                        func.count().label("total"),
+                        func.count()
+                        .filter(VaultFolderFile.processing_status == "ready")
+                        .label("ready"),
+                    )
+                    .where(
+                        VaultFolderFile.folder_id.in_([f.id for f in folders])
+                    )
+                    .group_by(VaultFolderFile.folder_id)
+                )
+            ).all()
+            counts = {
+                int(r.folder_id): (int(r.total), int(r.ready)) for r in count_rows
+            }
+    except Exception:
+        logger.exception(
+            "doxie tool failed", extra={"tool": "list_vault_folders"}
+        )
+        return {
+            "error": "tool_error",
+            "message": "Lookup failed; ask the user to try again.",
+        }
+
+    items = []
+    for f in folders:
+        total, ready = counts.get(f.id, (0, 0))
+        items.append(
+            _jsonable(
+                {
+                    "folder_id": f.id,
+                    "name": f.name,
+                    "description": (f.description or "")[:VAULT_DESC_SNIPPET_CHARS],
+                    "file_count": total,
+                    "ready_file_count": ready,
+                    "updated_at": f.updated_at,
+                }
+            )
+        )
+
+    return {"items": items, "total": len(items), "link": VAULT_URL}
+
+
+async def _execute_list_vault_files(
+    user: AuthenticatedUser,
+    db: AsyncSession,
+    args: Mapping[str, Any],
+) -> dict[str, Any]:
+    """List Vault files — one folder (pass ``folder_id``) or the whole vault.
+
+    Mirrors a database list tool: enumerates files with their processing
+    status so Doxie can pick one to read with get_vault_file. Scoped to
+    the caller's own folders; a specific foreign/missing ``folder_id``
+    returns not_found rather than a silently empty list.
+    """
+    denial = _check_feature(user, VAULT)
+    if denial is not None:
+        return denial
+
+    folder_id: int | None = None
+    if args.get("folder_id") is not None:
+        try:
+            folder_id = int(args["folder_id"])
+        except (TypeError, ValueError):
+            return {
+                "error": "invalid_args",
+                "message": (
+                    "Argument 'folder_id' must be an integer, or omit it to "
+                    "list files across every folder."
+                ),
+            }
+
+    try:
+        stmt = select(
+            VaultFolderFile, VaultFolder.name.label("folder_name")
+        ).join(VaultFolder, VaultFolder.id == VaultFolderFile.folder_id)
+        if folder_id is not None:
+            owner_id = (
+                await db.execute(
+                    select(VaultFolder.user_id).where(VaultFolder.id == folder_id)
+                )
+            ).scalar_one_or_none()
+            if owner_id is None or (owner_id != user.id and user.role != "admin"):
+                return {
+                    "error": "not_found",
+                    "message": f"No vault folder with id={folder_id}.",
+                }
+            stmt = stmt.where(VaultFolderFile.folder_id == folder_id)
+        else:
+            stmt = stmt.where(VaultFolder.user_id == user.id)
+        stmt = stmt.order_by(
+            VaultFolderFile.created_at.desc(), VaultFolderFile.id.desc()
+        ).limit(VAULT_FILE_LIST_CAP)
+        rows = (await db.execute(stmt)).all()
+    except Exception:
+        logger.exception(
+            "doxie tool failed", extra={"tool": "list_vault_files"}
+        )
+        return {
+            "error": "tool_error",
+            "message": "Lookup failed; ask the user to try again.",
+        }
+
+    items = [
+        _jsonable(
+            {
+                "file_id": file_row.id,
+                "folder_id": file_row.folder_id,
+                "folder_name": folder_name,
+                "original_filename": file_row.original_filename,
+                "mime_type": file_row.mime_type,
+                "size_bytes": file_row.size_bytes,
+                "processing_status": file_row.processing_status,
+                "created_at": file_row.created_at,
+            }
+        )
+        for file_row, folder_name in rows
+    ]
+
+    return {
+        "items": items,
+        "total": len(items),
+        "scope": folder_id if folder_id is not None else "all_folders",
+        "link": VAULT_URL,
+    }
+
+
+async def _execute_get_vault_file(
+    user: AuthenticatedUser,
+    db: AsyncSession,
+    args: Mapping[str, Any],
+) -> dict[str, Any]:
+    """Return one Vault file's full extracted text (capped).
+
+    The "read the whole document" tool — distinct from ask_vault, which
+    only returns the top-K matching passages. Use when the user wants a
+    file summarised or read end-to-end. Ownership is enforced via the
+    file's parent folder; text is capped at ``VAULT_FILE_TEXT_MAX_CHARS``
+    and the response flags truncation.
+    """
+    denial = _check_feature(user, VAULT)
+    if denial is not None:
+        return denial
+
+    try:
+        file_id = int(args["file_id"])
+    except (TypeError, ValueError, KeyError):
+        return {
+            "error": "invalid_args",
+            "message": (
+                "Argument 'file_id' must be an integer. File ids come from "
+                "list_vault_files."
+            ),
+        }
+
+    try:
+        row = (
+            await db.execute(
+                select(
+                    VaultFolderFile,
+                    VaultFolder.user_id.label("owner_id"),
+                    VaultFolder.name.label("folder_name"),
+                )
+                .join(VaultFolder, VaultFolder.id == VaultFolderFile.folder_id)
+                .where(VaultFolderFile.id == file_id)
+            )
+        ).first()
+    except Exception:
+        logger.exception("doxie tool failed", extra={"tool": "get_vault_file"})
+        return {
+            "error": "tool_error",
+            "message": "Lookup failed; ask the user to try again.",
+        }
+
+    if row is None:
+        return {
+            "error": "not_found",
+            "message": f"No vault file with id={file_id}.",
+        }
+    file_obj, owner_id, folder_name = row
+    if owner_id != user.id and user.role != "admin":
+        # Opaque — never reveal a file owned by someone else.
+        return {
+            "error": "not_found",
+            "message": f"No vault file with id={file_id}.",
+        }
+
+    text = file_obj.extracted_text or ""
+    truncated = len(text) > VAULT_FILE_TEXT_MAX_CHARS
+    result: dict[str, Any] = {
+        "file_id": file_obj.id,
+        "folder_id": file_obj.folder_id,
+        "folder_name": folder_name,
+        "original_filename": file_obj.original_filename,
+        "mime_type": file_obj.mime_type,
+        "size_bytes": file_obj.size_bytes,
+        "processing_status": file_obj.processing_status,
+        "extracted_text": text[:VAULT_FILE_TEXT_MAX_CHARS],
+        "text_truncated": truncated,
+        "link": VAULT_URL,
+    }
+    if file_obj.processing_status != "ready" or not text:
+        result["note"] = (
+            "This file has no readable text yet — it may still be processing "
+            f"(status: {file_obj.processing_status}) or the extraction "
+            "produced no text."
+        )
+    return _jsonable(result)
 
 
 # ── App knowledge ────────────────────────────────────────────────────────
@@ -2844,17 +3124,18 @@ _ASK_VAULT_SCHEMA: dict[str, Any] = {
             "description": (
                 "Free-form natural-language question. Embedded with the "
                 "same gemini-embedding-001 model used to index the "
-                "vault, then cosine top-K against the folder's chunk "
-                "index."
+                "vault, then cosine top-K against the chunk index."
             ),
         },
         "folder_id": {
             "type": "integer",
             "minimum": 1,
             "description": (
-                "Numeric id of the Vault folder to search. The user can "
-                "find it under /vault. Restricted to folders owned by "
-                "the calling user."
+                "OPTIONAL. Restrict the search to one folder. OMIT to search "
+                "across ALL of the user's vault folders (the default — prefer "
+                "this unless the user named a specific folder). Folder ids "
+                "come from list_vault_folders. Restricted to the caller's own "
+                "folders."
             ),
         },
         "top_k": {
@@ -2867,7 +3148,47 @@ _ASK_VAULT_SCHEMA: dict[str, Any] = {
             ),
         },
     },
-    "required": ["query", "folder_id"],
+    "required": ["query"],
+}
+
+
+_LIST_VAULT_FOLDERS_SCHEMA: dict[str, Any] = {
+    "type": "object",
+    "properties": {},
+}
+
+
+_LIST_VAULT_FILES_SCHEMA: dict[str, Any] = {
+    "type": "object",
+    "properties": {
+        "folder_id": {
+            "type": "integer",
+            "minimum": 1,
+            "description": (
+                "OPTIONAL. List files in just this folder. OMIT to list files "
+                "across ALL of the user's vault folders. Folder ids come from "
+                "list_vault_folders."
+            ),
+        },
+    },
+}
+
+
+_GET_VAULT_FILE_SCHEMA: dict[str, Any] = {
+    "type": "object",
+    "properties": {
+        "file_id": {
+            "type": "integer",
+            "minimum": 1,
+            "description": (
+                "Numeric id of the vault file to read (from "
+                "list_vault_files). Returns the file's full extracted text "
+                "(capped), so the model can summarise or quote the whole "
+                "document — not just the passages ask_vault would surface."
+            ),
+        },
+    },
+    "required": ["file_id"],
 }
 
 
@@ -3188,21 +3509,60 @@ TOOL_REGISTRY: dict[str, Tool] = {
     "ask_vault": Tool(
         name="ask_vault",
         description=(
-            "RAG over a user's Vault folder. Embeds the question with "
-            "gemini-embedding-001, runs pgvector cosine top-K against "
-            "the folder's pre-indexed chunks, and returns the matched "
-            "passages with their source filename. Restricted to folders "
-            "owned by the calling user. Use when the user references "
-            "internal docs they've uploaded (e.g. compliance playbooks, "
-            "internal memos)."
+            "Semantic search over the user's Vault — the documents they've "
+            "uploaded (compliance playbooks, internal memos, contracts, "
+            "rate sheets, etc.). Embeds the question with gemini-embedding-001 "
+            "and returns the best-matching passages with their source "
+            "filename and folder. By DEFAULT searches the user's WHOLE vault; "
+            "pass folder_id only to narrow to one folder. Use whenever the "
+            "user asks about their own internal/uploaded content. To read a "
+            "whole document rather than matching passages, use get_vault_file."
         ),
         parameters_schema=_ASK_VAULT_SCHEMA,
         feature_key=VAULT,
         execute=_execute_ask_vault,
         # Vault retrieval is cheap (one embedding + one pg query); the
-        # default 5s is fine. Caching is also OK because retrieve_chunks
-        # is purely a function of (folder_id, query) at a point in time
+        # default 5s is fine. Caching is also OK because retrieval is
+        # purely a function of (folder set, query) at a point in time
         # and the chat-level TTL is short.
+    ),
+    "list_vault_folders": Tool(
+        name="list_vault_folders",
+        description=(
+            "List the user's Vault folders with their ids, descriptions, and "
+            "file counts. The discovery entry point for the vault — call this "
+            "first when the user asks what's in their vault, or to get a "
+            "folder id for ask_vault / list_vault_files. Returns only the "
+            "caller's own folders."
+        ),
+        parameters_schema=_LIST_VAULT_FOLDERS_SCHEMA,
+        feature_key=VAULT,
+        execute=_execute_list_vault_folders,
+    ),
+    "list_vault_files": Tool(
+        name="list_vault_files",
+        description=(
+            "List the files in the user's Vault — one folder (pass folder_id) "
+            "or every folder (omit it). Returns each file's id, name, type, "
+            "size, and processing status. Use to see what documents exist and "
+            "to get a file_id for get_vault_file. Returns only the caller's "
+            "own files."
+        ),
+        parameters_schema=_LIST_VAULT_FILES_SCHEMA,
+        feature_key=VAULT,
+        execute=_execute_list_vault_files,
+    ),
+    "get_vault_file": Tool(
+        name="get_vault_file",
+        description=(
+            "Read one Vault file's full extracted text (capped), so you can "
+            "summarise or quote the whole document — not just the passages "
+            "ask_vault surfaces. Takes a file_id from list_vault_files. "
+            "Returns only files the caller owns."
+        ),
+        parameters_schema=_GET_VAULT_FILE_SCHEMA,
+        feature_key=VAULT,
+        execute=_execute_get_vault_file,
     ),
     "get_app_help": Tool(
         name="get_app_help",

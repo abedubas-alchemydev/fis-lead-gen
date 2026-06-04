@@ -279,3 +279,34 @@ async def test_chat_raises_on_empty_safety_blocked_response(
             tools={},
         )
     assert "SAFETY" in str(exc.value)
+
+
+def test_function_declaration_omits_parameters_for_no_arg_tools() -> None:
+    """Gemini 400s the WHOLE turn if a ``parameters`` object has empty
+    ``properties``, so no-arg tools (e.g. list_vault_folders) must declare
+    NO ``parameters`` field while tools with args keep theirs."""
+    from app.services.chatbot import _function_declaration
+    from app.services.chatbot_tools import TOOL_REGISTRY
+
+    no_arg = _function_declaration(TOOL_REGISTRY["list_vault_folders"])
+    assert no_arg["name"] == "list_vault_folders"
+    assert "parameters" not in no_arg
+
+    with_args = _function_declaration(TOOL_REGISTRY["ask_vault"])
+    assert with_args["parameters"]["properties"]
+
+
+def test_no_advertised_tool_emits_empty_properties() -> None:
+    """Regression guard for every tool in the live registry: a declaration
+    either omits ``parameters`` or carries a non-empty ``properties`` — never
+    the empty-``properties`` object Gemini rejects."""
+    from app.services.chatbot import _function_declaration
+    from app.services.chatbot_tools import TOOL_REGISTRY
+
+    for tool in TOOL_REGISTRY.values():
+        decl = _function_declaration(tool)
+        if "parameters" in decl:
+            assert decl["parameters"].get("properties"), (
+                f"{tool.name} declares parameters with empty properties — "
+                "Gemini will 400 the whole chat turn"
+            )
