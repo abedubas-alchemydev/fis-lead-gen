@@ -121,9 +121,34 @@ def test_executive_populated_array_not_overwritten() -> None:
         )
     )
     assert len(item.emails) == 2
-    assert item.emails[1].type == "personal"
+    # Personal-first ordering (both hits share confidence, so type decides).
+    assert item.emails[0].type == "personal"
+    assert item.emails[1].type == "work"
+    # Phones are not reordered — mobile stays where the source put it.
     assert len(item.phones) == 2
     assert item.phones[0].type == "mobile"
+
+
+def test_executive_emails_ordered_personal_first_then_confidence() -> None:
+    """Personal emails sort ahead of work; within a type higher confidence
+    wins and unknown confidence sorts last. Applies on read regardless of the
+    order the stored array was built in."""
+    item = ExecutiveContactItem.model_validate(
+        _exec_payload(
+            emails=[
+                {"value": "work-hi@firm.com", "type": "work", "confidence": 95.0, "source": "pdl"},
+                {"value": "personal-lo@gmail.com", "type": "personal", "confidence": 60.0, "source": "pdl"},
+                {"value": "work-none@firm.com", "type": "work", "confidence": None, "source": "hunter"},
+                {"value": "personal-hi@gmail.com", "type": "personal", "confidence": 90.0, "source": "pdl"},
+            ],
+        )
+    )
+    assert [hit.value for hit in item.emails] == [
+        "personal-hi@gmail.com",
+        "personal-lo@gmail.com",
+        "work-hi@firm.com",
+        "work-none@firm.com",
+    ]
 
 
 def test_executive_no_scalar_no_array_returns_empty_lists() -> None:
@@ -175,7 +200,7 @@ def test_investor_populated_array_not_overwritten() -> None:
             ],
         )
     )
-    assert [hit.type for hit in item.emails] == ["work", "personal"]
+    assert [hit.type for hit in item.emails] == ["personal", "work"]
 
 
 def test_investor_no_scalar_no_array_returns_empty_lists() -> None:
