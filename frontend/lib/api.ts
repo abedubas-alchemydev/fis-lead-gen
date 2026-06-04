@@ -130,6 +130,10 @@ import type {
   OutreachSendsListResponse,
   OutreachSendsScope,
   OutreachSignature,
+  SavedOutreachDraft,
+  SavedOutreachDraftDetail,
+  SavedOutreachDraftSaveRequest,
+  SavedOutreachDraftsListResponse,
   RecipientSearchResponse,
   FirmSearchResponse,
   FirmContactsResponse,
@@ -1112,6 +1116,59 @@ export async function composeSendOutreach(
   return apiRequest<OutreachSendResponse>("/api/v1/outreach/compose-send", {
     method: "POST",
     body: JSON.stringify(payload)
+  });
+}
+
+// ── Outreach drafts (Drafts tab) ──────────────────────────────────────
+// Saved-but-unsent composer drafts. "Sending" a draft is the composer
+// loading it back in and calling composeSendOutreach, then deleting it —
+// there's no send-from-draft endpoint, just CRUD here.
+
+export async function createOutreachDraft(
+  payload: SavedOutreachDraftSaveRequest
+): Promise<SavedOutreachDraftDetail> {
+  return apiRequest<SavedOutreachDraftDetail>("/api/v1/outreach/drafts", {
+    method: "POST",
+    body: JSON.stringify(payload)
+  });
+}
+
+export async function listOutreachDrafts(opts?: {
+  limit?: number;
+  offset?: number;
+}): Promise<SavedOutreachDraftsListResponse> {
+  return apiRequest<SavedOutreachDraftsListResponse>(
+    buildApiPath("/api/v1/outreach/drafts", {
+      limit: opts?.limit,
+      offset: opts?.offset
+    })
+  );
+}
+
+export async function getOutreachDraft(
+  draftId: number
+): Promise<SavedOutreachDraftDetail> {
+  return apiRequest<SavedOutreachDraftDetail>(
+    `/api/v1/outreach/drafts/${draftId}`
+  );
+}
+
+export async function updateOutreachDraft(
+  draftId: number,
+  payload: SavedOutreachDraftSaveRequest
+): Promise<SavedOutreachDraftDetail> {
+  return apiRequest<SavedOutreachDraftDetail>(
+    `/api/v1/outreach/drafts/${draftId}`,
+    {
+      method: "PUT",
+      body: JSON.stringify(payload)
+    }
+  );
+}
+
+export async function deleteOutreachDraft(draftId: number): Promise<void> {
+  await apiRequest<void>(`/api/v1/outreach/drafts/${draftId}`, {
+    method: "DELETE"
   });
 }
 

@@ -31,6 +31,7 @@ from app.models.executive_contact import ExecutiveContact
 from app.models.institutional_investor import InstitutionalInvestor
 from app.models.investment_advisor import InvestmentAdvisor
 from app.models.investor_contact import InvestorContact
+from app.models.outreach_draft import OutreachDraft
 from app.models.outreach_send import OutreachSend
 from app.models.pipeline_run import PipelineRun
 from app.models.user_outreach_settings import UserOutreachSettings
@@ -60,8 +61,13 @@ from app.schemas.vault import (
     OutreachAdvisorDraftRequest,
     OutreachAdvisorSendRequest,
     OutreachComposeSendRequest,
+    OutreachDraftDetail,
+    OutreachDraftItem,
+    OutreachDraftRecipient,
     OutreachDraftRequest,
     OutreachDraftResponse,
+    OutreachDraftSaveRequest,
+    OutreachDraftsListResponse,
     OutreachInvestorDraftRequest,
     OutreachInvestorSendRequest,
     OutreachSendDetailResponse,
@@ -1981,6 +1987,244 @@ async def delete_outreach_send(
         send.archived_at = datetime.now(timezone.utc)
         await db.commit()
 
+    return Response(status_code=status.HTTP_204_NO_CONTENT)
+
+
+# ── Outreach drafts ───────────────────────────────────────────────────
+# Saved-but-unsent composer drafts (the Outreach "Drafts" tab). A draft is
+# the mutable counterpart to the immutable outreach_sends audit row: the
+# Create-Outreach composer saves an in-progress To/Cc/Bcc message here, and
+# Doxie-authored emails land here (source="doxie") for human review. Drafts
+# are private to their owner and hard-deleted on send/discard — there's no
+# audit-retention need (the send itself is recorded in outreach_sends).
+# "Sending a draft" is the FE loading it back into the composer and POSTing
+# /compose-send, so this is pure CRUD — no send endpoint lives here.
+
+
+async def _validate_draft_folder(
+    *,
+    folder_id: int | None,
+    current_user: AuthenticatedUser,
+    db: AsyncSession,
+) -> None:
+    """404 if a folder_id is supplied that the caller doesn't own.
+
+    ``None`` (no service picked) is always allowed — mirrors the
+    optional-folder rule on the adhoc / compose send paths.
+    """
+    if folder_id is None:
+        return
+    owns = (
+        await db.execute(
+            select(VaultFolder.id).where(
+                VaultFolder.id == folder_id,
+                VaultFolder.user_id == current_user.id,
+            )
+        )
+    ).scalar_one_or_none()
+    if owns is None:
+        raise HTTPException(status_code=404, detail="outreach_inputs_not_found")
+
+
+async def _folder_name_for(db: AsyncSession, folder_id: int | None) -> str | None:
+    """The folder's display name, or None when no folder is set."""
+    if folder_id is None:
+        return None
+    return (
+        await db.execute(
+            select(VaultFolder.name).where(VaultFolder.id == folder_id)
+        )
+    ).scalar_one_or_none()
+
+
+def _apply_draft_fields(
+    draft: OutreachDraft, payload: OutreachDraftSaveRequest
+) -> None:
+    """Copy a save request onto a draft row.
+
+    Empty subject/body and empty recipient lists store as NULL so the DB
+    stays tidy; the read path normalizes them back to "" / []. Recipients
+    are stored as the compose-shaped dicts so they round-trip 1:1.
+    """
+    draft.subject = payload.subject or None
+    draft.body = payload.body or None
+    draft.to_recipients = [r.model_dump() for r in payload.to] or None
+    draft.cc_emails = list(payload.cc) or None
+    draft.bcc_emails = list(payload.bcc) or None
+    draft.sender_account_id = payload.sender_account_id
+    draft.folder_id = payload.folder_id
+    draft.source = payload.source
+
+
+def _draft_payload(draft: OutreachDraft, folder_name: str | None) -> dict:
+    """Flatten a draft row (+ joined folder name) into the dict the item and
+    detail response models consume. Recipients are projected back into the
+    compose-shaped to/cc/bcc the composer hydrates from."""
+    to = [
+        OutreachDraftRecipient(email=str(r.get("email", "")), name=r.get("name"))
+        for r in (draft.to_recipients or [])
+        if isinstance(r, dict)
+    ]
+    return {
+        "id": draft.id,
+        "subject": draft.subject or "",
+        "to": to,
+        "cc": [str(x) for x in (draft.cc_emails or [])],
+        "bcc": [str(x) for x in (draft.bcc_emails or [])],
+        "folder_id": draft.folder_id,
+        "folder_name": folder_name,
+        "sender_account_id": draft.sender_account_id,
+        "source": draft.source,
+        "created_at": draft.created_at,
+        "updated_at": draft.updated_at,
+    }
+
+
+async def _load_owned_draft(
+    *,
+    draft_id: int,
+    current_user: AuthenticatedUser,
+    db: AsyncSession,
+) -> tuple[OutreachDraft, str | None]:
+    """Fetch one of the caller's own drafts + its folder name, or 404.
+
+    404 for both "doesn't exist" and "belongs to another user" so a leaked
+    id can't confirm cross-user existence — same opacity as the sends paths.
+    """
+    row = (
+        await db.execute(
+            select(OutreachDraft, VaultFolder.name)
+            .outerjoin(VaultFolder, VaultFolder.id == OutreachDraft.folder_id)
+            .where(
+                OutreachDraft.id == draft_id,
+                OutreachDraft.user_id == current_user.id,
+            )
+        )
+    ).first()
+    if row is None:
+        raise HTTPException(status_code=404, detail="outreach_draft_not_found")
+    return row[0], row[1]
+
+
+@router.post(
+    "/drafts",
+    response_model=OutreachDraftDetail,
+    status_code=status.HTTP_201_CREATED,
+)
+async def create_outreach_draft_record(
+    payload: OutreachDraftSaveRequest,
+    current_user: AuthenticatedUser = Depends(_require_sent_outreach),
+    db: AsyncSession = Depends(get_db_session),
+) -> OutreachDraftDetail:
+    """Save a new composer draft for the caller. Returns the stored draft."""
+    await _validate_draft_folder(
+        folder_id=payload.folder_id, current_user=current_user, db=db
+    )
+    draft = OutreachDraft(user_id=current_user.id)
+    _apply_draft_fields(draft, payload)
+    db.add(draft)
+    await db.commit()
+    await db.refresh(draft)
+    folder_name = await _folder_name_for(db, draft.folder_id)
+    return OutreachDraftDetail(
+        **_draft_payload(draft, folder_name), body=draft.body or ""
+    )
+
+
+@router.get("/drafts", response_model=OutreachDraftsListResponse)
+async def list_outreach_drafts(
+    limit: int = Query(50, ge=1, le=200),
+    offset: int = Query(0, ge=0),
+    current_user: AuthenticatedUser = Depends(_require_sent_outreach),
+    db: AsyncSession = Depends(get_db_session),
+) -> OutreachDraftsListResponse:
+    """The caller's drafts, newest-edited first. Body is omitted from the
+    list rows (fetch via ``GET /outreach/drafts/{id}`` on open)."""
+    base = (
+        select(OutreachDraft, VaultFolder.name)
+        .outerjoin(VaultFolder, VaultFolder.id == OutreachDraft.folder_id)
+        .where(OutreachDraft.user_id == current_user.id)
+    )
+    count_stmt = select(func.count()).select_from(
+        select(OutreachDraft.id)
+        .where(OutreachDraft.user_id == current_user.id)
+        .subquery()
+    )
+    total = (await db.execute(count_stmt)).scalar_one()
+    rows = (
+        await db.execute(
+            base.order_by(OutreachDraft.updated_at.desc())
+            .limit(limit)
+            .offset(offset)
+        )
+    ).all()
+    items = [OutreachDraftItem(**_draft_payload(row[0], row[1])) for row in rows]
+    return OutreachDraftsListResponse(
+        items=items, total=total, limit=limit, offset=offset
+    )
+
+
+@router.get("/drafts/{draft_id}", response_model=OutreachDraftDetail)
+async def get_outreach_draft(
+    draft_id: int,
+    current_user: AuthenticatedUser = Depends(_require_sent_outreach),
+    db: AsyncSession = Depends(get_db_session),
+) -> OutreachDraftDetail:
+    """Full draft (incl. body) for the caller to resume editing."""
+    draft, folder_name = await _load_owned_draft(
+        draft_id=draft_id, current_user=current_user, db=db
+    )
+    return OutreachDraftDetail(
+        **_draft_payload(draft, folder_name), body=draft.body or ""
+    )
+
+
+@router.put("/drafts/{draft_id}", response_model=OutreachDraftDetail)
+async def update_outreach_draft(
+    draft_id: int,
+    payload: OutreachDraftSaveRequest,
+    current_user: AuthenticatedUser = Depends(_require_sent_outreach),
+    db: AsyncSession = Depends(get_db_session),
+) -> OutreachDraftDetail:
+    """Overwrite one of the caller's own drafts with the composer's state."""
+    draft, _ = await _load_owned_draft(
+        draft_id=draft_id, current_user=current_user, db=db
+    )
+    await _validate_draft_folder(
+        folder_id=payload.folder_id, current_user=current_user, db=db
+    )
+    _apply_draft_fields(draft, payload)
+    await db.commit()
+    await db.refresh(draft)
+    folder_name = await _folder_name_for(db, draft.folder_id)
+    return OutreachDraftDetail(
+        **_draft_payload(draft, folder_name), body=draft.body or ""
+    )
+
+
+@router.delete("/drafts/{draft_id}", status_code=status.HTTP_204_NO_CONTENT)
+async def delete_outreach_draft(
+    draft_id: int,
+    current_user: AuthenticatedUser = Depends(_require_sent_outreach),
+    db: AsyncSession = Depends(get_db_session),
+) -> Response:
+    """Hard-delete one of the caller's own drafts.
+
+    Owner-only: 404 for both "doesn't exist" and "belongs to another user".
+    Unlike sends, drafts carry no audit value, so this is a real delete.
+    """
+    draft = (
+        await db.execute(
+            select(OutreachDraft).where(
+                OutreachDraft.id == draft_id,
+                OutreachDraft.user_id == current_user.id,
+            )
+        )
+    ).scalar_one_or_none()
+    if draft is None:
+        raise HTTPException(status_code=404, detail="outreach_draft_not_found")
+    await db.delete(draft)
+    await db.commit()
     return Response(status_code=status.HTTP_204_NO_CONTENT)
 
 
