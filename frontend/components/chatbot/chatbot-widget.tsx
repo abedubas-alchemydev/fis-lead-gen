@@ -36,7 +36,9 @@ const TOOL_STATUS_LABELS: Record<string, string> = {
   search_institutional_investors: "Searching institutional investors…",
   get_institutional_investor_profile: "Loading investor profile…",
   list_broker_dealers_by_filter: "Filtering broker-dealers…",
-  list_investment_advisors_by_filter: "Filtering investment advisors…"
+  list_investment_advisors_by_filter: "Filtering investment advisors…",
+  run_email_extractor: "Starting email scan…",
+  draft_outreach_email: "Drafting outreach email…"
 };
 
 function toolStatusFor(name: string): string {

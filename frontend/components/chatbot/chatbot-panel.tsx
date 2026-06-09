@@ -11,6 +11,7 @@ import {
 } from "react";
 
 import { ChatbotMessage, type ChatMessage } from "./chatbot-message";
+import { ChatbotAttachButton, ChatbotVoiceButton } from "./chatbot-input-controls";
 
 export interface ChatbotPanelProps {
   messages: ReadonlyArray<ChatMessage>;
@@ -138,6 +139,11 @@ export const ChatbotPanel = forwardRef<ChatbotPanelHandle, ChatbotPanelProps>(fu
           if (!sendDisabled) onSend();
         }}
       >
+        <ChatbotAttachButton disabled={isSending} />
+        <ChatbotVoiceButton
+          onTranscript={(text) => onInputChange(input ? `${input} ${text}` : text)}
+          disabled={isSending}
+        />
         <textarea
           ref={inputRef}
           value={input}
