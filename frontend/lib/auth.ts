@@ -7,6 +7,7 @@ import {
   sendPasswordResetEmail,
   sendVerificationEmail as sendVerifyEmail,
   sendAdminApprovalRequestEmail,
+  sendNewSignInSignoutAlert,
 } from "@/lib/email";
 
 const globalForDatabase = globalThis as typeof globalThis & {
@@ -26,6 +27,31 @@ if (process.env.NODE_ENV !== "production") {
 export const db = database;
 
 const appUrl = process.env.BETTER_AUTH_URL ?? process.env.NEXT_PUBLIC_APP_URL ?? "http://localhost:3000";
+
+// Single-active-session: looks up the account owner's email and sends the
+// "you were signed out elsewhere" alert. Best-effort — never throws, so a
+// mail outage can't block a login.
+async function notifyForcedLogout(
+  userId: string,
+  info: { ip: string | null; userAgent: string | null }
+): Promise<void> {
+  try {
+    const res = await database.query<{ email: string; name: string | null }>(
+      'SELECT email, name FROM "user" WHERE id = $1',
+      [userId]
+    );
+    const row = res.rows[0];
+    if (!row?.email) return;
+    await sendNewSignInSignoutAlert({
+      user: { email: row.email, name: row.name ?? "" },
+      ip: info.ip,
+      userAgent: info.userAgent,
+      settingsUrl: `${appUrl}/settings/account`,
+    });
+  } catch (err) {
+    console.error("[SECURITY] Failed to send forced-logout alert:", err);
+  }
+}
 
 // Decodes a JWT payload without verifying the signature. Safe to use
 // here because Better Auth has already verified the id_token against
@@ -362,6 +388,44 @@ export const auth = betterAuth({
             );
           } catch (err) {
             console.error("[ACTIVITY] Failed to record login audit row:", err);
+          }
+
+          // Single-active-session enforcement: a fresh login ends the user's
+          // sessions on every other device, keeping only this one. Wrapped on
+          // its own so a failure here never blocks the login.
+          try {
+            const others = await database.query<{ id: string }>(
+              `SELECT id FROM session
+               WHERE user_id = $1 AND id <> $2 AND expires_at > NOW()`,
+              [session.userId, session.id]
+            );
+            const endedCount = others.rowCount ?? 0;
+            if (endedCount > 0) {
+              await database.query(
+                "DELETE FROM session WHERE user_id = $1 AND id <> $2",
+                [session.userId, session.id]
+              );
+              await database.query(
+                `INSERT INTO audit_log (user_id, action, details, timestamp)
+                 VALUES ($1, 'security.forced_logout_other_devices', $2, NOW())`,
+                [
+                  session.userId,
+                  JSON.stringify({
+                    kept_session_id: session.id,
+                    ended_count: endedCount,
+                    new_ip: session.ipAddress ?? null,
+                    new_user_agent: session.userAgent ?? null
+                  })
+                ]
+              );
+              // Fire-and-forget owner alert; do not await the mail send.
+              void notifyForcedLogout(session.userId, {
+                ip: session.ipAddress ?? null,
+                userAgent: session.userAgent ?? null
+              });
+            }
+          } catch (err) {
+            console.error("[SECURITY] Failed to enforce single active session:", err);
           }
         }
       },
