@@ -37,6 +37,7 @@ from app.services.email_extractor.enrichment.base import (
     EnrichmentError,
 )
 from app.services.email_extractor.enrichment.hunter import HunterEnrichProvider
+from app.services.email_extractor.enrichment.pdl import PdlEnrichProvider
 from app.services.email_extractor.enrichment.snov import SnovEnrichProvider
 from app.services.email_extractor.enrichment.web_scraper import WebScraperEnrichProvider
 
@@ -47,6 +48,7 @@ logger = logging.getLogger(__name__)
 # env change with no code edit.
 _PROVIDERS: dict[str, EmailEnrichmentProvider] = {
     "apollo": ApolloEnrichProvider(),
+    "pdl": PdlEnrichProvider(),
     "hunter": HunterEnrichProvider(),
     "snov": SnovEnrichProvider(),
     "web_scraper": WebScraperEnrichProvider(),

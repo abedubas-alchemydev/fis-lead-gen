@@ -23,6 +23,7 @@ from app.core.config import settings
 from app.models.discovered_email import DiscoveredEmail
 from app.services.email_extractor.enrichment import hunter as hunter_mod
 from app.services.email_extractor.enrichment import orchestrator
+from app.services.email_extractor.enrichment import pdl as pdl_mod
 from app.services.email_extractor.enrichment import snov as snov_mod
 from app.services.email_extractor.enrichment import web_scraper as web_scraper_mod
 from app.services.email_extractor.enrichment.base import (
@@ -380,6 +381,94 @@ async def test_snov_unconfigured_returns_none(monkeypatch: pytest.MonkeyPatch) -
     monkeypatch.setattr(settings, "snov_client_id", "", raising=False)
     monkeypatch.setattr(settings, "snov_client_secret", "", raising=False)
     assert await snov_mod.SnovEnrichProvider().enrich("liz@globex.com") is None
+
+
+# ──────────────────────────── PDL provider ────────────────────────────
+
+
+@respx.mock
+async def test_pdl_parses_person_and_prefers_personal_email(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """PDL fills the two fields the chain most often still misses after Apollo:
+    a phone (mobile preferred) and a personal email. Name is title-cased."""
+    monkeypatch.setattr(settings, "pdl_api_key", "k", raising=False)
+    monkeypatch.setattr(settings, "pdl_min_likelihood", 6, raising=False)
+    respx.post(pdl_mod.PERSON_ENRICH_URL).mock(
+        return_value=httpx.Response(
+            200,
+            json={
+                "likelihood": 8,
+                "data": {
+                    "full_name": "jane doe",  # PDL lowercases -> we title-case
+                    "job_title": "Compliance Officer",
+                    "job_company_name": "Acme Securities",
+                    "linkedin_url": "linkedin.com/in/janedoe",  # no scheme
+                    "work_email": "jane@acme.com",  # echoes discovered -> dropped
+                    "emails": [
+                        {"address": "jane@acme.com", "type": "professional"},
+                        {"address": "jane.personal@gmail.com", "type": "personal"},
+                    ],
+                    "mobile_phone": "+15551112222",
+                    "phone_numbers": ["+15559998888"],
+                },
+            },
+        )
+    )
+
+    data = await pdl_mod.PdlEnrichProvider().enrich("jane@acme.com")
+
+    assert data is not None
+    assert data.name == "Jane Doe"
+    assert data.title == "Compliance Officer"
+    assert data.company == "Acme Securities"
+    assert data.linkedin_url == "https://linkedin.com/in/janedoe"
+    assert data.email == "jane.personal@gmail.com"  # personal wins; echo dropped
+    assert data.phone == "+15551112222"  # mobile leads phone_numbers[]
+
+
+@respx.mock
+async def test_pdl_falls_back_to_phone_numbers_when_no_mobile(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(settings, "pdl_api_key", "k", raising=False)
+    respx.post(pdl_mod.PERSON_ENRICH_URL).mock(
+        return_value=httpx.Response(
+            200,
+            json={
+                "likelihood": 7,
+                "data": {"full_name": "john roe", "phone_numbers": ["+15553334444"]},
+            },
+        )
+    )
+
+    data = await pdl_mod.PdlEnrichProvider().enrich("john@roe.com")
+
+    assert data is not None
+    assert data.phone == "+15553334444"
+    assert data.email is None  # no differing address to contribute
+
+
+@respx.mock
+async def test_pdl_404_is_clean_miss(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(settings, "pdl_api_key", "k", raising=False)
+    respx.post(pdl_mod.PERSON_ENRICH_URL).mock(return_value=httpx.Response(404, json={}))
+
+    assert await pdl_mod.PdlEnrichProvider().enrich("nobody@acme.com") is None
+
+
+@respx.mock
+async def test_pdl_5xx_raises(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(settings, "pdl_api_key", "k", raising=False)
+    respx.post(pdl_mod.PERSON_ENRICH_URL).mock(return_value=httpx.Response(500, text="boom"))
+
+    with pytest.raises(EnrichmentError):
+        await pdl_mod.PdlEnrichProvider().enrich("jane@acme.com")
+
+
+async def test_pdl_unconfigured_returns_none(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(settings, "pdl_api_key", "", raising=False)
+    assert await pdl_mod.PdlEnrichProvider().enrich("jane@acme.com") is None
 
 
 # ──────────────────────────── Web-scraper provider ────────────────────────────

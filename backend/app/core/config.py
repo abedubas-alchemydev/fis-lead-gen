@@ -231,13 +231,16 @@ class Settings(BaseSettings):
     # by services/email_extractor/enrichment/orchestrator.py. Unlike the
     # contact-discovery fan-out, this runs IN ORDER and gap-fills: the first
     # provider to return a field wins it, later providers fill only the fields
-    # still empty (so Apollo's name/title/LinkedIn + a phone scraped by the web
-    # fallback combine on one row). Unconfigured providers (missing key/flag)
-    # are skipped. Registered names: apollo, hunter, snov, web_scraper. Reorder
-    # or trim via env with no code change (e.g. drop ``web_scraper`` to disable
-    # the site-crawl fallback). ``web_scraper`` additionally requires
-    # ``web_fallback_enabled``.
-    email_enrichment_chain: str = "apollo,hunter,snov,web_scraper"
+    # still empty (so Apollo's name/title/LinkedIn + a phone + personal email
+    # from PDL combine on one row). Unconfigured providers (missing key/flag)
+    # are skipped. Registered names: apollo, pdl, hunter, snov, web_scraper.
+    # ``pdl`` sits right after Apollo because it's the one paid API that returns
+    # person phones + personal emails (Apollo's sync phone is empty on our plan,
+    # Snov returns neither) -- the two fields the button most often still misses.
+    # Reorder or trim via env with no code change (e.g. drop ``web_scraper`` to
+    # disable the site-crawl fallback). ``web_scraper`` additionally requires
+    # ``web_fallback_enabled``; ``pdl`` requires ``pdl_api_key``.
+    email_enrichment_chain: str = "apollo,pdl,hunter,snov,web_scraper"
     gemini_api_key: str | None = None
     gemini_api_base: str = "https://generativelanguage.googleapis.com/v1beta"
     # Production default for the structured-PDF extraction path
