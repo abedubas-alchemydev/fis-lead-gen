@@ -620,6 +620,9 @@ export function AppShell({
           <main className="min-w-0 flex-1 overflow-auto">
             <GlobalBackButton />
             {children}
+            <footer className="border-t border-[var(--border,rgba(30,64,175,0.1))] px-6 py-4 text-center text-[11px] text-[var(--text-muted,#94a3b8)]">
+              Data provided by FINRA, SEC EDGAR, and DTCC/OCC directories.
+            </footer>
           </main>
         </div>
       </div>
