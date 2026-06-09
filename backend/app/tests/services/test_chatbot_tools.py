@@ -27,7 +27,6 @@ import pytest
 
 from app.core.feature_permissions import (
     ALERTS,
-    EMAIL_EXTRACTOR,
     INSTITUTIONAL_INVESTORS,
     INVESTMENT_ADVISORS,
     INVESTORS,
@@ -958,26 +957,11 @@ async def test_admin_bypasses_feature_gate_on_every_tool(
         assert r.get("error") != "no_access"
 
 
-# ── Action tools (write-capable) ────────────────────────────────────────
+# ── Action tool (write-capable) ─────────────────────────────────────────
 #
 # These tests cover the gate + arg-validation paths only — both short-circuit
 # before any DB access, so the ``db_stub`` sentinel is never touched. The
 # happy / not-found paths hit the live session and belong to integration.
-
-
-async def test_run_email_extractor_requires_feature(no_access_user, db_stub) -> None:
-    result = await chatbot_tools.TOOL_REGISTRY["run_email_extractor"].execute(
-        no_access_user, db_stub, {"domain": "acme.com"}
-    )
-    assert result["error"] == "no_access"
-
-
-async def test_run_email_extractor_rejects_missing_domain(db_stub) -> None:
-    user = _make_user(features=[EMAIL_EXTRACTOR])
-    result = await chatbot_tools.TOOL_REGISTRY["run_email_extractor"].execute(
-        user, db_stub, {}
-    )
-    assert result["error"] == "invalid_args"
 
 
 async def test_draft_outreach_email_requires_feature(no_access_user, db_stub) -> None:
@@ -1049,8 +1033,7 @@ def test_tool_registry_has_expected_names() -> None:
         "research_term",
         # Doxie BD<->IA dual-registration tool.
         "find_dual_registered_firms",
-        # Doxie action tools (write-capable).
-        "run_email_extractor",
+        # Doxie action tool (write-capable).
         "draft_outreach_email",
     }
 

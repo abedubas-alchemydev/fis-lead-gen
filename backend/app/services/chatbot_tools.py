@@ -24,7 +24,6 @@ Design rules followed throughout this module:
 
 from __future__ import annotations
 
-import asyncio
 import base64
 import logging
 from dataclasses import dataclass
@@ -39,7 +38,6 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.feature_permissions import (
     ALERTS,
-    EMAIL_EXTRACTOR,
     INSTITUTIONAL_INVESTORS,
     INVESTMENT_ADVISORS,
     INVESTORS,
@@ -49,7 +47,6 @@ from app.core.feature_permissions import (
 from app.models.advisor_filing import AdvisorFiling
 from app.models.broker_dealer import BrokerDealer
 from app.models.executive_contact import ExecutiveContact
-from app.models.extraction_run import ExtractionRun, RunStatus
 from app.models.form4_transaction import Form4Transaction
 from app.models.investor_filing import InvestorFiling
 from app.models.vault_folder import VaultFolder
@@ -114,7 +111,6 @@ from app.services.sec_pdf_fetcher import (
     fetch_filing_pdf_bytes,
     fetch_sec_pdf_bytes,
 )
-from app.services.email_extractor import aggregator as email_extractor_aggregator
 from app.services.outreach import (
     ContactContext,
     FirmContext,
@@ -3286,45 +3282,11 @@ _DUAL_REGISTRATION_PARAMETERS_SCHEMA: dict[str, Any] = {
 
 # ── Action tools (write-capable) ─────────────────────────────────────────
 #
-# Unlike the read-only lookups above, these cause side effects: one starts a
-# background email-extractor scan, the other generates an outreach draft via
-# Gemini Flash. They keep the same contract as every other tool — feature
-# gated, ownership checked, and never raising into the Gemini loop (expected
-# failures come back as structured error dicts).
-
-# Holds references to the detached scan tasks so the event loop doesn't
-# garbage-collect them mid-run (asyncio keeps only a weak ref otherwise).
-_BACKGROUND_SCAN_TASKS: set[asyncio.Task[None]] = set()
-
-
-_RUN_EMAIL_EXTRACTOR_PARAMETERS_SCHEMA: dict[str, Any] = {
-    "type": "object",
-    "properties": {
-        "domain": {
-            "type": "string",
-            "description": (
-                "Company domain to scan for contact emails, e.g. 'acme.com'. "
-                "Strip any 'https://' or 'www.' prefix."
-            ),
-        },
-        "person_name": {
-            "type": "string",
-            "description": "Optional person name to focus the scan on.",
-        },
-        "broker_dealer_id": {
-            "type": "integer",
-            "description": (
-                "Optional broker-dealer id to tie the scan to (from a search "
-                "or profile tool). Omit if not firm-specific."
-            ),
-        },
-        "advisor_id": {
-            "type": "integer",
-            "description": "Optional investment-advisor id to tie the scan to.",
-        },
-    },
-    "required": ["domain"],
-}
+# Unlike the read-only lookups above, this one causes a side effect: it
+# generates an outreach draft via Gemini Flash. It keeps the same contract
+# as every other tool — feature gated, ownership checked, and never raising
+# into the Gemini loop (expected failures come back as structured error
+# dicts).
 
 
 _DRAFT_OUTREACH_PARAMETERS_SCHEMA: dict[str, Any] = {
@@ -3351,74 +3313,6 @@ _DRAFT_OUTREACH_PARAMETERS_SCHEMA: dict[str, Any] = {
     },
     "required": ["broker_dealer_id", "contact_id", "folder_id"],
 }
-
-
-async def _execute_run_email_extractor(
-    user: AuthenticatedUser,
-    db: AsyncSession,
-    args: Mapping[str, Any],
-) -> dict[str, Any]:
-    """Start a background email-extractor scan for a domain.
-
-    Mirrors ``POST /email-extractor/scans``: inserts a queued
-    ``ExtractionRun`` and kicks ``aggregator.run`` as a detached task (it
-    opens its own DB session). Returns the new scan id so the user can track
-    it on the Email Extractor page. Queue-only — the scan runs async.
-    """
-    denial = _check_feature(user, EMAIL_EXTRACTOR)
-    if denial is not None:
-        return denial
-
-    domain = _opt_str(args, "domain")
-    if not domain:
-        return {
-            "error": "invalid_args",
-            "message": "Argument 'domain' is required, e.g. 'acme.com'.",
-        }
-
-    def _opt_id(key: str) -> int | None:
-        raw = args.get(key)
-        if raw is None:
-            return None
-        try:
-            return int(raw)
-        except (TypeError, ValueError):
-            return None
-
-    try:
-        scan = ExtractionRun(
-            domain=domain,
-            person_name=_opt_str(args, "person_name"),
-            bd_id=_opt_id("broker_dealer_id"),
-            advisor_id=_opt_id("advisor_id"),
-            status=RunStatus.queued.value,
-        )
-        db.add(scan)
-        await db.commit()
-        await db.refresh(scan)
-    except Exception:
-        logger.exception("doxie tool failed", extra={"tool": "run_email_extractor"})
-        return {
-            "error": "tool_error",
-            "message": "Couldn't start the email scan; ask the user to try again.",
-        }
-
-    # Detached so the chat reply isn't blocked on the scan; keep a ref so the
-    # loop doesn't GC it before it runs.
-    task = asyncio.create_task(email_extractor_aggregator.run(scan.id))
-    _BACKGROUND_SCAN_TASKS.add(task)
-    task.add_done_callback(_BACKGROUND_SCAN_TASKS.discard)
-
-    return {
-        "scan_id": scan.id,
-        "status": scan.status,
-        "domain": domain,
-        "link": f"/email-extractor/{scan.id}",
-        "message": (
-            f"Started an email scan for {domain}. It runs in the background — "
-            "results appear on the Email Extractor page."
-        ),
-    }
 
 
 async def _execute_draft_outreach_email(
@@ -3942,23 +3836,6 @@ TOOL_REGISTRY: dict[str, Tool] = {
         parameters_schema=_DUAL_REGISTRATION_PARAMETERS_SCHEMA,
         feature_key=MASTER_LIST,
         execute=_execute_find_dual_registered_firms,
-    ),
-    "run_email_extractor": Tool(
-        name="run_email_extractor",
-        description=(
-            "Start an email-extractor scan for a company domain to discover "
-            "contact emails. Use when the user asks to 'find emails for', "
-            "'scan', or 'run the email extractor on' a firm or domain. "
-            "Optionally tie it to a broker-dealer or investment-advisor id. "
-            "Returns a scan id; the scan runs in the background and results "
-            "show on the Email Extractor page. This performs a real action — "
-            "only call it when the user clearly wants a scan started."
-        ),
-        parameters_schema=_RUN_EMAIL_EXTRACTOR_PARAMETERS_SCHEMA,
-        feature_key=EMAIL_EXTRACTOR,
-        execute=_execute_run_email_extractor,
-        # Each call is a distinct action — never serve from the dedup cache.
-        cacheable=False,
     ),
     "draft_outreach_email": Tool(
         name="draft_outreach_email",
