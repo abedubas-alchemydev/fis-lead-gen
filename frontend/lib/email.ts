@@ -129,6 +129,54 @@ export async function sendPasswordResetEmail({
   }
 }
 
+// ─── New sign-in alert (single-active-session) ──────────────────────
+// Sent when a fresh login ends the account's sessions on other devices.
+// Best-effort: never throws, so the login hook can fire-and-forget it.
+export async function sendNewSignInSignoutAlert({
+  user,
+  ip,
+  userAgent,
+  settingsUrl,
+}: {
+  user: { email: string; name: string };
+  ip: string | null;
+  userAgent: string | null;
+  settingsUrl?: string;
+}) {
+  const html = buildHtml({
+    preheader: "A new sign-in ended your other DOX sessions",
+    heading: "New sign-in detected",
+    body: `
+      <p>Hi ${user.name || "there"},</p>
+      <p>Your DOX account (<strong>${user.email}</strong>) was just signed in on a new device, so we signed you out on every other device. Only the newest device stays signed in.</p>
+      <p>
+        <strong>New device IP:</strong> ${ip || "Unknown"}<br />
+        <strong>Browser:</strong> ${userAgent || "Unknown"}
+      </p>
+      <p>If this was you, no action is needed. If it wasn't, change your password right away.</p>
+    `,
+    ctaUrl: settingsUrl,
+    ctaLabel: settingsUrl ? "Review account" : undefined,
+    footer:
+      "You're receiving this because DOX keeps your account signed in on one device at a time for security.",
+  });
+
+  try {
+    const info = await getTransporter().sendMail({
+      from: fromAddress,
+      to: user.email,
+      subject: "New sign-in on your DOX account",
+      html,
+    });
+    console.log(
+      `[EMAIL][new-signin] sent ok messageId=${info.messageId} to=${user.email}`
+    );
+  } catch (error: unknown) {
+    // Best-effort alert — swallow so a mail outage never blocks a login.
+    console.error(`[EMAIL][new-signin] FAIL to=${user.email}:`, error);
+  }
+}
+
 // ─── Email Verification Email ───────────────────────────────────────
 export async function sendVerificationEmail({
   user,
