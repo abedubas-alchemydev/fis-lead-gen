@@ -24,6 +24,9 @@ export interface ChatMessage {
   // only parses markdown when this is true so a half-streamed
   // ``[Apex](/master-li`` doesn't flash a broken link mid-stream.
   isFinalized?: boolean;
+  // FE-only message (e.g. the conversational Vault-upload exchange) that
+  // renders in the thread but is NOT sent to the model as history.
+  localOnly?: boolean;
 }
 
 // Prefixes the FE recognises as in-app routes. URLs starting with one of
