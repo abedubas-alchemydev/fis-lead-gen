@@ -1,15 +1,15 @@
 """Background task: enrich every not-yet-enriched email in a scan.
 
 Walks ``DiscoveredEmail`` rows where ``run_id == scan_id`` and
-``enrichment_status != "enriched"``, then defers per-row enrichment to
-``apollo_enrichment.enrich_discovered_email`` -- which already commits
-``enrichment_status="error"`` on its own failure path. Per-row exceptions
+``enrichment_status != "enriched"``, then defers per-row enrichment to the
+enrichment orchestrator (``enrich_discovered_email``) -- which walks the
+provider chain and commits the row's status on its own. Per-row exceptions
 are caught here so one bad row never aborts the batch.
 
-Apollo ``/people/match`` is ~1-3 s per call. A small ``asyncio.sleep``
-between rows keeps us comfortably under provider rate limits without
-needing a token bucket. The endpoint hands this function to FastAPI's
-``BackgroundTasks`` so it runs after the 202 response has been written.
+Each row's chain walk is a handful of HTTP calls (~1-3 s). A small
+``asyncio.sleep`` between rows keeps us comfortably under provider rate
+limits without needing a token bucket. The endpoint hands this function to
+FastAPI's ``BackgroundTasks`` so it runs after the 202 response is written.
 """
 
 from __future__ import annotations
@@ -23,7 +23,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.db.session import SessionLocal
 from app.models.discovered_email import DiscoveredEmail
 from app.models.extraction_run import ExtractionRun
-from app.services.email_extractor.apollo_enrichment import (
+from app.services.email_extractor.enrichment import (
     EnrichmentError,
     enrich_discovered_email,
 )
@@ -46,7 +46,7 @@ async def run_bulk_enrichment(scan_id: int) -> None:
     Cancellation: before each row we re-read
     ``extraction_run.enrich_cancelled_at``; when set, we stop dispatching
     new rows and exit. Already-enriched rows stay enriched -- the loop
-    never rolls back, and the in-flight Apollo call (if any) finishes
+    never rolls back, and the in-flight provider call (if any) finishes
     before the cancel check fires for the next id.
     """
     async with SessionLocal() as db:

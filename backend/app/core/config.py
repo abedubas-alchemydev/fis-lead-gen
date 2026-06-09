@@ -235,6 +235,17 @@ class Settings(BaseSettings):
     # so the merge keeps it, below LinkedIn org-confirmed (80). Raising the
     # min-confidence floor above this disables web emails with no code change.
     web_fallback_email_confidence: float = 70.0
+    # Email-extractor "Enrich" provider chain (reverse-email -> person), walked
+    # by services/email_extractor/enrichment/orchestrator.py. Unlike the
+    # contact-discovery fan-out, this runs IN ORDER and gap-fills: the first
+    # provider to return a field wins it, later providers fill only the fields
+    # still empty (so Apollo's name/title/LinkedIn + a phone scraped by the web
+    # fallback combine on one row). Unconfigured providers (missing key/flag)
+    # are skipped. Registered names: apollo, hunter, snov, web_scraper. Reorder
+    # or trim via env with no code change (e.g. drop ``web_scraper`` to disable
+    # the site-crawl fallback). ``web_scraper`` additionally requires
+    # ``web_fallback_enabled``.
+    email_enrichment_chain: str = "apollo,hunter,snov,web_scraper"
     gemini_api_key: str | None = None
     gemini_api_base: str = "https://generativelanguage.googleapis.com/v1beta"
     # Production default for the structured-PDF extraction path

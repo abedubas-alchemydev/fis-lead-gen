@@ -53,6 +53,22 @@ def _seed_row() -> DiscoveredEmail:
     return row
 
 
+@pytest.fixture(autouse=True)
+def _isolate_to_apollo(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Pin the chain to Apollo only.
+
+    The enricher now walks a provider chain (Apollo -> Hunter -> Snov -> web
+    scraper); these tests exercise the Apollo path, so clear the other
+    providers' credentials/flags up front. Without this a local ``.env`` that
+    happens to carry Hunter/Snov keys would pull them into the chain and make
+    real (respx-blocked) calls.
+    """
+    monkeypatch.setattr(settings, "hunter_api_key", "", raising=False)
+    monkeypatch.setattr(settings, "snov_client_id", "", raising=False)
+    monkeypatch.setattr(settings, "snov_client_secret", "", raising=False)
+    monkeypatch.setattr(settings, "web_fallback_enabled", False, raising=False)
+
+
 @pytest.fixture
 def patch_settings(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(settings, "apollo_api_key", "test-apollo-key")

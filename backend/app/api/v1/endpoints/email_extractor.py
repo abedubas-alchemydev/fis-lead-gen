@@ -28,8 +28,11 @@ from app.schemas.email_extractor import (
 )
 from app.services.auth import ensure_feature, get_current_user
 from app.services.email_extractor import aggregator
-from app.services.email_extractor.apollo_enrichment import (
+from app.services.email_extractor.enrichment import (
+    NOT_CONFIGURED_MESSAGE,
+    NOT_FOUND_MESSAGE,
     EnrichmentError,
+    any_provider_configured,
     enrich_discovered_email,
 )
 from app.services.email_extractor.bulk_enrichment import run_bulk_enrichment
@@ -98,23 +101,30 @@ async def enrich_email(
     db: AsyncSession = Depends(get_db_session),
     current_user: AuthenticatedUser = Depends(_require_email_extractor),
 ) -> DiscoveredEmail:
-    """Run Apollo /people/match against a discovered email to pull name,
-    title, LinkedIn URL, and company. Writes results onto the row itself.
+    """Enrich a discovered email with the person behind it -- name, title,
+    company, LinkedIn, an alternate email, and phone -- by walking the
+    enrichment provider chain. Writes the merged result onto the row itself.
+
+    Errors stay provider-agnostic on the wire: a failure surfaces a generic
+    message, never the specific provider that failed.
     """
     try:
         return await enrich_discovered_email(db, discovered_email_id)
     except EnrichmentError as exc:
         message = str(exc)
-        if message == "discovered_email not found":
-            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=message) from exc
-        if message == "APOLLO_API_KEY not configured":
+        if message == NOT_FOUND_MESSAGE:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail="This email no longer exists.",
+            ) from exc
+        if message == NOT_CONFIGURED_MESSAGE:
             raise HTTPException(
                 status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
-                detail="Apollo enrichment is not configured on this deployment.",
+                detail="Enrichment is not configured on this deployment.",
             ) from exc
         raise HTTPException(
             status_code=status.HTTP_502_BAD_GATEWAY,
-            detail=f"apollo: {message}",
+            detail="Couldn't complete enrichment — please try again.",
         ) from exc
 
 
@@ -129,21 +139,22 @@ async def enrich_all_for_scan(
     db: AsyncSession = Depends(get_db_session),
     current_user: AuthenticatedUser = Depends(_require_email_extractor),
 ) -> EnrichAllResponse:
-    """Enqueue per-row Apollo enrichment for every unenriched email in a scan.
+    """Enqueue per-row enrichment for every unenriched email in a scan.
 
     Returns 202 immediately with a snapshot of what's queued so the
     frontend can display "Enriching N..." before polling
-    GET /scans/{run_id} for per-row progress. Per-email failures are
-    isolated by the background task so one bad row never aborts the batch.
+    GET /scans/{run_id} for per-row progress. Each row walks the enrichment
+    provider chain; per-email failures are isolated by the background task so
+    one bad row never aborts the batch.
     """
     scan = await db.get(ExtractionRun, run_id)
     if scan is None:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="scan not found")
 
-    if not settings.apollo_api_key:
+    if not any_provider_configured():
         raise HTTPException(
             status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
-            detail="Apollo enrichment is not configured on this deployment.",
+            detail="Enrichment is not configured on this deployment.",
         )
 
     total_stmt = select(func.count(DiscoveredEmail.id)).where(DiscoveredEmail.run_id == run_id)

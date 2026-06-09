@@ -97,7 +97,7 @@ export function EnrichAllButton({
       setStatusText(null);
       toast.error(
         err instanceof ApiError && err.status === 503
-          ? "Apollo enrichment isn't configured — contact an admin."
+          ? "Enrichment isn't configured — contact an admin."
           : "Couldn't start enrichment — please try again."
       );
       return;

@@ -118,10 +118,10 @@ function errorMessage(err: unknown, fallback: string): string {
 function enrichErrorMessage(err: unknown): string {
   if (err instanceof ApiError) {
     if (err.status === 503) {
-      return "Apollo enrichment isn't configured — contact an admin.";
+      return "Enrichment isn't configured — contact an admin.";
     }
     if (err.status === 502) {
-      return "Apollo couldn't be reached — try again in a moment.";
+      return "Couldn't reach the enrichment service — try again in a moment.";
     }
     if (err.status === 404) {
       return "This email no longer exists — refresh the scan.";
