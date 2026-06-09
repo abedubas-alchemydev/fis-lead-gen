@@ -957,6 +957,29 @@ async def test_admin_bypasses_feature_gate_on_every_tool(
         assert r.get("error") != "no_access"
 
 
+# ── Action tool (write-capable) ─────────────────────────────────────────
+#
+# These tests cover the gate + arg-validation paths only — both short-circuit
+# before any DB access, so the ``db_stub`` sentinel is never touched. The
+# happy / not-found paths hit the live session and belong to integration.
+
+
+async def test_draft_outreach_email_requires_feature(no_access_user, db_stub) -> None:
+    result = await chatbot_tools.TOOL_REGISTRY["draft_outreach_email"].execute(
+        no_access_user,
+        db_stub,
+        {"broker_dealer_id": 1, "contact_id": 2, "folder_id": 3},
+    )
+    assert result["error"] == "no_access"
+
+
+async def test_draft_outreach_email_rejects_bad_ids(vault_user, db_stub) -> None:
+    result = await chatbot_tools.TOOL_REGISTRY["draft_outreach_email"].execute(
+        vault_user, db_stub, {"broker_dealer_id": "not-an-int"}
+    )
+    assert result["error"] == "invalid_args"
+
+
 # ── Schema-drift guard ──────────────────────────────────────────────────
 
 
@@ -1010,6 +1033,8 @@ def test_tool_registry_has_expected_names() -> None:
         "research_term",
         # Doxie BD<->IA dual-registration tool.
         "find_dual_registered_firms",
+        # Doxie action tool (write-capable).
+        "draft_outreach_email",
     }
 
 

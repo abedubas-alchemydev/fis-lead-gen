@@ -106,7 +106,11 @@ DOXIE_TOOL_USAGE_PROMPT = (
     "answer directly and do NOT call research_term — reserve it for terms you "
     "truly don't know. When a definition does come from research_term, cite "
     "one source briefly as a markdown link. Never use it for a specific "
-    "firm's data, filings, or contacts — the database tools own that."
+    "firm's data, filings, or contacts — the database tools own that.\n\n"
+    "One tool takes a real action instead of just reading data: "
+    "draft_outreach_email composes a cold-email draft (it does NOT send). "
+    "Only call it when the user clearly asks for a draft, and afterward tell "
+    "the user the draft is ready and was not sent."
 )
 
 
