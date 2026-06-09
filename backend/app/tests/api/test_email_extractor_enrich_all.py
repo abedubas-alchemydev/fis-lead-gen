@@ -102,8 +102,15 @@ async def test_enrich_all_404_when_scan_missing(monkeypatch: pytest.MonkeyPatch)
         app.dependency_overrides.clear()
 
 
-async def test_enrich_all_503_when_apollo_key_missing(monkeypatch: pytest.MonkeyPatch) -> None:
+async def test_enrich_all_503_when_no_provider_configured(monkeypatch: pytest.MonkeyPatch) -> None:
+    # With no enrichment provider configured at all, enrich-all is unavailable.
+    # The 503 message stays provider-agnostic -- it never names which provider
+    # is missing.
     monkeypatch.setattr(settings, "apollo_api_key", "", raising=False)
+    monkeypatch.setattr(settings, "hunter_api_key", "", raising=False)
+    monkeypatch.setattr(settings, "snov_client_id", "", raising=False)
+    monkeypatch.setattr(settings, "snov_client_secret", "", raising=False)
+    monkeypatch.setattr(settings, "web_fallback_enabled", False, raising=False)
     app.dependency_overrides[get_current_user] = _override_user
     scan_id = await _seed_scan_with_emails(unenriched=2, already_enriched=0)
     try:
@@ -112,7 +119,9 @@ async def test_enrich_all_503_when_apollo_key_missing(monkeypatch: pytest.Monkey
                 f"/api/v1/email-extractor/scans/{scan_id}/enrich-all"
             )
         assert response.status_code == 503
-        assert "Apollo" in response.json()["detail"]
+        detail = response.json()["detail"]
+        assert detail == "Enrichment is not configured on this deployment."
+        assert "Apollo" not in detail
     finally:
         app.dependency_overrides.clear()
         await _cleanup_scan(scan_id)

@@ -1,0 +1,498 @@
+"""Unit tests for the discovered-email enrichment provider chain.
+
+Three layers, all DB-free / network-free:
+
+* orchestrator -- gap-fill merge, first-match-wins, early-stop, and the
+  outcome -> status mapping (enriched / no_match / error / not-configured),
+  driven by fake providers so no HTTP fires.
+* Hunter / Snov providers -- response parsing via respx (real ``/v2/people/find``
+  and ``/v1/get-profile-by-email`` shapes).
+* Web-scraper provider -- name parse + gating, with ``discover_web_fallback``
+  stubbed so no crawl/search runs.
+"""
+
+from __future__ import annotations
+
+from typing import Any
+
+import httpx
+import pytest
+import respx
+
+from app.core.config import settings
+from app.models.discovered_email import DiscoveredEmail
+from app.services.email_extractor.enrichment import hunter as hunter_mod
+from app.services.email_extractor.enrichment import orchestrator
+from app.services.email_extractor.enrichment import snov as snov_mod
+from app.services.email_extractor.enrichment import web_scraper as web_scraper_mod
+from app.services.email_extractor.enrichment.base import (
+    NOT_CONFIGURED_MESSAGE,
+    EmailEnrichmentProvider,
+    EnrichmentData,
+    EnrichmentError,
+)
+
+
+# ──────────────────────────── test doubles ────────────────────────────
+
+
+class _FakeProvider(EmailEnrichmentProvider):
+    """Configurable provider double. Records call count so the orchestrator's
+    early-stop / skip behaviour can be asserted."""
+
+    def __init__(
+        self,
+        name: str,
+        data: EnrichmentData | None = None,
+        *,
+        configured: bool = True,
+        error: bool = False,
+    ) -> None:
+        self.name = name
+        self._data = data
+        self._configured = configured
+        self._error = error
+        self.calls = 0
+
+    def is_configured(self) -> bool:
+        return self._configured
+
+    async def enrich(self, email: str, needed: set[str] | None = None) -> EnrichmentData | None:
+        self.calls += 1
+        if self._error:
+            raise EnrichmentError("boom")
+        return self._data
+
+
+class _FakeSession:
+    """AsyncSession stand-in exposing only get/commit/refresh."""
+
+    def __init__(self, row: DiscoveredEmail) -> None:
+        self._row = row
+        self.commits = 0
+
+    async def get(self, _model: Any, _pk: Any) -> DiscoveredEmail:
+        return self._row
+
+    async def commit(self) -> None:
+        self.commits += 1
+
+    async def refresh(self, _row: Any) -> None:
+        return None
+
+
+def _seed_row() -> DiscoveredEmail:
+    row = DiscoveredEmail()
+    row.id = 1
+    row.email = "jane@acme.com"
+    return row
+
+
+def _wire(
+    monkeypatch: pytest.MonkeyPatch,
+    providers: dict[str, EmailEnrichmentProvider],
+    chain: str,
+) -> None:
+    monkeypatch.setattr(orchestrator, "_PROVIDERS", providers)
+    monkeypatch.setattr(settings, "email_enrichment_chain", chain, raising=False)
+
+
+# ──────────────────────────── orchestrator ────────────────────────────
+
+
+async def test_gap_fill_merges_across_providers(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Later providers fill fields the earlier one left empty; the row ends up
+    with the union."""
+    apollo = _FakeProvider("apollo", EnrichmentData(name="Jane Doe", title="CCO"))
+    hunter = _FakeProvider(
+        "hunter",
+        EnrichmentData(
+            title="ignored",  # already set by apollo -> must NOT overwrite
+            company="Acme Securities",
+            linkedin_url="https://www.linkedin.com/in/jane-doe",
+            phone="+15551112222",
+            email="jane.alt@gmail.com",
+        ),
+    )
+    _wire(monkeypatch, {"apollo": apollo, "hunter": hunter}, "apollo,hunter")
+
+    out = await orchestrator.enrich_discovered_email(_FakeSession(_seed_row()), 1)
+
+    assert out.enriched_name == "Jane Doe"
+    assert out.enriched_title == "CCO"  # first-match-wins on a contested field
+    assert out.enriched_company == "Acme Securities"
+    assert out.enriched_linkedin_url == "https://www.linkedin.com/in/jane-doe"
+    assert out.enriched_phone == "+15551112222"
+    assert out.enriched_email == "jane.alt@gmail.com"
+    assert out.enrichment_status == "enriched"
+    assert apollo.calls == 1 and hunter.calls == 1
+
+
+async def test_first_match_wins_on_contested_field(monkeypatch: pytest.MonkeyPatch) -> None:
+    apollo = _FakeProvider("apollo", EnrichmentData(name="A"))
+    hunter = _FakeProvider("hunter", EnrichmentData(name="B", company="Acme"))
+    _wire(monkeypatch, {"apollo": apollo, "hunter": hunter}, "apollo,hunter")
+
+    out = await orchestrator.enrich_discovered_email(_FakeSession(_seed_row()), 1)
+
+    assert out.enriched_name == "A"
+    assert out.enriched_company == "Acme"
+
+
+async def test_complete_match_stops_chain_early(monkeypatch: pytest.MonkeyPatch) -> None:
+    """When a provider fills every field, downstream providers aren't called."""
+    full = EnrichmentData(
+        name="J", title="T", company="C", linkedin_url="L", email="e@x.com", phone="p"
+    )
+    apollo = _FakeProvider("apollo", full)
+    hunter = _FakeProvider("hunter", EnrichmentData(name="B"))
+    _wire(monkeypatch, {"apollo": apollo, "hunter": hunter}, "apollo,hunter")
+
+    out = await orchestrator.enrich_discovered_email(_FakeSession(_seed_row()), 1)
+
+    assert apollo.calls == 1
+    assert hunter.calls == 0
+    assert out.enrichment_status == "enriched"
+
+
+async def test_no_provider_configured_raises(monkeypatch: pytest.MonkeyPatch) -> None:
+    apollo = _FakeProvider("apollo", None, configured=False)
+    _wire(monkeypatch, {"apollo": apollo}, "apollo")
+
+    with pytest.raises(EnrichmentError) as excinfo:
+        await orchestrator.enrich_discovered_email(_FakeSession(_seed_row()), 1)
+    assert str(excinfo.value) == NOT_CONFIGURED_MESSAGE
+
+
+async def test_unconfigured_provider_is_skipped(monkeypatch: pytest.MonkeyPatch) -> None:
+    """An unconfigured link in the chain is skipped (not called, not a miss)."""
+    apollo = _FakeProvider("apollo", None, configured=False)
+    hunter = _FakeProvider("hunter", EnrichmentData(name="J"))
+    _wire(monkeypatch, {"apollo": apollo, "hunter": hunter}, "apollo,hunter")
+
+    out = await orchestrator.enrich_discovered_email(_FakeSession(_seed_row()), 1)
+
+    assert apollo.calls == 0
+    assert hunter.calls == 1
+    assert out.enriched_name == "J"
+
+
+async def test_all_clean_miss_sets_no_match(monkeypatch: pytest.MonkeyPatch) -> None:
+    apollo = _FakeProvider("apollo", None)
+    hunter = _FakeProvider("hunter", None)
+    _wire(monkeypatch, {"apollo": apollo, "hunter": hunter}, "apollo,hunter")
+
+    out = await orchestrator.enrich_discovered_email(_FakeSession(_seed_row()), 1)
+
+    assert out.enrichment_status == "no_match"
+
+
+async def test_all_errored_sets_error(monkeypatch: pytest.MonkeyPatch) -> None:
+    apollo = _FakeProvider("apollo", None, error=True)
+    hunter = _FakeProvider("hunter", None, error=True)
+    _wire(monkeypatch, {"apollo": apollo, "hunter": hunter}, "apollo,hunter")
+
+    out = await orchestrator.enrich_discovered_email(_FakeSession(_seed_row()), 1)
+
+    assert out.enrichment_status == "error"
+
+
+async def test_error_then_match_is_enriched(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A failing provider doesn't abort the chain; a later match still wins."""
+    apollo = _FakeProvider("apollo", None, error=True)
+    hunter = _FakeProvider("hunter", EnrichmentData(name="J"))
+    _wire(monkeypatch, {"apollo": apollo, "hunter": hunter}, "apollo,hunter")
+
+    out = await orchestrator.enrich_discovered_email(_FakeSession(_seed_row()), 1)
+
+    assert out.enriched_name == "J"
+    assert out.enrichment_status == "enriched"
+
+
+async def test_apollo_person_id_propagates(monkeypatch: pytest.MonkeyPatch) -> None:
+    apollo = _FakeProvider("apollo", EnrichmentData(name="J", apollo_person_id="pid123"))
+    _wire(monkeypatch, {"apollo": apollo}, "apollo")
+
+    out = await orchestrator.enrich_discovered_email(_FakeSession(_seed_row()), 1)
+
+    assert out.apollo_person_id == "pid123"
+
+
+def test_any_provider_configured(monkeypatch: pytest.MonkeyPatch) -> None:
+    _wire(
+        monkeypatch,
+        {
+            "apollo": _FakeProvider("apollo", None, configured=False),
+            "hunter": _FakeProvider("hunter", None, configured=True),
+        },
+        "apollo,hunter",
+    )
+    assert orchestrator.any_provider_configured() is True
+
+    _wire(monkeypatch, {"apollo": _FakeProvider("apollo", None, configured=False)}, "apollo")
+    assert orchestrator.any_provider_configured() is False
+
+
+# ──────────────────────────── Hunter provider ────────────────────────────
+
+
+@respx.mock
+async def test_hunter_parses_combined_shape(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(settings, "hunter_api_key", "k", raising=False)
+    respx.get(hunter_mod.PEOPLE_FIND_URL).mock(
+        return_value=httpx.Response(
+            200,
+            json={
+                "data": {
+                    "person": {
+                        "name": {"fullName": "Jane Doe", "givenName": "Jane", "familyName": "Doe"},
+                        "employment": {
+                            "title": "Compliance Officer",
+                            "name": "Acme Securities",
+                            "seniority": "executive",
+                        },
+                        "linkedin": {"handle": "in/jane-doe"},
+                        "phone": "+15551112222",
+                        "email": "jane.personal@gmail.com",
+                    },
+                    "company": {"name": "Acme Holdings"},
+                }
+            },
+        )
+    )
+
+    data = await hunter_mod.HunterEnrichProvider().enrich("jane@acme.com")
+
+    assert data is not None
+    assert data.name == "Jane Doe"
+    assert data.title == "Compliance Officer"
+    assert data.company == "Acme Securities"
+    assert data.linkedin_url == "https://www.linkedin.com/in/jane-doe"
+    assert data.phone == "+15551112222"
+    # personal email differs from the discovered address -> kept
+    assert data.email == "jane.personal@gmail.com"
+
+
+@respx.mock
+async def test_hunter_parses_flat_shape_and_suppresses_echo_email(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(settings, "hunter_api_key", "k", raising=False)
+    respx.get(hunter_mod.PEOPLE_FIND_URL).mock(
+        return_value=httpx.Response(
+            200,
+            json={
+                "data": {
+                    "name": {"fullName": "John Roe"},
+                    "position": "CFO",
+                    "linkedin_url": "https://www.linkedin.com/in/johnroe",
+                    "email": "jane@acme.com",  # echoes the input -> dropped
+                }
+            },
+        )
+    )
+
+    data = await hunter_mod.HunterEnrichProvider().enrich("jane@acme.com")
+
+    assert data is not None
+    assert data.name == "John Roe"
+    assert data.title == "CFO"
+    assert data.linkedin_url == "https://www.linkedin.com/in/johnroe"
+    assert data.email is None  # echoed input address is not a new email
+
+
+@respx.mock
+async def test_hunter_404_is_clean_miss(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(settings, "hunter_api_key", "k", raising=False)
+    respx.get(hunter_mod.PEOPLE_FIND_URL).mock(return_value=httpx.Response(404, json={}))
+
+    assert await hunter_mod.HunterEnrichProvider().enrich("jane@acme.com") is None
+
+
+@respx.mock
+async def test_hunter_5xx_raises(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(settings, "hunter_api_key", "k", raising=False)
+    respx.get(hunter_mod.PEOPLE_FIND_URL).mock(return_value=httpx.Response(500, text="boom"))
+
+    with pytest.raises(EnrichmentError):
+        await hunter_mod.HunterEnrichProvider().enrich("jane@acme.com")
+
+
+async def test_hunter_unconfigured_returns_none(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(settings, "hunter_api_key", "", raising=False)
+    assert await hunter_mod.HunterEnrichProvider().enrich("jane@acme.com") is None
+
+
+# ──────────────────────────── Snov provider ────────────────────────────
+
+
+@respx.mock
+async def test_snov_parses_profile(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(settings, "snov_client_id", "cid", raising=False)
+    monkeypatch.setattr(settings, "snov_client_secret", "sec", raising=False)
+    snov_mod._reset_token_cache_for_tests()
+    respx.post(snov_mod.OAUTH_URL).mock(
+        return_value=httpx.Response(200, json={"access_token": "tok", "expires_in": 3600})
+    )
+    respx.post(snov_mod.PROFILE_BY_EMAIL_URL).mock(
+        return_value=httpx.Response(
+            200,
+            json={
+                "name": "Liz Hamer",
+                "firstName": "Liz",
+                "lastName": "Hamer",
+                "currentJobs": [
+                    {"position": "Regional Creative Director", "companyName": "Globex"}
+                ],
+                "social": [
+                    {"link": "https://www.linkedin.com/in/lizihamer/", "type": "linkedIn"}
+                ],
+            },
+        )
+    )
+
+    data = await snov_mod.SnovEnrichProvider().enrich("liz@globex.com")
+
+    assert data is not None
+    assert data.name == "Liz Hamer"
+    assert data.title == "Regional Creative Director"
+    assert data.company == "Globex"
+    assert data.linkedin_url == "https://www.linkedin.com/in/lizihamer/"
+    assert data.phone is None  # this endpoint returns no phone
+
+
+@respx.mock
+async def test_snov_no_profile_is_clean_miss(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(settings, "snov_client_id", "cid", raising=False)
+    monkeypatch.setattr(settings, "snov_client_secret", "sec", raising=False)
+    snov_mod._reset_token_cache_for_tests()
+    respx.post(snov_mod.OAUTH_URL).mock(
+        return_value=httpx.Response(200, json={"access_token": "tok", "expires_in": 3600})
+    )
+    respx.post(snov_mod.PROFILE_BY_EMAIL_URL).mock(
+        return_value=httpx.Response(200, json={"success": False})
+    )
+
+    assert await snov_mod.SnovEnrichProvider().enrich("nobody@globex.com") is None
+
+
+async def test_snov_unconfigured_returns_none(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(settings, "snov_client_id", "", raising=False)
+    monkeypatch.setattr(settings, "snov_client_secret", "", raising=False)
+    assert await snov_mod.SnovEnrichProvider().enrich("liz@globex.com") is None
+
+
+# ──────────────────────────── Web-scraper provider ────────────────────────────
+
+
+async def test_web_scraper_disabled_returns_none(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(settings, "web_fallback_enabled", False, raising=False)
+    assert await web_scraper_mod.WebScraperEnrichProvider().enrich("jane.doe@acme.com") is None
+
+
+async def test_web_scraper_rejects_generic_and_unsplittable_locals(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(settings, "web_fallback_enabled", True, raising=False)
+    provider = web_scraper_mod.WebScraperEnrichProvider()
+    # single-token / role inbox -> can't derive a person
+    assert await provider.enrich("info@acme.com") is None
+    # two-token but firm-wide -> rejected before any crawl
+    assert await provider.enrich("investor.relations@acme.com") is None
+
+
+async def test_web_scraper_maps_web_fallback_result(monkeypatch: pytest.MonkeyPatch) -> None:
+    from app.services.contact_discovery.base import DiscoveryResult, PhoneHit
+
+    monkeypatch.setattr(settings, "web_fallback_enabled", True, raising=False)
+
+    async def _fake_discover(
+        *, domain: str, org_name: str, people: list[Any], crawler: Any = None, linkedin: Any = None
+    ) -> dict[int, DiscoveryResult]:
+        return {
+            0: DiscoveryResult(
+                email=None,
+                phone=None,
+                linkedin_url="https://www.linkedin.com/in/jane-doe",
+                confidence=80.0,
+                provider="web_fallback",
+                raw={},
+                emails=[],
+                phones=[
+                    PhoneHit(value="(555) 123-4567", type="work", confidence=70.0, source="web_fallback")
+                ],
+            )
+        }
+
+    monkeypatch.setattr(web_scraper_mod, "discover_web_fallback", _fake_discover)
+
+    data = await web_scraper_mod.WebScraperEnrichProvider().enrich("jane.doe@acme.com")
+
+    assert data is not None
+    assert data.name == "Jane Doe"
+    assert data.linkedin_url == "https://www.linkedin.com/in/jane-doe"
+    assert data.phone == "(555) 123-4567"
+
+
+async def test_web_scraper_skips_serpapi_search_when_linkedin_not_needed(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """When LinkedIn is already filled upstream, the SerpAPI-backed search is
+    stubbed off (protects scarce SerpAPI quota); the crawl still runs for the
+    missing phone."""
+    monkeypatch.setattr(settings, "web_fallback_enabled", True, raising=False)
+    captured: dict[str, Any] = {}
+
+    async def _fake_discover(*, domain: str, org_name: str, people: list[Any], crawler: Any = None, linkedin: Any = None) -> dict[int, Any]:
+        captured["crawler"] = crawler
+        captured["linkedin"] = linkedin
+        return {}
+
+    monkeypatch.setattr(web_scraper_mod, "discover_web_fallback", _fake_discover)
+
+    await web_scraper_mod.WebScraperEnrichProvider().enrich("jane.doe@acme.com", needed={"phone"})
+
+    assert captured["crawler"] is None  # real crawler built downstream
+    assert isinstance(captured["linkedin"], web_scraper_mod._NullLinkedIn)
+    assert await captured["linkedin"].find_person("a", "b", "c", "d") is None
+
+
+async def test_web_scraper_skips_crawl_when_only_linkedin_needed(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(settings, "web_fallback_enabled", True, raising=False)
+    captured: dict[str, Any] = {}
+
+    async def _fake_discover(*, domain: str, org_name: str, people: list[Any], crawler: Any = None, linkedin: Any = None) -> dict[int, Any]:
+        captured["crawler"] = crawler
+        captured["linkedin"] = linkedin
+        return {}
+
+    monkeypatch.setattr(web_scraper_mod, "discover_web_fallback", _fake_discover)
+
+    await web_scraper_mod.WebScraperEnrichProvider().enrich("jane.doe@acme.com", needed={"linkedin_url"})
+
+    assert captured["linkedin"] is None  # real provider built downstream
+    assert isinstance(captured["crawler"], web_scraper_mod._NullCrawler)
+
+
+async def test_web_scraper_noop_when_no_web_sourced_field_needed(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """name/title/company aren't web-sourced; if only those are missing the
+    provider does no work at all."""
+    monkeypatch.setattr(settings, "web_fallback_enabled", True, raising=False)
+    calls = {"n": 0}
+
+    async def _fake_discover(**_kwargs: Any) -> dict[int, Any]:
+        calls["n"] += 1
+        return {}
+
+    monkeypatch.setattr(web_scraper_mod, "discover_web_fallback", _fake_discover)
+
+    out = await web_scraper_mod.WebScraperEnrichProvider().enrich(
+        "jane.doe@acme.com", needed={"name", "title", "company"}
+    )
+
+    assert out is None
+    assert calls["n"] == 0
