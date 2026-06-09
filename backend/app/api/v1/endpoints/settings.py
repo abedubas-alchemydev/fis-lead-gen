@@ -24,6 +24,7 @@ from app.schemas.settings import (
     ScoringSettingsItem,
     ScoringSettingsUpdate,
 )
+from app.services.audit import record_audit
 from app.services.auth import get_current_user
 from app.services.broker_dealers import BrokerDealerRepository
 from app.services.classification import apply_classification_to_all
@@ -233,6 +234,16 @@ async def refresh_finra_details(
     # Re-apply classification gates
     classified_count = await apply_classification_to_all(db)
     await repository.refresh_lead_scores(db)
+
+    await record_audit(
+        db,
+        action="finra_bulk_refresh",
+        user_id=current_user.id,
+        details={
+            "total_firms_scanned": len(finra_records),
+            "firms_updated": updated_count,
+        },
+    )
     await db.commit()
 
     return {
