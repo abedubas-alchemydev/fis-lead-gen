@@ -4,7 +4,7 @@ The email-extractor "Enrich" button enriches a discovered email address with
 the person behind it -- name, title, company, LinkedIn, an alternate email,
 and a phone. This used to be Apollo-only; it now walks a configurable provider
 chain (``settings.email_enrichment_chain``, default
-``apollo,pdl,hunter,snov,web_scraper``) and *gap-fills*: the first provider that
+``apollo,pdl,hunter,snov,name_lookup,web_scraper``) and *gap-fills*: the first provider that
 returns a field wins it, and later providers fill only the fields still empty.
 See ``orchestrator.py`` for the walk + merge.
 
@@ -21,6 +21,7 @@ layer maps to specific HTTP status codes; everything else is a generic 502.
 
 from __future__ import annotations
 
+import re
 from abc import ABC, abstractmethod
 from dataclasses import dataclass
 from typing import Any
@@ -124,3 +125,22 @@ def clean_str(value: Any) -> str | None:
         stripped = value.strip()
         return stripped or None
     return None
+
+
+def split_name_from_local(local_part: str) -> tuple[str | None, str | None]:
+    """Split an email local-part into ``(first, last)`` when it cleanly encodes a
+    two-token name (``jane.smith``, ``jane_smith``). Drops single-char initials
+    so ``j.smith`` (ambiguous) is rejected rather than guessed. Shared by the
+    web-scraper and name-lookup providers, which both reverse the address itself
+    into a name."""
+    tokens = [t for t in re.split(r"[^a-z0-9]+", local_part.lower()) if t.isalpha() and len(t) >= 2]
+    if len(tokens) < 2:
+        return None, None
+    return tokens[0], tokens[-1]
+
+
+def brand_from_domain(domain: str) -> str:
+    """The firm's brand label from its domain (``vanguard.com`` -> ``vanguard``),
+    used as the org-affiliation signal for the LinkedIn / name+domain lookups."""
+    label = domain.lstrip(".").split(".")[0]
+    return label.replace("-", " ")

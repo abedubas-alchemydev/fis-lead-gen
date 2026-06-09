@@ -233,14 +233,20 @@ class Settings(BaseSettings):
     # provider to return a field wins it, later providers fill only the fields
     # still empty (so Apollo's name/title/LinkedIn + a phone + personal email
     # from PDL combine on one row). Unconfigured providers (missing key/flag)
-    # are skipped. Registered names: apollo, pdl, hunter, snov, web_scraper.
-    # ``pdl`` sits right after Apollo because it's the one paid API that returns
-    # person phones + personal emails (Apollo's sync phone is empty on our plan,
-    # Snov returns neither) -- the two fields the button most often still misses.
-    # Reorder or trim via env with no code change (e.g. drop ``web_scraper`` to
-    # disable the site-crawl fallback). ``web_scraper`` additionally requires
-    # ``web_fallback_enabled``; ``pdl`` requires ``pdl_api_key``.
-    email_enrichment_chain: str = "apollo,pdl,hunter,snov,web_scraper"
+    # are skipped. Registered names: apollo, pdl, hunter, snov, name_lookup,
+    # web_scraper. ``pdl`` sits right after Apollo because it's the one paid API
+    # that returns person phones + personal emails (Apollo's sync phone is empty
+    # on our plan, Snov returns neither) -- the two fields the button most often
+    # still misses. ``name_lookup`` is the coverage net: where every other link
+    # is a reverse-EMAIL lookup, it derives the name from the local-part and runs
+    # the brokers' NAME+domain match (a different index path), so it hits people
+    # not indexed by that address and fills the channel left empty on partial
+    # rows. It runs after the reverse-email links so the ``needed`` gating spends
+    # a second broker call only on real gaps. Reorder or trim via env with no
+    # code change (e.g. drop ``web_scraper`` to disable the site-crawl fallback).
+    # ``web_scraper`` additionally requires ``web_fallback_enabled``; ``pdl`` and
+    # ``name_lookup`` require ``pdl_api_key`` / a name+domain broker key.
+    email_enrichment_chain: str = "apollo,pdl,hunter,snov,name_lookup,web_scraper"
     gemini_api_key: str | None = None
     gemini_api_base: str = "https://generativelanguage.googleapis.com/v1beta"
     # Production default for the structured-PDF extraction path

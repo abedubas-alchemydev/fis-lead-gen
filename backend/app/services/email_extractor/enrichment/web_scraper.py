@@ -19,7 +19,6 @@ blow-up is surfaced as an :class:`EnrichmentError` for the orchestrator to log.
 from __future__ import annotations
 
 import logging
-import re
 
 from app.core.config import settings
 from app.services.contact_discovery.base import DiscoveryResult
@@ -34,6 +33,8 @@ from app.services.email_extractor.enrichment.base import (
     EmailEnrichmentProvider,
     EnrichmentData,
     EnrichmentError,
+    brand_from_domain,
+    split_name_from_local,
 )
 from app.services.email_extractor.site_crawler import SiteCrawler
 
@@ -55,7 +56,7 @@ class WebScraperEnrichProvider(EmailEnrichmentProvider):
         if not domain or not local:
             return None
 
-        first, last = _split_name(local)
+        first, last = split_name_from_local(local)
         if not first or not last:
             return None
         # A firm-wide inbox (info@, investor.relations@) belongs to no one
@@ -73,7 +74,7 @@ class WebScraperEnrichProvider(EmailEnrichmentProvider):
         if not need_linkedin and not need_channels:
             return None
 
-        org_name = _brand_from_domain(domain)
+        org_name = brand_from_domain(domain)
         try:
             results = await discover_web_fallback(
                 domain=domain,
@@ -107,23 +108,6 @@ class WebScraperEnrichProvider(EmailEnrichmentProvider):
             email=alt_email,
             phone=phone,
         )
-
-
-def _split_name(local_part: str) -> tuple[str | None, str | None]:
-    """Split an email local-part into (first, last) when it cleanly encodes a
-    two-token name (``jane.smith``, ``jane_smith``). Drops single-char initials
-    so ``j.smith`` (ambiguous) is rejected rather than guessed."""
-    tokens = [t for t in re.split(r"[^a-z0-9]+", local_part.lower()) if t.isalpha() and len(t) >= 2]
-    if len(tokens) < 2:
-        return None, None
-    return tokens[0], tokens[-1]
-
-
-def _brand_from_domain(domain: str) -> str:
-    """The firm's brand label from its domain (``vanguard.com`` -> ``vanguard``),
-    used as the org-affiliation signal for the LinkedIn search."""
-    label = domain.lstrip(".").split(".")[0]
-    return label.replace("-", " ")
 
 
 class _NullCrawler(SiteCrawler):

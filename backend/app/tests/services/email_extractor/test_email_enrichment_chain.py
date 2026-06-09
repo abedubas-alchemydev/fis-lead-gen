@@ -21,7 +21,10 @@ import respx
 
 from app.core.config import settings
 from app.models.discovered_email import DiscoveredEmail
+from app.services.contact_discovery.base import DiscoveryResult as CdDiscoveryResult
+from app.services.contact_discovery.base import EmailHit as CdEmailHit
 from app.services.email_extractor.enrichment import hunter as hunter_mod
+from app.services.email_extractor.enrichment import name_lookup as name_lookup_mod
 from app.services.email_extractor.enrichment import orchestrator
 from app.services.email_extractor.enrichment import pdl as pdl_mod
 from app.services.email_extractor.enrichment import snov as snov_mod
@@ -469,6 +472,112 @@ async def test_pdl_5xx_raises(monkeypatch: pytest.MonkeyPatch) -> None:
 async def test_pdl_unconfigured_returns_none(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(settings, "pdl_api_key", "", raising=False)
     assert await pdl_mod.PdlEnrichProvider().enrich("jane@acme.com") is None
+
+
+# ──────────────────────────── Name-lookup provider ────────────────────────────
+
+
+class _FakeFinder:
+    """Stand-in for a contact_discovery name+domain provider (find_person)."""
+
+    def __init__(self, result: Any = None, *, error: bool = False) -> None:
+        self._result = result
+        self._error = error
+
+    async def find_person(self, first: str, last: str, org: str, domain: str) -> Any:
+        if self._error:
+            raise RuntimeError("boom")
+        return self._result
+
+
+async def test_name_lookup_forward_fills_phone_and_email(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The reverse-email pass missed the channel; a name+domain broker hit fills
+    the phone + personal email, and the name parsed from the address is attached
+    only because a broker corroborated the person."""
+    monkeypatch.setattr(settings, "apollo_api_key", "k", raising=False)
+    monkeypatch.setattr(settings, "pdl_api_key", "", raising=False)
+    monkeypatch.setattr(settings, "hunter_api_key", "", raising=False)
+    hit = CdDiscoveryResult(
+        email="jonathan.lemco@vanguard.com",  # echoes the discovered address -> dropped
+        phone="+15551112222",
+        linkedin_url="https://www.linkedin.com/in/jlemco",
+        confidence=85.0,
+        provider="apollo_match",
+        raw={},
+        emails=[CdEmailHit(value="j.lemco@gmail.com", type="personal", confidence=85.0, source="apollo_match")],
+        apollo_person_id="pid-9",
+    )
+    monkeypatch.setattr(name_lookup_mod, "ApolloMatchProvider", lambda: _FakeFinder(hit))
+
+    data = await name_lookup_mod.NameLookupEnrichProvider().enrich("jonathan.lemco@vanguard.com")
+
+    assert data is not None
+    assert data.name == "Jonathan Lemco"
+    assert data.phone == "+15551112222"
+    assert data.email == "j.lemco@gmail.com"  # personal, differs from discovered
+    assert data.linkedin_url == "https://www.linkedin.com/in/jlemco"
+    assert data.apollo_person_id == "pid-9"
+
+
+async def test_name_lookup_rejects_generic_and_unsplittable(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(settings, "apollo_api_key", "k", raising=False)
+    provider = name_lookup_mod.NameLookupEnrichProvider()
+    # single-token local -> can't derive a person
+    assert await provider.enrich("info@vanguard.com") is None
+    # two-token but firm-wide -> rejected before any broker call
+    assert await provider.enrich("investor.relations@vanguard.com") is None
+
+
+async def test_name_lookup_all_miss_does_not_fabricate_a_name(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """No broker corroborated the person -> return None (never invent a name from
+    the address alone)."""
+    monkeypatch.setattr(settings, "apollo_api_key", "k", raising=False)
+    monkeypatch.setattr(settings, "pdl_api_key", "", raising=False)
+    monkeypatch.setattr(settings, "hunter_api_key", "", raising=False)
+    monkeypatch.setattr(name_lookup_mod, "ApolloMatchProvider", lambda: _FakeFinder(None))
+
+    assert await name_lookup_mod.NameLookupEnrichProvider().enrich("jane.doe@acme.com") is None
+
+
+async def test_name_lookup_all_error_raises(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(settings, "apollo_api_key", "k", raising=False)
+    monkeypatch.setattr(settings, "pdl_api_key", "", raising=False)
+    monkeypatch.setattr(settings, "hunter_api_key", "", raising=False)
+    monkeypatch.setattr(name_lookup_mod, "ApolloMatchProvider", lambda: _FakeFinder(error=True))
+
+    with pytest.raises(EnrichmentError):
+        await name_lookup_mod.NameLookupEnrichProvider().enrich("jane.doe@acme.com")
+
+
+async def test_name_lookup_unconfigured_returns_none(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(settings, "apollo_api_key", "", raising=False)
+    monkeypatch.setattr(settings, "pdl_api_key", "", raising=False)
+    monkeypatch.setattr(settings, "hunter_api_key", "", raising=False)
+    assert await name_lookup_mod.NameLookupEnrichProvider().enrich("jane.doe@acme.com") is None
+
+
+async def test_name_lookup_skips_when_no_fillable_field_needed(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """If only title/company are still missing (fields this link can't supply),
+    it does no broker work at all."""
+    monkeypatch.setattr(settings, "apollo_api_key", "k", raising=False)
+    built = {"n": 0}
+
+    def _factory() -> _FakeFinder:
+        built["n"] += 1
+        return _FakeFinder(None)
+
+    monkeypatch.setattr(name_lookup_mod, "ApolloMatchProvider", _factory)
+
+    out = await name_lookup_mod.NameLookupEnrichProvider().enrich(
+        "jane.doe@acme.com", needed={"title", "company"}
+    )
+
+    assert out is None
+    assert built["n"] == 0
 
 
 # ──────────────────────────── Web-scraper provider ────────────────────────────
