@@ -61,7 +61,7 @@ DISCOVERED_EMAIL_PROVIDERS: tuple[str, ...] = (
     "snov",
     "theharvester",
 )
-WEBSITE_SOURCES: tuple[str, ...] = ("finra", "iapd", "apollo", "serper", "serpapi")
+WEBSITE_SOURCES: tuple[str, ...] = ("finra", "iapd", "apollo", "serpapi")
 
 ALL_PROVIDERS: tuple[str, ...] = tuple(
     dict.fromkeys(
@@ -89,7 +89,6 @@ PROVIDER_LABELS: dict[str, str] = {
     "linkedin_search": "LinkedIn search",
     "finra": "FINRA",
     "iapd": "IAPD",
-    "serper": "serper.dev",
     "serpapi": "SerpAPI",
 }
 

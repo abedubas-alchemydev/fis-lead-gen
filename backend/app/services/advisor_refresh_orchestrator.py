@@ -82,7 +82,6 @@ from app.services.gemini_responses import (
     GeminiResponsesClient,
 )
 from app.services.serpapi import SerpAPIClient
-from app.services.serper import SerperClient
 from app.services.website_resolver import is_blocklisted_host, resolve_website
 
 
@@ -910,13 +909,8 @@ async def _run_resolve_advisor_website(
             if getattr(settings, "serpapi_api_key", None)
             else None
         )
-        serper = (
-            SerperClient(settings.serper_api_key)
-            if getattr(settings, "serper_api_key", None)
-            else None
-        )
 
-        # Resolve via search engines FIRST (SerpAPI / serper). Google's entity
+        # Resolve via search engine FIRST (SerpAPI). Google's entity
         # resolution plus the validator's high-confidence bypass picks the
         # firm's real domain — e.g. vanguard.com for "VANGUARD GROUP INC".
         # Apollo is demoted to a last-resort fallback here because its fuzzy
@@ -927,7 +921,6 @@ async def _run_resolve_advisor_website(
             crd=crd,
             apollo=None,
             serpapi=serpapi,
-            serper=serper,
         )
         if not website and apollo is not None:
             website, source, reason = await resolve_website(
@@ -935,7 +928,6 @@ async def _run_resolve_advisor_website(
                 crd=crd,
                 apollo=apollo,
                 serpapi=None,
-                serper=None,
             )
 
         if not website:

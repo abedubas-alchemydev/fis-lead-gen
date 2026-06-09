@@ -18,18 +18,17 @@ those rosters into real per-officer contacts with LinkedIn / email / phone.
 Provider coverage
 -----------------
 Each officer runs the full ``contact_discovery_chain`` (pdl, apollo_match,
-hunter, snov, linkedin_search). ``linkedin_search`` prefers serper.dev and
-falls back to SerpAPI — set ``SERPER_API_KEY`` for cheap bulk Google
-(SerpAPI's free tier caps at 100/month and will block a full sweep). The
-banner below prints which provider keys are visible so you can confirm
-serper is wired in before committing to the run. Apollo phone-reveal lands
-mobiles asynchronously via the webhook after each match.
+hunter, snov, linkedin_search). ``linkedin_search`` runs on SerpAPI —
+SerpAPI's free tier caps at 100/month and will block a full sweep, so use a
+paid plan. The banner below prints which provider keys are visible so you
+can confirm SerpAPI is wired in before committing to the run. Apollo
+phone-reveal lands mobiles asynchronously via the webhook after each match.
 
 Cost
 ----
 This fans the chain out across tens of thousands of officers. Apollo charges
-per match (+ per mobile reveal); serper ~$0.30/1k; SerpAPI ~$0.015/query.
-Use ``--scan-only`` first to size it, ``--limit N`` for a bounded smoke.
+per match (+ per mobile reveal); SerpAPI ~$0.015/query. Use ``--scan-only``
+first to size it, ``--limit N`` for a bounded smoke.
 
 Cooldown
 --------
@@ -106,29 +105,24 @@ def _parse_args() -> argparse.Namespace:
 
 def _provider_banner() -> str:
     """One line listing which discovery-chain provider keys are visible, so the
-    operator can confirm serper (cheap LinkedIn search) is wired in before a
+    operator can confirm SerpAPI (LinkedIn search) is wired in before a
     full sweep."""
     from app.core.config import settings
 
     def mark(present: bool) -> str:
         return "set" if present else "MISSING"
 
-    serper = bool(getattr(settings, "serper_api_key", None))
     serpapi = bool(getattr(settings, "serpapi_api_key", None))
     parts = [
         f"pdl={mark(bool(settings.pdl_api_key))}",
         f"apollo={mark(bool(settings.apollo_api_key))}",
         f"hunter={mark(bool(settings.hunter_api_key))}",
-        f"serper={mark(serper)}",
         f"serpapi={mark(serpapi)}",
         f"chain={settings.contact_discovery_chain}",
     ]
     line = "Providers: " + "  ".join(parts)
-    if not serper and not serpapi:
-        line += "\n  WARNING: neither serper nor serpapi key set — linkedin_search will no-op."
-    elif not serper and serpapi:
-        line += ("\n  NOTE: serper key absent — linkedin_search uses SerpAPI "
-                 "(free tier caps at 100/mo; set SERPER_API_KEY for a full sweep).")
+    if not serpapi:
+        line += "\n  WARNING: serpapi key not set — linkedin_search will no-op."
     return line
 
 

@@ -14,10 +14,8 @@ firms registered as ``303 ALTERNATIVES, LLC`` land at
 legal-name token nor a raw Apollo lookup would surface that without
 the DBA-aware anchor.
 
-serper.dev (the cheaper Google-search tier in the on-demand chain) is
-intentionally skipped by passing ``serper=None``: this backfill walks
-``Apollo -> SerpAPI`` only. Drop ``--no-serpapi`` if you want
-Apollo-only.
+This backfill walks the resolver chain ``Apollo -> SerpAPI``. Pass
+``--no-serpapi`` for an Apollo-only run.
 
 Idempotent: rows where ``website`` is already populated are skipped, so
 a second run is effectively free (selects + skips). Provider errors
@@ -281,7 +279,6 @@ async def run(
                 crd_number,
                 apollo,
                 serpapi,
-                None,  # serper.dev intentionally skipped — Apollo -> SerpAPI only
                 dba_names=dba_names,
                 resolver_aliases=resolver_aliases,
             )
@@ -304,9 +301,9 @@ async def run(
                 elif source == "serpapi":
                     counts["filled_from_serpapi"] += 1
                 else:
-                    # Defensive: serper is disabled but the resolver could
-                    # in principle return another source string; count it
-                    # so the summary still totals correctly.
+                    # Defensive: the resolver could in principle return
+                    # another source string; count it so the summary still
+                    # totals correctly.
                     counts.setdefault(f"filled_from_{source}", 0)
                     counts[f"filled_from_{source}"] += 1
                 print(f"  -> {source}: {website}", flush=True)

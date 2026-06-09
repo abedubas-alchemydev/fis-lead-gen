@@ -5,7 +5,7 @@ NOT scrape LinkedIn (auth-walled / ToS) and does NOT guess addresses. It
 composes two existing public sources:
 
 * :class:`LinkedInSearchProvider` -> the person's *public* profile URL via a
-  ``site:linkedin.com/in`` Google search (serper / SerpAPI), precision-tiered.
+  ``site:linkedin.com/in`` Google search (SerpAPI), precision-tiered.
 * :class:`SiteCrawler` -> literal emails (and, when
   ``settings.web_fallback_phones_enabled``, phones) published on the firm's OWN
   public website, robots-respecting.

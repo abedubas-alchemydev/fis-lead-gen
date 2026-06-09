@@ -1072,7 +1072,7 @@ export type InvestmentAdvisorListItem = {
   last_filing_date: string | null;
   filings_index_url: string | null;
   website: string | null;
-  // 'iapd' | 'apollo' | 'serper' | 'serpapi' | null
+  // 'iapd' | 'apollo' | 'serpapi' | null
   website_source: string | null;
   // Form ADV Item 5.F — regulatory AUM (analog of BD latest_net_capital)
   // and the discretionary/non-discretionary split.
