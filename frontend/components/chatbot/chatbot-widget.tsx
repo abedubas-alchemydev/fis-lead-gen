@@ -308,12 +308,12 @@ export function ChatbotWidget() {
 
         if (folders.length === 0) {
           appendAssistant(
-            `I'll file **${file.name}** for you, but you don't have any Vault folders yet. Reply with **new: <folder name>** and I'll create it and upload there.`
+            `I'll file **${file.name}** for you, but you don't have any Vault folders yet. Reply with **new: My Folder** and I'll create it and upload there.`
           );
         } else {
           const names = folders.map((f) => `**${f.name}**`).join(", ");
           appendAssistant(
-            `Which Vault folder should I file **${file.name}** into? Your folders: ${names}. Reply with a folder name, or **new: <name>** to create one.`
+            `Which Vault folder should I file **${file.name}** into? Your folders: ${names}. Reply with a folder name, or **new: My Folder** to create one.`
           );
         }
         setAwaitingFolder(true);
