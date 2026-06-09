@@ -35,6 +35,7 @@ import {
 } from "@/lib/advisor-list-state";
 import { formatCurrency, formatDate } from "@/lib/format";
 import { EmailScansSection } from "@/components/email-extractor/email-scans-section";
+import { EMAIL_EXTRACTION_ENABLED } from "@/lib/feature-flags";
 import {
   listScansForEntity,
   pickHydratableScan,
@@ -1083,17 +1084,19 @@ export function AdvisorDetailClient({ advisorId }: { advisorId: string }) {
       </div>
       </div>
 
-      {/* ── Discovered emails (full width) ── */}
-      <div className="mt-4">
-        <EmailScansSection
-          entityKind="advisor"
-          entityId={Number(advisorId)}
-          currentScanId={currentScanId}
-          resolvedDomain={resolvedDomain}
-          isHydrating={isHydratingScan}
-          onScanCreated={setCurrentScanId}
-        />
-      </div>
+      {/* ── Discovered emails (full width) — hidden: no data extraction in-app ── */}
+      {EMAIL_EXTRACTION_ENABLED && (
+        <div className="mt-4">
+          <EmailScansSection
+            entityKind="advisor"
+            entityId={Number(advisorId)}
+            currentScanId={currentScanId}
+            resolvedDomain={resolvedDomain}
+            isHydrating={isHydratingScan}
+            onScanCreated={setCurrentScanId}
+          />
+        </div>
+      )}
     </div>
   );
 }
