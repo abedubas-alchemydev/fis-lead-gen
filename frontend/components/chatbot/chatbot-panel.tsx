@@ -1,6 +1,6 @@
 "use client";
 
-import { PlusCircle, Send, X } from "lucide-react";
+import { Paperclip, PlusCircle, Send, X } from "lucide-react";
 import {
   forwardRef,
   useEffect,
@@ -22,6 +22,11 @@ export interface ChatbotPanelProps {
   onNewChat?: () => void;
   isSending?: boolean;
   isLoadingHistory?: boolean;
+  // A file the user attached (paperclip) that hasn't been filed yet — shown
+  // as a chip; the widget runs the "which folder?" flow on the next send.
+  pendingFileName?: string | null;
+  onAttachFile?: (file: File) => void;
+  onClearPendingFile?: () => void;
   // Fires when the user clicks an in-app link rendered in a Doxie reply.
   // Lets the widget collapse the panel so the user can actually see the
   // destination page (otherwise the chat panel keeps floating over it).
@@ -42,6 +47,9 @@ export const ChatbotPanel = forwardRef<ChatbotPanelHandle, ChatbotPanelProps>(fu
     onNewChat,
     isSending = false,
     isLoadingHistory = false,
+    pendingFileName = null,
+    onAttachFile,
+    onClearPendingFile,
     onInternalNavigate,
   },
   ref,
@@ -58,10 +66,12 @@ export const ChatbotPanel = forwardRef<ChatbotPanelHandle, ChatbotPanelProps>(fu
     endRef.current?.scrollIntoView({ behavior: "smooth", block: "end" });
   }, [messages.length]);
 
+  const canSend = input.trim().length > 0 || Boolean(pendingFileName);
+
   function handleKeyDown(event: KeyboardEvent<HTMLTextAreaElement>) {
     if (event.key === "Enter" && !event.shiftKey) {
       event.preventDefault();
-      if (!isSending && input.trim().length > 0) onSend();
+      if (!isSending && canSend) onSend();
     }
   }
 
@@ -69,7 +79,7 @@ export const ChatbotPanel = forwardRef<ChatbotPanelHandle, ChatbotPanelProps>(fu
     onInputChange(event.target.value);
   }
 
-  const sendDisabled = isSending || input.trim().length === 0;
+  const sendDisabled = isSending || !canSend;
 
   return (
     <div
@@ -133,36 +143,63 @@ export const ChatbotPanel = forwardRef<ChatbotPanelHandle, ChatbotPanelProps>(fu
       </div>
 
       <form
-        className="flex items-end gap-2 border-t border-[var(--border,rgba(30,64,175,0.1))] bg-[var(--surface,#ffffff)] px-3 py-3"
+        className="flex flex-col gap-2 border-t border-[var(--border,rgba(30,64,175,0.1))] bg-[var(--surface,#ffffff)] px-3 py-3"
         onSubmit={(event) => {
           event.preventDefault();
           if (!sendDisabled) onSend();
         }}
       >
-        <ChatbotAttachButton disabled={isSending} />
-        <ChatbotVoiceButton
-          onTranscript={(text) => onInputChange(input ? `${input} ${text}` : text)}
-          disabled={isSending}
-        />
-        <textarea
-          ref={inputRef}
-          value={input}
-          onChange={handleChange}
-          onKeyDown={handleKeyDown}
-          rows={1}
-          placeholder={isSending ? "Doxie is thinking…" : "Type a message…"}
-          aria-label="Chat message"
-          disabled={isSending}
-          className="max-h-32 min-h-[40px] flex-1 resize-none rounded-xl border border-[var(--border,rgba(30,64,175,0.1))] bg-[var(--surface,#ffffff)] px-3 py-2 text-sm text-[var(--text,#0f172a)] placeholder:text-[var(--text-muted,#94a3b8)] focus:border-[var(--doxie,#6366f1)] focus:outline-none focus:ring-2 focus:ring-[var(--doxie,#6366f1)]/30 disabled:cursor-not-allowed disabled:opacity-60"
-        />
-        <button
-          type="submit"
-          disabled={sendDisabled}
-          aria-label="Send message"
-          className="grid h-10 w-10 shrink-0 place-items-center rounded-xl bg-[var(--doxie,#6366f1)] text-white shadow-sm transition hover:bg-[var(--doxie-2,#8b5cf6)] disabled:cursor-not-allowed disabled:opacity-50 focus:outline-none focus:ring-2 focus:ring-[var(--doxie,#6366f1)]/40 focus:ring-offset-2"
-        >
-          <Send size={16} strokeWidth={2} />
-        </button>
+        {pendingFileName ? (
+          <div className="flex items-center gap-2 self-start rounded-lg bg-[var(--surface-2,#f1f6fd)] px-2 py-1 text-xs text-[var(--text,#0f172a)]">
+            <Paperclip size={12} strokeWidth={2} className="shrink-0 text-[var(--text-dim,#475569)]" />
+            <span className="max-w-[240px] truncate">{pendingFileName}</span>
+            {onClearPendingFile ? (
+              <button
+                type="button"
+                onClick={onClearPendingFile}
+                aria-label="Remove attachment"
+                title="Remove attachment"
+                className="grid h-4 w-4 place-items-center rounded text-[var(--text-muted,#94a3b8)] transition hover:text-[var(--text,#0f172a)]"
+              >
+                <X size={12} strokeWidth={2} />
+              </button>
+            ) : null}
+          </div>
+        ) : null}
+        <div className="flex items-end gap-2">
+          {onAttachFile ? (
+            <ChatbotAttachButton onFile={onAttachFile} disabled={isSending} />
+          ) : null}
+          <ChatbotVoiceButton
+            onTranscript={(text) => onInputChange(input ? `${input} ${text}` : text)}
+            disabled={isSending}
+          />
+          <textarea
+            ref={inputRef}
+            value={input}
+            onChange={handleChange}
+            onKeyDown={handleKeyDown}
+            rows={1}
+            placeholder={
+              isSending
+                ? "Doxie is thinking…"
+                : pendingFileName
+                  ? "Name a folder to file it in, or just send…"
+                  : "Type a message…"
+            }
+            aria-label="Chat message"
+            disabled={isSending}
+            className="max-h-32 min-h-[40px] flex-1 resize-none rounded-xl border border-[var(--border,rgba(30,64,175,0.1))] bg-[var(--surface,#ffffff)] px-3 py-2 text-sm text-[var(--text,#0f172a)] placeholder:text-[var(--text-muted,#94a3b8)] focus:border-[var(--doxie,#6366f1)] focus:outline-none focus:ring-2 focus:ring-[var(--doxie,#6366f1)]/30 disabled:cursor-not-allowed disabled:opacity-60"
+          />
+          <button
+            type="submit"
+            disabled={sendDisabled}
+            aria-label="Send message"
+            className="grid h-10 w-10 shrink-0 place-items-center rounded-xl bg-[var(--doxie,#6366f1)] text-white shadow-sm transition hover:bg-[var(--doxie-2,#8b5cf6)] disabled:cursor-not-allowed disabled:opacity-50 focus:outline-none focus:ring-2 focus:ring-[var(--doxie,#6366f1)]/40 focus:ring-offset-2"
+          >
+            <Send size={16} strokeWidth={2} />
+          </button>
+        </div>
       </form>
     </div>
   );

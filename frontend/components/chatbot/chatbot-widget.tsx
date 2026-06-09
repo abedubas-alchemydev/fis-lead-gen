@@ -6,15 +6,33 @@ import { useCallback, useEffect, useRef, useState } from "react";
 
 import {
   ApiError,
+  createVaultFolder,
+  listVaultFolders,
   loadDoxieHistory,
   startNewDoxieChat,
   streamDoxieMessage,
+  uploadVaultFile,
   type DoxieChatMessage,
   type DoxieStreamEvent
 } from "@/lib/api";
+import type { VaultFolder } from "@/lib/types";
 
 import { ChatbotPanel, type ChatbotPanelHandle } from "./chatbot-panel";
 import type { ChatMessage } from "./chatbot-message";
+
+// Resolve which Vault folder the user named in free text. Prefers an exact
+// (case-insensitive) name match, then the longest folder name contained in
+// the text — so "Test" doesn't win inside "E2E Test Service".
+function findFolderInText(folders: VaultFolder[], text: string): VaultFolder | null {
+  const lower = text.trim().toLowerCase();
+  if (!lower) return null;
+  const exact = folders.find((f) => f.name?.toLowerCase() === lower);
+  if (exact) return exact;
+  const contained = folders
+    .filter((f) => f.name && lower.includes(f.name.toLowerCase()))
+    .sort((a, b) => b.name.length - a.name.length);
+  return contained[0] ?? null;
+}
 
 const WELCOME_MESSAGE: ChatMessage = {
   id: 0,
@@ -117,6 +135,12 @@ export function ChatbotWidget() {
   const [isLoadingHistory, setIsLoadingHistory] = useState(false);
   const historyLoadedRef = useRef(false);
 
+  // Conversational Vault upload: a file attached via the paperclip waits
+  // here until the user names a folder (or Doxie asks for one).
+  const [pendingFile, setPendingFile] = useState<File | null>(null);
+  const [awaitingFolder, setAwaitingFolder] = useState(false);
+  const foldersRef = useRef<VaultFolder[] | null>(null);
+
   const fabRef = useRef<HTMLButtonElement>(null);
   const panelRef = useRef<ChatbotPanelHandle>(null);
   const nextIdRef = useRef(1);
@@ -186,9 +210,127 @@ export function ChatbotWidget() {
     };
   }, [isOpen]);
 
+  const handleAttachFile = useCallback((file: File) => {
+    setPendingFile(file);
+    setAwaitingFolder(false);
+    setIsOpen(true);
+    // Warm the folder cache so the "which folder?" step is instant.
+    if (!foldersRef.current) {
+      listVaultFolders()
+        .then((f) => {
+          foldersRef.current = f;
+        })
+        .catch(() => {
+          /* will be fetched again on send if needed */
+        });
+    }
+  }, []);
+
+  const clearPendingFile = useCallback(() => {
+    setPendingFile(null);
+    setAwaitingFolder(false);
+  }, []);
+
   const handleSend = useCallback(async () => {
+    if (isSending) return;
     const trimmed = input.trim();
-    if (trimmed.length === 0 || isSending) return;
+
+    // ── Conversational Vault upload ──────────────────────────────────
+    // A file is attached (paperclip). Its bytes can't ride inside a chat
+    // message, so we file it via the Vault API here — but present it as a
+    // back-and-forth: name a folder and Doxie files it; omit one and it asks.
+    if (pendingFile) {
+      const file = pendingFile;
+      const echo =
+        trimmed || (awaitingFolder ? "" : `Upload "${file.name}" to my Vault.`);
+      if (echo) {
+        setMessages((prev) => [
+          ...prev,
+          { id: nextIdRef.current++, role: "user", content: echo, localOnly: true },
+        ]);
+      }
+      setInput("");
+      setIsSending(true);
+
+      const appendAssistant = (content: string) =>
+        setMessages((prev) => [
+          ...prev,
+          {
+            id: nextIdRef.current++,
+            role: "assistant",
+            content,
+            isFinalized: true,
+            localOnly: true,
+          },
+        ]);
+
+      const fileInto = async (folder: VaultFolder) => {
+        try {
+          await uploadVaultFile(folder.id, file);
+          appendAssistant(
+            `✅ Filed **${file.name}** into **${folder.name}** — it's processing now and I'll be able to read it shortly.`
+          );
+        } catch (err) {
+          appendAssistant(
+            err instanceof ApiError
+              ? `I couldn't upload that: ${err.message}`
+              : "I couldn't upload that file — please try again."
+          );
+        } finally {
+          setPendingFile(null);
+          setAwaitingFolder(false);
+        }
+      };
+
+      try {
+        let folders = foldersRef.current;
+        if (!folders) {
+          folders = await listVaultFolders();
+          foldersRef.current = folders;
+        }
+
+        const newMatch = trimmed.match(/^new:\s*(.+)$/i);
+        if (newMatch) {
+          const created = await createVaultFolder({
+            name: newMatch[1].trim(),
+            description: "",
+          });
+          foldersRef.current = [...folders, created];
+          await fileInto(created);
+          return;
+        }
+
+        const named = trimmed ? findFolderInText(folders, trimmed) : null;
+        if (named) {
+          await fileInto(named);
+          return;
+        }
+
+        if (folders.length === 0) {
+          appendAssistant(
+            `I'll file **${file.name}** for you, but you don't have any Vault folders yet. Reply with **new: <folder name>** and I'll create it and upload there.`
+          );
+        } else {
+          const names = folders.map((f) => `**${f.name}**`).join(", ");
+          appendAssistant(
+            `Which Vault folder should I file **${file.name}** into? Your folders: ${names}. Reply with a folder name, or **new: <name>** to create one.`
+          );
+        }
+        setAwaitingFolder(true);
+      } catch (err) {
+        appendAssistant(
+          err instanceof ApiError
+            ? `I couldn't reach your Vault: ${err.message}`
+            : "Something went wrong reaching your Vault — please try again."
+        );
+      } finally {
+        setIsSending(false);
+      }
+      return;
+    }
+
+    // ── Normal Doxie chat ────────────────────────────────────────────
+    if (trimmed.length === 0) return;
 
     const userMessageId = nextIdRef.current++;
     const pendingId = nextIdRef.current++;
@@ -204,7 +346,7 @@ export function ChatbotWidget() {
     // placeholder — the placeholder must not go into the wire payload.
     const historyForApi: DoxieChatMessage[] = [
       ...messages
-        .filter((m) => m.id !== WELCOME_MESSAGE.id && !m.error && !m.pending)
+        .filter((m) => m.id !== WELCOME_MESSAGE.id && !m.error && !m.pending && !m.localOnly)
         .map((m) => ({ role: m.role, content: m.content })),
       { role: "user", content: trimmed }
     ];
@@ -286,13 +428,15 @@ export function ChatbotWidget() {
     } finally {
       setIsSending(false);
     }
-  }, [input, isSending, messages, pathname]);
+  }, [input, isSending, messages, pathname, pendingFile, awaitingFolder]);
 
   const handleNewChat = useCallback(async () => {
     if (isSending) return;
     const previous = messages;
     setMessages([WELCOME_MESSAGE]);
     setInput("");
+    setPendingFile(null);
+    setAwaitingFolder(false);
     try {
       await startNewDoxieChat();
     } catch (error) {
@@ -333,6 +477,9 @@ export function ChatbotWidget() {
           onNewChat={handleNewChat}
           isSending={isSending}
           isLoadingHistory={isLoadingHistory}
+          pendingFileName={pendingFile?.name ?? null}
+          onAttachFile={handleAttachFile}
+          onClearPendingFile={clearPendingFile}
           // Clicking a Doxie-emitted deep-link should collapse the
           // panel so the user can see the destination page. Cmd/Ctrl/
           // shift-click and middle-click bypass this and open in a new
