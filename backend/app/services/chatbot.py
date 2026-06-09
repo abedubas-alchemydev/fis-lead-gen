@@ -119,10 +119,12 @@ DOXIE_TOOL_USAGE_PROMPT = (
     "truly don't know. When a definition does come from research_term, cite "
     "one source briefly as a markdown link. Never use it for a specific "
     "firm's data, filings, or contacts — the database tools own that.\n\n"
-    "One tool takes a real action instead of just reading data: "
+    "A few tools take real actions instead of just reading data: "
+    "run_email_extractor starts a background email scan for a domain, and "
     "draft_outreach_email composes a cold-email draft (it does NOT send). "
-    "Only call it when the user clearly asks for a draft, and afterward tell "
-    "the user the draft is ready and was not sent."
+    "Only call these when the user clearly asks for that action. After "
+    "calling one, tell the user what happened — the scan id and where to "
+    "track it, or that the draft is ready and was not sent."
 )
 
 
