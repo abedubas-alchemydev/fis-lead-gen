@@ -1,10 +1,9 @@
 """Unit tests for ``app.services.web_research.search_web`` — the generic
 public-web search behind Doxie's ``research_term`` tool.
 
-respx-mocked so no serper / SerpAPI quota is burned. Mirrors the
-provider-fallback contract from ``test_linkedin_search`` (serper first,
-SerpAPI on miss/error) and the parse contracts in ``test_serper`` /
-``test_serpapi``.
+respx-mocked so no SerpAPI quota is burned. Validates the SerpAPI parse +
+answer-box extraction and the graceful-degrade contract (missing key / error
+-> empty payload, never raises).
 """
 
 from __future__ import annotations
@@ -16,79 +15,57 @@ import respx
 from app.core.config import settings
 from app.services.web_research import search_web
 
-_SERPER_URL = "https://google.serper.dev/search"
 _SERPAPI_URL = "https://serpapi.com/search.json"
 
 
 @pytest.fixture(autouse=True)
-def _both_keys(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Default both providers configured; individual tests override."""
-    monkeypatch.setattr(settings, "serper_api_key", "test-serper", raising=False)
+def _key(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Default SerpAPI configured; individual tests override."""
     monkeypatch.setattr(settings, "serpapi_api_key", "test-serpapi", raising=False)
 
 
-def _serper_payload(
-    items: list[tuple[str, str, str]],
-) -> dict[str, object]:
-    return {
-        "organic": [
-            {"link": url, "title": title, "snippet": snippet}
-            for (url, title, snippet) in items
-        ]
-    }
-
-
 @respx.mock
-async def test_serper_hit_returns_shaped_results() -> None:
-    respx.post(_SERPER_URL).mock(
-        return_value=httpx.Response(
-            200,
-            json=_serper_payload(
-                [("https://example.test/sofr", "SOFR", "SOFR is a benchmark rate.")]
-            ),
-        )
-    )
-
-    out = await search_web("SOFR")
-
-    assert out["provider"] == "serper"
-    assert out["results"][0] == {
-        "title": "SOFR",
-        "url": "https://example.test/sofr",
-        "snippet": "SOFR is a benchmark rate.",
-    }
-    # serper never tags high-confidence → no distinct answer extracted.
-    assert out["answer"] is None
-
-
-@respx.mock
-async def test_serper_error_falls_back_to_serpapi() -> None:
-    respx.post(_SERPER_URL).mock(return_value=httpx.Response(500))
-    serpapi_route = respx.get(_SERPAPI_URL).mock(
+async def test_serpapi_hit_returns_shaped_results() -> None:
+    respx.get(_SERPAPI_URL).mock(
         return_value=httpx.Response(
             200,
             json={
                 "organic_results": [
-                    {"link": "https://x.test", "title": "X", "snippet": "def"}
+                    {
+                        "link": "https://example.test/sofr",
+                        "title": "SOFR",
+                        "snippet": "SOFR is a benchmark rate.",
+                    }
                 ]
             },
         )
     )
 
+    out = await search_web("SOFR")
+
+    assert out["provider"] == "serpapi"
+    assert out["results"][0] == {
+        "title": "SOFR",
+        "url": "https://example.test/sofr",
+        "snippet": "SOFR is a benchmark rate.",
+    }
+
+
+@respx.mock
+async def test_serpapi_error_returns_empty() -> None:
+    """A provider error degrades to an empty payload (never raises) so the
+    caller can fall back to the model's own knowledge."""
+    respx.get(_SERPAPI_URL).mock(return_value=httpx.Response(500))
+
     out = await search_web("Reg BI")
 
-    assert serpapi_route.called
-    assert out["provider"] == "serpapi"
-    assert out["results"][0]["url"] == "https://x.test"
+    assert out == {"results": [], "answer": None, "provider": None}
 
 
 @respx.mock
 async def test_serpapi_answer_box_description_becomes_answer() -> None:
-    """serper misses (empty organic); SerpAPI's answer_box carries the
-    definition text, which must surface as ``answer``."""
-    respx.post(_SERPER_URL).mock(
-        return_value=httpx.Response(200, json={"organic": []})
-    )
+    """SerpAPI's answer_box carries the definition text, which must surface
+    as ``answer``."""
     respx.get(_SERPAPI_URL).mock(
         return_value=httpx.Response(
             200,
@@ -111,10 +88,9 @@ async def test_serpapi_answer_box_description_becomes_answer() -> None:
     assert out["answer"] == "T+1 settles one business day after the trade."
 
 
-async def test_no_keys_returns_empty_without_http(
+async def test_no_key_returns_empty_without_http(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    monkeypatch.setattr(settings, "serper_api_key", None, raising=False)
     monkeypatch.setattr(settings, "serpapi_api_key", None, raising=False)
 
     out = await search_web("anything")

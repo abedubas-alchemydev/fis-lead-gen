@@ -2622,7 +2622,7 @@ async def _execute_research_term(
 
     Flow: normalize the term and check the persisted glossary first; on a
     hit, return the stored definition with no web call. On a miss, research
-    the public web (serper -> SerpAPI), persist the result so the term is
+    the public web (SerpAPI), persist the result so the term is
     "learned" for every future chat, and return it. If neither the glossary
     nor the web yields anything, return an ``unavailable`` error so Doxie can
     fall back to its own knowledge.

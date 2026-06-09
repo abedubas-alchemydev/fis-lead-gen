@@ -46,7 +46,6 @@ import httpx
 
 from app.services.apollo import ApolloClient, ApolloError
 from app.services.serpapi import SerpAPIClient, SerpAPIError
-from app.services.serper import SerperClient, SerperError
 
 logger = logging.getLogger(__name__)
 
@@ -346,7 +345,6 @@ async def resolve_website(
     crd: str | None,
     apollo: ApolloClient | None,
     serpapi: SerpAPIClient | None = None,
-    serper: SerperClient | None = None,
     dba_names: list[str] | None = None,
     resolver_aliases: list[str] | None = None,
 ) -> tuple[str | None, str | None, str | None]:
@@ -355,13 +353,13 @@ async def resolve_website(
     Returns
     -------
     (website, source, reason)
-      - On success: ``(url, 'apollo'|'serper'|'serpapi', None)``
+      - On success: ``(url, 'apollo'|'serpapi', None)``
       - On clean miss (chain ran, no valid candidate): ``(None, None, 'no_valid_candidate')``
       - On total provider failure: ``(None, None, 'all_providers_errored: ...')``
 
-    ``serper`` and ``serpapi`` may be ``None`` when their respective API
-    keys aren't configured; the chain skips that tier and falls through
-    to a clean miss / partial-error case.
+    ``serpapi`` may be ``None`` when its API key isn't configured; the
+    chain skips that tier and falls through to a clean miss /
+    partial-error case.
 
     ``dba_names`` is the firm's list of "doing business as" / alternate
     trade names (typically sourced from ``broker_dealers.dba_names``,
@@ -387,17 +385,16 @@ async def resolve_website(
 
     Tier order
     ----------
-    Apollo → serper.dev (optional) → SerpAPI. Hunter's company-find
-    endpoint was previously Tier 2 but its ``/v2/companies/find``
-    endpoint expects ``domain`` not ``company`` name; every
-    name-based call returns 400 and we swallowed it as a clean miss.
-    Removing it from the chain saves an HTTP roundtrip per firm without
-    losing any signal (the contact-discovery module's separate Hunter
-    integration is unaffected — that one uses different endpoints).
+    Apollo → SerpAPI. Hunter's company-find endpoint was previously
+    Tier 2 but its ``/v2/companies/find`` endpoint expects ``domain``
+    not ``company`` name; every name-based call returns 400 and we
+    swallowed it as a clean miss. Removing it from the chain saves an
+    HTTP roundtrip per firm without losing any signal (the
+    contact-discovery module's separate Hunter integration is
+    unaffected — that one uses different endpoints).
 
-    serper.dev runs ahead of SerpAPI when configured because it's ~50×
-    cheaper per query; SerpAPI is the canonical fallback (and is the
-    primary search tier when serper.dev is unset).
+    SerpAPI is the sole search tier (Google organic results), queried
+    on the legal name.
 
     Apollo (Tier 1) is queried with the legal name **and** each alias from
     ``dba_names`` / ``resolver_aliases`` (deduped, capped at
@@ -441,8 +438,8 @@ async def resolve_website(
     # legal entity "AQR INVESTMENTS, LLC" returns zero Apollo orgs, but its
     # alias "AQR Capital Management" resolves straight to aqr.com. The aliases
     # were already used to *validate* a candidate (firm_tokens); here we also
-    # use them to *query*. Restricted to Apollo on purpose: the SerpAPI/serper
-    # search tiers stay on the legal name because Google doesn't surface these
+    # use them to *query*. Restricted to Apollo on purpose: the SerpAPI
+    # search tier stays on the legal name because Google doesn't surface these
     # parent sites even for the alias query (observed for AQR) and SerpAPI is
     # metered — so we don't multiply paid search calls. The validator still
     # gates every candidate, so an alias only admits a domain its own token
@@ -491,32 +488,7 @@ async def resolve_website(
         except Exception as exc:  # pragma: no cover - belt + braces
             errors.append(f"apollo: {exc}")
 
-    # Tier 2 — serper.dev Google search (optional, ahead of SerpAPI)
-    # Walks ALL organic results returned by the client (already capped at
-    # 10). serper.dev is structurally identical to SerpAPI for our
-    # purposes (same Google organic results, same SerpResult dataclass)
-    # but ~50× cheaper, so we hit it first to keep SerpAPI quota for the
-    # genuine fallback case. Skipped when ``SERPER_API_KEY`` is unset.
-    if serper is not None:
-        providers_attempted += 1
-        try:
-            results = await serper.search_firm(firm_name)
-            for result in results:
-                if await _validate(
-                    result.url,
-                    firm_tokens,
-                    high_confidence=getattr(
-                        result, "is_high_confidence", False
-                    ),
-                    significant_words=significant_words,
-                ):
-                    return (result.url, "serper", None)
-        except SerperError as exc:
-            errors.append(f"serper: {exc}")
-        except Exception as exc:  # pragma: no cover - belt + braces
-            errors.append(f"serper: {exc}")
-
-    # Tier 3 — SerpAPI Google search (canonical fallback)
+    # Tier 2 — SerpAPI Google search (sole search tier)
     # Walks ALL organic results returned by the client (already capped at
     # 10) so a strong-but-not-first hit can still win once the earlier
     # ones get rejected by blocklist / content-type / title checks. The

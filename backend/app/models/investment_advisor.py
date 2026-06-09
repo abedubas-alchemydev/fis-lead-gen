@@ -45,7 +45,7 @@ class InvestmentAdvisor(Base):
     matched_source: Mapped[str] = mapped_column(String(16), default="iapd", nullable=False)
     status: Mapped[str] = mapped_column(String(64), default="pending", index=True, nullable=False)
     website: Mapped[str | None] = mapped_column(String(512), nullable=True)
-    # 'iapd' | 'apollo' | 'serper' | 'serpapi' | None. Mirrors the BD
+    # 'iapd' | 'apollo' | 'serpapi' | None. Mirrors the BD
     # ``website_source`` column shape so the FE can disclose provenance
     # without a separate provider lookup.
     website_source: Mapped[str | None] = mapped_column(String(16), nullable=True)

@@ -91,7 +91,6 @@ from app.services.refresh_all_orchestrator import (
     run_refresh_all,
 )
 from app.services.serpapi import SerpAPIClient
-from app.services.serper import SerperClient
 from app.services.service_models import FinraBrokerDealerRecord
 from app.services.firm_alias_enricher import ensure_resolver_aliases
 from app.services.pipeline_reaper import STALE_REFRESH_RUN_AGE
@@ -1391,11 +1390,6 @@ async def resolve_broker_dealer_website(
             detail="Apollo API key is not configured.",
         )
     apollo = ApolloClient(apollo_key)
-    serper = (
-        SerperClient(settings.serper_api_key)
-        if settings.serper_api_key
-        else None
-    )
     serpapi = (
         SerpAPIClient(settings.serpapi_api_key)
         if settings.serpapi_api_key
@@ -1416,7 +1410,6 @@ async def resolve_broker_dealer_website(
         broker_dealer.crd_number,
         apollo,
         serpapi,
-        serper,
         dba_names=broker_dealer.dba_names,
         resolver_aliases=aliases,
     )

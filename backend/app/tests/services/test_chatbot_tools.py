@@ -2991,7 +2991,7 @@ class TestResearchTerm:
                         }
                     ],
                     "answer": None,
-                    "provider": "serper",
+                    "provider": "serpapi",
                 }
             ),
         )
@@ -3019,7 +3019,7 @@ class TestResearchTerm:
                 return_value={
                     "results": [],
                     "answer": "A definition.",
-                    "provider": "serper",
+                    "provider": "serpapi",
                 }
             ),
         )
@@ -3043,7 +3043,7 @@ class TestResearchTerm:
 
         async def fake_search_web(query: str, *, limit: int) -> dict[str, Any]:
             captured["limit"] = limit
-            return {"results": [], "answer": "x", "provider": "serper"}
+            return {"results": [], "answer": "x", "provider": "serpapi"}
 
         monkeypatch.setattr(
             chatbot_tools, "get_learned_term", AsyncMock(return_value=None)
