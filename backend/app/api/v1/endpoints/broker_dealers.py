@@ -45,6 +45,7 @@ from app.services.edgar import EdgarService, build_edgar_filing_url
 from app.schemas.pipeline import ClearingArrangementItem, ClearingArrangementsResponse
 from app.services.alerts import AlertRepository
 from app.core.feature_permissions import MASTER_LIST
+from app.services.audit import record_audit
 from app.services.auth import ensure_feature, get_current_user
 from app.services.broker_dealers import BrokerDealerRepository
 from app.services.unknown_reasons import (
@@ -1255,7 +1256,7 @@ async def get_filing_history(
 @router.post("/{broker_dealer_id}/health-check")
 async def trigger_health_check(
     broker_dealer_id: int,
-    _: AuthenticatedUser = Depends(_require_master_list),
+    current_user: AuthenticatedUser = Depends(_require_master_list),
     db: AsyncSession = Depends(get_db_session),
 ) -> dict[str, object]:
     """Triggered Enrichment / Health Check (Revision 2.2).
@@ -1309,6 +1310,18 @@ async def trigger_health_check(
             if enriched_record.types_of_business_other and enriched_record.types_of_business_other != broker_dealer.types_of_business_other:
                 broker_dealer.types_of_business_other = enriched_record.types_of_business_other
                 changes.append("types_of_business_other")
+
+        # Record the FINRA lookup for the audit trail — only when a CRD
+        # number was present, i.e. we actually queried FINRA detail.
+        await record_audit(
+            db,
+            action="finra_health_check",
+            user_id=current_user.id,
+            details={
+                "broker_dealer_id": broker_dealer_id,
+                "crd_number": broker_dealer.crd_number,
+            },
+        )
 
     # Re-apply the niche-restricted flag only. clearing_classification is NOT
     # derived here anymore: the old determine_clearing_classification() regex

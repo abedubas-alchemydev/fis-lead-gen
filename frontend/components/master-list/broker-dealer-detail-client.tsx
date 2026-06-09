@@ -24,6 +24,7 @@ import { ChannelIconCell } from "@/components/advisor-list/channel-icon-cell";
 import { OutreachButton } from "@/components/master-list/outreach-button";
 import { PeopleTable } from "@/components/master-list/detail/people-table";
 import { EmailScansSection } from "@/components/email-extractor/email-scans-section";
+import { EMAIL_EXTRACTION_ENABLED } from "@/lib/feature-flags";
 import { FinancialTrendChart } from "@/components/master-list/detail/financial-trend-chart";
 import { FirmWebsiteLink } from "@/components/master-list/detail/firm-website-link";
 import { CopyDomainButton } from "@/components/master-list/detail/copy-domain-button";
@@ -1621,17 +1622,19 @@ export function BrokerDealerDetailClient({ brokerDealerId }: { brokerDealerId: s
       </div>
       </div>
 
-      {/* ── Discovered emails (full width) ── */}
-      <div className="mt-4">
-        <EmailScansSection
-          entityKind="bd"
-          entityId={Number(brokerDealerId)}
-          currentScanId={currentScanId}
-          resolvedDomain={resolvedDomain}
-          isHydrating={isHydratingScan}
-          onScanCreated={setCurrentScanId}
-        />
-      </div>
+      {/* ── Discovered emails (full width) — hidden: no data extraction in-app ── */}
+      {EMAIL_EXTRACTION_ENABLED && (
+        <div className="mt-4">
+          <EmailScansSection
+            entityKind="bd"
+            entityId={Number(brokerDealerId)}
+            currentScanId={currentScanId}
+            resolvedDomain={resolvedDomain}
+            isHydrating={isHydratingScan}
+            onScanCreated={setCurrentScanId}
+          />
+        </div>
+      )}
     </div>
   );
 }

@@ -45,6 +45,8 @@ from app.core.feature_permissions import (
     VAULT,
 )
 from app.models.advisor_filing import AdvisorFiling
+from app.models.broker_dealer import BrokerDealer
+from app.models.executive_contact import ExecutiveContact
 from app.models.form4_transaction import Form4Transaction
 from app.models.investor_filing import InvestorFiling
 from app.models.vault_folder import VaultFolder
@@ -109,7 +111,16 @@ from app.services.sec_pdf_fetcher import (
     fetch_filing_pdf_bytes,
     fetch_sec_pdf_bytes,
 )
+from app.services.outreach import (
+    ContactContext,
+    FirmContext,
+    OutreachConfigurationError,
+    OutreachDraftError,
+    ServiceContext,
+    generate_outreach_draft,
+)
 from app.services.vault_retrieval import (
+    retrieve_chunks,
     retrieve_chunks_for_folders,
 )
 from app.services.web_research import search_web
@@ -3269,6 +3280,198 @@ _DUAL_REGISTRATION_PARAMETERS_SCHEMA: dict[str, Any] = {
 }
 
 
+# ── Action tools (write-capable) ─────────────────────────────────────────
+#
+# Unlike the read-only lookups above, this one causes a side effect: it
+# generates an outreach draft via Gemini Flash. It keeps the same contract
+# as every other tool — feature gated, ownership checked, and never raising
+# into the Gemini loop (expected failures come back as structured error
+# dicts).
+
+
+_DRAFT_OUTREACH_PARAMETERS_SCHEMA: dict[str, Any] = {
+    "type": "object",
+    "properties": {
+        "broker_dealer_id": {
+            "type": "integer",
+            "description": "Broker-dealer id the contact belongs to.",
+        },
+        "contact_id": {
+            "type": "integer",
+            "description": (
+                "Executive-contact id to address the email to. Must belong "
+                "to the given broker-dealer."
+            ),
+        },
+        "folder_id": {
+            "type": "integer",
+            "description": (
+                "Vault folder id whose documents and instructions seed the "
+                "pitch (from list_vault_folders). Must belong to the user."
+            ),
+        },
+    },
+    "required": ["broker_dealer_id", "contact_id", "folder_id"],
+}
+
+
+async def _execute_draft_outreach_email(
+    user: AuthenticatedUser,
+    db: AsyncSession,
+    args: Mapping[str, Any],
+) -> dict[str, Any]:
+    """Generate a cold-email ``{subject, body}`` draft for a (firm, contact).
+
+    Mirrors ``POST /outreach/draft``: validates the vault folder belongs to
+    the caller and the contact belongs to the broker-dealer (all three
+    misses collapse to one opaque ``not_found``), pulls top-K vault chunks
+    for RAG, then asks Gemini Flash to compose the draft. Draft only —
+    nothing is sent.
+    """
+    denial = _check_feature(user, VAULT)
+    if denial is not None:
+        return denial
+
+    try:
+        broker_dealer_id = int(args["broker_dealer_id"])
+        contact_id = int(args["contact_id"])
+        folder_id = int(args["folder_id"])
+    except (TypeError, ValueError, KeyError):
+        return {
+            "error": "invalid_args",
+            "message": (
+                "'broker_dealer_id', 'contact_id', and 'folder_id' are all "
+                "required integers. Folder ids come from list_vault_folders; "
+                "contact ids come from the broker-dealer profile."
+            ),
+        }
+
+    try:
+        folder = (
+            await db.execute(
+                select(VaultFolder).where(
+                    VaultFolder.id == folder_id,
+                    VaultFolder.user_id == user.id,
+                )
+            )
+        ).scalar_one_or_none()
+        broker_dealer = (
+            await db.execute(
+                select(BrokerDealer).where(BrokerDealer.id == broker_dealer_id)
+            )
+        ).scalar_one_or_none()
+        contact = None
+        if broker_dealer is not None:
+            contact = (
+                await db.execute(
+                    select(ExecutiveContact).where(
+                        ExecutiveContact.id == contact_id,
+                        ExecutiveContact.bd_id == broker_dealer_id,
+                    )
+                )
+            ).scalar_one_or_none()
+    except Exception:
+        logger.exception("doxie tool failed", extra={"tool": "draft_outreach_email"})
+        return {
+            "error": "tool_error",
+            "message": "Lookup failed; ask the user to try again.",
+        }
+
+    # Collapsed not-found: folder-not-yours / BD-missing / contact-missing
+    # surface identically so a leaked id can't be confirmed.
+    if folder is None or broker_dealer is None or contact is None:
+        return {
+            "error": "not_found",
+            "message": (
+                "Couldn't find that folder, firm, or contact together — check "
+                "the ids (list_vault_folders for folders, the broker-dealer "
+                "profile for contact ids)."
+            ),
+        }
+
+    firm_ctx = FirmContext(
+        name=broker_dealer.name,
+        city=broker_dealer.city,
+        state=broker_dealer.state,
+        current_clearing_partner=broker_dealer.current_clearing_partner,
+        firm_operations_text=broker_dealer.firm_operations_text,
+    )
+    contact_ctx = ContactContext(
+        name=contact.name,
+        title=contact.title,
+        email=contact.email,
+    )
+    query_parts = [
+        broker_dealer.name,
+        contact.title or "",
+        broker_dealer.city or "",
+        broker_dealer.state or "",
+        broker_dealer.current_clearing_partner or "",
+        (broker_dealer.firm_operations_text or "")[:500],
+        folder.name,
+    ]
+    retrieval_query = " ".join(part for part in query_parts if part)
+
+    retrieved: tuple[str, ...] = ()
+    if folder.description or retrieval_query:
+        try:
+            chunks = await retrieve_chunks(
+                folder_id=folder.id, query=retrieval_query, db=db
+            )
+            retrieved = tuple(chunk.text for chunk in chunks)
+        except Exception:
+            logger.warning(
+                "doxie draft: chunk retrieval failed for folder %s", folder.id
+            )
+
+    service_ctx = ServiceContext(
+        name=folder.name,
+        description=folder.description,
+        instructions=folder.outreach_instructions or "",
+        retrieved_chunks=retrieved,
+    )
+
+    try:
+        draft = await generate_outreach_draft(
+            firm=firm_ctx, contact=contact_ctx, service=service_ctx
+        )
+    except OutreachConfigurationError:
+        return {
+            "error": "not_configured",
+            "message": (
+                "Outreach drafting isn't configured (Gemini key missing or "
+                "invalid). Tell the user to contact an administrator."
+            ),
+        }
+    except OutreachDraftError:
+        return {
+            "error": "draft_failed",
+            "message": (
+                "The drafting service is unavailable right now; try again in "
+                "a moment."
+            ),
+        }
+    except Exception:
+        logger.exception("doxie tool failed", extra={"tool": "draft_outreach_email"})
+        return {
+            "error": "tool_error",
+            "message": "Couldn't draft the email; ask the user to try again.",
+        }
+
+    return {
+        "subject": draft.subject,
+        "body": draft.body,
+        "broker_dealer_id": broker_dealer_id,
+        "contact_id": contact_id,
+        "folder_id": folder_id,
+        "link": "/outreach/contacts",
+        "message": (
+            "Drafted a cold-email subject and body. This is a draft only — "
+            "nothing was sent."
+        ),
+    }
+
+
 TOOL_REGISTRY: dict[str, Tool] = {
     "search_broker_dealers": Tool(
         name="search_broker_dealers",
@@ -3633,5 +3836,22 @@ TOOL_REGISTRY: dict[str, Tool] = {
         parameters_schema=_DUAL_REGISTRATION_PARAMETERS_SCHEMA,
         feature_key=MASTER_LIST,
         execute=_execute_find_dual_registered_firms,
+    ),
+    "draft_outreach_email": Tool(
+        name="draft_outreach_email",
+        description=(
+            "Generate a cold-email draft (subject + body) for a specific "
+            "contact at a broker-dealer, grounded in a Vault folder's "
+            "documents and instructions. Use when the user asks to 'draft', "
+            "'write', or 'compose an outreach/cold email' to a contact. Needs "
+            "broker_dealer_id, contact_id, and the Vault folder_id (from "
+            "list_vault_folders). Returns a draft only — it does not send."
+        ),
+        parameters_schema=_DRAFT_OUTREACH_PARAMETERS_SCHEMA,
+        feature_key=VAULT,
+        execute=_execute_draft_outreach_email,
+        # Gemini Flash round-trip + RAG retrieval can exceed the 5s default.
+        timeout_s=30.0,
+        cacheable=False,
     ),
 }
