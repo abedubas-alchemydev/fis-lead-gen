@@ -26,6 +26,7 @@ import { PeopleTable } from "@/components/master-list/detail/people-table";
 import { EmailScansSection } from "@/components/email-extractor/email-scans-section";
 import { FinancialTrendChart } from "@/components/master-list/detail/financial-trend-chart";
 import { FirmWebsiteLink } from "@/components/master-list/detail/firm-website-link";
+import { CopyDomainButton } from "@/components/master-list/detail/copy-domain-button";
 import { FocusReportSection } from "@/components/master-list/detail/focus-report-section";
 import {
   classificationDisplay,
@@ -892,6 +893,9 @@ export function BrokerDealerDetailClient({ brokerDealerId }: { brokerDealerId: s
             website={bd.website}
             fallbackDomain={headerFallbackDomain}
           />
+          <div className="mt-1">
+            <CopyDomainButton domain={resolvedDomain} />
+          </div>
           <div className="mt-2 flex flex-wrap items-center gap-x-3 gap-y-1 text-[12px] text-[var(--text-muted,#94a3b8)]">
             <span>
               CIK <span className="font-mono text-[var(--text-dim,#475569)]">{bd.cik ?? "N/A"}</span>

@@ -35,6 +35,7 @@ import {
 } from "@/lib/advisor-list-state";
 import { formatCurrency, formatDate } from "@/lib/format";
 import { EmailScansSection } from "@/components/email-extractor/email-scans-section";
+import { CopyDomainButton } from "@/components/master-list/detail/copy-domain-button";
 import {
   listScansForEntity,
   pickHydratableScan,
@@ -602,6 +603,7 @@ export function AdvisorDetailClient({ advisorId }: { advisorId: string }) {
                 {cleanWebsiteDisplay(advisor.website)}
               </a>
             ) : null}
+            <CopyDomainButton domain={resolvedDomain} />
             <a
               href={`https://www.google.com/search?q=${encodeURIComponent(`${advisor.name} investment advisor`)}`}
               target="_blank"
