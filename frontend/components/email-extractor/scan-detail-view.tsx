@@ -343,7 +343,28 @@ function EnrichmentCell({
   }
 
   if (row.enrichment_status === "no_match") {
-    return <Pill variant="unknown">Not found</Pill>;
+    // An honest miss, but still re-runnable on its own: the chain or a
+    // provider's coverage may have changed since the last attempt, so give the
+    // row the same per-row re-run affordance the error row gets (bulk "Enrich
+    // All" already retries no_match rows too).
+    return (
+      <div className="flex flex-col items-start gap-1">
+        <Pill variant="unknown">Not found</Pill>
+        <Button
+          type="button"
+          variant="outline"
+          size="sm"
+          onClick={() => onEnrich(row.id)}
+          disabled={inFlight}
+        >
+          {inFlight ? (
+            <Loader2 className="h-3.5 w-3.5 animate-spin" strokeWidth={2} />
+          ) : null}
+          {inFlight ? "Enriching…" : "Re-enrich"}
+        </Button>
+        {error ? <EnrichErrorText error={error} /> : null}
+      </div>
+    );
   }
 
   if (row.enrichment_status === "error") {
