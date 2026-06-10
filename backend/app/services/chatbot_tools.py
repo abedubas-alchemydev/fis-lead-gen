@@ -28,14 +28,16 @@ import asyncio
 import base64
 import logging
 from dataclasses import dataclass
-from datetime import date, datetime
+from datetime import date, datetime, timedelta, timezone
 from decimal import Decimal
 from pathlib import Path
 from typing import Any, Awaitable, Callable, Mapping
+from urllib.parse import urlparse
 
 from fastapi import HTTPException
 from sqlalchemy import delete, func, select
 from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy.orm import selectinload
 
 from app.core.feature_permissions import (
     ALERTS,
@@ -44,19 +46,25 @@ from app.core.feature_permissions import (
     INVESTMENT_ADVISORS,
     INVESTORS,
     MASTER_LIST,
+    MY_FAVORITES,
     SENT_OUTREACH,
     VAULT,
 )
 from app.models.advisor_contact import AdvisorContact
 from app.models.advisor_filing import AdvisorFiling
 from app.models.broker_dealer import BrokerDealer
+from app.models.discovered_email import DiscoveredEmail
 from app.models.executive_contact import ExecutiveContact
 from app.models.extraction_run import ExtractionRun, RunStatus
+from app.models.favorite_list import FavoriteList, FavoriteListItem
 from app.models.form4_transaction import Form4Transaction
+from app.models.institutional_investor import InstitutionalInvestor
 from app.models.investment_advisor import InvestmentAdvisor
+from app.models.investor_contact import InvestorContact
 from app.models.investor_filing import InvestorFiling
 from app.models.outreach_draft import OutreachDraft
 from app.models.outreach_send import OutreachSend
+from app.models.pipeline_run import PipelineRun
 from app.models.vault_folder import VaultFolder
 from app.models.vault_folder_file import VaultFolderFile
 from app.schemas.auth import AuthenticatedUser
@@ -86,6 +94,7 @@ from app.services.chatbot_semantic import (
 )
 from app.services.chatbot_urls import (
     ALERTS_URL,
+    MY_FAVORITES_URL,
     OUTREACH_CREATE_URL,
     OUTREACH_DRAFTS_URL,
     OUTREACH_SENT_URL,
@@ -137,6 +146,8 @@ from app.services.outreach_send import (
     provider_send_and_record,
     resolve_sender_account,
 )
+from app.services import user_lists
+from app.services.pipeline_reaper import STALE_REFRESH_RUN_AGE
 from app.services.vault_retrieval import (
     retrieve_chunks,
     retrieve_chunks_for_folders,
@@ -177,6 +188,15 @@ DRAFT_RECIPIENTS_CAP = 10
 # OAuth token refresh + the provider send API routinely exceed the 5s
 # default tool budget — same headroom the PDF tools get.
 SEND_DRAFT_TOOL_TIMEOUT_S = 30.0
+# Status & quick-action tools.
+EMAIL_SCANS_LIMIT_DEFAULT = 10
+EMAIL_SCANS_LIMIT_MAX = 25
+EMAIL_SCAN_RESULTS_CAP = 25
+FAVORITES_LIST_LIMIT_DEFAULT = 10
+FAVORITES_LIST_LIMIT_MAX = 25
+MARK_ALERTS_IDS_CAP = 50
+CONTACT_EMAIL_RESULTS_CAP = 10
+CONTACT_DOMAIN_RESULTS_CAP = 15
 
 
 @dataclass(frozen=True)
@@ -4390,6 +4410,875 @@ async def _execute_send_outreach_draft(
     )
 
 
+# ── Status & quick-action tools ──────────────────────────────────────────
+
+
+_LIST_EMAIL_SCANS_PARAMETERS_SCHEMA: dict[str, Any] = {
+    "type": "object",
+    "properties": {
+        "limit": {
+            "type": "integer",
+            "description": (
+                f"Max scans to return (default {EMAIL_SCANS_LIMIT_DEFAULT}, "
+                f"cap {EMAIL_SCANS_LIMIT_MAX})."
+            ),
+        },
+        "broker_dealer_id": {
+            "type": "integer",
+            "description": "Only scans tied to this broker-dealer id.",
+        },
+        "advisor_id": {
+            "type": "integer",
+            "description": "Only scans tied to this investment-advisor id.",
+        },
+    },
+}
+
+
+_GET_EMAIL_SCAN_RESULTS_PARAMETERS_SCHEMA: dict[str, Any] = {
+    "type": "object",
+    "properties": {
+        "scan_id": {
+            "type": "integer",
+            "description": (
+                "Scan id from run_email_extractor or list_email_scans."
+            ),
+        },
+    },
+    "required": ["scan_id"],
+}
+
+
+_DATA_FRESHNESS_PARAMETERS_SCHEMA: dict[str, Any] = {
+    "type": "object",
+    "properties": {},
+}
+
+
+_FAVORITE_FIRM_PARAMETERS_SCHEMA: dict[str, Any] = {
+    "type": "object",
+    "properties": {
+        "entity_type": {
+            "type": "string",
+            "enum": ["broker_dealer", "investment_advisor"],
+            "description": "Which registry the firm id belongs to.",
+        },
+        "firm_id": {
+            "type": "integer",
+            "description": "Numeric firm id from the matching search tool.",
+        },
+    },
+    "required": ["entity_type", "firm_id"],
+}
+
+
+_LIST_MY_FAVORITES_PARAMETERS_SCHEMA: dict[str, Any] = {
+    "type": "object",
+    "properties": {
+        "limit": {
+            "type": "integer",
+            "description": (
+                f"Max favorites to return (default "
+                f"{FAVORITES_LIST_LIMIT_DEFAULT}, cap "
+                f"{FAVORITES_LIST_LIMIT_MAX})."
+            ),
+        },
+    },
+}
+
+
+_MARK_ALERTS_READ_PARAMETERS_SCHEMA: dict[str, Any] = {
+    "type": "object",
+    "properties": {
+        "alert_ids": {
+            "type": "array",
+            "items": {"type": "integer"},
+            "description": (
+                "Specific alert ids to mark read (from get_recent_alerts; "
+                f"cap {MARK_ALERTS_IDS_CAP})."
+            ),
+        },
+        "all": {
+            "type": "boolean",
+            "description": "Mark every unread alert read instead of ids.",
+        },
+    },
+}
+
+
+_FIND_CONTACT_BY_EMAIL_PARAMETERS_SCHEMA: dict[str, Any] = {
+    "type": "object",
+    "properties": {
+        "email": {
+            "type": "string",
+            "description": "Exact email address to look up.",
+        },
+    },
+    "required": ["email"],
+}
+
+
+_FIND_CONTACTS_BY_DOMAIN_PARAMETERS_SCHEMA: dict[str, Any] = {
+    "type": "object",
+    "properties": {
+        "domain": {
+            "type": "string",
+            "description": (
+                "Company domain, e.g. 'acme.com'. Full URLs are accepted "
+                "and normalized."
+            ),
+        },
+    },
+    "required": ["domain"],
+}
+
+
+def _scan_link(scan_id: int) -> str:
+    return f"/email-extractor/{scan_id}"
+
+
+async def _execute_list_email_scans(
+    user: AuthenticatedUser,
+    db: AsyncSession,
+    args: Mapping[str, Any],
+) -> dict[str, Any]:
+    """Recent email-extractor scans, newest first.
+
+    Mirrors ``GET /email-extractor/scans`` (scans are shared across users,
+    same as that endpoint) so Doxie can answer "how did my scan go?" after
+    ``run_email_extractor`` kicked one off.
+    """
+    denial = _check_feature(user, EMAIL_EXTRACTOR)
+    if denial is not None:
+        return denial
+
+    try:
+        raw_limit = (
+            int(args["limit"])
+            if args.get("limit") is not None
+            else EMAIL_SCANS_LIMIT_DEFAULT
+        )
+    except (TypeError, ValueError):
+        raw_limit = EMAIL_SCANS_LIMIT_DEFAULT
+    limit = max(1, min(raw_limit, EMAIL_SCANS_LIMIT_MAX))
+
+    def _opt_id(key: str) -> int | None:
+        raw = args.get(key)
+        if raw is None:
+            return None
+        try:
+            return int(raw)
+        except (TypeError, ValueError):
+            return None
+
+    bd_id = _opt_id("broker_dealer_id")
+    advisor_id = _opt_id("advisor_id")
+
+    try:
+        stmt = select(ExtractionRun).order_by(ExtractionRun.created_at.desc())
+        if bd_id is not None:
+            stmt = stmt.where(ExtractionRun.bd_id == bd_id)
+        if advisor_id is not None:
+            stmt = stmt.where(ExtractionRun.advisor_id == advisor_id)
+        scans = list((await db.execute(stmt.limit(limit))).scalars().all())
+    except Exception:
+        logger.exception("doxie tool failed", extra={"tool": "list_email_scans"})
+        return {
+            "error": "tool_error",
+            "message": "Couldn't load scans; ask the user to try again.",
+        }
+
+    items = [
+        {
+            "scan_id": scan.id,
+            "domain": scan.domain,
+            "person_name": scan.person_name,
+            "status": scan.status,
+            "total_items": scan.total_items,
+            "success_count": scan.success_count,
+            "failure_count": scan.failure_count,
+            "created_at": scan.created_at,
+            "completed_at": scan.completed_at,
+            "link": _scan_link(scan.id),
+        }
+        for scan in scans
+    ]
+    return _jsonable(
+        {"scans": items, "count": len(items), "list_link": "/email-extractor"}
+    )
+
+
+async def _execute_get_email_scan_results(
+    user: AuthenticatedUser,
+    db: AsyncSession,
+    args: Mapping[str, Any],
+) -> dict[str, Any]:
+    """One scan's status plus its discovered emails (capped)."""
+    denial = _check_feature(user, EMAIL_EXTRACTOR)
+    if denial is not None:
+        return denial
+
+    try:
+        scan_id = int(args.get("scan_id"))
+    except (TypeError, ValueError):
+        return {
+            "error": "invalid_args",
+            "message": "Argument 'scan_id' must be an integer.",
+        }
+
+    try:
+        scan = (
+            await db.execute(
+                select(ExtractionRun)
+                .options(selectinload(ExtractionRun.discovered_emails))
+                .where(ExtractionRun.id == scan_id)
+            )
+        ).scalar_one_or_none()
+    except Exception:
+        logger.exception(
+            "doxie tool failed", extra={"tool": "get_email_scan_results"}
+        )
+        return {
+            "error": "tool_error",
+            "message": "Couldn't load the scan; ask the user to try again.",
+        }
+
+    if scan is None:
+        return {
+            "error": "not_found",
+            "message": (
+                "No email scan with that id — list_email_scans shows recent "
+                "scans."
+            ),
+        }
+
+    emails = list(scan.discovered_emails or [])
+    shown = emails[:EMAIL_SCAN_RESULTS_CAP]
+    items = [
+        {
+            "email": e.email,
+            "source": e.source,
+            "confidence": e.confidence,
+            "enriched_name": e.enriched_name,
+            "enriched_title": e.enriched_title,
+            "enrichment_status": e.enrichment_status,
+        }
+        for e in shown
+    ]
+    return _jsonable(
+        {
+            "scan_id": scan.id,
+            "domain": scan.domain,
+            "status": scan.status,
+            "total_found": len(emails),
+            "shown": len(items),
+            "results": items,
+            "link": _scan_link(scan.id),
+        }
+    )
+
+
+# Parent pipelines a user might reasonably ask "is the data fresh?" about.
+# Sub-pipeline rows (``*_resolve_website`` etc.) fire as children of these
+# and would only add noise.
+_DATA_FRESHNESS_PIPELINES: tuple[str, ...] = (
+    "populate_all",
+    "initial_load",
+    "initial_load_advisors",
+    "daily_filing_monitor",
+    "clearing_pdf_pipeline",
+    "registration_watcher",
+    "deficiency_watcher",
+    "form4_watcher",
+    "broker_dealer_refresh_all",
+    "investment_advisor_refresh_all",
+    "broker_dealer_gap_fill",
+    "investment_advisor_gap_fill",
+)
+
+
+def _stall_threshold(pipeline_name: str) -> timedelta:
+    """How long a run may stay ``running`` before we flag it.
+
+    populate_all / initial_load legitimately run 30-90+ minutes. The
+    refresh/gap-fill family is reaped at ``STALE_REFRESH_RUN_AGE`` by
+    pipeline_reaper, so anything older than that is already suspect.
+    Everything else gets a flat hour.
+    """
+    if pipeline_name == "populate_all" or pipeline_name.startswith(
+        "initial_load"
+    ):
+        return timedelta(hours=2)
+    if pipeline_name.endswith("_refresh_all") or pipeline_name.endswith(
+        "_gap_fill"
+    ):
+        return STALE_REFRESH_RUN_AGE
+    return timedelta(hours=1)
+
+
+async def _execute_get_data_freshness(
+    user: AuthenticatedUser,  # noqa: ARG001 — informational, no gate
+    db: AsyncSession,
+    args: Mapping[str, Any],  # noqa: ARG001 — no parameters
+) -> dict[str, Any]:
+    """Read-only data-freshness report over ``pipeline_runs``.
+
+    Counters and timestamps only — consistent with the any-authenticated
+    ``GET /pipeline/run/{id}`` contract, so no permission gate. The tool
+    cannot trigger anything; the description says so to keep the model
+    from promising a refresh it can't start.
+    """
+    try:
+        latest_stmt = (
+            select(PipelineRun)
+            .where(
+                PipelineRun.pipeline_name.in_(_DATA_FRESHNESS_PIPELINES),
+                PipelineRun.status == "completed",
+            )
+            .order_by(
+                PipelineRun.pipeline_name, PipelineRun.completed_at.desc()
+            )
+            .distinct(PipelineRun.pipeline_name)
+        )
+        latest = list((await db.execute(latest_stmt)).scalars().all())
+        active_stmt = (
+            select(PipelineRun)
+            .where(
+                PipelineRun.pipeline_name.in_(_DATA_FRESHNESS_PIPELINES),
+                PipelineRun.status.in_(("running", "queued")),
+            )
+            .order_by(PipelineRun.started_at.desc())
+            .limit(25)
+        )
+        active = list((await db.execute(active_stmt)).scalars().all())
+    except Exception:
+        logger.exception(
+            "doxie tool failed", extra={"tool": "get_data_freshness"}
+        )
+        return {
+            "error": "tool_error",
+            "message": (
+                "Couldn't read pipeline history; ask the user to try again."
+            ),
+        }
+
+    now = datetime.now(timezone.utc)
+    last_completed = [
+        {
+            "pipeline": run.pipeline_name,
+            "completed_at": run.completed_at,
+            "total_items": run.total_items,
+            "success_count": run.success_count,
+            "failure_count": run.failure_count,
+        }
+        for run in sorted(
+            latest, key=lambda r: r.completed_at or now, reverse=True
+        )
+    ]
+    in_flight = []
+    for run in active:
+        started = run.started_at
+        stalled = bool(
+            run.status == "running"
+            and started is not None
+            and now - started > _stall_threshold(run.pipeline_name)
+        )
+        in_flight.append(
+            {
+                "pipeline": run.pipeline_name,
+                "status": run.status,
+                "started_at": started,
+                "possibly_stalled": stalled,
+            }
+        )
+    return _jsonable(
+        {
+            "last_completed": last_completed,
+            "in_flight": in_flight,
+            "note": (
+                "Read-only report — Doxie cannot start or stop pipelines; "
+                "admins trigger refreshes from the Settings pages."
+            ),
+        }
+    )
+
+
+async def _favorite_action(
+    user: AuthenticatedUser,
+    db: AsyncSession,
+    args: Mapping[str, Any],
+    *,
+    favorite: bool,
+) -> dict[str, Any]:
+    """Shared body for favorite_firm / unfavorite_firm.
+
+    Wraps the same ``user_lists`` default-list helpers the heart toggles
+    use, so favorites land exactly where the My Favorites page reads.
+    Unfavoriting touches only the default list (custom lists keep theirs),
+    same as the app's toggle.
+    """
+    tool_name = "favorite_firm" if favorite else "unfavorite_firm"
+    denial = _check_feature(user, MY_FAVORITES)
+    if denial is not None:
+        return denial
+
+    entity_type = (_opt_str(args, "entity_type") or "").lower()
+    if entity_type not in ("broker_dealer", "investment_advisor"):
+        return {
+            "error": "invalid_args",
+            "message": (
+                "Argument 'entity_type' must be 'broker_dealer' or "
+                "'investment_advisor'."
+            ),
+        }
+    try:
+        firm_id = int(args.get("firm_id"))
+    except (TypeError, ValueError):
+        return {
+            "error": "invalid_args",
+            "message": "Argument 'firm_id' must be an integer.",
+        }
+
+    try:
+        if entity_type == "broker_dealer":
+            firm_name = (
+                await db.execute(
+                    select(BrokerDealer.name).where(BrokerDealer.id == firm_id)
+                )
+            ).scalar_one_or_none()
+        else:
+            firm_name = (
+                await db.execute(
+                    select(InvestmentAdvisor.name).where(
+                        InvestmentAdvisor.id == firm_id
+                    )
+                )
+            ).scalar_one_or_none()
+        if firm_name is None:
+            return {
+                "error": "not_found",
+                "message": "No firm with that id in that registry.",
+            }
+        if entity_type == "broker_dealer":
+            if favorite:
+                await user_lists.add_favorite(db, user.id, firm_id)
+            else:
+                await user_lists.remove_favorite(db, user.id, firm_id)
+        else:
+            if favorite:
+                await user_lists.add_advisor_favorite(db, user.id, firm_id)
+            else:
+                await user_lists.remove_advisor_favorite(db, user.id, firm_id)
+    except Exception:
+        logger.exception("doxie tool failed", extra={"tool": tool_name})
+        return {
+            "error": "tool_error",
+            "message": "Couldn't update favorites; ask the user to try again.",
+        }
+
+    result_key = "favorited" if favorite else "unfavorited"
+    payload: dict[str, Any] = {
+        result_key: True,
+        "entity_type": entity_type,
+        "firm_id": firm_id,
+        "firm_name": firm_name,
+        "link": MY_FAVORITES_URL,
+    }
+    if not favorite:
+        payload["note"] = (
+            "Removed from the default Favorites list; custom lists are "
+            "untouched."
+        )
+    return _jsonable(payload)
+
+
+async def _execute_favorite_firm(
+    user: AuthenticatedUser,
+    db: AsyncSession,
+    args: Mapping[str, Any],
+) -> dict[str, Any]:
+    return await _favorite_action(user, db, args, favorite=True)
+
+
+async def _execute_unfavorite_firm(
+    user: AuthenticatedUser,
+    db: AsyncSession,
+    args: Mapping[str, Any],
+) -> dict[str, Any]:
+    return await _favorite_action(user, db, args, favorite=False)
+
+
+async def _execute_list_my_favorites(
+    user: AuthenticatedUser,
+    db: AsyncSession,
+    args: Mapping[str, Any],
+) -> dict[str, Any]:
+    """The caller's favorited firms across all their lists, newest first."""
+    denial = _check_feature(user, MY_FAVORITES)
+    if denial is not None:
+        return denial
+
+    try:
+        raw_limit = (
+            int(args["limit"])
+            if args.get("limit") is not None
+            else FAVORITES_LIST_LIMIT_DEFAULT
+        )
+    except (TypeError, ValueError):
+        raw_limit = FAVORITES_LIST_LIMIT_DEFAULT
+    limit = max(1, min(raw_limit, FAVORITES_LIST_LIMIT_MAX))
+
+    try:
+        rows = (
+            await db.execute(
+                select(
+                    FavoriteListItem.broker_dealer_id,
+                    FavoriteListItem.advisor_id,
+                    FavoriteListItem.created_at,
+                    FavoriteList.name.label("list_name"),
+                    BrokerDealer.name.label("bd_name"),
+                    InvestmentAdvisor.name.label("ia_name"),
+                )
+                .join(FavoriteList, FavoriteList.id == FavoriteListItem.list_id)
+                .outerjoin(
+                    BrokerDealer,
+                    BrokerDealer.id == FavoriteListItem.broker_dealer_id,
+                )
+                .outerjoin(
+                    InvestmentAdvisor,
+                    InvestmentAdvisor.id == FavoriteListItem.advisor_id,
+                )
+                .where(FavoriteList.user_id == user.id)
+                .order_by(FavoriteListItem.created_at.desc())
+                .limit(limit)
+            )
+        ).all()
+    except Exception:
+        logger.exception(
+            "doxie tool failed", extra={"tool": "list_my_favorites"}
+        )
+        return {
+            "error": "tool_error",
+            "message": "Couldn't load favorites; ask the user to try again.",
+        }
+
+    items: list[dict[str, Any]] = []
+    for row in rows:
+        if row.broker_dealer_id is not None:
+            items.append(
+                {
+                    "entity_type": "broker_dealer",
+                    "firm_id": row.broker_dealer_id,
+                    "name": row.bd_name,
+                    "list_name": row.list_name,
+                    "favorited_at": row.created_at,
+                    "link": bd_detail_url(row.broker_dealer_id),
+                }
+            )
+        elif row.advisor_id is not None:
+            items.append(
+                {
+                    "entity_type": "investment_advisor",
+                    "firm_id": row.advisor_id,
+                    "name": row.ia_name,
+                    "list_name": row.list_name,
+                    "favorited_at": row.created_at,
+                    "link": ia_detail_url(row.advisor_id),
+                }
+            )
+    return _jsonable(
+        {"favorites": items, "count": len(items), "list_link": MY_FAVORITES_URL}
+    )
+
+
+async def _execute_mark_alerts_read(
+    user: AuthenticatedUser,
+    db: AsyncSession,
+    args: Mapping[str, Any],
+) -> dict[str, Any]:
+    """Mark filing alerts read — specific ids or all unread.
+
+    ``FilingAlert.is_read`` is global (not per-user), exactly like the
+    app's mark-read buttons; the result notes that so the model can warn
+    when it matters.
+    """
+    denial = _check_feature(user, ALERTS)
+    if denial is not None:
+        return denial
+
+    raw_ids = args.get("alert_ids")
+    mark_all = args.get("all") is True
+    has_ids = isinstance(raw_ids, (list, tuple)) and len(raw_ids) > 0
+    if has_ids == mark_all:
+        return {
+            "error": "invalid_args",
+            "message": (
+                "Pass either 'alert_ids' (a non-empty list from "
+                "get_recent_alerts) or 'all': true — exactly one."
+            ),
+        }
+
+    try:
+        if mark_all:
+            updated = await _alerts_repo.mark_all_read(
+                db, form_types=[], priorities=[]
+            )
+            return _jsonable(
+                {
+                    "updated_count": int(updated),
+                    "link": ALERTS_URL,
+                    "note": (
+                        "Alerts are shared — this marked them read for all "
+                        "users."
+                    ),
+                }
+            )
+
+        ids: list[int] = []
+        for raw in list(raw_ids)[:MARK_ALERTS_IDS_CAP]:
+            try:
+                ids.append(int(raw))
+            except (TypeError, ValueError):
+                continue
+        if not ids:
+            return {
+                "error": "invalid_args",
+                "message": "'alert_ids' must contain integer alert ids.",
+            }
+        updated = 0
+        missing: list[int] = []
+        for alert_id in ids:
+            alert = await _alerts_repo.mark_alert_read(
+                db, alert_id, is_read=True
+            )
+            if alert is None:
+                missing.append(alert_id)
+            else:
+                updated += 1
+    except Exception:
+        logger.exception(
+            "doxie tool failed", extra={"tool": "mark_alerts_read"}
+        )
+        return {
+            "error": "tool_error",
+            "message": "Couldn't update alerts; ask the user to try again.",
+        }
+
+    payload: dict[str, Any] = {
+        "updated_count": updated,
+        "link": ALERTS_URL,
+        "note": "Alerts are shared — read status applies to all users.",
+    }
+    if missing:
+        payload["not_found_ids"] = missing
+    return _jsonable(payload)
+
+
+def _normalize_contact_domain(raw: str) -> str:
+    """Strip scheme + path + leading 'www.' so callers can paste URLs.
+
+    Copy of ``endpoints/contacts._normalize_domain`` — the tool needs the
+    same forgiving input handling without importing an endpoint module.
+    """
+    raw = raw.strip().lower()
+    if "://" not in raw:
+        raw = "http://" + raw
+    netloc = urlparse(raw).netloc or raw
+    if netloc.startswith("www."):
+        netloc = netloc[4:]
+    return netloc.split(":")[0]
+
+
+async def _collect_contact_hits(
+    db: AsyncSession,
+    *,
+    email_needle: str | None = None,
+    domain: str | None = None,
+    cap: int,
+) -> list[dict[str, Any]]:
+    """Lean DB-only sweep across the three contact tables + the
+    discovered-emails buffer. Exactly one of email_needle / domain is set.
+    Deliberately never calls Apollo — no surprise credit spend from chat
+    (the /contacts endpoints offer that as an explicit opt-in instead).
+    """
+    hits: list[dict[str, Any]] = []
+    specs = (
+        (
+            ExecutiveContact,
+            ExecutiveContact.bd_id,
+            BrokerDealer,
+            "broker_dealer",
+            bd_detail_url,
+        ),
+        (
+            AdvisorContact,
+            AdvisorContact.advisor_id,
+            InvestmentAdvisor,
+            "investment_advisor",
+            ia_detail_url,
+        ),
+        (
+            InvestorContact,
+            InvestorContact.investor_id,
+            InstitutionalInvestor,
+            "institutional_investor",
+            ii_detail_url,
+        ),
+    )
+    for model, fk_col, firm_model, firm_type, link_fn in specs:
+        if len(hits) >= cap:
+            break
+        stmt = select(
+            model.id,
+            fk_col.label("firm_id"),
+            model.name,
+            model.title,
+            model.email,
+            firm_model.name.label("firm_name"),
+        ).join(firm_model, firm_model.id == fk_col)
+        if email_needle is not None:
+            stmt = stmt.where(func.lower(model.email) == email_needle)
+        else:
+            stmt = stmt.where(func.lower(model.email).like(f"%@{domain}"))
+        stmt = stmt.limit(cap - len(hits))
+        for row in (await db.execute(stmt)).all():
+            hits.append(
+                {
+                    "source": model.__tablename__,
+                    "firm_type": firm_type,
+                    "firm_id": row.firm_id,
+                    "firm_name": row.firm_name,
+                    "contact_id": row.id,
+                    "name": row.name,
+                    "title": row.title,
+                    "email": row.email,
+                    "link": link_fn(row.firm_id),
+                }
+            )
+
+    # Extractor finds that may not be saved contacts yet.
+    if len(hits) < cap:
+        de_stmt = select(DiscoveredEmail).order_by(
+            DiscoveredEmail.created_at.desc()
+        )
+        if email_needle is not None:
+            de_stmt = de_stmt.where(
+                func.lower(DiscoveredEmail.email) == email_needle
+            )
+        else:
+            de_stmt = de_stmt.where(DiscoveredEmail.domain == domain)
+        discovered = (
+            (await db.execute(de_stmt.limit(cap - len(hits)))).scalars().all()
+        )
+        for de in discovered:
+            if de.bd_id is not None:
+                firm_type = "broker_dealer"
+                firm_id: int | None = de.bd_id
+            elif de.advisor_id is not None:
+                firm_type = "investment_advisor"
+                firm_id = de.advisor_id
+            else:
+                firm_type = None
+                firm_id = None
+            hits.append(
+                {
+                    "source": "discovered_email",
+                    "firm_type": firm_type,
+                    "firm_id": firm_id,
+                    "firm_name": de.enriched_company,
+                    "contact_id": None,
+                    "name": de.enriched_name,
+                    "title": de.enriched_title,
+                    "email": de.email,
+                    "link": _scan_link(de.run_id),
+                }
+            )
+    return hits
+
+
+async def _execute_find_contact_by_email(
+    user: AuthenticatedUser,  # noqa: ARG001 — no gate, mirrors /contacts
+    db: AsyncSession,
+    args: Mapping[str, Any],
+) -> dict[str, Any]:
+    """Exact-address lookup across all contact tables + discovered emails."""
+    email_value = (_opt_str(args, "email") or "").lower()
+    if "@" not in email_value:
+        return {
+            "error": "invalid_args",
+            "message": (
+                "Argument 'email' must be a full address, e.g. "
+                "'sarah@acme.com'."
+            ),
+        }
+    try:
+        hits = await _collect_contact_hits(
+            db, email_needle=email_value, cap=CONTACT_EMAIL_RESULTS_CAP
+        )
+    except Exception:
+        logger.exception(
+            "doxie tool failed", extra={"tool": "find_contact_by_email"}
+        )
+        return {
+            "error": "tool_error",
+            "message": "Contact lookup failed; ask the user to try again.",
+        }
+    payload: dict[str, Any] = {
+        "email": email_value,
+        "hits": hits,
+        "count": len(hits),
+    }
+    if not hits:
+        payload["note"] = (
+            "No contact with that address on file (contact tables and "
+            "discovered emails)."
+        )
+    return _jsonable(payload)
+
+
+async def _execute_find_contacts_by_domain(
+    user: AuthenticatedUser,  # noqa: ARG001 — no gate, mirrors /contacts
+    db: AsyncSession,
+    args: Mapping[str, Any],
+) -> dict[str, Any]:
+    """Everyone we know with an email at one company domain."""
+    raw_domain = _opt_str(args, "domain")
+    if not raw_domain:
+        return {
+            "error": "invalid_args",
+            "message": "Argument 'domain' is required, e.g. 'acme.com'.",
+        }
+    domain = _normalize_contact_domain(raw_domain)
+    if "." not in domain:
+        return {
+            "error": "invalid_args",
+            "message": "Argument 'domain' must look like 'acme.com'.",
+        }
+    try:
+        hits = await _collect_contact_hits(
+            db, domain=domain, cap=CONTACT_DOMAIN_RESULTS_CAP
+        )
+    except Exception:
+        logger.exception(
+            "doxie tool failed", extra={"tool": "find_contacts_by_domain"}
+        )
+        return {
+            "error": "tool_error",
+            "message": "Contact lookup failed; ask the user to try again.",
+        }
+    payload: dict[str, Any] = {
+        "domain": domain,
+        "hits": hits,
+        "count": len(hits),
+    }
+    if not hits:
+        payload["note"] = (
+            "No contacts with an email at that domain. run_email_extractor "
+            "can scan the domain to discover some."
+        )
+    return _jsonable(payload)
+
+
 TOOL_REGISTRY: dict[str, Tool] = {
     "search_broker_dealers": Tool(
         name="search_broker_dealers",
@@ -4860,5 +5749,116 @@ TOOL_REGISTRY: dict[str, Tool] = {
         # OAuth refresh + provider API need PDF-tool-class headroom.
         timeout_s=SEND_DRAFT_TOOL_TIMEOUT_S,
         cacheable=False,
+    ),
+    "list_email_scans": Tool(
+        name="list_email_scans",
+        description=(
+            "List recent email-extractor scans (newest first) with status "
+            "and result counts. Use to answer 'how did my email scan go?' "
+            "or to find the scan_id for get_email_scan_results. Optional "
+            "broker_dealer_id / advisor_id filters."
+        ),
+        parameters_schema=_LIST_EMAIL_SCANS_PARAMETERS_SCHEMA,
+        feature_key=EMAIL_EXTRACTOR,
+        execute=_execute_list_email_scans,
+    ),
+    "get_email_scan_results": Tool(
+        name="get_email_scan_results",
+        description=(
+            "Read one email scan's status and its discovered emails "
+            "(addresses, source, confidence, enrichment state). Use after "
+            "run_email_extractor finishes, or with an id from "
+            "list_email_scans."
+        ),
+        parameters_schema=_GET_EMAIL_SCAN_RESULTS_PARAMETERS_SCHEMA,
+        feature_key=EMAIL_EXTRACTOR,
+        execute=_execute_get_email_scan_results,
+    ),
+    "get_data_freshness": Tool(
+        name="get_data_freshness",
+        description=(
+            "Report when each data pipeline last completed and what is "
+            "running right now (with a possibly_stalled flag). Use for "
+            "'is the data fresh?' / 'is a refresh running?'. Read-only — "
+            "it cannot start or stop anything."
+        ),
+        parameters_schema=_DATA_FRESHNESS_PARAMETERS_SCHEMA,
+        # Informational — no permission gate, same pattern as get_app_help.
+        feature_key="dashboard",
+        execute=_execute_get_data_freshness,
+    ),
+    "favorite_firm": Tool(
+        name="favorite_firm",
+        description=(
+            "Add a broker-dealer or investment advisor to the user's "
+            "Favorites (the same list as the heart toggle). This changes "
+            "real state — only call when the user clearly asks."
+        ),
+        parameters_schema=_FAVORITE_FIRM_PARAMETERS_SCHEMA,
+        feature_key=MY_FAVORITES,
+        execute=_execute_favorite_firm,
+        cacheable=False,
+    ),
+    "unfavorite_firm": Tool(
+        name="unfavorite_firm",
+        description=(
+            "Remove a broker-dealer or investment advisor from the user's "
+            "default Favorites list. This changes real state — only call "
+            "when the user clearly asks."
+        ),
+        parameters_schema=_FAVORITE_FIRM_PARAMETERS_SCHEMA,
+        feature_key=MY_FAVORITES,
+        execute=_execute_unfavorite_firm,
+        cacheable=False,
+    ),
+    "list_my_favorites": Tool(
+        name="list_my_favorites",
+        description=(
+            "List the firms the user has favorited (across their lists), "
+            "newest first, with deep links."
+        ),
+        parameters_schema=_LIST_MY_FAVORITES_PARAMETERS_SCHEMA,
+        feature_key=MY_FAVORITES,
+        execute=_execute_list_my_favorites,
+        # Skip the dedup cache so a favorite added seconds ago shows up.
+        cacheable=False,
+    ),
+    "mark_alerts_read": Tool(
+        name="mark_alerts_read",
+        description=(
+            "Mark filing alerts as read — specific alert ids (from "
+            "get_recent_alerts) or all unread. Alerts are shared, so this "
+            "marks them read for every user; only call on clear user "
+            "intent."
+        ),
+        parameters_schema=_MARK_ALERTS_READ_PARAMETERS_SCHEMA,
+        feature_key=ALERTS,
+        execute=_execute_mark_alerts_read,
+        cacheable=False,
+    ),
+    "find_contact_by_email": Tool(
+        name="find_contact_by_email",
+        description=(
+            "Look up an exact email address across every contact table and "
+            "the extractor's discovered emails — 'do we know "
+            "sarah@acme.com?'. Database-only; never spends enrichment "
+            "credits."
+        ),
+        parameters_schema=_FIND_CONTACT_BY_EMAIL_PARAMETERS_SCHEMA,
+        # No permission gate — mirrors the /contacts endpoints.
+        feature_key="dashboard",
+        execute=_execute_find_contact_by_email,
+    ),
+    "find_contacts_by_domain": Tool(
+        name="find_contacts_by_domain",
+        description=(
+            "List everyone on file with an email at one company domain — "
+            "'who do we know at acme.com?'. Database-only; never spends "
+            "enrichment credits."
+        ),
+        parameters_schema=_FIND_CONTACTS_BY_DOMAIN_PARAMETERS_SCHEMA,
+        # No permission gate — mirrors the /contacts endpoints.
+        feature_key="dashboard",
+        execute=_execute_find_contacts_by_domain,
     ),
 }

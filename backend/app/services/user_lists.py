@@ -24,7 +24,7 @@ from __future__ import annotations
 from datetime import datetime
 from typing import Sequence
 
-from sqlalchemy import delete, func, select
+from sqlalchemy import delete, func, select, text
 from sqlalchemy.dialects.postgresql import insert
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -159,6 +159,56 @@ async def remove_favorite(db: AsyncSession, user_id: str, bd_id: int) -> None:
         delete(FavoriteListItem).where(
             FavoriteListItem.list_id == list_id,
             FavoriteListItem.broker_dealer_id == bd_id,
+        )
+    )
+    await db.commit()
+
+
+async def add_advisor_favorite(
+    db: AsyncSession, user_id: str, advisor_id: int
+) -> FavoriteListItem:
+    """Advisor analogue of :func:`add_favorite` — same default-list flow.
+
+    ``uq_favorite_list_item_list_advisor`` is a PARTIAL unique index
+    (``WHERE advisor_id IS NOT NULL``, migration 0031); ON CONFLICT must
+    bind it via the matching ``index_where`` predicate, mirroring the
+    explicit-list endpoint in ``favorite_lists.py``.
+    """
+    list_id = await _get_or_create_default_list_id(db, user_id)
+    insert_stmt = (
+        insert(FavoriteListItem)
+        .values(list_id=list_id, advisor_id=advisor_id, broker_dealer_id=None)
+        .on_conflict_do_nothing(
+            index_elements=["list_id", "advisor_id"],
+            index_where=text("advisor_id IS NOT NULL"),
+        )
+        .returning(FavoriteListItem)
+    )
+    row = (await db.execute(insert_stmt)).scalar_one_or_none()
+    if row is None:
+        existing = await db.execute(
+            select(FavoriteListItem).where(
+                FavoriteListItem.list_id == list_id,
+                FavoriteListItem.advisor_id == advisor_id,
+            )
+        )
+        row = existing.scalar_one()
+    await db.commit()
+    return row
+
+
+async def remove_advisor_favorite(
+    db: AsyncSession, user_id: str, advisor_id: int
+) -> None:
+    """Advisor analogue of :func:`remove_favorite` — idempotent delete
+    from the user's default list."""
+    list_id = await _get_default_list_id(db, user_id)
+    if list_id is None:
+        return
+    await db.execute(
+        delete(FavoriteListItem).where(
+            FavoriteListItem.list_id == list_id,
+            FavoriteListItem.advisor_id == advisor_id,
         )
     )
     await db.commit()
