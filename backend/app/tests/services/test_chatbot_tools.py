@@ -33,6 +33,7 @@ from app.core.feature_permissions import (
     INVESTMENT_ADVISORS,
     INVESTORS,
     MASTER_LIST,
+    MY_FAVORITES,
     SENT_OUTREACH,
     VAULT,
 )
@@ -90,6 +91,11 @@ def vault_user() -> AuthenticatedUser:
 @pytest.fixture
 def outreach_user() -> AuthenticatedUser:
     return _make_user(features=[SENT_OUTREACH])
+
+
+@pytest.fixture
+def favorites_user() -> AuthenticatedUser:
+    return _make_user(features=[MY_FAVORITES])
 
 
 @pytest.fixture
@@ -1340,6 +1346,242 @@ async def test_send_outreach_draft_maps_provider_412s(
     assert r2["error"] == "send_permission_needed"
 
 
+# ── Status & quick-action tools ─────────────────────────────────────────
+
+
+async def test_list_email_scans_requires_feature(no_access_user, db_stub) -> None:
+    result = await chatbot_tools.TOOL_REGISTRY["list_email_scans"].execute(
+        no_access_user, db_stub, {}
+    )
+    assert result["error"] == "no_access"
+
+
+async def test_get_email_scan_results_requires_feature(
+    no_access_user, db_stub
+) -> None:
+    result = await chatbot_tools.TOOL_REGISTRY["get_email_scan_results"].execute(
+        no_access_user, db_stub, {"scan_id": 1}
+    )
+    assert result["error"] == "no_access"
+
+
+async def test_get_email_scan_results_rejects_bad_id(db_stub) -> None:
+    user = _make_user(features=[EMAIL_EXTRACTOR])
+    result = await chatbot_tools.TOOL_REGISTRY["get_email_scan_results"].execute(
+        user, db_stub, {"scan_id": "x"}
+    )
+    assert result["error"] == "invalid_args"
+
+
+def test_stall_threshold_tiers() -> None:
+    """populate_all / initial_load get hours; the reaped refresh family
+    inherits STALE_REFRESH_RUN_AGE; watchers get the flat hour."""
+    from datetime import timedelta
+
+    from app.services.pipeline_reaper import STALE_REFRESH_RUN_AGE
+
+    assert chatbot_tools._stall_threshold("populate_all") == timedelta(hours=2)
+    assert chatbot_tools._stall_threshold("initial_load_advisors") == timedelta(
+        hours=2
+    )
+    assert (
+        chatbot_tools._stall_threshold("broker_dealer_refresh_all")
+        == STALE_REFRESH_RUN_AGE
+    )
+    assert (
+        chatbot_tools._stall_threshold("investment_advisor_gap_fill")
+        == STALE_REFRESH_RUN_AGE
+    )
+    assert chatbot_tools._stall_threshold("registration_watcher") == timedelta(
+        hours=1
+    )
+
+
+async def test_get_data_freshness_has_no_permission_gate(
+    no_access_user, db_stub
+) -> None:
+    """Informational tool — a zero-permission user is never denied. (The
+    db stub can't run the query, so the result is a tool_error — the
+    assertion is only that the gate didn't fire.)"""
+    result = await chatbot_tools.TOOL_REGISTRY["get_data_freshness"].execute(
+        no_access_user, db_stub, {}
+    )
+    assert result.get("error") != "no_access"
+
+
+async def test_favorite_firm_requires_feature(no_access_user, db_stub) -> None:
+    result = await chatbot_tools.TOOL_REGISTRY["favorite_firm"].execute(
+        no_access_user, db_stub, {"entity_type": "broker_dealer", "firm_id": 1}
+    )
+    assert result["error"] == "no_access"
+
+
+async def test_favorite_firm_rejects_bad_args(favorites_user, db_stub) -> None:
+    r1 = await chatbot_tools.TOOL_REGISTRY["favorite_firm"].execute(
+        favorites_user, db_stub, {"entity_type": "fund", "firm_id": 1}
+    )
+    r2 = await chatbot_tools.TOOL_REGISTRY["favorite_firm"].execute(
+        favorites_user, db_stub, {"entity_type": "broker_dealer", "firm_id": "x"}
+    )
+    assert r1["error"] == "invalid_args"
+    assert r2["error"] == "invalid_args"
+
+
+async def test_favorite_firm_bd_calls_user_lists(
+    favorites_user, monkeypatch
+) -> None:
+    fake_db = _QueuedDb(["Acme Securities LLC"])
+    add = AsyncMock()
+    monkeypatch.setattr(chatbot_tools.user_lists, "add_favorite", add)
+
+    result = await chatbot_tools.TOOL_REGISTRY["favorite_firm"].execute(
+        favorites_user, fake_db, {"entity_type": "broker_dealer", "firm_id": 7}
+    )
+
+    add.assert_awaited_once_with(fake_db, favorites_user.id, 7)
+    assert result["favorited"] is True
+    assert result["firm_name"] == "Acme Securities LLC"
+    assert result["link"] == "/my-favorites"
+
+
+async def test_unfavorite_firm_ia_calls_advisor_mirror(
+    favorites_user, monkeypatch
+) -> None:
+    fake_db = _QueuedDb(["Beta Advisors LP"])
+    remove = AsyncMock()
+    monkeypatch.setattr(
+        chatbot_tools.user_lists, "remove_advisor_favorite", remove
+    )
+
+    result = await chatbot_tools.TOOL_REGISTRY["unfavorite_firm"].execute(
+        favorites_user,
+        fake_db,
+        {"entity_type": "investment_advisor", "firm_id": 9},
+    )
+
+    remove.assert_awaited_once_with(fake_db, favorites_user.id, 9)
+    assert result["unfavorited"] is True
+
+
+async def test_favorite_firm_unknown_firm(favorites_user) -> None:
+    fake_db = _QueuedDb([None])
+    result = await chatbot_tools.TOOL_REGISTRY["favorite_firm"].execute(
+        favorites_user, fake_db, {"entity_type": "broker_dealer", "firm_id": 404}
+    )
+    assert result["error"] == "not_found"
+
+
+async def test_list_my_favorites_requires_feature(no_access_user, db_stub) -> None:
+    result = await chatbot_tools.TOOL_REGISTRY["list_my_favorites"].execute(
+        no_access_user, db_stub, {}
+    )
+    assert result["error"] == "no_access"
+
+
+async def test_mark_alerts_read_requires_feature(no_access_user, db_stub) -> None:
+    result = await chatbot_tools.TOOL_REGISTRY["mark_alerts_read"].execute(
+        no_access_user, db_stub, {"all": True}
+    )
+    assert result["error"] == "no_access"
+
+
+async def test_mark_alerts_read_requires_exactly_one_mode(
+    alerts_user, db_stub
+) -> None:
+    r1 = await chatbot_tools.TOOL_REGISTRY["mark_alerts_read"].execute(
+        alerts_user, db_stub, {}
+    )
+    r2 = await chatbot_tools.TOOL_REGISTRY["mark_alerts_read"].execute(
+        alerts_user, db_stub, {"alert_ids": [1], "all": True}
+    )
+    r3 = await chatbot_tools.TOOL_REGISTRY["mark_alerts_read"].execute(
+        alerts_user, db_stub, {"alert_ids": []}
+    )
+    assert r1["error"] == "invalid_args"
+    assert r2["error"] == "invalid_args"
+    assert r3["error"] == "invalid_args"
+
+
+async def test_mark_alerts_read_by_ids_counts_and_reports_missing(
+    alerts_user, db_stub, monkeypatch
+) -> None:
+    async def _fake_mark(db, alert_id, *, is_read=True):  # noqa: ARG001
+        return SimpleNamespace(id=alert_id) if alert_id != 99 else None
+
+    repo = SimpleNamespace(
+        mark_alert_read=_fake_mark, mark_all_read=AsyncMock()
+    )
+    monkeypatch.setattr(chatbot_tools, "_alerts_repo", repo)
+
+    result = await chatbot_tools.TOOL_REGISTRY["mark_alerts_read"].execute(
+        alerts_user, db_stub, {"alert_ids": [1, 2, 99]}
+    )
+
+    assert result["updated_count"] == 2
+    assert result["not_found_ids"] == [99]
+    assert "shared" in result["note"]
+
+
+async def test_mark_alerts_read_all_uses_repo_bulk(
+    alerts_user, db_stub, monkeypatch
+) -> None:
+    repo = SimpleNamespace(
+        mark_alert_read=AsyncMock(), mark_all_read=AsyncMock(return_value=5)
+    )
+    monkeypatch.setattr(chatbot_tools, "_alerts_repo", repo)
+
+    result = await chatbot_tools.TOOL_REGISTRY["mark_alerts_read"].execute(
+        alerts_user, db_stub, {"all": True}
+    )
+
+    repo.mark_all_read.assert_awaited_once()
+    assert result["updated_count"] == 5
+
+
+def test_normalize_contact_domain() -> None:
+    assert (
+        chatbot_tools._normalize_contact_domain("https://www.Acme.com/about")
+        == "acme.com"
+    )
+    assert chatbot_tools._normalize_contact_domain("acme.com:8080") == "acme.com"
+    assert chatbot_tools._normalize_contact_domain("  ACME.com ") == "acme.com"
+
+
+async def test_find_contact_by_email_rejects_bad_address(db_stub) -> None:
+    user = _make_user(features=[])
+    result = await chatbot_tools.TOOL_REGISTRY["find_contact_by_email"].execute(
+        user, db_stub, {"email": "not-an-address"}
+    )
+    assert result["error"] == "invalid_args"
+
+
+async def test_find_contacts_by_domain_rejects_bad_domain(db_stub) -> None:
+    user = _make_user(features=[])
+    r1 = await chatbot_tools.TOOL_REGISTRY["find_contacts_by_domain"].execute(
+        user, db_stub, {}
+    )
+    r2 = await chatbot_tools.TOOL_REGISTRY["find_contacts_by_domain"].execute(
+        user, db_stub, {"domain": "localhost"}
+    )
+    assert r1["error"] == "invalid_args"
+    assert r2["error"] == "invalid_args"
+
+
+async def test_contact_lookup_tools_have_no_permission_gate(
+    no_access_user, db_stub
+) -> None:
+    """Mirrors the ungated /contacts endpoints — the db stub turns the
+    query into tool_error, but the gate must not fire."""
+    r1 = await chatbot_tools.TOOL_REGISTRY["find_contact_by_email"].execute(
+        no_access_user, db_stub, {"email": "a@b.com"}
+    )
+    r2 = await chatbot_tools.TOOL_REGISTRY["find_contacts_by_domain"].execute(
+        no_access_user, db_stub, {"domain": "acme.com"}
+    )
+    assert r1.get("error") != "no_access"
+    assert r2.get("error") != "no_access"
+
+
 # ── Schema-drift guard ──────────────────────────────────────────────────
 
 
@@ -1402,6 +1644,16 @@ def test_tool_registry_has_expected_names() -> None:
         "list_outreach_drafts",
         "get_outreach_draft",
         "send_outreach_draft",
+        # Status & quick-action tools.
+        "list_email_scans",
+        "get_email_scan_results",
+        "get_data_freshness",
+        "favorite_firm",
+        "unfavorite_firm",
+        "list_my_favorites",
+        "mark_alerts_read",
+        "find_contact_by_email",
+        "find_contacts_by_domain",
     }
 
 

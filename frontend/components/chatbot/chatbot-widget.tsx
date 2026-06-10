@@ -62,7 +62,16 @@ const TOOL_STATUS_LABELS: Record<string, string> = {
   save_outreach_draft: "Saving draft…",
   list_outreach_drafts: "Loading your drafts…",
   get_outreach_draft: "Opening draft…",
-  send_outreach_draft: "Sending email…"
+  send_outreach_draft: "Sending email…",
+  list_email_scans: "Checking email scans…",
+  get_email_scan_results: "Loading scan results…",
+  get_data_freshness: "Checking data freshness…",
+  favorite_firm: "Updating favorites…",
+  unfavorite_firm: "Updating favorites…",
+  list_my_favorites: "Loading your favorites…",
+  mark_alerts_read: "Marking alerts read…",
+  find_contact_by_email: "Searching contacts…",
+  find_contacts_by_domain: "Searching contacts…"
 };
 
 function toolStatusFor(name: string): string {
