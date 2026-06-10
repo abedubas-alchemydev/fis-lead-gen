@@ -604,6 +604,9 @@ class _StubSemanticService:
     embedded: int = 0
     skipped: int = 0
     failed: int = 0
+    ia_embedded: int = 0
+    ia_skipped: int = 0
+    ia_failed: int = 0
     calls: list[dict[str, object]] = field(default_factory=list)
 
     async def backfill_broker_dealers(self, db: Any) -> Any:
@@ -612,6 +615,16 @@ class _StubSemanticService:
 
         return BackfillResult(
             embedded=self.embedded, skipped=self.skipped, failed=self.failed
+        )
+
+    async def backfill_investment_advisors(self, db: Any) -> Any:
+        self.calls.append({"method": "backfill_investment_advisors", "db": db})
+        from app.services.chatbot_semantic import BackfillResult
+
+        return BackfillResult(
+            embedded=self.ia_embedded,
+            skipped=self.ia_skipped,
+            failed=self.ia_failed,
         )
 
 
@@ -644,14 +657,30 @@ async def test_backfill_admin_returns_counts(monkeypatch: pytest.MonkeyPatch) ->
     try:
         stub = _install_semantic_stub(
             monkeypatch,
-            _StubSemanticService(embedded=12, skipped=3, failed=1),
+            _StubSemanticService(
+                embedded=12,
+                skipped=3,
+                failed=1,
+                ia_embedded=7,
+                ia_skipped=2,
+                ia_failed=0,
+            ),
         )
         response = await _post_backfill()
         assert response.status_code == 200
-        assert response.json() == {"embedded": 12, "skipped": 3, "failed": 1}
-        assert any(
-            c["method"] == "backfill_broker_dealers" for c in stub.calls
-        )
+        # Top-level counts stay the all-entities totals (the original
+        # contract); the per-entity breakdowns are additive.
+        assert response.json() == {
+            "embedded": 19,
+            "skipped": 5,
+            "failed": 1,
+            "broker_dealers": {"embedded": 12, "skipped": 3, "failed": 1},
+            "investment_advisors": {"embedded": 7, "skipped": 2, "failed": 0},
+        }
+        assert [c["method"] for c in stub.calls] == [
+            "backfill_broker_dealers",
+            "backfill_investment_advisors",
+        ]
     finally:
         # Restore the viewer override so subsequent tests see the
         # autouse fixture's expected state.

@@ -827,6 +827,124 @@ class TestSemanticFirmSearch:
         await tool.execute(bd_user, db_stub, {"query": "x", "limit": 9999})
         assert captured["limit"] == chatbot_tools.SEMANTIC_RESULT_LIMIT_MAX
 
+    async def test_rejects_bad_entity_type(
+        self,
+        bd_user: AuthenticatedUser,
+        db_stub: object,
+    ) -> None:
+        tool = chatbot_tools.TOOL_REGISTRY["semantic_firm_search"]
+        result = await tool.execute(
+            bd_user, db_stub, {"query": "x", "entity_type": "hedge_fund"}
+        )
+        assert result["error"] == "invalid_args"
+
+    async def test_entity_types_scoped_to_permissions(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        bd_user: AuthenticatedUser,
+        ia_user: AuthenticatedUser,
+        db_stub: object,
+    ) -> None:
+        """Default 'any' searches only the registries the caller can see."""
+        from app.services.chatbot_semantic import (
+            ENTITY_TYPE_BROKER_DEALER,
+            ENTITY_TYPE_INVESTMENT_ADVISOR,
+        )
+
+        captured: dict[str, Any] = {}
+
+        async def fake_search(_db: Any, **kwargs: Any) -> list[Any]:
+            captured.update(kwargs)
+            return []
+
+        monkeypatch.setattr(
+            chatbot_tools._semantic_service, "search", fake_search
+        )
+        tool = chatbot_tools.TOOL_REGISTRY["semantic_firm_search"]
+
+        await tool.execute(bd_user, db_stub, {"query": "retail firms"})
+        assert list(captured["entity_types"]) == [ENTITY_TYPE_BROKER_DEALER]
+
+        await tool.execute(ia_user, db_stub, {"query": "retail firms"})
+        assert list(captured["entity_types"]) == [
+            ENTITY_TYPE_INVESTMENT_ADVISOR
+        ]
+
+    async def test_entity_type_filter_intersects_permissions(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        bd_user: AuthenticatedUser,
+        db_stub: object,
+    ) -> None:
+        """A MASTER_LIST-only user explicitly asking for advisors is denied
+        without the service ever being called."""
+        sentinel = AsyncMock()
+        monkeypatch.setattr(chatbot_tools._semantic_service, "search", sentinel)
+        tool = chatbot_tools.TOOL_REGISTRY["semantic_firm_search"]
+        result = await tool.execute(
+            bd_user,
+            db_stub,
+            {"query": "x", "entity_type": "investment_advisor"},
+        )
+        assert result["error"] == "no_access"
+        sentinel.assert_not_called()
+
+    async def test_mixed_hits_project_both_types_without_list_link(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        db_stub: object,
+    ) -> None:
+        """BD + IA hits each project with their own detail link; the BD
+        id-set list_link is omitted because the IA list has no ids param."""
+        from app.services.chatbot_semantic import (
+            ENTITY_TYPE_BROKER_DEALER,
+            ENTITY_TYPE_INVESTMENT_ADVISOR,
+            SemanticSearchHit,
+        )
+
+        admin = _make_user(role="admin", features=[])
+        hits = [
+            SemanticSearchHit(
+                entity_type=ENTITY_TYPE_BROKER_DEALER,
+                entity_id=42,
+                content="bd summary",
+                similarity=0.91,
+            ),
+            SemanticSearchHit(
+                entity_type=ENTITY_TYPE_INVESTMENT_ADVISOR,
+                entity_id=77,
+                content="ia summary",
+                similarity=0.88,
+            ),
+        ]
+        monkeypatch.setattr(
+            chatbot_tools._semantic_service,
+            "search",
+            AsyncMock(return_value=hits),
+        )
+        monkeypatch.setattr(
+            chatbot_tools._bd_repo,
+            "get_broker_dealer",
+            AsyncMock(return_value=_make_bd_orm(id=42)),
+        )
+        monkeypatch.setattr(
+            chatbot_tools._ia_repo,
+            "get_investment_advisor",
+            AsyncMock(return_value=_make_ia_orm(id=77)),
+        )
+
+        tool = chatbot_tools.TOOL_REGISTRY["semantic_firm_search"]
+        result = await tool.execute(admin, db_stub, {"query": "anything"})
+
+        assert [it["entity_type"] for it in result["items"]] == [
+            ENTITY_TYPE_BROKER_DEALER,
+            ENTITY_TYPE_INVESTMENT_ADVISOR,
+        ]
+        assert result["items"][0]["link"] == "/master-list/42"
+        assert result["items"][1]["link"] == "/advisor-list/77"
+        assert "list_link" not in result
+        assert result["candidates_considered"] == 2
+
 
 async def test_admin_bypasses_feature_gate_on_every_tool(
     monkeypatch: pytest.MonkeyPatch,

@@ -78,6 +78,7 @@ from app.services.chatbot_learned_terms import (
 from app.services.chatbot_semantic import (
     ChatbotSemanticService,
     ENTITY_TYPE_BROKER_DEALER,
+    ENTITY_TYPE_INVESTMENT_ADVISOR,
 )
 from app.services.chatbot_urls import (
     ALERTS_URL,
@@ -888,14 +889,53 @@ async def _execute_semantic_firm_search(
 ) -> dict[str, Any]:
     """Conceptual / semantic firm lookup via the RAG embedding index.
 
-    Distinct from ``search_broker_dealers`` (substring on name/CRD/CIK).
-    Use when the user's query is descriptive — "broker-dealers
-    specializing in retail HNW clients", "firms similar to Acme" —
-    rather than a specific identifier or name fragment.
+    Distinct from the substring search tools. Use when the user's query
+    is descriptive — "broker-dealers specializing in retail HNW clients",
+    "advisors serving pension funds", "firms similar to Acme" — rather
+    than a specific identifier or name fragment.
+
+    Covers broker-dealers AND investment advisors. The eligible entity
+    types are the intersection of the caller's feature permissions
+    (MASTER_LIST ↔ BDs, INVESTMENT_ADVISORS ↔ IAs) with the optional
+    ``entity_type`` filter, so a single registry permission still works.
     """
-    denial = _check_feature(user, MASTER_LIST)
-    if denial is not None:
-        return denial
+    requested = (_opt_str(args, "entity_type") or "any").lower()
+    if requested not in ("broker_dealer", "investment_advisor", "any"):
+        return {
+            "error": "invalid_args",
+            "message": (
+                "Argument 'entity_type' must be 'broker_dealer', "
+                "'investment_advisor', or 'any'."
+            ),
+        }
+
+    eligible: list[str] = []
+    if requested in ("broker_dealer", "any") and _user_can_see_feature(
+        user, MASTER_LIST
+    ):
+        eligible.append(ENTITY_TYPE_BROKER_DEALER)
+    if requested in ("investment_advisor", "any") and _user_can_see_feature(
+        user, INVESTMENT_ADVISORS
+    ):
+        eligible.append(ENTITY_TYPE_INVESTMENT_ADVISOR)
+    if not eligible:
+        # The caller lacks every registry the request would search — the
+        # explicit gate check produces the standard denial message for
+        # whichever registry they asked for.
+        denial = _check_feature(
+            user,
+            INVESTMENT_ADVISORS
+            if requested == "investment_advisor"
+            else MASTER_LIST,
+        )
+        return denial or {
+            "error": "no_access",
+            "message": (
+                "User does not have access to any registry this search "
+                "covers."
+            ),
+        }
+
     query_or_error = _require_query(args)
     if isinstance(query_or_error, dict):
         return query_or_error
@@ -909,7 +949,7 @@ async def _execute_semantic_firm_search(
         hits = await _semantic_service.search(
             db,
             query=query_or_error,
-            entity_types=[ENTITY_TYPE_BROKER_DEALER],
+            entity_types=eligible,
             limit=limit,
         )
     except Exception:
@@ -934,49 +974,69 @@ async def _execute_semantic_firm_search(
             ),
         }
 
-    # Fetch the BD rows for each hit so Doxie has names + identifiers to
+    # Fetch the firm rows for each hit so Doxie has names + identifiers to
     # cite. The hit's ``content`` snippet is what the embedding actually
     # matched — surfacing it lets Doxie quote the relevant phrase.
-    bd_ids = [h.entity_id for h in hits if h.entity_type == ENTITY_TYPE_BROKER_DEALER]
     items: list[dict[str, Any]] = []
     for hit in hits:
-        if hit.entity_type != ENTITY_TYPE_BROKER_DEALER:
-            continue
         try:
-            bd = await _bd_repo.get_broker_dealer(db, hit.entity_id)
+            if hit.entity_type == ENTITY_TYPE_BROKER_DEALER:
+                bd = await _bd_repo.get_broker_dealer(db, hit.entity_id)
+                if bd is None:
+                    # Embedding row points at a deleted firm — stale index
+                    # entry. Skip silently; a re-backfill cleans it up.
+                    continue
+                summary = _project_bd_summary(
+                    BrokerDealerListItem.model_validate(bd)
+                )
+            elif hit.entity_type == ENTITY_TYPE_INVESTMENT_ADVISOR:
+                advisor = await _ia_repo.get_investment_advisor(
+                    db, hit.entity_id
+                )
+                if advisor is None:
+                    continue
+                summary = _project_ia_summary(
+                    InvestmentAdvisorListItem.model_validate(advisor)
+                )
+            else:
+                continue
         except Exception:
             logger.exception(
-                "doxie tool failed loading bd id=%s tool=semantic_firm_search",
+                "doxie tool failed loading %s id=%s tool=semantic_firm_search",
+                hit.entity_type,
                 hit.entity_id,
             )
             continue
-        if bd is None:
-            # Embedding row points at a deleted BD — stale index entry.
-            # Skip silently; a re-backfill will clean it up.
-            continue
-        bd_item = BrokerDealerListItem.model_validate(bd)
-        summary = _project_bd_summary(bd_item)
+        summary["entity_type"] = hit.entity_type
         summary["similarity"] = round(hit.similarity, 4)
         summary["match_snippet"] = hit.content[:200]
         items.append(summary)
 
-    return {
+    result: dict[str, Any] = {
         "items": items,
         "total_matched": len(items),
         # The total we *would have* returned if not capped by feature
         # gates or stale-row filtering. Helpful for Doxie to mention
         # when the result set is truncated.
-        "candidates_considered": len(bd_ids),
-        # Deep-link to exactly the firms we cited. Semantic hits are a
-        # specific id set that no name/``q`` search can reproduce (``q`` is
-        # a substring match, not an embedding lookup), so passing the query
-        # through as ``q`` lands the user on an empty list. Stamp the ids
-        # straight onto the URL instead — the master list filters to them
-        # and shows an "N selected firms" chip. See ``bd_list_url(ids=...)``.
-        "list_link": bd_list_url(
-            ids=[it["id"] for it in items if it.get("id") is not None]
-        ),
+        "candidates_considered": len(hits),
     }
+    # Deep-link to exactly the firms we cited. Semantic hits are a
+    # specific id set that no name/``q`` search can reproduce (``q`` is
+    # a substring match, not an embedding lookup), so stamp the ids
+    # straight onto the URL — the master list filters to them and shows
+    # an "N selected firms" chip. Only the BD list supports an id-set
+    # param today, so the link is emitted only when every hit is a BD
+    # (per-item links cover the rest); an IA id-set deep-link is a
+    # follow-up on ia_list_url/advisor-list-state.
+    bd_item_ids = [
+        it["id"]
+        for it in items
+        if it.get("entity_type") == ENTITY_TYPE_BROKER_DEALER
+        and it.get("id") is not None
+    ]
+    if items and len(bd_item_ids) == len(items):
+        result["list_link"] = bd_list_url(ids=bd_item_ids)
+    return result
 
 
 async def _execute_list_investment_advisors_by_filter(
@@ -2873,9 +2933,17 @@ _SEMANTIC_SEARCH_PARAMETERS_SCHEMA: dict[str, Any] = {
             "description": (
                 "Free-form descriptive query — e.g. 'firms similar to "
                 "Acme Securities', 'broker-dealers focused on high-net-"
-                "worth retail clients'. Use only when the query is "
-                "conceptual; for exact name/CRD lookups call "
-                "search_broker_dealers instead."
+                "worth retail clients', 'advisors serving pension funds'. "
+                "Use only when the query is conceptual; for exact name/CRD "
+                "lookups call the matching search tool instead."
+            ),
+        },
+        "entity_type": {
+            "type": "string",
+            "enum": ["broker_dealer", "investment_advisor", "any"],
+            "description": (
+                "Restrict hits to one registry. Default 'any' searches "
+                "broker-dealers and investment advisors together."
             ),
         },
         "limit": {
@@ -3679,15 +3747,19 @@ TOOL_REGISTRY: dict[str, Tool] = {
     "semantic_firm_search": Tool(
         name="semantic_firm_search",
         description=(
-            "Conceptual / semantic search over broker-dealer firms via "
-            "vector embeddings. Use when the user's query is descriptive "
-            "rather than naming a specific firm — examples: 'firms similar "
-            "to Acme Securities', 'broker-dealers focused on retail HNW', "
-            "'small BDs that clear self'. For exact name / CRD lookups, "
-            "call search_broker_dealers instead. Returns hits with a "
-            "similarity score and a snippet of the matched summary."
+            "Conceptual / semantic search over broker-dealers and "
+            "investment advisors via vector embeddings. Use when the "
+            "user's query is descriptive rather than naming a specific "
+            "firm — examples: 'firms similar to Acme Securities', "
+            "'broker-dealers focused on retail HNW', 'advisors serving "
+            "pension clients'. Optional entity_type narrows to one "
+            "registry. For exact name / CRD lookups, call the matching "
+            "search tool instead. Returns hits with a similarity score "
+            "and a snippet of the matched summary."
         ),
         parameters_schema=_SEMANTIC_SEARCH_PARAMETERS_SCHEMA,
+        # Nominal key — execute derives eligible registries from the
+        # caller's MASTER_LIST / INVESTMENT_ADVISORS permissions.
         feature_key=MASTER_LIST,
         execute=_execute_semantic_firm_search,
     ),

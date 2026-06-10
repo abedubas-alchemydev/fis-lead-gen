@@ -67,10 +67,26 @@ class ChatbotNewConversationResponse(BaseModel):
     conversation_id: int
 
 
-class ChatbotEmbeddingBackfillResponse(BaseModel):
-    """Counts returned by POST /chatbot/embeddings/backfill."""
+class ChatbotEmbeddingBackfillEntityCounts(BaseModel):
+    """Per-entity-type slice of a backfill run."""
     model_config = ConfigDict(extra="forbid")
 
     embedded: int
     skipped: int
     failed: int
+
+
+class ChatbotEmbeddingBackfillResponse(BaseModel):
+    """Counts returned by POST /chatbot/embeddings/backfill.
+
+    Top-level counts stay the all-entities totals (the original contract);
+    the optional per-entity breakdowns were added when the backfill grew
+    to cover investment advisors alongside broker-dealers.
+    """
+    model_config = ConfigDict(extra="forbid")
+
+    embedded: int
+    skipped: int
+    failed: int
+    broker_dealers: ChatbotEmbeddingBackfillEntityCounts | None = None
+    investment_advisors: ChatbotEmbeddingBackfillEntityCounts | None = None
