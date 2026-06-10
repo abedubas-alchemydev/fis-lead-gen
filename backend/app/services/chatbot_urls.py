@@ -54,6 +54,10 @@ MY_FAVORITES_URL = "/my-favorites"
 VISITED_FIRMS_URL = "/visited-firms"
 VAULT_URL = "/vault"
 SETTINGS_USERS_URL = "/settings/users"
+# Outreach workspace tabs (?tab= values come from outreach-workspace-client).
+OUTREACH_SENT_URL = "/outreach/sent"
+OUTREACH_DRAFTS_URL = "/outreach/sent?tab=drafts"
+OUTREACH_CREATE_URL = "/outreach/sent?tab=create"
 
 
 # Defaults must match the FE state modules so we strip the same values.

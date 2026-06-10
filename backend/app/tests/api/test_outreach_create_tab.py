@@ -7,7 +7,7 @@ Integration-marked -- both endpoints touch a real Postgres. Covers:
 * POST /outreach/adhoc-send -- payload validation (Pydantic email
   rejection) and auth gating. The happy path goes through the
   provider plumbing we already cover via the existing /outreach/send
-  surface (``_resolve_sender_account`` + ``_provider_send_and_record``),
+  surface (``resolve_sender_account`` + ``provider_send_and_record`` (app.services.outreach_send)),
   so this file deliberately stops short of mocking Gmail / Microsoft /
   Yahoo transports just to retest that shared codepath.
 """
@@ -317,7 +317,7 @@ async def test_adhoc_send_412_when_no_linked_account() -> None:
                 },
             )
         # User has no linked Google / Microsoft / Yahoo accounts ->
-        # _resolve_sender_account returns 412.
+        # resolve_sender_account returns 412.
         assert response.status_code == 412
         assert response.json()["detail"] == "google_account_not_linked"
     finally:
@@ -386,7 +386,7 @@ async def test_compose_send_412_when_no_linked_account() -> None:
                     "body": "hi there",
                 },
             )
-        # No linked account -> _resolve_sender_account returns 412 before
+        # No linked account -> resolve_sender_account returns 412 before
         # any transport is touched.
         assert response.status_code == 412
         assert response.json()["detail"] == "google_account_not_linked"

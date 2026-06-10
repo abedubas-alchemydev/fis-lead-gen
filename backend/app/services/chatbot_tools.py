@@ -34,7 +34,7 @@ from pathlib import Path
 from typing import Any, Awaitable, Callable, Mapping
 
 from fastapi import HTTPException
-from sqlalchemy import func, select
+from sqlalchemy import delete, func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.feature_permissions import (
@@ -44,14 +44,19 @@ from app.core.feature_permissions import (
     INVESTMENT_ADVISORS,
     INVESTORS,
     MASTER_LIST,
+    SENT_OUTREACH,
     VAULT,
 )
+from app.models.advisor_contact import AdvisorContact
 from app.models.advisor_filing import AdvisorFiling
 from app.models.broker_dealer import BrokerDealer
 from app.models.executive_contact import ExecutiveContact
 from app.models.extraction_run import ExtractionRun, RunStatus
 from app.models.form4_transaction import Form4Transaction
+from app.models.investment_advisor import InvestmentAdvisor
 from app.models.investor_filing import InvestorFiling
+from app.models.outreach_draft import OutreachDraft
+from app.models.outreach_send import OutreachSend
 from app.models.vault_folder import VaultFolder
 from app.models.vault_folder_file import VaultFolderFile
 from app.schemas.auth import AuthenticatedUser
@@ -81,6 +86,9 @@ from app.services.chatbot_semantic import (
 )
 from app.services.chatbot_urls import (
     ALERTS_URL,
+    OUTREACH_CREATE_URL,
+    OUTREACH_DRAFTS_URL,
+    OUTREACH_SENT_URL,
     VAULT_URL,
     bd_detail_url,
     bd_list_url,
@@ -121,7 +129,13 @@ from app.services.outreach import (
     OutreachConfigurationError,
     OutreachDraftError,
     ServiceContext,
+    advisor_firm_operations,
     generate_outreach_draft,
+)
+from app.services.outreach_send import (
+    dedupe_recipients,
+    provider_send_and_record,
+    resolve_sender_account,
 )
 from app.services.vault_retrieval import (
     retrieve_chunks,
@@ -152,6 +166,17 @@ WEB_RESEARCH_LIMIT_MAX = 6
 # one ~2s retry; give the tool headroom above the 5s TOOL_EXECUTION_TIMEOUT_S
 # default so a fallback search isn't chopped mid-call.
 WEB_RESEARCH_TOOL_TIMEOUT_S = 15.0
+# Outreach-copilot tools. Subject cap mirrors the outreach_drafts column
+# (RFC 5322 line limit); body cap mirrors the composer textarea ceiling.
+FIRM_CONTACTS_LIMIT = 25
+DRAFTS_LIST_LIMIT_DEFAULT = 10
+DRAFTS_LIST_LIMIT_MAX = 25
+DRAFT_SUBJECT_MAX_CHARS = 998
+DRAFT_BODY_MAX_CHARS = 20_000
+DRAFT_RECIPIENTS_CAP = 10
+# OAuth token refresh + the provider send API routinely exceed the 5s
+# default tool budget — same headroom the PDF tools get.
+SEND_DRAFT_TOOL_TIMEOUT_S = 30.0
 
 
 @dataclass(frozen=True)
@@ -3330,15 +3355,30 @@ _RUN_EMAIL_EXTRACTOR_PARAMETERS_SCHEMA: dict[str, Any] = {
 _DRAFT_OUTREACH_PARAMETERS_SCHEMA: dict[str, Any] = {
     "type": "object",
     "properties": {
+        "entity_type": {
+            "type": "string",
+            "enum": ["broker_dealer", "investment_advisor"],
+            "description": (
+                "Which registry the firm belongs to. Defaults to "
+                "'broker_dealer'."
+            ),
+        },
+        "firm_id": {
+            "type": "integer",
+            "description": (
+                "Firm id the contact belongs to. 'broker_dealer_id' is "
+                "accepted as a legacy alias."
+            ),
+        },
         "broker_dealer_id": {
             "type": "integer",
-            "description": "Broker-dealer id the contact belongs to.",
+            "description": "Legacy alias for firm_id (broker-dealers only).",
         },
         "contact_id": {
             "type": "integer",
             "description": (
-                "Executive-contact id to address the email to. Must belong "
-                "to the given broker-dealer."
+                "Contact id to address the email to (from "
+                "list_firm_contacts). Must belong to the given firm."
             ),
         },
         "folder_id": {
@@ -3349,7 +3389,7 @@ _DRAFT_OUTREACH_PARAMETERS_SCHEMA: dict[str, Any] = {
             ),
         },
     },
-    "required": ["broker_dealer_id", "contact_id", "folder_id"],
+    "required": ["contact_id", "folder_id"],
 }
 
 
@@ -3428,27 +3468,39 @@ async def _execute_draft_outreach_email(
 ) -> dict[str, Any]:
     """Generate a cold-email ``{subject, body}`` draft for a (firm, contact).
 
-    Mirrors ``POST /outreach/draft``: validates the vault folder belongs to
-    the caller and the contact belongs to the broker-dealer (all three
-    misses collapse to one opaque ``not_found``), pulls top-K vault chunks
-    for RAG, then asks Gemini Flash to compose the draft. Draft only —
-    nothing is sent.
+    Mirrors ``POST /outreach/draft`` / ``POST /outreach/advisor-draft``:
+    validates the vault folder belongs to the caller and the contact
+    belongs to the firm (all three misses collapse to one opaque
+    ``not_found``), pulls top-K vault chunks for RAG, then asks Gemini
+    Flash to compose the draft. Draft only — nothing is sent.
     """
     denial = _check_feature(user, VAULT)
     if denial is not None:
         return denial
 
+    entity_type = (_opt_str(args, "entity_type") or "broker_dealer").lower()
+    if entity_type not in ("broker_dealer", "investment_advisor"):
+        return {
+            "error": "invalid_args",
+            "message": (
+                "Argument 'entity_type' must be 'broker_dealer' or "
+                "'investment_advisor'."
+            ),
+        }
+
     try:
-        broker_dealer_id = int(args["broker_dealer_id"])
+        # ``broker_dealer_id`` kept as an accepted alias for the firm id so
+        # pre-IA conversations (and the model's habit) keep working.
+        firm_id = int(args.get("firm_id", args.get("broker_dealer_id")))
         contact_id = int(args["contact_id"])
         folder_id = int(args["folder_id"])
     except (TypeError, ValueError, KeyError):
         return {
             "error": "invalid_args",
             "message": (
-                "'broker_dealer_id', 'contact_id', and 'folder_id' are all "
-                "required integers. Folder ids come from list_vault_folders; "
-                "contact ids come from the broker-dealer profile."
+                "'firm_id' (or 'broker_dealer_id'), 'contact_id', and "
+                "'folder_id' are all required integers. Folder ids come from "
+                "list_vault_folders; contact ids come from list_firm_contacts."
             ),
         }
 
@@ -3461,21 +3513,40 @@ async def _execute_draft_outreach_email(
                 )
             )
         ).scalar_one_or_none()
-        broker_dealer = (
-            await db.execute(
-                select(BrokerDealer).where(BrokerDealer.id == broker_dealer_id)
-            )
-        ).scalar_one_or_none()
-        contact = None
-        if broker_dealer is not None:
-            contact = (
+        firm: BrokerDealer | InvestmentAdvisor | None
+        contact: ExecutiveContact | AdvisorContact | None = None
+        if entity_type == "broker_dealer":
+            firm = (
                 await db.execute(
-                    select(ExecutiveContact).where(
-                        ExecutiveContact.id == contact_id,
-                        ExecutiveContact.bd_id == broker_dealer_id,
+                    select(BrokerDealer).where(BrokerDealer.id == firm_id)
+                )
+            ).scalar_one_or_none()
+            if firm is not None:
+                contact = (
+                    await db.execute(
+                        select(ExecutiveContact).where(
+                            ExecutiveContact.id == contact_id,
+                            ExecutiveContact.bd_id == firm_id,
+                        )
+                    )
+                ).scalar_one_or_none()
+        else:
+            firm = (
+                await db.execute(
+                    select(InvestmentAdvisor).where(
+                        InvestmentAdvisor.id == firm_id
                     )
                 )
             ).scalar_one_or_none()
+            if firm is not None:
+                contact = (
+                    await db.execute(
+                        select(AdvisorContact).where(
+                            AdvisorContact.id == contact_id,
+                            AdvisorContact.advisor_id == firm_id,
+                        )
+                    )
+                ).scalar_one_or_none()
     except Exception:
         logger.exception("doxie tool failed", extra={"tool": "draft_outreach_email"})
         return {
@@ -3483,24 +3554,36 @@ async def _execute_draft_outreach_email(
             "message": "Lookup failed; ask the user to try again.",
         }
 
-    # Collapsed not-found: folder-not-yours / BD-missing / contact-missing
+    # Collapsed not-found: folder-not-yours / firm-missing / contact-missing
     # surface identically so a leaked id can't be confirmed.
-    if folder is None or broker_dealer is None or contact is None:
+    if folder is None or firm is None or contact is None:
         return {
             "error": "not_found",
             "message": (
                 "Couldn't find that folder, firm, or contact together — check "
-                "the ids (list_vault_folders for folders, the broker-dealer "
-                "profile for contact ids)."
+                "the ids (list_vault_folders for folders, list_firm_contacts "
+                "for contact ids) and that entity_type matches the firm."
             ),
         }
 
+    if entity_type == "broker_dealer":
+        clearing_partner = firm.current_clearing_partner
+        operations_text = firm.firm_operations_text
+    else:
+        # Advisors carry no clearing partner; fall back to the Form ADV
+        # advisory-activities blurb when the free-text field is empty —
+        # same shaping as POST /outreach/advisor-draft.
+        clearing_partner = None
+        operations_text = firm.firm_operations_text or advisor_firm_operations(
+            firm
+        )
+
     firm_ctx = FirmContext(
-        name=broker_dealer.name,
-        city=broker_dealer.city,
-        state=broker_dealer.state,
-        current_clearing_partner=broker_dealer.current_clearing_partner,
-        firm_operations_text=broker_dealer.firm_operations_text,
+        name=firm.name,
+        city=firm.city,
+        state=firm.state,
+        current_clearing_partner=clearing_partner,
+        firm_operations_text=operations_text,
     )
     contact_ctx = ContactContext(
         name=contact.name,
@@ -3508,12 +3591,12 @@ async def _execute_draft_outreach_email(
         email=contact.email,
     )
     query_parts = [
-        broker_dealer.name,
+        firm.name,
         contact.title or "",
-        broker_dealer.city or "",
-        broker_dealer.state or "",
-        broker_dealer.current_clearing_partner or "",
-        (broker_dealer.firm_operations_text or "")[:500],
+        firm.city or "",
+        firm.state or "",
+        clearing_partner or "",
+        (operations_text or "")[:500],
         folder.name,
     ]
     retrieval_query = " ".join(part for part in query_parts if part)
@@ -3567,15 +3650,744 @@ async def _execute_draft_outreach_email(
     return {
         "subject": draft.subject,
         "body": draft.body,
-        "broker_dealer_id": broker_dealer_id,
+        "entity_type": entity_type,
+        "firm_id": firm_id,
         "contact_id": contact_id,
         "folder_id": folder_id,
+        "to_email": contact.email,
+        "to_name": contact.name,
         "link": "/outreach/contacts",
         "message": (
             "Drafted a cold-email subject and body. This is a draft only — "
-            "nothing was sent."
+            "nothing was sent. Offer to store it with save_outreach_draft so "
+            "the user can review it on the Outreach Drafts tab."
         ),
     }
+
+
+# ── Outreach copilot: firm contacts, saved drafts, confirmed send ────────
+
+
+_LIST_FIRM_CONTACTS_PARAMETERS_SCHEMA: dict[str, Any] = {
+    "type": "object",
+    "properties": {
+        "entity_type": {
+            "type": "string",
+            "enum": ["broker_dealer", "investment_advisor"],
+            "description": (
+                "Which registry the firm id belongs to: 'broker_dealer' "
+                "(Broker Dealers) or 'investment_advisor' (Advisors)."
+            ),
+        },
+        "firm_id": {
+            "type": "integer",
+            "description": "Numeric firm id from the matching search tool.",
+        },
+    },
+    "required": ["entity_type", "firm_id"],
+}
+
+
+_SAVE_OUTREACH_DRAFT_PARAMETERS_SCHEMA: dict[str, Any] = {
+    "type": "object",
+    "properties": {
+        "subject": {
+            "type": "string",
+            "description": "Email subject line.",
+        },
+        "body": {
+            "type": "string",
+            "description": "Full plain-text email body.",
+        },
+        "to_email": {
+            "type": "string",
+            "description": (
+                "Primary recipient address (draft_outreach_email returns it "
+                "as to_email)."
+            ),
+        },
+        "to_name": {
+            "type": "string",
+            "description": "Primary recipient display name, when known.",
+        },
+        "cc": {
+            "type": "array",
+            "items": {"type": "string"},
+            "description": "Optional CC addresses.",
+        },
+        "bcc": {
+            "type": "array",
+            "items": {"type": "string"},
+            "description": "Optional BCC addresses.",
+        },
+        "folder_id": {
+            "type": "integer",
+            "description": (
+                "Optional Vault service folder to associate (from "
+                "list_vault_folders). Must belong to the user."
+            ),
+        },
+    },
+    "required": ["subject", "body", "to_email"],
+}
+
+
+_LIST_OUTREACH_DRAFTS_PARAMETERS_SCHEMA: dict[str, Any] = {
+    "type": "object",
+    "properties": {
+        "limit": {
+            "type": "integer",
+            "description": (
+                f"Max drafts to return (default {DRAFTS_LIST_LIMIT_DEFAULT}, "
+                f"cap {DRAFTS_LIST_LIMIT_MAX})."
+            ),
+        },
+    },
+}
+
+
+_GET_OUTREACH_DRAFT_PARAMETERS_SCHEMA: dict[str, Any] = {
+    "type": "object",
+    "properties": {
+        "draft_id": {
+            "type": "integer",
+            "description": (
+                "Draft id from save_outreach_draft or list_outreach_drafts."
+            ),
+        },
+    },
+    "required": ["draft_id"],
+}
+
+
+_SEND_OUTREACH_DRAFT_PARAMETERS_SCHEMA: dict[str, Any] = {
+    "type": "object",
+    "properties": {
+        "draft_id": {
+            "type": "integer",
+            "description": (
+                "Id of the saved outreach draft to transmit (from "
+                "save_outreach_draft or list_outreach_drafts)."
+            ),
+        },
+        "confirm": {
+            "type": "boolean",
+            "description": (
+                "Set true ONLY when the user's latest message explicitly "
+                "confirms sending this exact draft (e.g. 'yes, send it'). "
+                "Never set true preemptively."
+            ),
+        },
+    },
+    "required": ["draft_id", "confirm"],
+}
+
+
+async def _execute_list_firm_contacts(
+    user: AuthenticatedUser,
+    db: AsyncSession,
+    args: Mapping[str, Any],
+) -> dict[str, Any]:
+    """Email-bearing contacts at one firm — the picker step before drafting.
+
+    Mirrors ``GET /outreach/firms/contacts``: only contacts with an email
+    are returned (the ones outreach can actually address), capped at
+    ``FIRM_CONTACTS_LIMIT``. The ``contact_id`` returned here is the handle
+    ``draft_outreach_email`` accepts. Gated on the entity's own feature key
+    (the same contacts already render on those detail pages) rather than
+    SENT_OUTREACH, so users who can see the firm can pick a contact.
+    """
+    entity_type = (_opt_str(args, "entity_type") or "").lower()
+    if entity_type not in ("broker_dealer", "investment_advisor"):
+        return {
+            "error": "invalid_args",
+            "message": (
+                "Argument 'entity_type' must be 'broker_dealer' or "
+                "'investment_advisor'."
+            ),
+        }
+
+    feature_key = (
+        MASTER_LIST if entity_type == "broker_dealer" else INVESTMENT_ADVISORS
+    )
+    denial = _check_feature(user, feature_key)
+    if denial is not None:
+        return denial
+
+    try:
+        firm_id = int(args.get("firm_id"))
+    except (TypeError, ValueError):
+        return {
+            "error": "invalid_args",
+            "message": "Argument 'firm_id' must be an integer.",
+        }
+
+    try:
+        if entity_type == "broker_dealer":
+            firm_name = (
+                await db.execute(
+                    select(BrokerDealer.name).where(BrokerDealer.id == firm_id)
+                )
+            ).scalar_one_or_none()
+            contact_stmt = (
+                select(ExecutiveContact)
+                .where(ExecutiveContact.bd_id == firm_id)
+                .where(ExecutiveContact.email.isnot(None))
+                .order_by(ExecutiveContact.name.asc())
+                .limit(FIRM_CONTACTS_LIMIT)
+            )
+            link = bd_detail_url(firm_id)
+        else:
+            firm_name = (
+                await db.execute(
+                    select(InvestmentAdvisor.name).where(
+                        InvestmentAdvisor.id == firm_id
+                    )
+                )
+            ).scalar_one_or_none()
+            contact_stmt = (
+                select(AdvisorContact)
+                .where(AdvisorContact.advisor_id == firm_id)
+                .where(AdvisorContact.email.isnot(None))
+                .order_by(AdvisorContact.name.asc())
+                .limit(FIRM_CONTACTS_LIMIT)
+            )
+            link = ia_detail_url(firm_id)
+        if firm_name is None:
+            return {
+                "error": "not_found",
+                "message": "No firm with that id in that registry.",
+            }
+        contacts = list((await db.execute(contact_stmt)).scalars().all())
+    except Exception:
+        logger.exception(
+            "doxie tool failed", extra={"tool": "list_firm_contacts"}
+        )
+        return {
+            "error": "tool_error",
+            "message": "Contact lookup failed; ask the user to try again.",
+        }
+
+    items = [
+        {
+            "contact_id": contact.id,
+            "name": contact.name,
+            "title": contact.title,
+            "email": contact.email,
+            "has_phone": bool(contact.phone or contact.phones),
+        }
+        for contact in contacts
+    ]
+    payload: dict[str, Any] = {
+        "entity_type": entity_type,
+        "firm_id": firm_id,
+        "firm_name": firm_name,
+        "contacts": items,
+        "count": len(items),
+        "link": link,
+    }
+    if not items:
+        payload["note"] = (
+            "No email-bearing contacts on file for this firm. The user can "
+            "run contact enrichment from the firm's detail page."
+        )
+    return _jsonable(payload)
+
+
+def _clean_address_list(args: Mapping[str, Any], key: str) -> list[str]:
+    """Project an optional list arg into trimmed plausible addresses."""
+    raw = args.get(key)
+    if not isinstance(raw, (list, tuple)):
+        return []
+    out: list[str] = []
+    for item in raw:
+        addr = str(item).strip()
+        if "@" in addr:
+            out.append(addr)
+    return out[:DRAFT_RECIPIENTS_CAP]
+
+
+async def _execute_save_outreach_draft(
+    user: AuthenticatedUser,
+    db: AsyncSession,
+    args: Mapping[str, Any],
+) -> dict[str, Any]:
+    """Persist a Doxie-authored draft so it shows on the Outreach Drafts tab.
+
+    Mirrors ``POST /outreach/drafts`` with ``source="doxie"``: the user
+    reviews (and can edit or send) the draft from the composer. Saving
+    never sends anything.
+    """
+    denial = _check_feature(user, SENT_OUTREACH)
+    if denial is not None:
+        return denial
+
+    subject = (_opt_str(args, "subject") or "")[:DRAFT_SUBJECT_MAX_CHARS]
+    body = str(args.get("body") or "").strip()[:DRAFT_BODY_MAX_CHARS]
+    to_email = _opt_str(args, "to_email") or ""
+    if not subject or not body or "@" not in to_email:
+        return {
+            "error": "invalid_args",
+            "message": (
+                "'subject', 'body', and a valid 'to_email' are all required."
+            ),
+        }
+    to_name = _opt_str(args, "to_name")
+    cc = _clean_address_list(args, "cc")
+    bcc = _clean_address_list(args, "bcc")
+
+    folder_id: int | None = None
+    if args.get("folder_id") is not None:
+        try:
+            folder_id = int(args["folder_id"])
+        except (TypeError, ValueError):
+            return {
+                "error": "invalid_args",
+                "message": "Argument 'folder_id' must be an integer.",
+            }
+
+    try:
+        if folder_id is not None:
+            owns = (
+                await db.execute(
+                    select(VaultFolder.id).where(
+                        VaultFolder.id == folder_id,
+                        VaultFolder.user_id == user.id,
+                    )
+                )
+            ).scalar_one_or_none()
+            if owns is None:
+                return {
+                    "error": "not_found",
+                    "message": (
+                        "No Vault folder with that id — list_vault_folders "
+                        "shows the user's folders."
+                    ),
+                }
+        draft = OutreachDraft(
+            user_id=user.id,
+            subject=subject,
+            body=body,
+            to_recipients=[{"email": to_email, "name": to_name}],
+            cc_emails=cc or None,
+            bcc_emails=bcc or None,
+            folder_id=folder_id,
+            source="doxie",
+        )
+        db.add(draft)
+        await db.commit()
+        await db.refresh(draft)
+    except Exception:
+        logger.exception(
+            "doxie tool failed", extra={"tool": "save_outreach_draft"}
+        )
+        return {
+            "error": "tool_error",
+            "message": "Couldn't save the draft; ask the user to try again.",
+        }
+
+    return _jsonable(
+        {
+            "draft_id": draft.id,
+            "subject": subject,
+            "to": to_email,
+            "folder_id": folder_id,
+            "link": OUTREACH_DRAFTS_URL,
+            "message": (
+                "Saved to the Outreach Drafts tab for review. Nothing was "
+                "sent."
+            ),
+        }
+    )
+
+
+async def _execute_list_outreach_drafts(
+    user: AuthenticatedUser,
+    db: AsyncSession,
+    args: Mapping[str, Any],
+) -> dict[str, Any]:
+    """The caller's saved drafts, newest-edited first (no bodies)."""
+    denial = _check_feature(user, SENT_OUTREACH)
+    if denial is not None:
+        return denial
+
+    try:
+        raw_limit = (
+            int(args["limit"])
+            if args.get("limit") is not None
+            else DRAFTS_LIST_LIMIT_DEFAULT
+        )
+    except (TypeError, ValueError):
+        raw_limit = DRAFTS_LIST_LIMIT_DEFAULT
+    limit = max(1, min(raw_limit, DRAFTS_LIST_LIMIT_MAX))
+
+    try:
+        rows = (
+            await db.execute(
+                select(OutreachDraft, VaultFolder.name)
+                .outerjoin(
+                    VaultFolder, VaultFolder.id == OutreachDraft.folder_id
+                )
+                .where(OutreachDraft.user_id == user.id)
+                .order_by(OutreachDraft.updated_at.desc())
+                .limit(limit)
+            )
+        ).all()
+        total = (
+            await db.execute(
+                select(func.count())
+                .select_from(OutreachDraft)
+                .where(OutreachDraft.user_id == user.id)
+            )
+        ).scalar_one()
+    except Exception:
+        logger.exception(
+            "doxie tool failed", extra={"tool": "list_outreach_drafts"}
+        )
+        return {
+            "error": "tool_error",
+            "message": "Couldn't load drafts; ask the user to try again.",
+        }
+
+    items = []
+    for draft, folder_name in rows:
+        to = [
+            str(r.get("email", ""))
+            for r in (draft.to_recipients or [])
+            if isinstance(r, dict) and r.get("email")
+        ]
+        items.append(
+            {
+                "draft_id": draft.id,
+                "subject": draft.subject or "",
+                "to": to,
+                "folder_name": folder_name,
+                "source": draft.source,
+                "updated_at": draft.updated_at,
+            }
+        )
+    return _jsonable(
+        {
+            "drafts": items,
+            "count": len(items),
+            "total": int(total),
+            "list_link": OUTREACH_DRAFTS_URL,
+        }
+    )
+
+
+async def _execute_get_outreach_draft(
+    user: AuthenticatedUser,
+    db: AsyncSession,
+    args: Mapping[str, Any],
+) -> dict[str, Any]:
+    """One full draft (incl. body) — what send_outreach_draft would transmit."""
+    denial = _check_feature(user, SENT_OUTREACH)
+    if denial is not None:
+        return denial
+
+    try:
+        draft_id = int(args.get("draft_id"))
+    except (TypeError, ValueError):
+        return {
+            "error": "invalid_args",
+            "message": "Argument 'draft_id' must be an integer.",
+        }
+
+    try:
+        row = (
+            await db.execute(
+                select(OutreachDraft, VaultFolder.name)
+                .outerjoin(
+                    VaultFolder, VaultFolder.id == OutreachDraft.folder_id
+                )
+                .where(
+                    OutreachDraft.id == draft_id,
+                    OutreachDraft.user_id == user.id,
+                )
+            )
+        ).first()
+    except Exception:
+        logger.exception(
+            "doxie tool failed", extra={"tool": "get_outreach_draft"}
+        )
+        return {
+            "error": "tool_error",
+            "message": "Couldn't load the draft; ask the user to try again.",
+        }
+
+    # Opaque not-found: "doesn't exist" and "belongs to another user" look
+    # identical, same as the drafts endpoints.
+    if row is None:
+        return {
+            "error": "not_found",
+            "message": (
+                "No draft with that id — list_outreach_drafts shows the "
+                "user's drafts."
+            ),
+        }
+
+    draft, folder_name = row
+    to = [
+        {"email": str(r.get("email", "")), "name": r.get("name")}
+        for r in (draft.to_recipients or [])
+        if isinstance(r, dict)
+    ]
+    return _jsonable(
+        {
+            "draft_id": draft.id,
+            "subject": draft.subject or "",
+            "body": draft.body or "",
+            "to": to,
+            "cc": [str(x) for x in (draft.cc_emails or [])],
+            "bcc": [str(x) for x in (draft.bcc_emails or [])],
+            "folder_id": draft.folder_id,
+            "folder_name": folder_name,
+            "source": draft.source,
+            "updated_at": draft.updated_at,
+            "link": OUTREACH_DRAFTS_URL,
+        }
+    )
+
+
+async def _load_owned_draft_row(
+    db: AsyncSession, draft_id: int, user_id: str
+) -> OutreachDraft | None:
+    """One owned draft row or None. Module-level seam so unit tests can
+    monkeypatch the lookup without a live session."""
+    return (
+        await db.execute(
+            select(OutreachDraft).where(
+                OutreachDraft.id == draft_id,
+                OutreachDraft.user_id == user_id,
+            )
+        )
+    ).scalar_one_or_none()
+
+
+def _send_failure_dict(exc: HTTPException) -> dict[str, Any]:
+    """Translate send-path HTTPExceptions into Doxie error dicts.
+
+    ``provider_send_and_record`` has already recorded the failed attempt in
+    Sent history by the time these surface; the dict just tells the model
+    how the user can fix it (the OAuth linking/consent flows live on the
+    Outreach page, not in chat).
+    """
+    detail = str(exc.detail or "")
+    if detail.endswith("_account_not_linked") or detail == "sender_account_not_found":
+        return {
+            "error": "no_linked_account",
+            "message": (
+                "No linked email account can send this. The user needs to "
+                "connect Gmail, Outlook, or Yahoo on the Outreach page "
+                "first."
+            ),
+            "link": OUTREACH_CREATE_URL,
+        }
+    if detail.endswith("_scope_required"):
+        return {
+            "error": "send_permission_needed",
+            "message": (
+                "The linked email account hasn't granted send permission. "
+                "Sending once from the Outreach compose page will prompt "
+                "the user to re-consent."
+            ),
+            "link": OUTREACH_CREATE_URL,
+        }
+    if detail.endswith("_oauth_not_configured"):
+        return {
+            "error": "not_configured",
+            "message": (
+                "Email sending isn't configured on the server. Tell the "
+                "user to contact an administrator."
+            ),
+        }
+    return {
+        "error": "send_failed",
+        "message": (
+            "The email provider rejected the send; the attempt is recorded "
+            "as failed in Sent history. Try again in a moment."
+        ),
+        "link": OUTREACH_SENT_URL,
+    }
+
+
+async def _execute_send_outreach_draft(
+    user: AuthenticatedUser,
+    db: AsyncSession,
+    args: Mapping[str, Any],
+) -> dict[str, Any]:
+    """Transmit a saved draft, byte-for-byte, via the user's linked mailbox.
+
+    The draft_id indirection is the safety contract: what gets sent is
+    exactly the saved draft the user reviewed — the model cannot slip in
+    different text at send time. ``confirm`` must be true, and the system
+    prompt instructs the model to set it only after the user's latest
+    message explicitly says to send. Mirrors the composer's compose-send:
+    adhoc-shaped audit row, then the draft is deleted on success.
+    """
+    denial = _check_feature(user, SENT_OUTREACH)
+    if denial is not None:
+        return denial
+
+    try:
+        draft_id = int(args.get("draft_id"))
+    except (TypeError, ValueError):
+        return {
+            "error": "invalid_args",
+            "message": "Argument 'draft_id' must be an integer.",
+        }
+
+    if args.get("confirm") is not True:
+        return {
+            "error": "confirmation_required",
+            "message": (
+                "Not sent. Show the user the draft's recipient, subject, "
+                "and body, and ask whether to send it. Call again with "
+                "confirm=true only after they explicitly say to send."
+            ),
+        }
+
+    try:
+        draft = await _load_owned_draft_row(db, draft_id, user.id)
+    except Exception:
+        logger.exception(
+            "doxie tool failed", extra={"tool": "send_outreach_draft"}
+        )
+        return {
+            "error": "tool_error",
+            "message": "Couldn't load the draft; ask the user to try again.",
+        }
+    if draft is None:
+        return {
+            "error": "not_found",
+            "message": (
+                "No draft with that id — list_outreach_drafts shows the "
+                "user's drafts."
+            ),
+        }
+
+    # Capture everything off the row up front: the send helper commits the
+    # session, which may expire the ORM instance mid-flow.
+    subject = draft.subject or ""
+    body = draft.body or ""
+    folder_id = draft.folder_id
+    sender_account_id = draft.sender_account_id
+    to_pairs = [
+        (str(r.get("email", "")).strip(), r.get("name"))
+        for r in (draft.to_recipients or [])
+        if isinstance(r, dict)
+    ]
+    to_all = [email for email, _ in to_pairs if "@" in email]
+    cc_all = [
+        str(x).strip() for x in (draft.cc_emails or []) if "@" in str(x)
+    ]
+    bcc_all = [
+        str(x).strip() for x in (draft.bcc_emails or []) if "@" in str(x)
+    ]
+
+    if not to_all or not subject.strip() or not body.strip():
+        return {
+            "error": "draft_incomplete",
+            "message": (
+                "The draft is missing a recipient, subject, or body — it "
+                "can't be sent as-is. The user can finish it on the Drafts "
+                "tab, or save a complete replacement."
+            ),
+            "link": OUTREACH_DRAFTS_URL,
+        }
+
+    to_emails, cc_emails, bcc_emails = dedupe_recipients(
+        to_all, cc_all, bcc_all
+    )
+    primary_name = next(
+        (name for email, name in to_pairs if email == to_emails[0]), None
+    )
+
+    try:
+        folder = None
+        if folder_id is not None:
+            folder = (
+                await db.execute(
+                    select(VaultFolder).where(
+                        VaultFolder.id == folder_id,
+                        VaultFolder.user_id == user.id,
+                    )
+                )
+            ).scalar_one_or_none()
+        sender_account = await resolve_sender_account(
+            db=db,
+            current_user=user,
+            folder=folder,
+            explicit_account_id=sender_account_id,
+        )
+        # Adhoc-shaped audit row (no firm/contact FK), same as the
+        # composer's compose-send path.
+        audit = OutreachSend(
+            user_id=user.id,
+            folder_id=folder_id,
+            subject=subject,
+            body=body,
+            status="failed",
+            provider=sender_account.provider_id,
+            recipient_email=to_emails[0],
+            recipient_name=primary_name,
+        )
+        response = await provider_send_and_record(
+            db=db,
+            current_user=user,
+            audit=audit,
+            sender_account=sender_account,
+            to_emails=to_emails,
+            subject=subject,
+            body=body,
+            cc_emails=cc_emails or None,
+            bcc_emails=bcc_emails or None,
+        )
+    except HTTPException as exc:
+        return _send_failure_dict(exc)
+    except Exception:
+        logger.exception(
+            "doxie tool failed", extra={"tool": "send_outreach_draft"}
+        )
+        return {
+            "error": "tool_error",
+            "message": "Couldn't send the draft; ask the user to try again.",
+        }
+
+    # Sent — drop the draft like the composer does. Best-effort: a delete
+    # hiccup must not turn a successful send into an error reply.
+    draft_deleted = True
+    try:
+        await db.execute(
+            delete(OutreachDraft).where(
+                OutreachDraft.id == draft_id,
+                OutreachDraft.user_id == user.id,
+            )
+        )
+        await db.commit()
+    except Exception:
+        draft_deleted = False
+        logger.warning(
+            "doxie send: draft %s not deleted after send", draft_id
+        )
+
+    return _jsonable(
+        {
+            "sent": True,
+            "send_id": response.id,
+            "to": to_emails,
+            "cc": cc_emails,
+            "bcc": bcc_emails,
+            "subject": subject,
+            "draft_deleted": draft_deleted,
+            "link": OUTREACH_SENT_URL,
+            "message": (
+                "Sent from the user's linked mailbox and recorded in Sent "
+                "history. The draft was removed."
+            ),
+        }
+    )
 
 
 TOOL_REGISTRY: dict[str, Tool] = {
@@ -3964,10 +4776,11 @@ TOOL_REGISTRY: dict[str, Tool] = {
         name="draft_outreach_email",
         description=(
             "Generate a cold-email draft (subject + body) for a specific "
-            "contact at a broker-dealer, grounded in a Vault folder's "
-            "documents and instructions. Use when the user asks to 'draft', "
-            "'write', or 'compose an outreach/cold email' to a contact. Needs "
-            "broker_dealer_id, contact_id, and the Vault folder_id (from "
+            "contact at a broker-dealer or investment advisor, grounded in a "
+            "Vault folder's documents and instructions. Use when the user "
+            "asks to 'draft', 'write', or 'compose an outreach/cold email' "
+            "to a contact. Needs entity_type + firm_id, contact_id (from "
+            "list_firm_contacts), and the Vault folder_id (from "
             "list_vault_folders). Returns a draft only — it does not send."
         ),
         parameters_schema=_DRAFT_OUTREACH_PARAMETERS_SCHEMA,
@@ -3975,6 +4788,77 @@ TOOL_REGISTRY: dict[str, Tool] = {
         execute=_execute_draft_outreach_email,
         # Gemini Flash round-trip + RAG retrieval can exceed the 5s default.
         timeout_s=30.0,
+        cacheable=False,
+    ),
+    "list_firm_contacts": Tool(
+        name="list_firm_contacts",
+        description=(
+            "List the email-bearing contacts at one broker-dealer or "
+            "investment advisor — name, title, email, and the contact_id "
+            "that draft_outreach_email needs. Use this to find who can be "
+            "emailed at a firm before drafting outreach."
+        ),
+        parameters_schema=_LIST_FIRM_CONTACTS_PARAMETERS_SCHEMA,
+        # Nominal key — execute checks MASTER_LIST or INVESTMENT_ADVISORS
+        # per entity_type, same pattern as list_filings_for_firm.
+        feature_key=MASTER_LIST,
+        execute=_execute_list_firm_contacts,
+    ),
+    "save_outreach_draft": Tool(
+        name="save_outreach_draft",
+        description=(
+            "Save an email draft (subject, body, recipient) to the user's "
+            "Outreach Drafts tab for review. Use right after "
+            "draft_outreach_email, or when the user asks to save an email "
+            "for later. Saving does NOT send anything."
+        ),
+        parameters_schema=_SAVE_OUTREACH_DRAFT_PARAMETERS_SCHEMA,
+        feature_key=SENT_OUTREACH,
+        execute=_execute_save_outreach_draft,
+        # A write — never serve from the dedup cache.
+        cacheable=False,
+    ),
+    "list_outreach_drafts": Tool(
+        name="list_outreach_drafts",
+        description=(
+            "List the user's saved outreach drafts (newest first): draft_id, "
+            "subject, recipients, and source. Use when the user asks what "
+            "drafts they have or wants to resume/send one."
+        ),
+        parameters_schema=_LIST_OUTREACH_DRAFTS_PARAMETERS_SCHEMA,
+        feature_key=SENT_OUTREACH,
+        execute=_execute_list_outreach_drafts,
+        # Skip the dedup cache so a draft saved seconds ago always shows.
+        cacheable=False,
+    ),
+    "get_outreach_draft": Tool(
+        name="get_outreach_draft",
+        description=(
+            "Read one saved outreach draft in full (subject, body, To/CC/"
+            "BCC). Use it to show the user exactly what send_outreach_draft "
+            "would transmit before asking them to confirm."
+        ),
+        parameters_schema=_GET_OUTREACH_DRAFT_PARAMETERS_SCHEMA,
+        feature_key=SENT_OUTREACH,
+        execute=_execute_get_outreach_draft,
+        # Skip the dedup cache — the user may edit the draft mid-chat.
+        cacheable=False,
+    ),
+    "send_outreach_draft": Tool(
+        name="send_outreach_draft",
+        description=(
+            "Send a saved outreach draft as a real email from the user's "
+            "linked mailbox (Gmail/Outlook/Yahoo). Transmits exactly the "
+            "saved draft. Requires confirm=true, which may ONLY be set "
+            "after the user's latest message explicitly confirms sending "
+            "this draft. The draft is deleted after a successful send and "
+            "the attempt is recorded in Sent history."
+        ),
+        parameters_schema=_SEND_OUTREACH_DRAFT_PARAMETERS_SCHEMA,
+        feature_key=SENT_OUTREACH,
+        execute=_execute_send_outreach_draft,
+        # OAuth refresh + provider API need PDF-tool-class headroom.
+        timeout_s=SEND_DRAFT_TOOL_TIMEOUT_S,
         cacheable=False,
     ),
 }

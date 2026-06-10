@@ -24,6 +24,7 @@ from typing import Any
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
+from fastapi import HTTPException
 
 from app.core.feature_permissions import (
     ALERTS,
@@ -32,6 +33,7 @@ from app.core.feature_permissions import (
     INVESTMENT_ADVISORS,
     INVESTORS,
     MASTER_LIST,
+    SENT_OUTREACH,
     VAULT,
 )
 from app.schemas.auth import AuthenticatedUser
@@ -83,6 +85,11 @@ def alerts_user() -> AuthenticatedUser:
 @pytest.fixture
 def vault_user() -> AuthenticatedUser:
     return _make_user(features=[VAULT])
+
+
+@pytest.fixture
+def outreach_user() -> AuthenticatedUser:
+    return _make_user(features=[SENT_OUTREACH])
 
 
 @pytest.fixture
@@ -996,6 +1003,343 @@ async def test_draft_outreach_email_rejects_bad_ids(vault_user, db_stub) -> None
     assert result["error"] == "invalid_args"
 
 
+async def test_draft_outreach_email_rejects_bad_entity_type(
+    vault_user, db_stub
+) -> None:
+    result = await chatbot_tools.TOOL_REGISTRY["draft_outreach_email"].execute(
+        vault_user,
+        db_stub,
+        {"entity_type": "hedge_fund", "firm_id": 1, "contact_id": 2, "folder_id": 3},
+    )
+    assert result["error"] == "invalid_args"
+
+
+async def test_draft_outreach_email_requires_some_firm_id(
+    vault_user, db_stub
+) -> None:
+    """Neither firm_id nor the broker_dealer_id alias → invalid_args."""
+    result = await chatbot_tools.TOOL_REGISTRY["draft_outreach_email"].execute(
+        vault_user, db_stub, {"contact_id": 2, "folder_id": 3}
+    )
+    assert result["error"] == "invalid_args"
+
+
+class _ScalarResult:
+    def __init__(self, value: Any) -> None:
+        self._value = value
+
+    def scalar_one_or_none(self) -> Any:
+        return self._value
+
+
+class _QueuedDb:
+    """Fake AsyncSession: each execute() pops the next queued scalar."""
+
+    def __init__(self, results: list[Any]) -> None:
+        self._results = list(results)
+
+    async def execute(self, stmt: Any) -> _ScalarResult:  # noqa: ARG002
+        return _ScalarResult(self._results.pop(0))
+
+
+async def test_draft_outreach_email_ia_branch_builds_advisor_context(
+    vault_user, monkeypatch
+) -> None:
+    """The investment_advisor branch mirrors POST /outreach/advisor-draft:
+    no clearing partner, and operations text falls back to the Form ADV
+    advisory-activities blurb."""
+    folder = SimpleNamespace(
+        id=3, name="Custody Services", description="", outreach_instructions=""
+    )
+    advisor = SimpleNamespace(
+        name="Acme Advisors",
+        city="Austin",
+        state="TX",
+        firm_operations_text=None,
+        advisory_activities=["Portfolio management"],
+    )
+    contact = SimpleNamespace(
+        name="Sarah Lee", title="COO", email="sarah@acme.com"
+    )
+    fake_db = _QueuedDb([folder, advisor, contact])
+
+    captured: dict[str, Any] = {}
+
+    async def _fake_generate(**kwargs: Any) -> Any:
+        captured.update(kwargs)
+        return SimpleNamespace(subject="Subj", body="Body")
+
+    monkeypatch.setattr(chatbot_tools, "generate_outreach_draft", _fake_generate)
+    monkeypatch.setattr(
+        chatbot_tools, "retrieve_chunks", AsyncMock(return_value=[])
+    )
+
+    result = await chatbot_tools.TOOL_REGISTRY["draft_outreach_email"].execute(
+        vault_user,
+        fake_db,
+        {
+            "entity_type": "investment_advisor",
+            "firm_id": 9,
+            "contact_id": 2,
+            "folder_id": 3,
+        },
+    )
+
+    assert result.get("error") is None
+    assert result["entity_type"] == "investment_advisor"
+    assert result["to_email"] == "sarah@acme.com"
+    assert result["subject"] == "Subj"
+    firm_ctx = captured["firm"]
+    assert firm_ctx.current_clearing_partner is None
+    assert firm_ctx.firm_operations_text == (
+        "Advisory activities: Portfolio management"
+    )
+
+
+# ── Outreach copilot tools ──────────────────────────────────────────────
+
+
+async def test_list_firm_contacts_rejects_bad_entity_type(
+    bd_user, db_stub
+) -> None:
+    result = await chatbot_tools.TOOL_REGISTRY["list_firm_contacts"].execute(
+        bd_user, db_stub, {"entity_type": "fund", "firm_id": 1}
+    )
+    assert result["error"] == "invalid_args"
+
+
+async def test_list_firm_contacts_gates_per_entity(bd_user, ia_user, db_stub) -> None:
+    """A MASTER_LIST-only user can't list advisor contacts, and vice versa."""
+    r1 = await chatbot_tools.TOOL_REGISTRY["list_firm_contacts"].execute(
+        bd_user, db_stub, {"entity_type": "investment_advisor", "firm_id": 1}
+    )
+    r2 = await chatbot_tools.TOOL_REGISTRY["list_firm_contacts"].execute(
+        ia_user, db_stub, {"entity_type": "broker_dealer", "firm_id": 1}
+    )
+    assert r1["error"] == "no_access"
+    assert r2["error"] == "no_access"
+
+
+async def test_list_firm_contacts_rejects_bad_firm_id(bd_user, db_stub) -> None:
+    result = await chatbot_tools.TOOL_REGISTRY["list_firm_contacts"].execute(
+        bd_user, db_stub, {"entity_type": "broker_dealer", "firm_id": "x"}
+    )
+    assert result["error"] == "invalid_args"
+
+
+async def test_save_outreach_draft_requires_feature(no_access_user, db_stub) -> None:
+    result = await chatbot_tools.TOOL_REGISTRY["save_outreach_draft"].execute(
+        no_access_user,
+        db_stub,
+        {"subject": "s", "body": "b", "to_email": "a@b.com"},
+    )
+    assert result["error"] == "no_access"
+
+
+async def test_save_outreach_draft_rejects_missing_fields(
+    outreach_user, db_stub
+) -> None:
+    r1 = await chatbot_tools.TOOL_REGISTRY["save_outreach_draft"].execute(
+        outreach_user, db_stub, {}
+    )
+    r2 = await chatbot_tools.TOOL_REGISTRY["save_outreach_draft"].execute(
+        outreach_user,
+        db_stub,
+        {"subject": "s", "body": "b", "to_email": "not-an-address"},
+    )
+    assert r1["error"] == "invalid_args"
+    assert r2["error"] == "invalid_args"
+
+
+async def test_save_outreach_draft_rejects_bad_folder_id(
+    outreach_user, db_stub
+) -> None:
+    result = await chatbot_tools.TOOL_REGISTRY["save_outreach_draft"].execute(
+        outreach_user,
+        db_stub,
+        {"subject": "s", "body": "b", "to_email": "a@b.com", "folder_id": "x"},
+    )
+    assert result["error"] == "invalid_args"
+
+
+async def test_list_outreach_drafts_requires_feature(
+    no_access_user, db_stub
+) -> None:
+    result = await chatbot_tools.TOOL_REGISTRY["list_outreach_drafts"].execute(
+        no_access_user, db_stub, {}
+    )
+    assert result["error"] == "no_access"
+
+
+async def test_get_outreach_draft_requires_feature(no_access_user, db_stub) -> None:
+    result = await chatbot_tools.TOOL_REGISTRY["get_outreach_draft"].execute(
+        no_access_user, db_stub, {"draft_id": 1}
+    )
+    assert result["error"] == "no_access"
+
+
+async def test_get_outreach_draft_rejects_bad_id(outreach_user, db_stub) -> None:
+    result = await chatbot_tools.TOOL_REGISTRY["get_outreach_draft"].execute(
+        outreach_user, db_stub, {"draft_id": "x"}
+    )
+    assert result["error"] == "invalid_args"
+
+
+def _draft_stub(**overrides: Any) -> SimpleNamespace:
+    defaults: dict[str, Any] = {
+        "id": 11,
+        "user_id": "u",
+        "subject": "Quick intro",
+        "body": "Hi,\n\nValue.\n\n- Me",
+        "to_recipients": [{"email": "to@example.com", "name": "Toni"}],
+        "cc_emails": ["cc@example.com"],
+        "bcc_emails": None,
+        "folder_id": None,
+        "sender_account_id": None,
+        "source": "doxie",
+    }
+    defaults.update(overrides)
+    return SimpleNamespace(**defaults)
+
+
+async def test_send_outreach_draft_requires_feature(no_access_user, db_stub) -> None:
+    result = await chatbot_tools.TOOL_REGISTRY["send_outreach_draft"].execute(
+        no_access_user, db_stub, {"draft_id": 1, "confirm": True}
+    )
+    assert result["error"] == "no_access"
+
+
+async def test_send_outreach_draft_rejects_bad_id(outreach_user, db_stub) -> None:
+    result = await chatbot_tools.TOOL_REGISTRY["send_outreach_draft"].execute(
+        outreach_user, db_stub, {"draft_id": "x", "confirm": True}
+    )
+    assert result["error"] == "invalid_args"
+
+
+async def test_send_outreach_draft_requires_confirmation(
+    outreach_user, db_stub, monkeypatch
+) -> None:
+    """confirm absent or falsy → refused BEFORE the draft is even loaded."""
+    loader = AsyncMock()
+    monkeypatch.setattr(chatbot_tools, "_load_owned_draft_row", loader)
+
+    r1 = await chatbot_tools.TOOL_REGISTRY["send_outreach_draft"].execute(
+        outreach_user, db_stub, {"draft_id": 11}
+    )
+    r2 = await chatbot_tools.TOOL_REGISTRY["send_outreach_draft"].execute(
+        outreach_user, db_stub, {"draft_id": 11, "confirm": False}
+    )
+    r3 = await chatbot_tools.TOOL_REGISTRY["send_outreach_draft"].execute(
+        outreach_user, db_stub, {"draft_id": 11, "confirm": "yes"}
+    )
+
+    assert r1["error"] == "confirmation_required"
+    assert r2["error"] == "confirmation_required"
+    # Truthy-but-not-boolean must not count as consent.
+    assert r3["error"] == "confirmation_required"
+    assert loader.await_count == 0
+
+
+async def test_send_outreach_draft_unknown_draft(
+    outreach_user, db_stub, monkeypatch
+) -> None:
+    monkeypatch.setattr(
+        chatbot_tools, "_load_owned_draft_row", AsyncMock(return_value=None)
+    )
+    result = await chatbot_tools.TOOL_REGISTRY["send_outreach_draft"].execute(
+        outreach_user, db_stub, {"draft_id": 404, "confirm": True}
+    )
+    assert result["error"] == "not_found"
+
+
+async def test_send_outreach_draft_incomplete_draft(
+    outreach_user, db_stub, monkeypatch
+) -> None:
+    for stub in (
+        _draft_stub(subject=""),
+        _draft_stub(body="  "),
+        _draft_stub(to_recipients=[]),
+        _draft_stub(to_recipients=[{"email": "not-an-address"}]),
+    ):
+        monkeypatch.setattr(
+            chatbot_tools, "_load_owned_draft_row", AsyncMock(return_value=stub)
+        )
+        result = await chatbot_tools.TOOL_REGISTRY["send_outreach_draft"].execute(
+            outreach_user, db_stub, {"draft_id": 11, "confirm": True}
+        )
+        assert result["error"] == "draft_incomplete"
+
+
+async def test_send_outreach_draft_sends_exactly_the_saved_draft(
+    outreach_user, db_stub, monkeypatch
+) -> None:
+    """The invariant behind the draft_id indirection: what goes to the
+    provider is byte-for-byte the saved draft — subject, body, and the
+    full recipient set."""
+    stub = _draft_stub()
+    monkeypatch.setattr(
+        chatbot_tools, "_load_owned_draft_row", AsyncMock(return_value=stub)
+    )
+    monkeypatch.setattr(
+        chatbot_tools,
+        "resolve_sender_account",
+        AsyncMock(return_value=SimpleNamespace(provider_id="google", id="acct-1")),
+    )
+    sender = AsyncMock(return_value=SimpleNamespace(id=77))
+    monkeypatch.setattr(chatbot_tools, "provider_send_and_record", sender)
+
+    result = await chatbot_tools.TOOL_REGISTRY["send_outreach_draft"].execute(
+        outreach_user, db_stub, {"draft_id": 11, "confirm": True}
+    )
+
+    sender.assert_awaited_once()
+    kwargs = sender.await_args.kwargs
+    assert kwargs["subject"] == stub.subject
+    assert kwargs["body"] == stub.body
+    assert kwargs["to_emails"] == ["to@example.com"]
+    assert kwargs["cc_emails"] == ["cc@example.com"]
+    assert kwargs["bcc_emails"] is None
+    audit = kwargs["audit"]
+    assert audit.recipient_email == "to@example.com"
+    assert audit.recipient_name == "Toni"
+    assert result["sent"] is True
+    assert result["send_id"] == 77
+    assert result["subject"] == stub.subject
+    # db_stub can't run the DELETE — the tool must degrade, not fail.
+    assert result["draft_deleted"] is False
+
+
+async def test_send_outreach_draft_maps_provider_412s(
+    outreach_user, db_stub, monkeypatch
+) -> None:
+    monkeypatch.setattr(
+        chatbot_tools,
+        "_load_owned_draft_row",
+        AsyncMock(return_value=_draft_stub()),
+    )
+
+    monkeypatch.setattr(
+        chatbot_tools,
+        "resolve_sender_account",
+        AsyncMock(side_effect=HTTPException(412, "google_account_not_linked")),
+    )
+    r1 = await chatbot_tools.TOOL_REGISTRY["send_outreach_draft"].execute(
+        outreach_user, db_stub, {"draft_id": 11, "confirm": True}
+    )
+
+    monkeypatch.setattr(
+        chatbot_tools,
+        "resolve_sender_account",
+        AsyncMock(side_effect=HTTPException(412, "gmail_scope_required")),
+    )
+    r2 = await chatbot_tools.TOOL_REGISTRY["send_outreach_draft"].execute(
+        outreach_user, db_stub, {"draft_id": 11, "confirm": True}
+    )
+
+    assert r1["error"] == "no_linked_account"
+    assert r2["error"] == "send_permission_needed"
+
+
 # ── Schema-drift guard ──────────────────────────────────────────────────
 
 
@@ -1052,6 +1396,12 @@ def test_tool_registry_has_expected_names() -> None:
         # Doxie action tools (write-capable).
         "run_email_extractor",
         "draft_outreach_email",
+        # Outreach copilot — contacts, saved drafts, confirmed send.
+        "list_firm_contacts",
+        "save_outreach_draft",
+        "list_outreach_drafts",
+        "get_outreach_draft",
+        "send_outreach_draft",
     }
 
 
