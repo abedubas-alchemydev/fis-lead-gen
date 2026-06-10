@@ -15,6 +15,7 @@ import {
   type DoxieChatMessage,
   type DoxieStreamEvent
 } from "@/lib/api";
+import { DOXIE_ASK_EVENT, type DoxieAskDetail } from "@/lib/doxie-events";
 import type { VaultFolder } from "@/lib/types";
 
 import { ChatbotPanel, type ChatbotPanelHandle } from "./chatbot-panel";
@@ -98,6 +99,47 @@ function streamErrorMessageFor(code: string, message: string): string {
   return message || "Doxie hit a snag mid-reply. Please try again.";
 }
 
+// Starter prompts for an empty conversation, specialised to where the user
+// currently is. Every prompt maps onto something Doxie can actually do
+// today (profile/filing/PDF tools, filtered lists, alerts, outreach
+// drafting) so a chip never dead-ends.
+function buildSuggestedPrompts(pathname: string | null): string[] {
+  const path = pathname ?? "";
+  if (/^\/master-list\/\d+/.test(path)) {
+    return [
+      "Summarize this firm's latest FOCUS filing",
+      "Is this firm self-clearing?",
+      "Draft an outreach email to this firm"
+    ];
+  }
+  if (/^\/advisor-list\/\d+/.test(path)) {
+    return [
+      "Summarize this advisor's profile",
+      "What filings does this advisor have?",
+      "Draft an outreach email to this firm"
+    ];
+  }
+  if (path.startsWith("/email-extractor")) {
+    return [
+      "Run an email scan on a domain",
+      "How does the email extractor work?",
+      "What can you do?"
+    ];
+  }
+  if (path.startsWith("/outreach")) {
+    return [
+      "Help me draft a cold outreach email",
+      "How does sending outreach work?",
+      "What can you do?"
+    ];
+  }
+  return [
+    "Find self-clearing broker-dealers in Texas",
+    "What's new in my alerts?",
+    "What can you do?"
+  ];
+}
+
 function DoxieIcon({ size = 24, strokeWidth = 2 }: { size?: number; strokeWidth?: number }) {
   return (
     <svg
@@ -145,6 +187,10 @@ export function ChatbotWidget() {
   const fabRef = useRef<HTMLButtonElement>(null);
   const panelRef = useRef<ChatbotPanelHandle>(null);
   const nextIdRef = useRef(1);
+  // In-flight stream controller (Stop button) + the last turn's wire
+  // history (Retry button re-runs it verbatim).
+  const abortRef = useRef<AbortController | null>(null);
+  const lastTurnRef = useRef<DoxieChatMessage[] | null>(null);
 
   // Page context for Doxie. ``usePathname`` is reactive across route
   // changes; document.title is read at send-time so a freshly-rendered
@@ -174,6 +220,23 @@ export function ChatbotWidget() {
   useEffect(() => {
     if (isOpen) panelRef.current?.focusInput();
   }, [isOpen]);
+
+  // "Ask Doxie" entry points elsewhere in the app dispatch a window event
+  // (see lib/doxie-events.ts) — open the panel pre-filled. Deliberately
+  // never auto-sends: the user reviews and presses Send, which matters now
+  // that action tools are registered server-side.
+  useEffect(() => {
+    function handleAsk(event: Event) {
+      const detail = (event as CustomEvent<DoxieAskDetail>).detail;
+      if (!detail?.prompt) return;
+      setIsOpen(true);
+      setInput(detail.prompt);
+      // Panel may be mounting this frame — focus on the next one.
+      requestAnimationFrame(() => panelRef.current?.focusInput());
+    }
+    window.addEventListener(DOXIE_ASK_EVENT, handleAsk);
+    return () => window.removeEventListener(DOXIE_ASK_EVENT, handleAsk);
+  }, []);
 
   // Lazy-load persisted history on first panel open.
   useEffect(() => {
@@ -232,9 +295,121 @@ export function ChatbotWidget() {
     setAwaitingFolder(false);
   }, []);
 
-  const handleSend = useCallback(async () => {
+  // One streamed assistant turn rendered into the bubble ``pendingId``.
+  // Abortable via the Stop button; the wire history is stashed so a
+  // retryable error bubble can re-run the exact same turn.
+  const runDoxieTurn = useCallback(
+    async (historyForApi: DoxieChatMessage[], pendingId: number) => {
+      lastTurnRef.current = historyForApi;
+
+      function patchPending(updater: (current: ChatMessage) => ChatMessage) {
+        setMessages((prev) =>
+          prev.map((m) => (m.id === pendingId ? updater(m) : m))
+        );
+      }
+
+      function handleEvent(event: DoxieStreamEvent) {
+        switch (event.type) {
+          case "tool_call":
+            patchPending((m) => ({ ...m, toolStatus: toolStatusFor(event.name) }));
+            break;
+          case "tool_result":
+            // Clear the per-tool label; if another tool_call follows it'll
+            // replace it. A "done" or first text_delta finalises pending.
+            patchPending((m) => ({ ...m, toolStatus: undefined }));
+            break;
+          case "text_delta":
+            patchPending((m) => ({
+              ...m,
+              // First delta clears pending so the bubble switches from
+              // dots to streaming text.
+              pending: false,
+              toolStatus: undefined,
+              content: m.content + event.text
+            }));
+            break;
+          case "done":
+            patchPending((m) => ({
+              ...m,
+              pending: false,
+              toolStatus: undefined,
+              // If no deltas streamed (e.g. iteration cap fallback), the
+              // ``reply`` carries the final text — use it.
+              content: m.content || event.reply,
+              // Flip to finalised so the bubble re-renders with markdown
+              // + clickable deep-links. Doing it only here (not on each
+              // text_delta) is what prevents mid-stream half-link flicker.
+              isFinalized: true
+            }));
+            break;
+          case "error":
+            patchPending(() => ({
+              id: pendingId,
+              role: "assistant",
+              content: streamErrorMessageFor(event.code, event.message),
+              error: true,
+              retryable: true
+            }));
+            break;
+        }
+      }
+
+      const controller = new AbortController();
+      abortRef.current = controller;
+      setIsSending(true);
+      try {
+        await streamDoxieMessage({
+          messages: historyForApi,
+          pageContext: {
+            path: pathname ?? undefined,
+            title: typeof document !== "undefined" ? document.title : undefined
+          },
+          signal: controller.signal,
+          onEvent: handleEvent
+        });
+      } catch (error) {
+        const isAbort =
+          typeof error === "object" &&
+          error !== null &&
+          (error as { name?: string }).name === "AbortError";
+        if (isAbort) {
+          // User pressed Stop. Keep whatever streamed in (finalised so
+          // markdown renders); drop the bubble entirely if nothing did.
+          // The BE persists assistant turns only on ``done``, so a
+          // stopped reply won't appear in history after a reload — the
+          // kept partial is an FE-session courtesy.
+          setMessages((prev) =>
+            prev.flatMap((m) => {
+              if (m.id !== pendingId) return [m];
+              if (!m.content) return [];
+              return [
+                { ...m, pending: false, toolStatus: undefined, isFinalized: true }
+              ];
+            })
+          );
+        } else {
+          // Network / HTTP-level failure before / during the stream — the
+          // BE never sent a ``done`` event so the pending bubble still
+          // shows dots. Replace it with a retryable error message.
+          patchPending(() => ({
+            id: pendingId,
+            role: "assistant",
+            content: errorMessageFor(error),
+            error: true,
+            retryable: true
+          }));
+        }
+      } finally {
+        abortRef.current = null;
+        setIsSending(false);
+      }
+    },
+    [pathname]
+  );
+
+  const handleSend = useCallback(async (textOverride?: string) => {
     if (isSending) return;
-    const trimmed = input.trim();
+    const trimmed = (textOverride ?? input).trim();
 
     // ── Conversational Vault upload ──────────────────────────────────
     // A file is attached (paperclip). Its bytes can't ride inside a chat
@@ -354,82 +529,37 @@ export function ChatbotWidget() {
 
     setMessages((prev) => [...prev, userMessage, pendingMessage]);
     setInput("");
-    setIsSending(true);
+    await runDoxieTurn(historyForApi, pendingId);
+  }, [input, isSending, messages, pendingFile, awaitingFolder, runDoxieTurn]);
 
-    function patchPending(updater: (current: ChatMessage) => ChatMessage) {
-      setMessages((prev) =>
-        prev.map((m) => (m.id === pendingId ? updater(m) : m))
-      );
-    }
+  const handleStop = useCallback(() => {
+    abortRef.current?.abort();
+  }, []);
 
-    function handleEvent(event: DoxieStreamEvent) {
-      switch (event.type) {
-        case "tool_call":
-          patchPending((m) => ({ ...m, toolStatus: toolStatusFor(event.name) }));
-          break;
-        case "tool_result":
-          // Clear the per-tool label; if another tool_call follows it'll
-          // replace it. A "done" or first text_delta finalises pending.
-          patchPending((m) => ({ ...m, toolStatus: undefined }));
-          break;
-        case "text_delta":
-          patchPending((m) => ({
-            ...m,
-            // First delta clears pending so the bubble switches from
-            // dots to streaming text.
-            pending: false,
-            toolStatus: undefined,
-            content: m.content + event.text
-          }));
-          break;
-        case "done":
-          patchPending((m) => ({
-            ...m,
-            pending: false,
-            toolStatus: undefined,
-            // If no deltas streamed (e.g. iteration cap fallback), the
-            // ``reply`` carries the final text — use it.
-            content: m.content || event.reply,
-            // Flip to finalised so the bubble re-renders with markdown
-            // + clickable deep-links. Doing it only here (not on each
-            // text_delta) is what prevents mid-stream half-link flicker.
-            isFinalized: true
-          }));
-          break;
-        case "error":
-          patchPending(() => ({
-            id: pendingId,
-            role: "assistant",
-            content: streamErrorMessageFor(event.code, event.message),
-            error: true
-          }));
-          break;
-      }
-    }
+  // Re-run the turn behind a retryable error bubble. Caveat (accepted for
+  // an FE-only change): the BE persists the user turn on every attempt,
+  // so a retried turn shows the user message twice in reloaded history.
+  const handleRetry = useCallback(
+    (errorId: number) => {
+      if (isSending) return;
+      const history = lastTurnRef.current;
+      if (!history) return;
+      const pendingId = nextIdRef.current++;
+      setMessages((prev) => [
+        ...prev.filter((m) => m.id !== errorId),
+        { id: pendingId, role: "assistant", content: "", pending: true }
+      ]);
+      void runDoxieTurn(history, pendingId);
+    },
+    [isSending, runDoxieTurn]
+  );
 
-    try {
-      await streamDoxieMessage({
-        messages: historyForApi,
-        pageContext: {
-          path: pathname ?? undefined,
-          title: typeof document !== "undefined" ? document.title : undefined
-        },
-        onEvent: handleEvent
-      });
-    } catch (error) {
-      // Network / HTTP-level failure before / during the stream — the BE
-      // never sent a ``done`` event so the pending bubble still shows
-      // dots. Replace it with an error message.
-      patchPending(() => ({
-        id: pendingId,
-        role: "assistant",
-        content: errorMessageFor(error),
-        error: true
-      }));
-    } finally {
-      setIsSending(false);
-    }
-  }, [input, isSending, messages, pathname, pendingFile, awaitingFolder]);
+  const handleSuggestion = useCallback(
+    (text: string) => {
+      void handleSend(text);
+    },
+    [handleSend]
+  );
 
   const handleNewChat = useCallback(async () => {
     if (isSending) return;
@@ -486,6 +616,18 @@ export function ChatbotWidget() {
           // shift-click and middle-click bypass this and open in a new
           // tab — see ChatLink in chatbot-message.tsx.
           onInternalNavigate={closePanel}
+          onStop={handleStop}
+          // Starter chips only on a fresh thread (just the welcome
+          // message) with no attachment pending.
+          suggestions={
+            messages.length === 1 &&
+            messages[0]?.id === WELCOME_MESSAGE.id &&
+            !pendingFile
+              ? buildSuggestedPrompts(pathname)
+              : undefined
+          }
+          onSuggestionClick={handleSuggestion}
+          onRetryMessage={handleRetry}
         />
       ) : null}
     </>
