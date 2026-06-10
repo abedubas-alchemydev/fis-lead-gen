@@ -11,6 +11,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.db.session import get_db_session
 from app.schemas.auth import AuthenticatedUser
 from app.schemas.chatbot import (
+    ChatbotEmbeddingBackfillEntityCounts,
     ChatbotEmbeddingBackfillResponse,
     ChatbotHistoryMessage,
     ChatbotHistoryResponse,
@@ -280,12 +281,15 @@ async def post_chatbot_embeddings_backfill(
     current_user: AuthenticatedUser = Depends(get_current_user),
     db: AsyncSession = Depends(get_db_session),
 ) -> ChatbotEmbeddingBackfillResponse:
-    """Admin-only: (re)populate the BD embedding index for semantic search.
+    """Admin-only: (re)populate the BD + IA embedding index for semantic
+    search.
 
-    Synchronous — the BD table is small enough that batch-of-50 embedding
+    Synchronous — both tables are small enough that batch-of-50 embedding
     against Gemini's API completes inside the Cloud Run request budget
     (a few minutes at worst). Re-runs are cheap because the service
-    skips rows whose content hash didn't change.
+    skips rows whose content hash didn't change. The populate-all pipeline
+    also runs this incrementally after each run, so the manual endpoint is
+    mostly for first-time population and recovery.
 
     Non-admins get 403; admins always pass.
     """
@@ -295,11 +299,18 @@ async def post_chatbot_embeddings_backfill(
             detail="Admin access required.",
         )
 
-    result = await chatbot_semantic_service.backfill_broker_dealers(db)
+    bd = await chatbot_semantic_service.backfill_broker_dealers(db)
+    ia = await chatbot_semantic_service.backfill_investment_advisors(db)
     return ChatbotEmbeddingBackfillResponse(
-        embedded=result.embedded,
-        skipped=result.skipped,
-        failed=result.failed,
+        embedded=bd.embedded + ia.embedded,
+        skipped=bd.skipped + ia.skipped,
+        failed=bd.failed + ia.failed,
+        broker_dealers=ChatbotEmbeddingBackfillEntityCounts(
+            embedded=bd.embedded, skipped=bd.skipped, failed=bd.failed
+        ),
+        investment_advisors=ChatbotEmbeddingBackfillEntityCounts(
+            embedded=ia.embedded, skipped=ia.skipped, failed=ia.failed
+        ),
     )
 
 
