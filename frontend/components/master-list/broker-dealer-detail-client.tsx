@@ -25,6 +25,7 @@ import { OutreachButton } from "@/components/master-list/outreach-button";
 import { PeopleTable } from "@/components/master-list/detail/people-table";
 import { EmailScansSection } from "@/components/email-extractor/email-scans-section";
 import { EMAIL_EXTRACTION_ENABLED } from "@/lib/feature-flags";
+import { askDoxie } from "@/lib/doxie-events";
 import { FinancialTrendChart } from "@/components/master-list/detail/financial-trend-chart";
 import { FirmWebsiteLink } from "@/components/master-list/detail/firm-website-link";
 import { CopyDomainButton } from "@/components/master-list/detail/copy-domain-button";
@@ -913,6 +914,19 @@ export function BrokerDealerDetailClient({ brokerDealerId }: { brokerDealerId: s
           </div>
         </div>
         <div className="flex shrink-0 items-center gap-2.5">
+          <Button
+            variant="outline"
+            type="button"
+            onClick={() =>
+              askDoxie({
+                prompt: `Tell me about ${bd.name}${bd.crd_number ? ` (CRD ${bd.crd_number})` : ""} — summarize the profile and latest filings.`,
+              })
+            }
+            title="Open Doxie with a question about this firm"
+          >
+            <Sparkles className="h-4 w-4" strokeWidth={2} />
+            Ask Doxie
+          </Button>
           <Button
             variant="outline"
             type="button"

@@ -1,6 +1,6 @@
 "use client";
 
-import { Paperclip, PlusCircle, Send, X } from "lucide-react";
+import { Paperclip, PlusCircle, Send, Square, X } from "lucide-react";
 import {
   forwardRef,
   useEffect,
@@ -31,6 +31,15 @@ export interface ChatbotPanelProps {
   // Lets the widget collapse the panel so the user can actually see the
   // destination page (otherwise the chat panel keeps floating over it).
   onInternalNavigate?: () => void;
+  // Aborts the in-flight stream; while sending, the Send button becomes a
+  // Stop button wired to this.
+  onStop?: () => void;
+  // Starter prompts rendered as chips on a fresh conversation. Clicking
+  // one sends it immediately.
+  suggestions?: ReadonlyArray<string>;
+  onSuggestionClick?: (text: string) => void;
+  // Re-runs the turn behind a retryable error bubble.
+  onRetryMessage?: (messageId: number) => void;
 }
 
 export interface ChatbotPanelHandle {
@@ -51,6 +60,10 @@ export const ChatbotPanel = forwardRef<ChatbotPanelHandle, ChatbotPanelProps>(fu
     onAttachFile,
     onClearPendingFile,
     onInternalNavigate,
+    onStop,
+    suggestions,
+    onSuggestionClick,
+    onRetryMessage,
   },
   ref,
 ) {
@@ -136,11 +149,31 @@ export const ChatbotPanel = forwardRef<ChatbotPanelHandle, ChatbotPanelProps>(fu
               toolStatus={message.toolStatus}
               isFinalized={message.isFinalized}
               onInternalNavigate={onInternalNavigate}
+              onRetry={
+                message.error && message.retryable && onRetryMessage
+                  ? () => onRetryMessage(message.id)
+                  : undefined
+              }
             />
           ))
         )}
         <div ref={endRef} />
       </div>
+
+      {suggestions && suggestions.length > 0 && !isLoadingHistory && !isSending ? (
+        <div className="flex flex-wrap gap-1.5 px-3 pb-1 pt-2">
+          {suggestions.map((text) => (
+            <button
+              key={text}
+              type="button"
+              onClick={() => onSuggestionClick?.(text)}
+              className="rounded-full border border-[var(--border,rgba(30,64,175,0.1))] bg-[var(--surface-2,#f1f6fd)] px-3 py-1.5 text-xs text-[var(--text-dim,#475569)] transition hover:border-[var(--doxie,#6366f1)]/40 hover:text-[var(--doxie,#6366f1)] focus:outline-none focus:ring-2 focus:ring-[var(--doxie,#6366f1)]/40"
+            >
+              {text}
+            </button>
+          ))}
+        </div>
+      ) : null}
 
       <form
         className="flex flex-col gap-2 border-t border-[var(--border,rgba(30,64,175,0.1))] bg-[var(--surface,#ffffff)] px-3 py-3"
@@ -191,14 +224,26 @@ export const ChatbotPanel = forwardRef<ChatbotPanelHandle, ChatbotPanelProps>(fu
             disabled={isSending}
             className="max-h-32 min-h-[40px] flex-1 resize-none rounded-xl border border-[var(--border,rgba(30,64,175,0.1))] bg-[var(--surface,#ffffff)] px-3 py-2 text-sm text-[var(--text,#0f172a)] placeholder:text-[var(--text-muted,#94a3b8)] focus:border-[var(--doxie,#6366f1)] focus:outline-none focus:ring-2 focus:ring-[var(--doxie,#6366f1)]/30 disabled:cursor-not-allowed disabled:opacity-60"
           />
-          <button
-            type="submit"
-            disabled={sendDisabled}
-            aria-label="Send message"
-            className="grid h-10 w-10 shrink-0 place-items-center rounded-xl bg-[var(--doxie,#6366f1)] text-white shadow-sm transition hover:bg-[var(--doxie-2,#8b5cf6)] disabled:cursor-not-allowed disabled:opacity-50 focus:outline-none focus:ring-2 focus:ring-[var(--doxie,#6366f1)]/40 focus:ring-offset-2"
-          >
-            <Send size={16} strokeWidth={2} />
-          </button>
+          {isSending && onStop ? (
+            <button
+              type="button"
+              onClick={onStop}
+              aria-label="Stop generating"
+              title="Stop generating"
+              className="grid h-10 w-10 shrink-0 place-items-center rounded-xl bg-[var(--surface-2,#f1f6fd)] text-[var(--text,#0f172a)] shadow-sm ring-1 ring-inset ring-[var(--border,rgba(30,64,175,0.1))] transition hover:bg-[var(--border,rgba(30,64,175,0.1))] focus:outline-none focus:ring-2 focus:ring-[var(--doxie,#6366f1)]/40 focus:ring-offset-2"
+            >
+              <Square size={14} strokeWidth={2} fill="currentColor" />
+            </button>
+          ) : (
+            <button
+              type="submit"
+              disabled={sendDisabled}
+              aria-label="Send message"
+              className="grid h-10 w-10 shrink-0 place-items-center rounded-xl bg-[var(--doxie,#6366f1)] text-white shadow-sm transition hover:bg-[var(--doxie-2,#8b5cf6)] disabled:cursor-not-allowed disabled:opacity-50 focus:outline-none focus:ring-2 focus:ring-[var(--doxie,#6366f1)]/40 focus:ring-offset-2"
+            >
+              <Send size={16} strokeWidth={2} />
+            </button>
+          )}
         </div>
       </form>
     </div>

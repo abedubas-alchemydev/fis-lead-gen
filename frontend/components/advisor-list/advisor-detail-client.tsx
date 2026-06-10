@@ -34,6 +34,7 @@ import {
   type AdvisorListQueryState,
 } from "@/lib/advisor-list-state";
 import { formatCurrency, formatDate } from "@/lib/format";
+import { askDoxie } from "@/lib/doxie-events";
 import { EmailScansSection } from "@/components/email-extractor/email-scans-section";
 import { CopyDomainButton } from "@/components/master-list/detail/copy-domain-button";
 import { EMAIL_EXTRACTION_ENABLED } from "@/lib/feature-flags";
@@ -655,6 +656,19 @@ export function AdvisorDetailClient({ advisorId }: { advisorId: string }) {
           </div>
         </div>
         <div className="flex shrink-0 items-center gap-2.5">
+          <Button
+            type="button"
+            variant="outline"
+            onClick={() =>
+              askDoxie({
+                prompt: `Tell me about ${advisor.name}${advisor.crd_number ? ` (CRD ${advisor.crd_number})` : ""} — summarize the profile and latest filings.`,
+              })
+            }
+            title="Open Doxie with a question about this firm"
+          >
+            <Sparkles className="h-4 w-4" strokeWidth={2} />
+            Ask Doxie
+          </Button>
           <Button
             type="button"
             variant="outline"
