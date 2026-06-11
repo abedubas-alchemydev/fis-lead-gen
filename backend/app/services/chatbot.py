@@ -32,13 +32,17 @@ import json
 import logging
 from collections import OrderedDict
 from dataclasses import dataclass
+from datetime import datetime, timezone
 from time import monotonic
 from typing import Any, AsyncIterator, Mapping, Sequence
 
 import httpx
+from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.config import settings
+from app.models.broker_dealer import BrokerDealer
+from app.models.investment_advisor import InvestmentAdvisor
 from app.schemas.auth import AuthenticatedUser
 from app.schemas.chatbot import ChatbotMessage, ChatbotPageContext
 from app.services.chatbot_app_knowledge import FEATURE_LABELS_FOR_PROMPT
@@ -141,10 +145,23 @@ DOXIE_TOOL_USAGE_PROMPT = (
 )
 
 
-# Safety brakes — see module docstring for rationale.
-MAX_TOOL_ITERATIONS = 5
+# Safety brakes — see module docstring for rationale. The iteration cap
+# sits at 8 (up from 5) because legitimate multi-step asks — e.g. find a
+# firm → load its profile → list contacts → draft outreach — already burn
+# four round-trips before a single retry or disambiguation; the wall
+# clock below stays the hard backstop against pathological loops.
+MAX_TOOL_ITERATIONS = 8
 TOOL_EXECUTION_TIMEOUT_S = 5.0
 CHAT_WALL_CLOCK_BUDGET_S = 60.0
+
+# Entity types the FE may claim in ``page_context``. Maps the wire value
+# to the firm table + the human label used in the system-prompt line.
+# Unknown types resolve to None — silent fallback to the plain path/title
+# context, never a 4xx/5xx (see ``_resolve_entity_context``).
+_PAGE_ENTITY_TYPES: dict[str, tuple[type, str]] = {
+    "broker_dealer": (BrokerDealer, "broker-dealer"),
+    "investment_advisor": (InvestmentAdvisor, "investment advisor"),
+}
 
 
 # ─── Tool result cache ────────────────────────────────────────────────────
@@ -287,6 +304,9 @@ class ChatbotService:
         )
 
         contents = self._build_contents(messages)
+        # Resolved once per request (one lightweight SELECT), reused across
+        # every loop iteration's system prompt.
+        entity_line = await self._resolve_entity_context(db, page_context)
         deadline = monotonic() + CHAT_WALL_CLOCK_BUDGET_S
 
         for iteration in range(MAX_TOOL_ITERATIONS + 1):
@@ -305,6 +325,7 @@ class ChatbotService:
                 contents=contents,
                 page_context=page_context,
                 tools=active_tools,
+                entity_line=entity_line,
             )
             response_payload = await self._post_with_retries(payload)
             function_calls, model_parts = self._extract_function_calls_and_parts(
@@ -377,10 +398,17 @@ class ChatbotService:
         contents: list[dict[str, Any]],
         page_context: ChatbotPageContext | None,
         tools: Mapping[str, Tool],
+        entity_line: str | None = None,
     ) -> dict[str, Any]:
         payload: dict[str, Any] = {
             "systemInstruction": {
-                "parts": [{"text": self._build_system_text(page_context, tools)}]
+                "parts": [
+                    {
+                        "text": self._build_system_text(
+                            page_context, tools, entity_line
+                        )
+                    }
+                ]
             },
             "contents": contents,
             "generationConfig": {
@@ -404,11 +432,21 @@ class ChatbotService:
         cls,
         page_context: ChatbotPageContext | None,
         tools: Mapping[str, Tool],
+        entity_line: str | None = None,
     ) -> str:
         text = DOXIE_SYSTEM_PROMPT
         if tools:
             text = f"{text}\n\n{DOXIE_TOOL_USAGE_PROMPT}"
+        # Computed per turn (NOT at import) so long-lived Cloud Run
+        # processes don't freeze the date at process start. Grounds
+        # "latest filing", "this year", "how stale is this" questions.
+        today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+        text = f"{text}\n\nToday's date is {today} (UTC)."
         context_block = cls._format_page_context(page_context)
+        if entity_line:
+            # Extend the page-context line with the resolved firm so
+            # "this firm" is grounded without a tool round-trip.
+            context_block = f"{context_block} {entity_line}".strip()
         if context_block:
             text = f"{text}\n\n{context_block}"
         return text
@@ -427,6 +465,53 @@ class ChatbotService:
         return (
             "Current page context (the user is viewing this page right now): "
             + ", ".join(parts)
+        )
+
+    @staticmethod
+    async def _resolve_entity_context(
+        db: AsyncSession, context: ChatbotPageContext | None
+    ) -> str | None:
+        """Resolve ``page_context.entity_*`` into a system-prompt sentence.
+
+        One lightweight SELECT (name + CRD) against the claimed firm
+        table. Any miss — unknown ``entity_type``, no row for the id, or
+        a DB error — returns ``None`` so the prompt silently falls back
+        to the plain path/title behaviour. The entity fields are never
+        persisted; only path/title land on the ``chatbot_message`` row.
+        """
+        if (
+            context is None
+            or context.entity_type is None
+            or context.entity_id is None
+        ):
+            return None
+        entity = _PAGE_ENTITY_TYPES.get(context.entity_type)
+        if entity is None:
+            return None
+        model, label = entity
+        try:
+            result = await db.execute(
+                select(model.name, model.crd_number).where(
+                    model.id == context.entity_id
+                )
+            )
+            row = result.first()
+        except Exception:  # noqa: BLE001 — context is a nicety, never fatal
+            logger.warning(
+                "doxie page-entity lookup failed entity_type=%s entity_id=%s",
+                context.entity_type,
+                context.entity_id,
+                exc_info=True,
+            )
+            return None
+        if row is None:
+            return None
+        name, crd_number = row
+        crd_part = f"CRD {crd_number}, " if crd_number else ""
+        return (
+            f"The user is currently viewing the detail page for {label} "
+            f"{name} ({crd_part}id {context.entity_id}) — "
+            '"this firm" refers to it.'
         )
 
     async def _dispatch_tool(
@@ -563,6 +648,9 @@ class ChatbotService:
             TOOL_REGISTRY if tools is None else tools
         )
         contents = self._build_contents(messages)
+        # Resolved once per request (one lightweight SELECT), reused across
+        # every loop iteration's system prompt.
+        entity_line = await self._resolve_entity_context(db, page_context)
         deadline = monotonic() + CHAT_WALL_CLOCK_BUDGET_S
 
         for iteration in range(MAX_TOOL_ITERATIONS + 1):
@@ -584,6 +672,7 @@ class ChatbotService:
                 contents=contents,
                 page_context=page_context,
                 tools=active_tools,
+                entity_line=entity_line,
             )
 
             accumulated_parts: list[dict[str, Any]] = []

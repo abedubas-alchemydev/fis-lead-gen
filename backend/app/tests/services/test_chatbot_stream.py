@@ -427,7 +427,8 @@ async def test_max_iterations_emits_fallback_done(
     user: AuthenticatedUser,
     db_stub: object,
 ) -> None:
-    # 6 consecutive functionCall responses (one over the cap).
+    # MAX_TOOL_ITERATIONS + 1 consecutive functionCall responses (one over
+    # the cap).
     respx.post(_GEMINI_STREAM_URL).mock(
         side_effect=[
             httpx.Response(

@@ -1343,6 +1343,12 @@ export interface DoxieChatMessage {
 export interface DoxiePageContext {
   path?: string;
   title?: string;
+  // Sent only from firm detail routes with a numeric id segment
+  // (/master-list/{id} → broker_dealer, /advisor-list/{id} →
+  // investment_advisor) so the BE can ground "this firm" to the exact
+  // row being viewed. Never persisted server-side.
+  entity_type?: "broker_dealer" | "investment_advisor";
+  entity_id?: number;
 }
 
 export async function sendDoxieMessage(

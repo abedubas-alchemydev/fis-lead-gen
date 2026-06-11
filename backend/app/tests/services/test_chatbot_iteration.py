@@ -353,8 +353,9 @@ async def test_max_iterations_returns_fallback_without_raising(
     user: AuthenticatedUser,
     db_stub: object,
 ) -> None:
-    """Six consecutive functionCall responses must exit the loop cleanly
-    with the final response's text (or a fallback), never raising."""
+    """MAX_TOOL_ITERATIONS + 1 consecutive functionCall responses must exit
+    the loop cleanly with the final response's text (or a fallback), never
+    raising."""
     responses = [
         httpx.Response(200, json=_function_call_response(("lookup", {"i": i})))
         for i in range(chatbot_module.MAX_TOOL_ITERATIONS + 1)
