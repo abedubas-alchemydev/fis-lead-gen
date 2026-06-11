@@ -8,6 +8,9 @@ import { useState, type AnchorHTMLAttributes, type ReactNode } from "react";
 import ReactMarkdown from "react-markdown";
 import rehypeSanitize from "rehype-sanitize";
 
+import { draftForMessage } from "./chatbot-draft";
+import { ChatbotDraftCard } from "./chatbot-draft-card";
+
 export type ChatRole = "user" | "assistant";
 
 export interface ChatMessage {
@@ -233,6 +236,12 @@ export function ChatbotMessage({
   // copy a half-answer, and FE-authored error text isn't worth copying.
   const showCopy = shouldRenderMarkdown;
 
+  // Interactive outreach-draft card. Only finalized assistant replies
+  // qualify, and only when the just-streamed turn captured draft data
+  // for this exact content (live session only — reloaded history has no
+  // capture, so it renders as plain text like before).
+  const draft = shouldRenderMarkdown ? draftForMessage(content) : undefined;
+
   function handleCopy() {
     if (!navigator.clipboard) return;
     navigator.clipboard
@@ -274,6 +283,9 @@ export function ChatbotMessage({
             content
           )}
         </div>
+        {draft ? (
+          <ChatbotDraftCard draft={draft} onInternalNavigate={onInternalNavigate} />
+        ) : null}
         {showCopy ? (
           <button
             type="button"

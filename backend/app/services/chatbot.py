@@ -147,6 +147,53 @@ TOOL_EXECUTION_TIMEOUT_S = 5.0
 CHAT_WALL_CLOCK_BUDGET_S = 60.0
 
 
+# ─── Streamed tool-result payloads (outreach draft card) ─────────────────
+#
+# The FE renders an interactive draft card on the assistant message when a
+# streamed turn produced an outreach draft. That needs the draft fields
+# (subject / body / recipients / draft_id) on the ``tool_result`` SSE
+# event — for these tools ONLY. Strict whitelist: every other tool's data
+# stays server-side (the model sees it via ``functionResponse``; the user
+# sees it through the model's prose).
+STREAM_RESULT_TOOLS: frozenset[str] = frozenset(
+    {
+        "draft_outreach_email",
+        "save_outreach_draft",
+        "get_outreach_draft",
+    }
+)
+
+# Serialized-size cap for a mirrored tool result. A max-size saved draft
+# (998-char subject + 20k-char body + recipients) fits with headroom;
+# anything larger is dropped rather than truncated — a clipped JSON
+# payload is worse than no card (the chat text flow still has the draft).
+STREAM_RESULT_MAX_CHARS = 24_000
+
+
+def _stream_tool_result_payload(
+    name: str, result: Mapping[str, Any]
+) -> dict[str, Any] | None:
+    """The result payload to mirror onto a ``tool_result`` SSE event.
+
+    ``None`` (the overwhelmingly common case) means "omit the field".
+    Only the whitelisted outreach-draft tools qualify, and only when the
+    result is a successful (non-error), JSON-serializable dict under the
+    size cap.
+    """
+    if name not in STREAM_RESULT_TOOLS:
+        return None
+    if result.get("error"):
+        # Error dicts carry no draft fields — nothing to render.
+        return None
+    try:
+        serialized = json.dumps(result)
+    except (TypeError, ValueError):
+        return None
+    if len(serialized) > STREAM_RESULT_MAX_CHARS:
+        return None
+    return dict(result)
+
+
 # ─── Tool result cache ────────────────────────────────────────────────────
 #
 # Per-process LRU keyed by ``(tool_name, args_json, user_id)`` with a short
@@ -529,9 +576,12 @@ class ChatbotService:
         - ``{type: "tool_call", name: "..."}`` — emitted just before
           dispatching a tool. The FE shows a per-tool status indicator
           (e.g. "Looking up Acme Securities…").
-        - ``{type: "tool_result", name: "...", error?: "..."}`` — emitted
-          after the tool returns; ``error`` is set when the tool returned
-          a structured error dict so the FE can dim the status line.
+        - ``{type: "tool_result", name: "...", error?: "...", result?: {...}}``
+          — emitted after the tool returns; ``error`` is set when the tool
+          returned a structured error dict so the FE can dim the status
+          line. ``result`` mirrors the full result JSON for the outreach
+          draft tools only (``STREAM_RESULT_TOOLS``) so the FE can render
+          an interactive draft card; all other tools omit it.
         - ``{type: "done", reply: "..."}`` — final event; carries the full
           assistant reply so the endpoint can persist it without
           re-concatenating deltas.
@@ -661,7 +711,7 @@ class ChatbotService:
                 result = await self._dispatch_tool(
                     call, tools=active_tools, user=user, db=db
                 )
-                yield {
+                result_event: dict[str, Any] = {
                     "type": "tool_result",
                     "name": call.name,
                     # Surface only the error code (not the data) — the FE
@@ -669,6 +719,13 @@ class ChatbotService:
                     # full result in the next iteration's contents.
                     "error": result.get("error"),
                 }
+                # Exception: the outreach-draft tools mirror their result
+                # JSON so the FE can render an interactive draft card.
+                # Whitelist + size cap live in the helper.
+                mirrored = _stream_tool_result_payload(call.name, result)
+                if mirrored is not None:
+                    result_event["result"] = mirrored
+                yield result_event
                 response_parts.append(
                     {
                         "functionResponse": {

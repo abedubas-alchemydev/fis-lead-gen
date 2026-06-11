@@ -317,6 +317,182 @@ async def test_tool_result_carries_error_field(
     assert tool_result["error"] == "no_access"
 
 
+# ── Whitelisted outreach-draft tools mirror their result payload ────────
+#
+# The FE renders an interactive draft card from the ``result`` field on
+# ``tool_result`` events — emitted ONLY for the tools in
+# ``STREAM_RESULT_TOOLS``, only on success, and only under the size cap.
+
+
+def _mock_one_tool_call_then_text(name: str, args: dict[str, Any]) -> None:
+    respx.post(_GEMINI_STREAM_URL).mock(
+        side_effect=[
+            httpx.Response(
+                200,
+                content=_sse_bytes([_gemini_chunk_function_call(name, args)]),
+            ),
+            httpx.Response(
+                200,
+                content=_sse_bytes([_gemini_chunk_text("Draft ready.")]),
+            ),
+        ]
+    )
+
+
+@respx.mock
+@pytest.mark.asyncio
+async def test_whitelisted_draft_tool_result_payload_is_mirrored(
+    patch_gemini: None,
+    user: AuthenticatedUser,
+    db_stub: object,
+) -> None:
+    _mock_one_tool_call_then_text("save_outreach_draft", {})
+
+    draft_result = {
+        "draft_id": 41,
+        "subject": "Clearing services intro",
+        "to": "cfo@acme.example",
+        "folder_id": None,
+        "link": "/outreach/sent?tab=drafts",
+        "message": "Saved.",
+    }
+    tool = _make_tool_stub("save_outreach_draft", result=draft_result)
+    events = await _collect(
+        ChatbotService().chat_stream(
+            messages=[ChatbotMessage(role="user", content="save it")],
+            user=user,
+            db=db_stub,
+            tools={"save_outreach_draft": tool},
+        )
+    )
+
+    tool_result = next(e for e in events if e["type"] == "tool_result")
+    assert tool_result["name"] == "save_outreach_draft"
+    assert tool_result["error"] is None
+    assert tool_result["result"] == draft_result
+
+
+@respx.mock
+@pytest.mark.asyncio
+async def test_non_whitelisted_tool_result_payload_is_not_mirrored(
+    patch_gemini: None,
+    user: AuthenticatedUser,
+    db_stub: object,
+) -> None:
+    """Every tool outside STREAM_RESULT_TOOLS keeps the lean event shape —
+    its data must never leave the server on the SSE stream."""
+    _mock_one_tool_call_then_text("search_broker_dealers", {"q": "Acme"})
+
+    tool = _make_tool_stub(
+        "search_broker_dealers", result={"items": [{"id": 1, "name": "Acme"}]}
+    )
+    events = await _collect(
+        ChatbotService().chat_stream(
+            messages=[ChatbotMessage(role="user", content="find acme")],
+            user=user,
+            db=db_stub,
+            tools={"search_broker_dealers": tool},
+        )
+    )
+
+    tool_result = next(e for e in events if e["type"] == "tool_result")
+    assert tool_result == {
+        "type": "tool_result",
+        "name": "search_broker_dealers",
+        "error": None,
+    }
+
+
+@respx.mock
+@pytest.mark.asyncio
+async def test_whitelisted_tool_error_result_is_not_mirrored(
+    patch_gemini: None,
+    user: AuthenticatedUser,
+    db_stub: object,
+) -> None:
+    """An error dict carries no draft fields — the event keeps only the
+    error code, same as before."""
+    _mock_one_tool_call_then_text("get_outreach_draft", {"draft_id": 9})
+
+    tool = _make_tool_stub(
+        "get_outreach_draft",
+        result={"error": "not_found", "message": "No draft with that id."},
+    )
+    events = await _collect(
+        ChatbotService().chat_stream(
+            messages=[ChatbotMessage(role="user", content="open draft 9")],
+            user=user,
+            db=db_stub,
+            tools={"get_outreach_draft": tool},
+        )
+    )
+
+    tool_result = next(e for e in events if e["type"] == "tool_result")
+    assert tool_result["error"] == "not_found"
+    assert "result" not in tool_result
+
+
+@respx.mock
+@pytest.mark.asyncio
+async def test_oversized_whitelisted_result_is_dropped_not_truncated(
+    patch_gemini: None,
+    user: AuthenticatedUser,
+    db_stub: object,
+) -> None:
+    _mock_one_tool_call_then_text("get_outreach_draft", {"draft_id": 7})
+
+    oversized = {
+        "draft_id": 7,
+        "subject": "big",
+        "body": "x" * (chatbot_module.STREAM_RESULT_MAX_CHARS + 1),
+    }
+    tool = _make_tool_stub("get_outreach_draft", result=oversized)
+    events = await _collect(
+        ChatbotService().chat_stream(
+            messages=[ChatbotMessage(role="user", content="open draft 7")],
+            user=user,
+            db=db_stub,
+            tools={"get_outreach_draft": tool},
+        )
+    )
+
+    tool_result = next(e for e in events if e["type"] == "tool_result")
+    assert tool_result["error"] is None
+    assert "result" not in tool_result
+
+
+def test_stream_tool_result_payload_helper_rules() -> None:
+    """Unit coverage for the whitelist/size/serializability gate itself."""
+    helper = chatbot_module._stream_tool_result_payload
+
+    ok = {"draft_id": 3, "subject": "hi", "body": "text"}
+    # All three outreach-draft tools pass through; the payload is a copy.
+    for name in chatbot_module.STREAM_RESULT_TOOLS:
+        mirrored = helper(name, ok)
+        assert mirrored == ok
+        assert mirrored is not ok
+    assert chatbot_module.STREAM_RESULT_TOOLS == {
+        "draft_outreach_email",
+        "save_outreach_draft",
+        "get_outreach_draft",
+    }
+
+    # Any other tool — including the send tool — never mirrors.
+    assert helper("send_outreach_draft", ok) is None
+    assert helper("search_broker_dealers", ok) is None
+
+    # Error results, oversized results, and unserializable results drop.
+    assert helper("get_outreach_draft", {"error": "not_found"}) is None
+    assert (
+        helper(
+            "get_outreach_draft",
+            {"body": "x" * (chatbot_module.STREAM_RESULT_MAX_CHARS + 1)},
+        )
+        is None
+    )
+    assert helper("draft_outreach_email", {"body": object()}) is None
+
+
 # ── Error: missing API key ──────────────────────────────────────────────
 
 
