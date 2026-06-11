@@ -576,6 +576,26 @@ export function ChatbotWidget() {
     [handleSend]
   );
 
+  // After the history view reopens an archived conversation, refetch the
+  // (now active) thread so the chat view shows the restored transcript.
+  // Errors intentionally propagate to the history view's error state —
+  // reopen is idempotent, so retrying from there is safe.
+  const reloadActiveConversation = useCallback(async () => {
+    setIsLoadingHistory(true);
+    try {
+      const history = await loadDoxieHistory();
+      const restored: ChatMessage[] = history.messages.map((m) => ({
+        id: nextIdRef.current++,
+        role: m.role,
+        content: m.content,
+        isFinalized: true
+      }));
+      setMessages(restored.length > 0 ? restored : [WELCOME_MESSAGE]);
+    } finally {
+      setIsLoadingHistory(false);
+    }
+  }, []);
+
   const handleNewChat = useCallback(async () => {
     if (isSending) return;
     const previous = messages;
@@ -626,6 +646,7 @@ export function ChatbotWidget() {
           pendingFileName={pendingFile?.name ?? null}
           onAttachFile={handleAttachFile}
           onClearPendingFile={clearPendingFile}
+          onConversationReopened={reloadActiveConversation}
           // Clicking a Doxie-emitted deep-link should collapse the
           // panel so the user can see the destination page. Cmd/Ctrl/
           // shift-click and middle-click bypass this and open in a new

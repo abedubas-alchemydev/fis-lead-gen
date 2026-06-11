@@ -11,6 +11,8 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.db.session import get_db_session
 from app.schemas.auth import AuthenticatedUser
 from app.schemas.chatbot import (
+    ChatbotConversationListResponse,
+    ChatbotConversationSummary,
     ChatbotEmbeddingBackfillEntityCounts,
     ChatbotEmbeddingBackfillResponse,
     ChatbotHistoryMessage,
@@ -21,7 +23,10 @@ from app.schemas.chatbot import (
 )
 from app.services.auth import get_current_user
 from app.services.chatbot import ChatbotService
-from app.services.chatbot_history import ChatbotHistoryService
+from app.services.chatbot_history import (
+    ChatbotHistoryService,
+    ConversationListing,
+)
 from app.services.chatbot_semantic import ChatbotSemanticService
 from app.services.gemini_responses import (
     GeminiConfigurationError,
@@ -333,3 +338,115 @@ async def post_chatbot_new_conversation(
         db, user_id=current_user.id
     )
     return ChatbotNewConversationResponse(conversation_id=conversation.id)
+
+
+# Preview length for the conversation list — long enough to recognise a
+# thread, short enough for one line in the 380px panel.
+_PREVIEW_MAX_CHARS = 80
+
+
+def _conversation_preview(first_user_message: str | None) -> str:
+    """Collapse the first user message into a one-line list preview."""
+    collapsed = " ".join((first_user_message or "").split())
+    if not collapsed:
+        # Conversation with no user turn yet (e.g. "New chat" pressed and
+        # abandoned) — give the FE something human to render.
+        return "New conversation"
+    if len(collapsed) <= _PREVIEW_MAX_CHARS:
+        return collapsed
+    return collapsed[:_PREVIEW_MAX_CHARS].rstrip() + "…"
+
+
+def _to_conversation_summary(
+    listing: ConversationListing,
+) -> ChatbotConversationSummary:
+    conversation = listing.conversation
+    return ChatbotConversationSummary(
+        id=conversation.id,
+        started_at=conversation.started_at,
+        updated_at=conversation.updated_at,
+        archived_at=conversation.archived_at,
+        is_active=conversation.archived_at is None,
+        message_count=listing.message_count,
+        preview=_conversation_preview(listing.first_user_message),
+    )
+
+
+@router.get("/conversations", response_model=ChatbotConversationListResponse)
+async def get_chatbot_conversations(
+    current_user: AuthenticatedUser = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db_session),
+) -> ChatbotConversationListResponse:
+    """Newest-first list of the current user's conversations (cap 50).
+
+    Powers the history browser in the chat panel — includes the active
+    conversation (``is_active``) alongside archived ones so the list is
+    a complete picture of the user's recent threads.
+    """
+    listings = await chatbot_history_service.list_conversations(
+        db, user_id=current_user.id
+    )
+    return ChatbotConversationListResponse(
+        conversations=[_to_conversation_summary(listing) for listing in listings]
+    )
+
+
+@router.get(
+    "/conversations/{conversation_id}/messages",
+    response_model=ChatbotHistoryResponse,
+)
+async def get_chatbot_conversation_messages(
+    conversation_id: int,
+    current_user: AuthenticatedUser = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db_session),
+) -> ChatbotHistoryResponse:
+    """Read-only transcript of one conversation (active or archived).
+
+    404 — not 403 — when the id doesn't exist or belongs to a different
+    user, so the response doesn't leak which conversation ids exist.
+    """
+    conversation = await chatbot_history_service.get_conversation_for_user(
+        db, conversation_id=conversation_id, user_id=current_user.id
+    )
+    if conversation is None:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Conversation not found.",
+        )
+    rows = await chatbot_history_service.list_messages(
+        db, conversation_id=conversation.id
+    )
+    return ChatbotHistoryResponse(
+        conversation_id=conversation.id,
+        messages=[ChatbotHistoryMessage.model_validate(row) for row in rows],
+    )
+
+
+@router.post(
+    "/conversations/{conversation_id}/reopen",
+    response_model=ChatbotConversationSummary,
+)
+async def post_chatbot_conversation_reopen(
+    conversation_id: int,
+    current_user: AuthenticatedUser = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db_session),
+) -> ChatbotConversationSummary:
+    """Make an archived conversation the active one again.
+
+    Archives the currently active conversation (when a different one
+    exists), clears the target's ``archived_at``, and returns the
+    target's summary. Idempotent when the target is already active.
+    Same 404-over-403 ownership semantics as the transcript endpoint.
+    """
+    conversation = await chatbot_history_service.reopen_conversation(
+        db, conversation_id=conversation_id, user_id=current_user.id
+    )
+    if conversation is None:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Conversation not found.",
+        )
+    listing = await chatbot_history_service.summarize_conversation(
+        db, conversation=conversation
+    )
+    return _to_conversation_summary(listing)

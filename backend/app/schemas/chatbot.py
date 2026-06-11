@@ -67,6 +67,32 @@ class ChatbotNewConversationResponse(BaseModel):
     conversation_id: int
 
 
+class ChatbotConversationSummary(BaseModel):
+    """One row in GET /chatbot/conversations (and the body returned by
+    POST /chatbot/conversations/{id}/reopen).
+
+    ``preview`` is the conversation's first user message truncated for
+    list display ("New conversation" when no user turn exists yet), so
+    the history browser is scannable without loading any transcript.
+    """
+    model_config = ConfigDict(extra="forbid")
+
+    id: int
+    started_at: datetime
+    updated_at: datetime
+    archived_at: datetime | None
+    is_active: bool
+    message_count: int
+    preview: str
+
+
+class ChatbotConversationListResponse(BaseModel):
+    """Newest-first listing of the current user's conversations."""
+    model_config = ConfigDict(extra="forbid")
+
+    conversations: list[ChatbotConversationSummary]
+
+
 class ChatbotEmbeddingBackfillEntityCounts(BaseModel):
     """Per-entity-type slice of a backfill run."""
     model_config = ConfigDict(extra="forbid")
