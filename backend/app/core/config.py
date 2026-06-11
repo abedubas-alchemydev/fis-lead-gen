@@ -271,7 +271,9 @@ class Settings(BaseSettings):
     # pipeline). Flash is the production default — sub-second TTFB and ~5×
     # cheaper than Pro per token, sufficient for general-purpose conversation.
     gemini_chat_model: str = "gemini-2.5-flash"
-    gemini_chat_max_output_tokens: int = 1024
+    # 4096 (was 1024) — tool-rich answers (firm rundowns, outreach drafts,
+    # multi-firm comparisons) were truncating mid-reply at 1024.
+    gemini_chat_max_output_tokens: int = 4096
     gemini_chat_temperature: float = 0.7
     # When True, the LLM-bound clearing-extraction path uploads PDFs to the
     # provider Files API (Gemini / OpenAI) instead of inline base64. ADR-0001

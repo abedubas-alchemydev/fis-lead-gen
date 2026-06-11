@@ -318,6 +318,42 @@ async def test_returns_reply_and_persists_user_then_assistant(
     assert len(chatbot.calls) == 1
 
 
+async def test_accepts_entity_fields_in_page_context(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Old clients omit ``entity_type``/``entity_id`` (covered by the test
+    above); new clients send them from firm detail routes. The payload must
+    validate and the parsed fields must reach the chatbot service. The
+    history layer keeps persisting only path/title off the same object."""
+    chatbot, history = _install_stubs(
+        monkeypatch, chatbot=_StubChatbotService(reply="It's Acme.")
+    )
+
+    response = await _post_message(
+        {
+            "messages": [
+                {"role": "user", "content": "Is this firm self-clearing?"}
+            ],
+            "page_context": {
+                "path": "/master-list/678",
+                "title": "Acme Securities — DOX",
+                "entity_type": "broker_dealer",
+                "entity_id": 678,
+            },
+        }
+    )
+
+    assert response.status_code == 200
+    assert chatbot.calls[0]["page_context"] == ChatbotPageContext(
+        path="/master-list/678",
+        title="Acme Securities — DOX",
+        entity_type="broker_dealer",
+        entity_id=678,
+    )
+    appends = [c for c in history.calls if c["method"] == "append_message"]
+    assert appends[0]["page_context"].entity_id == 678
+
+
 async def test_rejects_when_last_message_is_assistant(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

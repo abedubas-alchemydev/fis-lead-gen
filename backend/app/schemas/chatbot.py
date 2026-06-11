@@ -21,11 +21,21 @@ class ChatbotPageContext(BaseModel):
     The FE sends ``path`` (always) and ``title`` (when available). The BE
     folds these into the system prompt so Doxie can reason about the
     current page without the FE having to pre-fetch any per-route summary.
+
+    ``entity_type`` / ``entity_id`` are sent only from firm detail routes
+    (numeric-id ``/master-list/{id}`` → ``broker_dealer``, numeric-id
+    ``/advisor-list/{id}`` → ``investment_advisor``) so the BE can ground
+    "this firm" to the exact row being viewed. Both optional — old clients
+    omit them — and never persisted (only path/title are stored on the
+    ``chatbot_message`` row). Unknown values fall back silently to the
+    path/title behaviour rather than erroring.
     """
     model_config = ConfigDict(extra="forbid")
 
     path: str | None = Field(default=None, max_length=512)
     title: str | None = Field(default=None, max_length=256)
+    entity_type: str | None = Field(default=None, max_length=64)
+    entity_id: int | None = Field(default=None)
 
 
 class ChatbotRequest(BaseModel):

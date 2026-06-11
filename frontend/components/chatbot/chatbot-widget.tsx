@@ -13,6 +13,7 @@ import {
   streamDoxieMessage,
   uploadVaultFile,
   type DoxieChatMessage,
+  type DoxiePageContext,
   type DoxieStreamEvent
 } from "@/lib/api";
 import { DOXIE_ASK_EVENT, type DoxieAskDetail } from "@/lib/doxie-events";
@@ -153,6 +154,21 @@ function buildSuggestedPrompts(pathname: string | null): string[] {
     "What's new in my alerts?",
     "What can you do?"
   ];
+}
+
+// Firm-detail routes carry the viewed entity's identity in the page
+// context so the BE can ground "this firm" to the exact row without a
+// tool round-trip. Only fully-numeric id segments qualify — any other
+// path sends no entity fields (the BE then falls back to path/title).
+function entityContextFor(
+  pathname: string | null
+): Pick<DoxiePageContext, "entity_type" | "entity_id"> | null {
+  const path = pathname ?? "";
+  const bd = /^\/master-list\/(\d+)(?:\/|$)/.exec(path);
+  if (bd) return { entity_type: "broker_dealer", entity_id: Number(bd[1]) };
+  const ia = /^\/advisor-list\/(\d+)(?:\/|$)/.exec(path);
+  if (ia) return { entity_type: "investment_advisor", entity_id: Number(ia[1]) };
+  return null;
 }
 
 function DoxieIcon({ size = 24, strokeWidth = 2 }: { size?: number; strokeWidth?: number }) {
@@ -377,7 +393,8 @@ export function ChatbotWidget() {
           messages: historyForApi,
           pageContext: {
             path: pathname ?? undefined,
-            title: typeof document !== "undefined" ? document.title : undefined
+            title: typeof document !== "undefined" ? document.title : undefined,
+            ...(entityContextFor(pathname) ?? {})
           },
           signal: controller.signal,
           onEvent: handleEvent
