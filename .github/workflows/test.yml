@@ -331,8 +331,10 @@ jobs:
       # since our last load. A Cloud Scheduler cron (nightly 04:00 ET,
       # America/New_York) invokes this job so fresh BDs are in the master list
       # by morning — one-time scheduler setup + ops notes in
-      # docs/runbooks/extract-new-bds.md. The script is standalone (no app.*
-      # imports) and only needs DATABASE_URL: it probes FINRA's public
+      # docs/runbooks/extract-new-bds.md. The script needs DATABASE_URL, plus
+      # GEMINI_API_KEY so its post-apply Doxie embed hook can index the new
+      # BDs (without the key the hook logs a skip and the semantic index
+      # drifts). It probes FINRA's public
       # BrokerCheck endpoints from MAX(crd_number)+1 and self-terminates after
       # --max-misses consecutive non-BD CRDs, so one run/night catches up the
       # gap. Lighter than the gap-fill/backfill jobs (1Gi/1cpu, 1h timeout) —
@@ -354,7 +356,7 @@ jobs:
             --max-retries=0 \
             --parallelism=1 \
             --tasks=1 \
-            --set-secrets=DATABASE_URL=DATABASE_URL_BACKEND_STAGING:latest \
+            --set-secrets=DATABASE_URL=DATABASE_URL_BACKEND_STAGING:latest,GEMINI_API_KEY=GEMINI_API_KEY:latest \
             --labels=commit-sha=${{ env.SHORT_SHA }},environment=staging,kind=batch-job
 
       - name: Deploy frontend to Cloud Run
