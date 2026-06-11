@@ -1408,7 +1408,15 @@ export async function startNewDoxieChat(): Promise<number> {
 export type DoxieStreamEvent =
   | { type: "text_delta"; text: string }
   | { type: "tool_call"; name: string }
-  | { type: "tool_result"; name: string; error?: string | null }
+  | {
+      type: "tool_result";
+      name: string;
+      error?: string | null;
+      // Mirrored result JSON — present ONLY for the whitelisted outreach
+      // draft tools (see STREAM_RESULT_TOOLS in backend chatbot.py) so
+      // the FE can render an interactive draft card. Other tools omit it.
+      result?: Record<string, unknown> | null;
+    }
   | { type: "done"; reply: string }
   | { type: "error"; code: string; message: string };
 

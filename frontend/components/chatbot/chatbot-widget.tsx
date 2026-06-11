@@ -19,6 +19,12 @@ import {
 import { DOXIE_ASK_EVENT, type DoxieAskDetail } from "@/lib/doxie-events";
 import type { VaultFolder } from "@/lib/types";
 
+import {
+  applyDraftToolResult,
+  isDraftResultTool,
+  rememberDraftForMessage,
+  type DoxieOutreachDraft
+} from "./chatbot-draft";
 import { ChatbotPanel, type ChatbotPanelHandle } from "./chatbot-panel";
 import type { ChatMessage } from "./chatbot-message";
 
@@ -333,6 +339,18 @@ export function ChatbotWidget() {
     async (historyForApi: DoxieChatMessage[], pendingId: number) => {
       lastTurnRef.current = historyForApi;
 
+      // Outreach-draft capture for this turn. The BE mirrors the result
+      // JSON of the outreach draft tools (and only those — see
+      // STREAM_RESULT_TOOLS in backend chatbot.py) onto ``tool_result``
+      // events; fold them into a snapshot as they arrive. On ``done`` the
+      // snapshot is remembered keyed by the bubble's final content so
+      // ChatbotMessage renders an interactive draft card under it.
+      // ``streamedText`` shadows the pending bubble's accumulated content
+      // (both start empty and append every delta) so the remember key
+      // matches exactly what the bubble renders.
+      let draftSnapshot: DoxieOutreachDraft | null = null;
+      let streamedText = "";
+
       function patchPending(updater: (current: ChatMessage) => ChatMessage) {
         setMessages((prev) =>
           prev.map((m) => (m.id === pendingId ? updater(m) : m))
@@ -345,11 +363,19 @@ export function ChatbotWidget() {
             patchPending((m) => ({ ...m, toolStatus: toolStatusFor(event.name) }));
             break;
           case "tool_result":
+            if (event.result && isDraftResultTool(event.name)) {
+              draftSnapshot = applyDraftToolResult(
+                draftSnapshot,
+                event.name,
+                event.result
+              );
+            }
             // Clear the per-tool label; if another tool_call follows it'll
             // replace it. A "done" or first text_delta finalises pending.
             patchPending((m) => ({ ...m, toolStatus: undefined }));
             break;
           case "text_delta":
+            streamedText += event.text;
             patchPending((m) => ({
               ...m,
               // First delta clears pending so the bubble switches from
@@ -359,7 +385,13 @@ export function ChatbotWidget() {
               content: m.content + event.text
             }));
             break;
-          case "done":
+          case "done": {
+            // Same fallback as the content patch below: if no deltas
+            // streamed, the ``reply`` carries the final text.
+            const finalContent = streamedText || event.reply;
+            if (draftSnapshot && finalContent) {
+              rememberDraftForMessage(finalContent, draftSnapshot);
+            }
             patchPending((m) => ({
               ...m,
               pending: false,
@@ -373,6 +405,7 @@ export function ChatbotWidget() {
               isFinalized: true
             }));
             break;
+          }
           case "error":
             patchPending(() => ({
               id: pendingId,
