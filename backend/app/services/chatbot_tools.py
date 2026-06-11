@@ -5934,3 +5934,10 @@ TOOL_REGISTRY: dict[str, Tool] = {
         execute=_execute_find_contacts_by_domain,
     ),
 }
+
+# Aggregate-analytics tools live in their own module; imported after the
+# registry exists because that module defers its imports from this one
+# (mutual reference — see its docstring for the ordering contract).
+from app.services.chatbot_tools_analytics import build_analytics_tools  # noqa: E402
+
+TOOL_REGISTRY.update(build_analytics_tools())
