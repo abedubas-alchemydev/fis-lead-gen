@@ -1772,6 +1772,9 @@ def test_tool_registry_has_expected_names() -> None:
         "mark_alerts_read",
         "find_contact_by_email",
         "find_contacts_by_domain",
+        # Aggregate-analytics tools (chatbot_tools_analytics module).
+        "get_firm_aggregates",
+        "list_firms_by_clearing_partner",
     }
 
 
