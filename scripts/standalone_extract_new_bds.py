@@ -8,9 +8,16 @@ This script catches up the gap without re-running the full initial_load:
 it probes FINRA's per-CRD search endpoint starting just above
 ``MAX(crd_number)``, and INSERTs each new BD it finds.
 
-Standalone -- no imports from ``app.*``, ``brokercheck_extractor/``, or
-any other project module -- so the file can be removed after the
-catchup without breaking anything else.
+Standalone -- the extraction itself imports nothing from ``app.*``,
+``brokercheck_extractor/``, or any other project module -- so the file
+can be removed after the catchup without breaking anything else. The one
+exception is the post-apply Doxie freshness hook
+(``_embed_backfill_after_apply``): after new BDs are committed it lazily
+imports ``app.services.chatbot_semantic`` to embed them into the
+``chatbot_firm_embedding`` semantic-search index. That import is
+best-effort and failure-isolated -- when ``app.*`` or GEMINI_API_KEY is
+unavailable it logs and moves on, never touching the extractor's exit
+code or its committed rows.
 
 Discovery strategy. FINRA assigns CRDs sequentially. Start at
 ``MAX(crd_number) + 1`` and probe upward. Stop when we see
@@ -319,10 +326,78 @@ async def _probe_one(client: httpx.AsyncClient, crd: int) -> Optional[NewBd]:
 
 
 # ---------------------------------------------------------------------------
+# Doxie semantic-index freshness hook (best-effort, post-apply only)
+# ---------------------------------------------------------------------------
+
+async def _embed_backfill_after_apply() -> None:
+    """Embed newly-committed BDs into Doxie's semantic-search index.
+
+    The nightly Cloud Run Job is this script's main caller, and the BDs
+    it inserts would otherwise sit unembedded until someone runs the
+    populate-all pipeline (which almost never happens on staging). The
+    backfill is incremental -- content-hash skip means already-embedded
+    firms cost a hash lookup, not a Gemini call -- so chaining it here
+    keeps ``chatbot_firm_embedding`` fresh for cheap.
+
+    Failure-isolated by contract: lazy ``app.*`` imports (preserving the
+    standalone property of every path that doesn't reach a successful
+    ``--apply`` write), and every exception is caught and logged. This
+    function must never change the extractor's exit code; the inserts it
+    runs after are already committed, so there is nothing to roll back.
+    In the backend image PYTHONPATH=/app makes ``app.*`` importable and
+    the app reads the same DATABASE_URL env var this script defaults to;
+    GEMINI_API_KEY missing (it isn't mounted on the extract job yet)
+    downgrades to a logged skip.
+    """
+    try:
+        # Local checkouts run this script without PYTHONPATH set up; the
+        # backend package lives at <repo>/backend (same bootstrap as
+        # scripts/gap_fill_investment_advisors.py). In the image the dir
+        # doesn't exist and PYTHONPATH=/app already covers ``app.*``.
+        from pathlib import Path
+
+        backend_root = Path(__file__).resolve().parents[1] / "backend"
+        if backend_root.is_dir() and str(backend_root) not in sys.path:
+            sys.path.insert(0, str(backend_root))
+
+        from app.core.config import settings
+        from app.db.session import SessionLocal
+        from app.services.chatbot_semantic import ChatbotSemanticService
+    except Exception as exc:  # noqa: BLE001
+        logger.warning(
+            "doxie embed backfill after extract skipped: app modules "
+            "unavailable (%s)", exc,
+        )
+        return
+    try:
+        if not settings.gemini_api_key:
+            logger.info(
+                "doxie embed backfill after extract skipped: GEMINI_API_KEY "
+                "not configured"
+            )
+            return
+        service = ChatbotSemanticService()
+        async with SessionLocal() as db:
+            bd = await service.backfill_broker_dealers(db)
+            ia = await service.backfill_investment_advisors(db)
+        logger.info(
+            "doxie embed backfill after extract: bd_embedded=%d bd_skipped=%d "
+            "bd_failed=%d ia_embedded=%d ia_skipped=%d ia_failed=%d",
+            bd.embedded, bd.skipped, bd.failed,
+            ia.embedded, ia.skipped, ia.failed,
+        )
+    except Exception:  # noqa: BLE001
+        logger.exception(
+            "doxie embed backfill after extract failed; extractor result "
+            "unaffected"
+        )
+
+
+# ---------------------------------------------------------------------------
 # Main
 # ---------------------------------------------------------------------------
 
-async def main() -> int:
+async def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(
         description="Standalone CRD-probe extractor for net-new broker-dealers.",
     )
@@ -350,7 +425,7 @@ async def main() -> int:
         default=500,
         help="Hard cap on total CRDs probed in one run (default 500).",
     )
-    args = parser.parse_args()
+    args = parser.parse_args(argv)
 
     if not args.db_url:
         logger.error("no DATABASE_URL env var and no --db-url; aborting")
@@ -509,6 +584,11 @@ async def main() -> int:
                 written += 1
                 logger.info("inserted id=%d crd=%s %s", new_id, bd.crd_number, bd.name)
         logger.info("wrote %d row(s) (skipped %d duplicate(s))", written, len(skipped))
+        # New BDs are committed (engine.begin() above) -- chain the Doxie
+        # embed pass so they become semantically searchable tonight, not
+        # whenever populate-all next runs. Best-effort: the hook swallows
+        # its own errors and never affects this script's exit code.
+        await _embed_backfill_after_apply()
         return 0
     finally:
         await engine.dispose()
