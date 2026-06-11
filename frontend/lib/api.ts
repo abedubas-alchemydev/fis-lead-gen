@@ -1402,6 +1402,52 @@ export async function startNewDoxieChat(): Promise<number> {
   return response.conversation_id;
 }
 
+// ── Doxie conversation history browser ────────────────────────────────────
+// List / transcript / reopen for past conversations. ``preview`` is the
+// BE-derived first user message (already truncated for list display).
+
+export interface DoxieConversationSummary {
+  id: number;
+  started_at: string;
+  updated_at: string;
+  archived_at: string | null;
+  is_active: boolean;
+  message_count: number;
+  preview: string;
+}
+
+// Newest-first, capped at 50 server-side. Includes the active
+// conversation (``is_active: true``) alongside archived ones.
+export async function listDoxieConversations(): Promise<DoxieConversationSummary[]> {
+  const response = await apiRequest<{ conversations: DoxieConversationSummary[] }>(
+    "/api/v1/chatbot/conversations",
+    { method: "GET" }
+  );
+  return response.conversations;
+}
+
+// Read-only transcript of one conversation (active or archived). 404s
+// when the id isn't the current user's.
+export async function loadDoxieConversationMessages(
+  conversationId: number
+): Promise<DoxieHistoryResponse> {
+  return apiRequest<DoxieHistoryResponse>(
+    `/api/v1/chatbot/conversations/${conversationId}/messages`,
+    { method: "GET" }
+  );
+}
+
+// Make an archived conversation the active one again (archives the
+// current active thread). Idempotent when it's already active.
+export async function reopenDoxieConversation(
+  conversationId: number
+): Promise<DoxieConversationSummary> {
+  return apiRequest<DoxieConversationSummary>(
+    `/api/v1/chatbot/conversations/${conversationId}/reopen`,
+    { method: "POST" }
+  );
+}
+
 // ── Doxie streaming chat (SSE) ────────────────────────────────────────────
 // Events emitted by the BE stream endpoint. Mirrors the dicts yielded by
 // `ChatbotService.chat_stream` (see backend/app/services/chatbot.py).

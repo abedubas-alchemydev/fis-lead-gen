@@ -1,15 +1,17 @@
 "use client";
 
-import { Paperclip, PlusCircle, Send, Square, X } from "lucide-react";
+import { History, Paperclip, PlusCircle, Send, Square, X } from "lucide-react";
 import {
   forwardRef,
   useEffect,
   useImperativeHandle,
   useRef,
+  useState,
   type ChangeEvent,
   type KeyboardEvent,
 } from "react";
 
+import { ChatbotHistory } from "./chatbot-history";
 import { ChatbotMessage, type ChatMessage } from "./chatbot-message";
 import { ChatbotAttachButton, ChatbotVoiceButton } from "./chatbot-input-controls";
 
@@ -40,6 +42,10 @@ export interface ChatbotPanelProps {
   onSuggestionClick?: (text: string) => void;
   // Re-runs the turn behind a retryable error bubble.
   onRetryMessage?: (messageId: number) => void;
+  // Fires after the history browser reopens an archived conversation —
+  // the widget refetches the active thread so the chat view shows the
+  // restored transcript before the panel flips back to it.
+  onConversationReopened?: () => void | Promise<void>;
 }
 
 export interface ChatbotPanelHandle {
@@ -64,11 +70,15 @@ export const ChatbotPanel = forwardRef<ChatbotPanelHandle, ChatbotPanelProps>(fu
     suggestions,
     onSuggestionClick,
     onRetryMessage,
+    onConversationReopened,
   },
   ref,
 ) {
   const inputRef = useRef<HTMLTextAreaElement>(null);
   const endRef = useRef<HTMLDivElement>(null);
+  // "chat" renders the live thread + composer; "history" swaps the body
+  // for the conversation browser (list + read-only transcripts).
+  const [view, setView] = useState<"chat" | "history">("chat");
 
   useImperativeHandle(ref, () => ({
     focusInput: () => inputRef.current?.focus(),
@@ -110,10 +120,30 @@ export const ChatbotPanel = forwardRef<ChatbotPanelHandle, ChatbotPanelProps>(fu
           <p className="text-xs text-[var(--text-muted,#94a3b8)]">Your in-app AI assistant</p>
         </div>
         <div className="flex items-center gap-1">
+          <button
+            type="button"
+            onClick={() => setView((current) => (current === "history" ? "chat" : "history"))}
+            aria-label={view === "history" ? "Back to chat" : "Browse conversation history"}
+            title="Conversation history"
+            aria-pressed={view === "history"}
+            disabled={isSending}
+            className={`grid h-9 w-9 place-items-center rounded-lg transition hover:bg-[var(--surface-2,#f1f6fd)] hover:text-[var(--text,#0f172a)] disabled:cursor-not-allowed disabled:opacity-50 focus:outline-none focus:ring-2 focus:ring-[var(--doxie,#6366f1)]/40 ${
+              view === "history"
+                ? "bg-[var(--surface-2,#f1f6fd)] text-[var(--doxie,#6366f1)]"
+                : "text-[var(--text-dim,#475569)]"
+            }`}
+          >
+            <History size={18} strokeWidth={2} />
+          </button>
           {onNewChat ? (
             <button
               type="button"
-              onClick={onNewChat}
+              onClick={() => {
+                // Starting a fresh chat from the history view should land
+                // the user on the (now empty) live thread, not the list.
+                setView("chat");
+                onNewChat();
+              }}
               aria-label="Start a new chat"
               title="Start a new chat"
               disabled={isSending}
@@ -133,119 +163,136 @@ export const ChatbotPanel = forwardRef<ChatbotPanelHandle, ChatbotPanelProps>(fu
         </div>
       </header>
 
-      <div className="flex-1 space-y-3 overflow-y-auto px-4 py-4">
-        {isLoadingHistory ? (
-          <p className="text-center text-xs text-[var(--text-muted,#94a3b8)]">
-            Loading your conversation…
-          </p>
-        ) : (
-          messages.map((message) => (
-            <ChatbotMessage
-              key={message.id}
-              role={message.role}
-              content={message.content}
-              pending={message.pending}
-              error={message.error}
-              toolStatus={message.toolStatus}
-              isFinalized={message.isFinalized}
-              onInternalNavigate={onInternalNavigate}
-              onRetry={
-                message.error && message.retryable && onRetryMessage
-                  ? () => onRetryMessage(message.id)
-                  : undefined
-              }
-            />
-          ))
-        )}
-        <div ref={endRef} />
-      </div>
-
-      {suggestions && suggestions.length > 0 && !isLoadingHistory && !isSending ? (
-        <div className="flex flex-wrap gap-1.5 px-3 pb-1 pt-2">
-          {suggestions.map((text) => (
-            <button
-              key={text}
-              type="button"
-              onClick={() => onSuggestionClick?.(text)}
-              className="rounded-full border border-[var(--border,rgba(30,64,175,0.1))] bg-[var(--surface-2,#f1f6fd)] px-3 py-1.5 text-xs text-[var(--text-dim,#475569)] transition hover:border-[var(--doxie,#6366f1)]/40 hover:text-[var(--doxie,#6366f1)] focus:outline-none focus:ring-2 focus:ring-[var(--doxie,#6366f1)]/40"
-            >
-              {text}
-            </button>
-          ))}
-        </div>
-      ) : null}
-
-      <form
-        className="flex flex-col gap-2 border-t border-[var(--border,rgba(30,64,175,0.1))] bg-[var(--surface,#ffffff)] px-3 py-3"
-        onSubmit={(event) => {
-          event.preventDefault();
-          if (!sendDisabled) onSend();
-        }}
-      >
-        {pendingFileName ? (
-          <div className="flex items-center gap-2 self-start rounded-lg bg-[var(--surface-2,#f1f6fd)] px-2 py-1 text-xs text-[var(--text,#0f172a)]">
-            <Paperclip size={12} strokeWidth={2} className="shrink-0 text-[var(--text-dim,#475569)]" />
-            <span className="max-w-[240px] truncate">{pendingFileName}</span>
-            {onClearPendingFile ? (
-              <button
-                type="button"
-                onClick={onClearPendingFile}
-                aria-label="Remove attachment"
-                title="Remove attachment"
-                className="grid h-4 w-4 place-items-center rounded text-[var(--text-muted,#94a3b8)] transition hover:text-[var(--text,#0f172a)]"
-              >
-                <X size={12} strokeWidth={2} />
-              </button>
-            ) : null}
+      {view === "history" ? (
+        <ChatbotHistory
+          onBack={() => setView("chat")}
+          onConversationReopened={async () => {
+            // Let the widget refetch the active thread first so the chat
+            // view never flashes the stale (pre-reopen) transcript. A
+            // reload failure propagates to the history view's error state
+            // (retrying is safe — reopen is idempotent).
+            await onConversationReopened?.();
+            setView("chat");
+          }}
+          onInternalNavigate={onInternalNavigate}
+        />
+      ) : (
+        <>
+          <div className="flex-1 space-y-3 overflow-y-auto px-4 py-4">
+            {isLoadingHistory ? (
+              <p className="text-center text-xs text-[var(--text-muted,#94a3b8)]">
+                Loading your conversation…
+              </p>
+            ) : (
+              messages.map((message) => (
+                <ChatbotMessage
+                  key={message.id}
+                  role={message.role}
+                  content={message.content}
+                  pending={message.pending}
+                  error={message.error}
+                  toolStatus={message.toolStatus}
+                  isFinalized={message.isFinalized}
+                  onInternalNavigate={onInternalNavigate}
+                  onRetry={
+                    message.error && message.retryable && onRetryMessage
+                      ? () => onRetryMessage(message.id)
+                      : undefined
+                  }
+                />
+              ))
+            )}
+            <div ref={endRef} />
           </div>
-        ) : null}
-        <div className="flex items-end gap-2">
-          {onAttachFile ? (
-            <ChatbotAttachButton onFile={onAttachFile} disabled={isSending} />
+
+          {suggestions && suggestions.length > 0 && !isLoadingHistory && !isSending ? (
+            <div className="flex flex-wrap gap-1.5 px-3 pb-1 pt-2">
+              {suggestions.map((text) => (
+                <button
+                  key={text}
+                  type="button"
+                  onClick={() => onSuggestionClick?.(text)}
+                  className="rounded-full border border-[var(--border,rgba(30,64,175,0.1))] bg-[var(--surface-2,#f1f6fd)] px-3 py-1.5 text-xs text-[var(--text-dim,#475569)] transition hover:border-[var(--doxie,#6366f1)]/40 hover:text-[var(--doxie,#6366f1)] focus:outline-none focus:ring-2 focus:ring-[var(--doxie,#6366f1)]/40"
+                >
+                  {text}
+                </button>
+              ))}
+            </div>
           ) : null}
-          <ChatbotVoiceButton
-            onTranscript={(text) => onInputChange(input ? `${input} ${text}` : text)}
-            disabled={isSending}
-          />
-          <textarea
-            ref={inputRef}
-            value={input}
-            onChange={handleChange}
-            onKeyDown={handleKeyDown}
-            rows={1}
-            placeholder={
-              isSending
-                ? "Doxie is thinking…"
-                : pendingFileName
-                  ? "Name a folder to file it in, or just send…"
-                  : "Type a message…"
-            }
-            aria-label="Chat message"
-            disabled={isSending}
-            className="max-h-32 min-h-[40px] flex-1 resize-none rounded-xl border border-[var(--border,rgba(30,64,175,0.1))] bg-[var(--surface,#ffffff)] px-3 py-2 text-sm text-[var(--text,#0f172a)] placeholder:text-[var(--text-muted,#94a3b8)] focus:border-[var(--doxie,#6366f1)] focus:outline-none focus:ring-2 focus:ring-[var(--doxie,#6366f1)]/30 disabled:cursor-not-allowed disabled:opacity-60"
-          />
-          {isSending && onStop ? (
-            <button
-              type="button"
-              onClick={onStop}
-              aria-label="Stop generating"
-              title="Stop generating"
-              className="grid h-10 w-10 shrink-0 place-items-center rounded-xl bg-[var(--surface-2,#f1f6fd)] text-[var(--text,#0f172a)] shadow-sm ring-1 ring-inset ring-[var(--border,rgba(30,64,175,0.1))] transition hover:bg-[var(--border,rgba(30,64,175,0.1))] focus:outline-none focus:ring-2 focus:ring-[var(--doxie,#6366f1)]/40 focus:ring-offset-2"
-            >
-              <Square size={14} strokeWidth={2} fill="currentColor" />
-            </button>
-          ) : (
-            <button
-              type="submit"
-              disabled={sendDisabled}
-              aria-label="Send message"
-              className="grid h-10 w-10 shrink-0 place-items-center rounded-xl bg-[var(--doxie,#6366f1)] text-white shadow-sm transition hover:bg-[var(--doxie-2,#8b5cf6)] disabled:cursor-not-allowed disabled:opacity-50 focus:outline-none focus:ring-2 focus:ring-[var(--doxie,#6366f1)]/40 focus:ring-offset-2"
-            >
-              <Send size={16} strokeWidth={2} />
-            </button>
-          )}
-        </div>
-      </form>
+
+          <form
+            className="flex flex-col gap-2 border-t border-[var(--border,rgba(30,64,175,0.1))] bg-[var(--surface,#ffffff)] px-3 py-3"
+            onSubmit={(event) => {
+              event.preventDefault();
+              if (!sendDisabled) onSend();
+            }}
+          >
+            {pendingFileName ? (
+              <div className="flex items-center gap-2 self-start rounded-lg bg-[var(--surface-2,#f1f6fd)] px-2 py-1 text-xs text-[var(--text,#0f172a)]">
+                <Paperclip size={12} strokeWidth={2} className="shrink-0 text-[var(--text-dim,#475569)]" />
+                <span className="max-w-[240px] truncate">{pendingFileName}</span>
+                {onClearPendingFile ? (
+                  <button
+                    type="button"
+                    onClick={onClearPendingFile}
+                    aria-label="Remove attachment"
+                    title="Remove attachment"
+                    className="grid h-4 w-4 place-items-center rounded text-[var(--text-muted,#94a3b8)] transition hover:text-[var(--text,#0f172a)]"
+                  >
+                    <X size={12} strokeWidth={2} />
+                  </button>
+                ) : null}
+              </div>
+            ) : null}
+            <div className="flex items-end gap-2">
+              {onAttachFile ? (
+                <ChatbotAttachButton onFile={onAttachFile} disabled={isSending} />
+              ) : null}
+              <ChatbotVoiceButton
+                onTranscript={(text) => onInputChange(input ? `${input} ${text}` : text)}
+                disabled={isSending}
+              />
+              <textarea
+                ref={inputRef}
+                value={input}
+                onChange={handleChange}
+                onKeyDown={handleKeyDown}
+                rows={1}
+                placeholder={
+                  isSending
+                    ? "Doxie is thinking…"
+                    : pendingFileName
+                      ? "Name a folder to file it in, or just send…"
+                      : "Type a message…"
+                }
+                aria-label="Chat message"
+                disabled={isSending}
+                className="max-h-32 min-h-[40px] flex-1 resize-none rounded-xl border border-[var(--border,rgba(30,64,175,0.1))] bg-[var(--surface,#ffffff)] px-3 py-2 text-sm text-[var(--text,#0f172a)] placeholder:text-[var(--text-muted,#94a3b8)] focus:border-[var(--doxie,#6366f1)] focus:outline-none focus:ring-2 focus:ring-[var(--doxie,#6366f1)]/30 disabled:cursor-not-allowed disabled:opacity-60"
+              />
+              {isSending && onStop ? (
+                <button
+                  type="button"
+                  onClick={onStop}
+                  aria-label="Stop generating"
+                  title="Stop generating"
+                  className="grid h-10 w-10 shrink-0 place-items-center rounded-xl bg-[var(--surface-2,#f1f6fd)] text-[var(--text,#0f172a)] shadow-sm ring-1 ring-inset ring-[var(--border,rgba(30,64,175,0.1))] transition hover:bg-[var(--border,rgba(30,64,175,0.1))] focus:outline-none focus:ring-2 focus:ring-[var(--doxie,#6366f1)]/40 focus:ring-offset-2"
+                >
+                  <Square size={14} strokeWidth={2} fill="currentColor" />
+                </button>
+              ) : (
+                <button
+                  type="submit"
+                  disabled={sendDisabled}
+                  aria-label="Send message"
+                  className="grid h-10 w-10 shrink-0 place-items-center rounded-xl bg-[var(--doxie,#6366f1)] text-white shadow-sm transition hover:bg-[var(--doxie-2,#8b5cf6)] disabled:cursor-not-allowed disabled:opacity-50 focus:outline-none focus:ring-2 focus:ring-[var(--doxie,#6366f1)]/40 focus:ring-offset-2"
+                >
+                  <Send size={16} strokeWidth={2} />
+                </button>
+              )}
+            </div>
+          </form>
+        </>
+      )}
     </div>
   );
 });

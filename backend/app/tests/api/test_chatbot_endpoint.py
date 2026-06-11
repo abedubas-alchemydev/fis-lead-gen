@@ -25,6 +25,7 @@ from app.main import app
 from app.schemas.auth import AuthenticatedUser
 from app.schemas.chatbot import ChatbotMessage, ChatbotPageContext
 from app.services.auth import get_current_user
+from app.services.chatbot_history import ConversationListing
 from app.services.gemini_responses import (
     GeminiConfigurationError,
     GeminiExtractionError,
@@ -35,6 +36,7 @@ ENDPOINT_STREAM = "/api/v1/chatbot/messages/stream"
 ENDPOINT_GET = "/api/v1/chatbot/messages"
 ENDPOINT_NEW = "/api/v1/chatbot/conversations/new"
 ENDPOINT_BACKFILL = "/api/v1/chatbot/embeddings/backfill"
+ENDPOINT_CONVERSATIONS = "/api/v1/chatbot/conversations"
 
 
 def _override_user() -> AuthenticatedUser:
@@ -137,6 +139,9 @@ class _StubChatbotService:
 @dataclass
 class _StubConversation:
     id: int = 7
+    started_at: datetime = datetime(2026, 5, 26, 9, 0)
+    updated_at: datetime = datetime(2026, 5, 26, 9, 5)
+    archived_at: datetime | None = None
 
 
 @dataclass
@@ -166,6 +171,15 @@ class _StubHistoryService:
     # Tracks how many appends have happened so a test can inject a failure
     # only on the second (assistant-turn) append.
     append_fail_on_call: int | None = None
+    # ── conversation-history browser stubs ──────────────────────────────
+    # What ``list_conversations`` returns.
+    listings: list[ConversationListing] = field(default_factory=list)
+    # The single conversation the stub "owns" for the current user; a
+    # request for any other id simulates not-found / another user's row.
+    owned_conversation: _StubConversation | None = None
+    # Aggregates returned by ``summarize_conversation``.
+    summary_message_count: int = 0
+    summary_first_user_message: str | None = None
 
     async def get_or_create_active_conversation(
         self, db: Any, *, user_id: str
@@ -221,6 +235,62 @@ class _StubHistoryService:
         if self.archive_raises is not None:
             raise self.archive_raises
         return _StubConversation(id=self.conversation.id + 1)
+
+    async def list_conversations(
+        self, db: Any, *, user_id: str, limit: int = 50
+    ) -> list[ConversationListing]:
+        self.calls.append(
+            {"method": "list_conversations", "user_id": user_id, "limit": limit}
+        )
+        return self.listings
+
+    async def get_conversation_for_user(
+        self, db: Any, *, conversation_id: int, user_id: str
+    ) -> _StubConversation | None:
+        self.calls.append(
+            {
+                "method": "get_conversation_for_user",
+                "conversation_id": conversation_id,
+                "user_id": user_id,
+            }
+        )
+        if (
+            self.owned_conversation is not None
+            and self.owned_conversation.id == conversation_id
+        ):
+            return self.owned_conversation
+        return None
+
+    async def reopen_conversation(
+        self, db: Any, *, conversation_id: int, user_id: str
+    ) -> _StubConversation | None:
+        self.calls.append(
+            {
+                "method": "reopen_conversation",
+                "conversation_id": conversation_id,
+                "user_id": user_id,
+            }
+        )
+        if (
+            self.owned_conversation is not None
+            and self.owned_conversation.id == conversation_id
+        ):
+            # Mirror the real service: the target comes back active.
+            self.owned_conversation.archived_at = None
+            return self.owned_conversation
+        return None
+
+    async def summarize_conversation(
+        self, db: Any, *, conversation: _StubConversation
+    ) -> ConversationListing:
+        self.calls.append(
+            {"method": "summarize_conversation", "conversation_id": conversation.id}
+        )
+        return ConversationListing(
+            conversation=conversation,
+            message_count=self.summary_message_count,
+            first_user_message=self.summary_first_user_message,
+        )
 
 
 def _install_stubs(
@@ -278,6 +348,24 @@ async def _post_new_conversation() -> httpx.Response:
     transport = httpx.ASGITransport(app=app)
     async with httpx.AsyncClient(transport=transport, base_url="http://testserver") as client:
         return await client.post(ENDPOINT_NEW)
+
+
+async def _get_conversations() -> httpx.Response:
+    transport = httpx.ASGITransport(app=app)
+    async with httpx.AsyncClient(transport=transport, base_url="http://testserver") as client:
+        return await client.get(ENDPOINT_CONVERSATIONS)
+
+
+async def _get_conversation_messages(conversation_id: int) -> httpx.Response:
+    transport = httpx.ASGITransport(app=app)
+    async with httpx.AsyncClient(transport=transport, base_url="http://testserver") as client:
+        return await client.get(f"{ENDPOINT_CONVERSATIONS}/{conversation_id}/messages")
+
+
+async def _post_reopen(conversation_id: int) -> httpx.Response:
+    transport = httpx.ASGITransport(app=app)
+    async with httpx.AsyncClient(transport=transport, base_url="http://testserver") as client:
+        return await client.post(f"{ENDPOINT_CONVERSATIONS}/{conversation_id}/reopen")
 
 
 # ── POST /messages — happy path + validation ────────────────────────────
@@ -522,6 +610,217 @@ async def test_new_conversation_returns_new_id(monkeypatch: pytest.MonkeyPatch) 
     )
 
 
+# ── GET /conversations — history browser listing ────────────────────────
+
+
+async def test_list_conversations_maps_summaries(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    active = _StubConversation(
+        id=21,
+        started_at=datetime(2026, 6, 2, 10, 0),
+        updated_at=datetime(2026, 6, 2, 10, 30),
+        archived_at=None,
+    )
+    archived = _StubConversation(
+        id=20,
+        started_at=datetime(2026, 6, 1, 9, 0),
+        updated_at=datetime(2026, 6, 1, 9, 45),
+        archived_at=datetime(2026, 6, 2, 10, 0),
+    )
+    _, history = _install_stubs(
+        monkeypatch,
+        chatbot=_StubChatbotService(reply="unused"),
+        history=_StubHistoryService(
+            listings=[
+                ConversationListing(
+                    conversation=active,
+                    message_count=4,
+                    first_user_message="What firms clear through Apex?",
+                ),
+                ConversationListing(
+                    conversation=archived,
+                    message_count=0,
+                    first_user_message=None,
+                ),
+            ]
+        ),
+    )
+
+    response = await _get_conversations()
+    assert response.status_code == 200
+    rows = response.json()["conversations"]
+    assert [r["id"] for r in rows] == [21, 20]
+
+    assert rows[0]["is_active"] is True
+    assert rows[0]["archived_at"] is None
+    assert rows[0]["message_count"] == 4
+    assert rows[0]["preview"] == "What firms clear through Apex?"
+    assert rows[0]["started_at"].startswith("2026-06-02")
+
+    # No user turn yet → fallback preview; archived row isn't active.
+    assert rows[1]["is_active"] is False
+    assert rows[1]["archived_at"] is not None
+    assert rows[1]["message_count"] == 0
+    assert rows[1]["preview"] == "New conversation"
+
+    assert any(c["method"] == "list_conversations" for c in history.calls)
+
+
+async def test_list_conversations_preview_truncated_and_collapsed(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    long_message = "tell me about " + "clearing firms " * 20  # ≫ 80 chars
+    multiline = "line one\n\n   line two\t\tspaced"
+    _, _history = _install_stubs(
+        monkeypatch,
+        chatbot=_StubChatbotService(reply="unused"),
+        history=_StubHistoryService(
+            listings=[
+                ConversationListing(
+                    conversation=_StubConversation(id=1),
+                    message_count=2,
+                    first_user_message=long_message,
+                ),
+                ConversationListing(
+                    conversation=_StubConversation(id=2),
+                    message_count=2,
+                    first_user_message=multiline,
+                ),
+            ]
+        ),
+    )
+
+    response = await _get_conversations()
+    assert response.status_code == 200
+    rows = response.json()["conversations"]
+
+    truncated = rows[0]["preview"]
+    assert truncated.endswith("…")
+    # 80 content chars + the ellipsis (rstrip may shave a trailing space).
+    assert len(truncated) <= 81
+    assert truncated[:-1].rstrip() == long_message[:80].rstrip()
+
+    # Newlines / runs of whitespace collapse to single spaces.
+    assert rows[1]["preview"] == "line one line two spaced"
+
+
+async def test_list_conversations_empty(monkeypatch: pytest.MonkeyPatch) -> None:
+    _, _history = _install_stubs(
+        monkeypatch,
+        chatbot=_StubChatbotService(reply="unused"),
+        history=_StubHistoryService(listings=[]),
+    )
+
+    response = await _get_conversations()
+    assert response.status_code == 200
+    assert response.json() == {"conversations": []}
+
+
+# ── GET /conversations/{id}/messages — transcript + ownership ───────────
+
+
+async def test_get_conversation_messages_returns_transcript(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _, history = _install_stubs(
+        monkeypatch,
+        chatbot=_StubChatbotService(reply="unused"),
+        history=_StubHistoryService(
+            owned_conversation=_StubConversation(id=42),
+            messages=[
+                _StubMessageRow(id=1, role="user", content="hi", created_at=datetime(2026, 5, 1, 9)),
+                _StubMessageRow(id=2, role="assistant", content="hey there", created_at=datetime(2026, 5, 1, 9, 1)),
+            ],
+        ),
+    )
+
+    response = await _get_conversation_messages(42)
+    assert response.status_code == 200
+    body = response.json()
+    assert body["conversation_id"] == 42
+    assert [m["content"] for m in body["messages"]] == ["hi", "hey there"]
+    # Transcript was fetched for the OWNED conversation, post-ownership-check.
+    assert any(c["method"] == "get_conversation_for_user" for c in history.calls)
+    assert any(
+        c["method"] == "list_messages" and c["conversation_id"] == 42
+        for c in history.calls
+    )
+
+
+async def test_get_conversation_messages_404_when_not_owned(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Another user's id (or a nonexistent one) must 404 without ever
+    touching the transcript."""
+    _, history = _install_stubs(
+        monkeypatch,
+        chatbot=_StubChatbotService(reply="unused"),
+        history=_StubHistoryService(
+            owned_conversation=_StubConversation(id=42),
+            messages=[
+                _StubMessageRow(id=1, role="user", content="secret", created_at=datetime(2026, 5, 1, 9)),
+            ],
+        ),
+    )
+
+    response = await _get_conversation_messages(999)
+    assert response.status_code == 404
+    assert not any(c["method"] == "list_messages" for c in history.calls)
+
+
+# ── POST /conversations/{id}/reopen — swap-active semantics ─────────────
+
+
+async def test_reopen_conversation_returns_active_summary(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    archived = _StubConversation(
+        id=9,
+        archived_at=datetime(2026, 6, 1, 8, 0),
+    )
+    _, history = _install_stubs(
+        monkeypatch,
+        chatbot=_StubChatbotService(reply="unused"),
+        history=_StubHistoryService(
+            owned_conversation=archived,
+            summary_message_count=6,
+            summary_first_user_message="Who clears for Robinhood?",
+        ),
+    )
+
+    response = await _post_reopen(9)
+    assert response.status_code == 200
+    body = response.json()
+    assert body["id"] == 9
+    # Reopened conversation comes back as the active one.
+    assert body["is_active"] is True
+    assert body["archived_at"] is None
+    assert body["message_count"] == 6
+    assert body["preview"] == "Who clears for Robinhood?"
+
+    reopens = [c for c in history.calls if c["method"] == "reopen_conversation"]
+    assert len(reopens) == 1
+    assert reopens[0]["conversation_id"] == 9
+
+
+async def test_reopen_conversation_404_when_not_owned(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _, history = _install_stubs(
+        monkeypatch,
+        chatbot=_StubChatbotService(reply="unused"),
+        history=_StubHistoryService(owned_conversation=_StubConversation(id=9)),
+    )
+
+    response = await _post_reopen(123456)
+    assert response.status_code == 404
+    # No summary computed for a rejected reopen.
+    assert not any(
+        c["method"] == "summarize_conversation" for c in history.calls
+    )
+
+
 # ── POST /messages/stream — SSE ─────────────────────────────────────────
 
 
@@ -745,6 +1044,9 @@ async def test_requires_authenticated_session() -> None:
             _get_history(),
             _post_new_conversation(),
             _post_backfill(),
+            _get_conversations(),
+            _get_conversation_messages(1),
+            _post_reopen(1),
         ):
             response = await fetch
             assert response.status_code == 401

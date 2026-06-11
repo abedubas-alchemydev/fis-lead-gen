@@ -228,6 +228,214 @@ async def test_used_with_real_timestamps_for_ordering() -> None:
     assert [r.content for r in rows] == [f"#{i}" for i in range(20)]
 
 
+# ── Conversation-history browser (list / ownership / reopen) ────────────
+
+
+async def test_list_conversations_newest_first_with_counts_and_previews() -> None:
+    """Two threads: counts + first-user-message resolve per conversation
+    and the most recently touched one lists first."""
+    user_id = await _seed_user()
+    service = ChatbotHistoryService()
+
+    async with SessionLocal() as session:
+        first = await service.get_or_create_active_conversation(session, user_id=user_id)
+        await service.append_message(
+            session, conversation_id=first.id, role="user", content="first question"
+        )
+        await service.append_message(
+            session, conversation_id=first.id, role="assistant", content="first answer"
+        )
+
+    async with SessionLocal() as session:
+        second = await service.archive_active_and_create_new(session, user_id=user_id)
+        await service.append_message(
+            session, conversation_id=second.id, role="user", content="second thread opener"
+        )
+
+    async with SessionLocal() as session:
+        listings = await service.list_conversations(session, user_id=user_id)
+
+    assert [item.conversation.id for item in listings] == [second.id, first.id]
+    by_id = {item.conversation.id: item for item in listings}
+    assert by_id[first.id].message_count == 2
+    assert by_id[first.id].first_user_message == "first question"
+    assert by_id[first.id].conversation.archived_at is not None
+    assert by_id[second.id].message_count == 1
+    assert by_id[second.id].first_user_message == "second thread opener"
+    assert by_id[second.id].conversation.archived_at is None
+
+
+async def test_list_conversations_first_user_message_skips_assistant_turn() -> None:
+    """An assistant turn that lands first (greeting backfill etc.) must not
+    become the preview — the preview is the first USER message."""
+    user_id = await _seed_user()
+    service = ChatbotHistoryService()
+
+    async with SessionLocal() as session:
+        conv = await service.get_or_create_active_conversation(session, user_id=user_id)
+        await service.append_message(
+            session, conversation_id=conv.id, role="assistant", content="welcome aboard"
+        )
+        await service.append_message(
+            session, conversation_id=conv.id, role="user", content="actual question"
+        )
+
+    async with SessionLocal() as session:
+        listings = await service.list_conversations(session, user_id=user_id)
+    assert len(listings) == 1
+    assert listings[0].message_count == 2
+    assert listings[0].first_user_message == "actual question"
+
+
+async def test_list_conversations_empty_thread_defaults() -> None:
+    """A conversation with no messages lists with count 0 / no preview."""
+    user_id = await _seed_user()
+    service = ChatbotHistoryService()
+
+    async with SessionLocal() as session:
+        conv = await service.get_or_create_active_conversation(session, user_id=user_id)
+
+    async with SessionLocal() as session:
+        listings = await service.list_conversations(session, user_id=user_id)
+    assert [item.conversation.id for item in listings] == [conv.id]
+    assert listings[0].message_count == 0
+    assert listings[0].first_user_message is None
+
+
+async def test_list_conversations_scoped_to_user_and_capped_at_50() -> None:
+    """55 archived rows → only the 50 newest come back; another user's
+    rows never bleed in."""
+    user_id = await _seed_user()
+    other_user_id = await _seed_user()
+    service = ChatbotHistoryService()
+
+    archived_marker = datetime(2026, 1, 1, tzinfo=timezone.utc)
+    async with SessionLocal() as session:
+        rows = [
+            ChatbotConversation(user_id=user_id, archived_at=archived_marker)
+            for _ in range(55)
+        ]
+        session.add_all(rows)
+        # One conversation for the other user — must not appear below.
+        session.add(ChatbotConversation(user_id=other_user_id))
+        await session.commit()
+        inserted_ids = [row.id for row in rows]
+
+    async with SessionLocal() as session:
+        listings = await service.list_conversations(session, user_id=user_id)
+
+    assert len(listings) == 50
+    returned_ids = [item.conversation.id for item in listings]
+    # All rows share one server_default updated_at; the id-desc tiebreak
+    # makes "newest 50" the 50 highest ids.
+    assert returned_ids == sorted(inserted_ids, reverse=True)[:50]
+
+
+async def test_get_conversation_for_user_enforces_ownership() -> None:
+    user_id = await _seed_user()
+    other_user_id = await _seed_user()
+    service = ChatbotHistoryService()
+
+    async with SessionLocal() as session:
+        conv = await service.get_or_create_active_conversation(session, user_id=user_id)
+
+    async with SessionLocal() as session:
+        owner_hit = await service.get_conversation_for_user(
+            session, conversation_id=conv.id, user_id=user_id
+        )
+        stranger_hit = await service.get_conversation_for_user(
+            session, conversation_id=conv.id, user_id=other_user_id
+        )
+        missing_hit = await service.get_conversation_for_user(
+            session, conversation_id=99_999_999, user_id=user_id
+        )
+    assert owner_hit is not None and owner_hit.id == conv.id
+    assert stranger_hit is None
+    assert missing_hit is None
+
+
+async def test_reopen_conversation_swaps_active() -> None:
+    """Reopening an archived thread archives the current active one and
+    reactivates the target — exactly one active row survives."""
+    user_id = await _seed_user()
+    service = ChatbotHistoryService()
+
+    async with SessionLocal() as session:
+        original = await service.get_or_create_active_conversation(session, user_id=user_id)
+    async with SessionLocal() as session:
+        replacement = await service.archive_active_and_create_new(session, user_id=user_id)
+
+    async with SessionLocal() as session:
+        reopened = await service.reopen_conversation(
+            session, conversation_id=original.id, user_id=user_id
+        )
+    assert reopened is not None
+    assert reopened.id == original.id
+    assert reopened.archived_at is None
+
+    async with SessionLocal() as session:
+        rows = (
+            await session.execute(
+                select(ChatbotConversation)
+                .where(ChatbotConversation.user_id == user_id)
+                .order_by(ChatbotConversation.id)
+            )
+        ).scalars().all()
+    states = {row.id: row.archived_at is None for row in rows}
+    assert states == {original.id: True, replacement.id: False}
+
+
+async def test_reopen_conversation_idempotent_when_already_active() -> None:
+    user_id = await _seed_user()
+    service = ChatbotHistoryService()
+
+    async with SessionLocal() as session:
+        conv = await service.get_or_create_active_conversation(session, user_id=user_id)
+
+    async with SessionLocal() as session:
+        reopened = await service.reopen_conversation(
+            session, conversation_id=conv.id, user_id=user_id
+        )
+    assert reopened is not None
+    assert reopened.id == conv.id
+    assert reopened.archived_at is None
+
+    async with SessionLocal() as session:
+        rows = (
+            await session.execute(
+                select(ChatbotConversation).where(
+                    ChatbotConversation.user_id == user_id
+                )
+            )
+        ).scalars().all()
+    assert len(rows) == 1
+    assert rows[0].archived_at is None
+
+
+async def test_reopen_conversation_rejects_other_users_row() -> None:
+    """Reopen with someone else's id returns None and mutates nothing."""
+    owner_id = await _seed_user()
+    intruder_id = await _seed_user()
+    service = ChatbotHistoryService()
+
+    async with SessionLocal() as session:
+        owned = await service.get_or_create_active_conversation(session, user_id=owner_id)
+    async with SessionLocal() as session:
+        # Archive it so a successful (buggy) reopen would be observable.
+        await service.archive_active_and_create_new(session, user_id=owner_id)
+
+    async with SessionLocal() as session:
+        result = await service.reopen_conversation(
+            session, conversation_id=owned.id, user_id=intruder_id
+        )
+    assert result is None
+
+    async with SessionLocal() as session:
+        row = await session.get(ChatbotConversation, owned.id)
+        assert row is not None
+        assert row.archived_at is not None  # untouched
+
+
 # Avoid unused-import lints when pytest collects the file but doesn't run
 # integration mode.
 _ = (datetime, timezone)
