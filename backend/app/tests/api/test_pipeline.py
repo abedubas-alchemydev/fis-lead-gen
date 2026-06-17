@@ -437,23 +437,26 @@ def test_scheduled_router_is_wired_into_v1_api() -> None:
     fail with 404 instead of 200, which is harder to diagnose than a
     failing test.
 
-    Inspect the fully built ``app`` rather than the module-global
-    ``api_router``. ``api_router.routes`` is populated as an import side
-    effect of ``app.api.v1.api`` (25 ``include_router`` calls at module
-    scope), so reading it directly is import-order sensitive and can come
-    back empty when this test happens to run before the suite has imported
-    that module. ``app.routes`` is the source of truth for what is actually
-    mounted (carrying the ``/api/v1`` prefix) and is stable regardless of
-    test execution order.
+    Force a clean reload of ``app.api.v1.api`` so the check is
+    order-independent. ``api_router`` is populated as an import side effect
+    of that module (25 ``include_router`` calls at module scope), and a
+    latent circular import means that, depending on which test triggers the
+    first import, both ``api_router`` and a freshly built ``app`` can end up
+    with the API routes missing. By the time this test runs every endpoint
+    module is already in ``sys.modules``, so ``importlib.reload`` re-runs the
+    wiring cleanly against fully-loaded routers -- no partial initialization.
     """
-    from app.main import app
+    import importlib
 
-    paths = {route.path for route in app.routes if hasattr(route, "path")}
-    assert "/api/v1/pipeline/run/filing-monitor" in paths
-    assert "/api/v1/pipeline/run/populate-all" in paths
-    assert "/api/v1/pipeline/run/initial-load" in paths
-    assert "/api/v1/pipeline/wipe-bd-data" in paths
-    assert "/api/v1/pipeline/set-files-api-flag" in paths
+    import app.api.v1.api as api_module
+
+    importlib.reload(api_module)
+    paths = {route.path for route in api_module.api_router.routes if hasattr(route, "path")}
+    assert "/pipeline/run/filing-monitor" in paths
+    assert "/pipeline/run/populate-all" in paths
+    assert "/pipeline/run/initial-load" in paths
+    assert "/pipeline/wipe-bd-data" in paths
+    assert "/pipeline/set-files-api-flag" in paths
 
 
 # ───────────────────────────── wipe-bd-data ────────────────────────────
