@@ -431,32 +431,30 @@ async def test_populate_all_background_completes_and_fires_embed_hook(
 # ───────────────────────── route registration ─────────────────────────
 
 
-def test_scheduled_router_is_wired_into_v1_api() -> None:
-    """Regression guard: the new routers must be registered on the v1 api
-    router. Forgetting ``include_router`` makes Cloud Scheduler attempts
-    fail with 404 instead of 200, which is harder to diagnose than a
-    failing test.
+async def test_scheduled_router_is_wired_into_v1_api() -> None:
+    """Regression guard: the Tier-2 pipeline routers must be registered on
+    the v1 api router. Forgetting ``include_router`` makes Cloud Scheduler
+    attempts fail with 404 instead of the intended 401/403/200, which is
+    harder to diagnose than a failing test.
 
-    Force a clean reload of ``app.api.v1.api`` so the check is
-    order-independent. ``api_router`` is populated as an import side effect
-    of that module (25 ``include_router`` calls at module scope), and a
-    latent circular import means that, depending on which test triggers the
-    first import, both ``api_router`` and a freshly built ``app`` can end up
-    with the API routes missing. By the time this test runs every endpoint
-    module is already in ``sys.modules``, so ``importlib.reload`` re-runs the
-    wiring cleanly against fully-loaded routers -- no partial initialization.
+    Checked behaviourally through the app -- an anonymous POST to each path
+    must not 404 (a mounted route answers with auth 401/403 or validation
+    422; only an unmounted one 404s). We deliberately do NOT inspect router
+    internals: the unit suite's import order can leave a directly-inspected
+    ``api_router`` reading empty even though the app routes every endpoint
+    correctly, which made the old inspection-based guard flaky on CI.
     """
-    import importlib
-
-    import app.api.v1.api as api_module
-
-    importlib.reload(api_module)
-    paths = {route.path for route in api_module.api_router.routes if hasattr(route, "path")}
-    assert "/pipeline/run/filing-monitor" in paths
-    assert "/pipeline/run/populate-all" in paths
-    assert "/pipeline/run/initial-load" in paths
-    assert "/pipeline/wipe-bd-data" in paths
-    assert "/pipeline/set-files-api-flag" in paths
+    paths = [
+        "/api/v1/pipeline/run/filing-monitor",
+        "/api/v1/pipeline/run/populate-all",
+        "/api/v1/pipeline/run/initial-load",
+        "/api/v1/pipeline/wipe-bd-data",
+        "/api/v1/pipeline/set-files-api-flag",
+    ]
+    async with _client() as client:
+        for path in paths:
+            response = await client.post(path, json={})
+            assert response.status_code != 404, f"{path} is not mounted"
 
 
 # ───────────────────────────── wipe-bd-data ────────────────────────────
