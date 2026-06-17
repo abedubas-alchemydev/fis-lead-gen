@@ -5,11 +5,13 @@ Phase 2 follow-up #5. The existing function-calling tools answer precise
 miss conceptual queries like "find broker-dealers similar to Acme" or
 "firms that focus on high-net-worth retail." This module:
 
-- ``backfill_broker_dealers(db)`` walks every BD row, builds a compact
-  summary string, embeds it with ``gemini-embedding-001`` (the same
-  model the Vault RAG already uses), and upserts into
-  ``chatbot_firm_embedding``. SHA-256 of the summary lets re-runs skip
-  rows whose underlying data didn't change.
+- ``backfill_broker_dealers(db)`` / ``backfill_investment_advisors(db)``
+  walk every BD / IA row, build a compact summary string, embed it with
+  ``gemini-embedding-001`` (the same model the Vault RAG already uses),
+  and upsert into ``chatbot_firm_embedding``. SHA-256 of the summary lets
+  re-runs skip rows whose underlying data didn't change.
+  ``run_post_pipeline_embed_backfill()`` chains both incrementally after
+  the populate-all pipeline so the index keeps itself fresh.
 
 - ``search(db, query, ...)`` embeds the user's query and runs a cosine
   top-K against the HNSW index. Returns hits with similarity scores so
@@ -26,17 +28,21 @@ from __future__ import annotations
 import hashlib
 import logging
 from dataclasses import dataclass
-from typing import Sequence
+from typing import Any, Callable, Sequence
 
 from sqlalchemy import select, text
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.core.config import settings
+from app.db.session import SessionLocal
 from app.models.broker_dealer import BrokerDealer
 from app.models.chatbot_firm_embedding import (
     ENTITY_TYPE_BROKER_DEALER,
+    ENTITY_TYPE_INVESTMENT_ADVISOR,
     ChatbotFirmEmbedding,
 )
+from app.models.investment_advisor import InvestmentAdvisor
 from app.services.vault_embeddings import embed_chunks, embed_query
 
 logger = logging.getLogger(__name__)
@@ -77,11 +83,38 @@ class ChatbotSemanticService:
     """Embed + retrieve firm summaries for Doxie's RAG tool."""
 
     async def backfill_broker_dealers(self, db: AsyncSession) -> BackfillResult:
-        """Embed every BD that's new or whose summary text changed.
+        """Embed every BD that's new or whose summary text changed."""
+        return await self._backfill_entities(
+            db,
+            model=BrokerDealer,
+            entity_type=ENTITY_TYPE_BROKER_DEALER,
+            content_builder=_build_broker_dealer_content,
+        )
 
-        Pages through ``broker_dealers`` in ``_BACKFILL_BATCH_SIZE`` chunks.
+    async def backfill_investment_advisors(
+        self, db: AsyncSession
+    ) -> BackfillResult:
+        """Embed every IA that's new or whose summary text changed."""
+        return await self._backfill_entities(
+            db,
+            model=InvestmentAdvisor,
+            entity_type=ENTITY_TYPE_INVESTMENT_ADVISOR,
+            content_builder=_build_investment_advisor_content,
+        )
+
+    async def _backfill_entities(
+        self,
+        db: AsyncSession,
+        *,
+        model: type[Any],
+        entity_type: str,
+        content_builder: Callable[[Any], str],
+    ) -> BackfillResult:
+        """Shared incremental backfill loop, parametrized per entity.
+
+        Pages through the entity table in ``_BACKFILL_BATCH_SIZE`` chunks.
         Per batch:
-          1. Build the content string for each BD.
+          1. Build the content string for each row.
           2. Hash + look up existing embeddings; skip rows whose hash is
              unchanged.
           3. Embed only the changed/new rows via ``embed_chunks``.
@@ -100,8 +133,8 @@ class ChatbotSemanticService:
 
         while True:
             page_stmt = (
-                select(BrokerDealer)
-                .order_by(BrokerDealer.id.asc())
+                select(model)
+                .order_by(model.id.asc())
                 .offset(offset)
                 .limit(_BACKFILL_BATCH_SIZE)
             )
@@ -109,12 +142,12 @@ class ChatbotSemanticService:
             if not page:
                 break
 
-            page_ids = [bd.id for bd in page]
+            page_ids = [row.id for row in page]
             existing_stmt = select(
                 ChatbotFirmEmbedding.entity_id,
                 ChatbotFirmEmbedding.content_hash,
             ).where(
-                ChatbotFirmEmbedding.entity_type == ENTITY_TYPE_BROKER_DEALER,
+                ChatbotFirmEmbedding.entity_type == entity_type,
                 ChatbotFirmEmbedding.entity_id.in_(page_ids),
             )
             existing_hashes = {
@@ -124,16 +157,16 @@ class ChatbotSemanticService:
 
             to_embed_ids: list[int] = []
             to_embed_contents: list[str] = []
-            for bd in page:
-                content = _build_broker_dealer_content(bd)
+            for entity in page:
+                content = content_builder(entity)
                 if not content:
                     skipped_total += 1
                     continue
                 h = _content_hash(content)
-                if existing_hashes.get(bd.id) == h:
+                if existing_hashes.get(entity.id) == h:
                     skipped_total += 1
                     continue
-                to_embed_ids.append(bd.id)
+                to_embed_ids.append(entity.id)
                 to_embed_contents.append(content)
 
             if to_embed_contents:
@@ -141,19 +174,21 @@ class ChatbotSemanticService:
                     vectors = await embed_chunks(to_embed_contents)
                 except Exception:  # noqa: BLE001
                     logger.exception(
-                        "Doxie embedding batch failed offset=%d size=%d",
+                        "Doxie embedding batch failed entity_type=%s "
+                        "offset=%d size=%d",
+                        entity_type,
                         offset,
                         len(to_embed_contents),
                     )
                     failed_total += len(to_embed_contents)
                 else:
-                    for bd_id, content, vector in zip(
+                    for entity_id, content, vector in zip(
                         to_embed_ids, to_embed_contents, vectors
                     ):
                         await self._upsert_embedding(
                             db,
-                            entity_type=ENTITY_TYPE_BROKER_DEALER,
-                            entity_id=bd_id,
+                            entity_type=entity_type,
+                            entity_id=entity_id,
                             content=content,
                             content_hash=_content_hash(content),
                             embedding=vector,
@@ -303,7 +338,99 @@ def _build_broker_dealer_content(bd: BrokerDealer) -> str:
     if bd.firm_operations_text:
         parts.append(f"Operations: {bd.firm_operations_text}")
 
-    text_blob = "\n".join(p for p in parts if p)
+    return _truncate_content("\n".join(p for p in parts if p))
+
+
+def _build_investment_advisor_content(advisor: InvestmentAdvisor) -> str:
+    """IA counterpart of the BD builder — a Form ADV-derived summary.
+
+    Same shape rules: dense identifying lines first, long-tail prose
+    (``firm_operations_text``) last so truncation never costs the fields
+    a query is most likely to match on.
+    """
+    parts: list[str] = []
+
+    name_line = advisor.name or ""
+    aliases = advisor.other_business_names
+    if isinstance(aliases, list) and aliases:
+        valid_aliases = [a for a in aliases if isinstance(a, str) and a.strip()]
+        if valid_aliases:
+            name_line = (
+                f"{name_line} (also known as: {', '.join(valid_aliases[:5])})"
+            )
+    if name_line:
+        parts.append(f"Investment advisor: {name_line}")
+
+    location_bits = [b for b in (advisor.city, advisor.state) if b]
+    if location_bits:
+        parts.append("Location: " + ", ".join(location_bits))
+
+    if advisor.status:
+        parts.append(f"Status: {advisor.status}")
+    if advisor.regulatory_aum is not None:
+        parts.append(f"Regulatory AUM: {advisor.regulatory_aum:,.0f} USD")
+    if advisor.files_13f:
+        parts.append("Files 13F: yes")
+
+    activities = advisor.advisory_activities
+    if isinstance(activities, list) and activities:
+        joined = ", ".join(str(a) for a in activities[:10] if a)
+        if joined:
+            parts.append(f"Advisory activities: {joined}")
+
+    client_types = advisor.client_types
+    if isinstance(client_types, list) and client_types:
+        joined = ", ".join(str(c) for c in client_types[:10] if c)
+        if joined:
+            parts.append(f"Client types: {joined}")
+
+    if advisor.firm_operations_text:
+        parts.append(f"Operations: {advisor.firm_operations_text}")
+
+    return _truncate_content("\n".join(p for p in parts if p))
+
+
+def _truncate_content(text_blob: str) -> str:
     if len(text_blob) > _MAX_CONTENT_CHARS:
-        text_blob = text_blob[: _MAX_CONTENT_CHARS - 1] + "…"
+        return text_blob[: _MAX_CONTENT_CHARS - 1] + "…"
     return text_blob
+
+
+# ── Post-pipeline incremental embed hook ────────────────────────────────
+
+
+async def run_post_pipeline_embed_backfill() -> None:
+    """Incremental embed pass fired after a data pipeline lands.
+
+    Wired as the last statement of the populate-all background task so
+    new/changed firms become semantically searchable without the manual
+    admin backfill. Hash-skip makes re-runs cheap (only changed rows hit
+    the embedding API).
+
+    Failure-isolated by contract: opens its own session, swallows every
+    exception, and returns early when the Gemini key is absent — it must
+    never affect the pipeline run that triggered it.
+    """
+    if not settings.gemini_api_key:
+        logger.info(
+            "Doxie post-pipeline embed backfill skipped: GEMINI_API_KEY "
+            "not configured"
+        )
+        return
+    try:
+        service = ChatbotSemanticService()
+        async with SessionLocal() as db:
+            bd = await service.backfill_broker_dealers(db)
+            ia = await service.backfill_investment_advisors(db)
+        logger.info(
+            "Doxie post-pipeline embed backfill: BD embedded=%d skipped=%d "
+            "failed=%d; IA embedded=%d skipped=%d failed=%d",
+            bd.embedded,
+            bd.skipped,
+            bd.failed,
+            ia.embedded,
+            ia.skipped,
+            ia.failed,
+        )
+    except Exception:  # noqa: BLE001
+        logger.exception("Doxie post-pipeline embed backfill failed")

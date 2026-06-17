@@ -37,11 +37,10 @@ without code changes.
 
 Search providers
 ----------------
-Reuses the website-resolver's search clients: serper.dev primary (cheap),
-SerpAPI fallback. Both expose ``search_firm(query)`` which is really just an
-arbitrary Google query returning ``SerpResult`` (url / domain / title /
-snippet). No key for either -> the provider returns ``None`` silently so the
-chain skips it without spurious warnings.
+Reuses the website-resolver's SerpAPI client. ``search_firm(query)`` is
+really just an arbitrary Google query returning ``SerpResult`` (url /
+domain / title / snippet). No key -> the provider returns ``None``
+silently so the chain skips it without spurious warnings.
 """
 
 from __future__ import annotations
@@ -56,7 +55,6 @@ from app.services.contact_discovery.base import (
     DiscoveryResult,
 )
 from app.services.serpapi import SerpAPIClient, SerpAPIError, SerpResult
-from app.services.serper import SerperClient, SerperError
 
 logger = logging.getLogger(__name__)
 
@@ -147,18 +145,9 @@ class LinkedInSearchProvider(ContactDiscoveryProvider):
     async def _search(
         self, first: str, last: str, org_name: str
     ) -> list[SerpResult]:
-        """serper primary, SerpAPI fallback. Returns [] when no key/both miss."""
+        """SerpAPI Google search. Returns [] when no key / on error."""
         org = (org_name or "").strip()
         query = f'"{first} {last}" {org} site:linkedin.com/in'.strip()
-
-        serper_key = getattr(settings, "serper_api_key", None)
-        if serper_key:
-            try:
-                hits = await SerperClient(serper_key).search_firm(query)
-                if hits:
-                    return hits
-            except SerperError as exc:
-                logger.info("linkedin_search serper error for %s %s: %s", first, last, exc)
 
         serpapi_key = getattr(settings, "serpapi_api_key", None)
         if serpapi_key:

@@ -26,6 +26,7 @@ from app.schemas.pipeline import (
 from app.api.v1.endpoints.broker_dealers import schedule_auto_refresh_financials_batch
 from app.services.auth import _ensure_admin_or_scheduler_sa, get_current_user
 from app.services.broker_dealers import BrokerDealerRepository
+from app.services.chatbot_semantic import run_post_pipeline_embed_backfill
 from app.services.investment_advisors import InvestmentAdvisorRepository
 from app.services.cloud_run_client import (
     CloudRunUpdateError,
@@ -129,7 +130,14 @@ async def _run_populate_all_background(run_id: int, trigger_source: str) -> None
 
     try:
         async with SessionLocal() as db:
-            filing_run = await filing_monitor_service.run(
+            # ``run`` returns (run, auto_extract_bd_ids) since the watched-firm
+            # auto re-extraction landed (#397); this call site kept the old
+            # single-value shape and made every populate-all fail on
+            # ``tuple.total_items``. The auto-extract hook needs a request's
+            # BackgroundTasks to schedule against, which doesn't exist inside
+            # a background task — the scheduled /filing-monitor trigger owns
+            # that hook, so populate-all just drops the ids.
+            filing_run, _ = await filing_monitor_service.run(
                 db, trigger_source=f"populate_all:{trigger_source}"
             )
             total_items += filing_run.total_items
@@ -171,6 +179,12 @@ async def _run_populate_all_background(run_id: int, trigger_source: str) -> None
         run.completed_at = datetime.now(timezone.utc)
         run.notes = "; ".join(notes_parts) if notes_parts else run.notes
         await db.commit()
+
+    # Incremental Doxie embed pass: new/changed firms become semantically
+    # searchable without the manual admin backfill. Deliberately after the
+    # final status commit, and the hook swallows its own errors + opens its
+    # own session — embed duration or failure can never affect the run row.
+    await run_post_pipeline_embed_backfill()
 
 
 async def _run_initial_load_background(run_id: int, trigger_source: str) -> None:

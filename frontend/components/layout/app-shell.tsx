@@ -9,6 +9,7 @@ import { usePathname, useRouter, useSearchParams } from "next/navigation";
 import { GlobalBackButton } from "@/components/layout/global-back-button";
 import { apiRequest } from "@/lib/api";
 import { authClient } from "@/lib/auth-client";
+import { EMAIL_EXTRACTION_ENABLED } from "@/lib/feature-flags";
 
 // ─── Sidebar nav icons — verbatim SVG paths from dashboard-redesign.html ──
 // Each accepts className + strokeWidth so the SidebarNavLink can size + stroke
@@ -282,7 +283,10 @@ const navSections: ReadonlyArray<NavSection> = [
   {
     label: "Outbound",
     items: [
-      { href: "/email-extractor", label: "Email Extractor", icon: EmailExtractorIcon, badgeKey: null, permissionKey: "email_extractor" },
+      // Email Extractor hidden — no data extraction in-app (lib/feature-flags.ts).
+      ...(EMAIL_EXTRACTION_ENABLED
+        ? [{ href: "/email-extractor" as Route, label: "Email Extractor", icon: EmailExtractorIcon, badgeKey: null as BadgeKey, permissionKey: "email_extractor" }]
+        : []),
       { href: "/outreach/contacts" as Route, label: "Contacts", icon: OutreachContactsIcon, badgeKey: null, permissionKey: "outreach_contacts" },
       { href: "/outreach/sent" as Route, label: "Outreach", icon: SentOutreachIcon, badgeKey: null, permissionKey: "sent_outreach" },
       { href: "/vault", label: "Vault", icon: VaultIcon, badgeKey: null, permissionKey: "vault" }
@@ -620,6 +624,9 @@ export function AppShell({
           <main className="min-w-0 flex-1 overflow-auto">
             <GlobalBackButton />
             {children}
+            <footer className="border-t border-[var(--border,rgba(30,64,175,0.1))] px-6 py-4 text-center text-[11px] text-[var(--text-muted,#94a3b8)]">
+              Data provided by FINRA, SEC EDGAR, and DTCC/OCC directories.
+            </footer>
           </main>
         </div>
       </div>

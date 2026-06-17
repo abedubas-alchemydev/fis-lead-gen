@@ -24,8 +24,11 @@ import { ChannelIconCell } from "@/components/advisor-list/channel-icon-cell";
 import { OutreachButton } from "@/components/master-list/outreach-button";
 import { PeopleTable } from "@/components/master-list/detail/people-table";
 import { EmailScansSection } from "@/components/email-extractor/email-scans-section";
+import { EMAIL_EXTRACTION_ENABLED } from "@/lib/feature-flags";
+import { askDoxie } from "@/lib/doxie-events";
 import { FinancialTrendChart } from "@/components/master-list/detail/financial-trend-chart";
 import { FirmWebsiteLink } from "@/components/master-list/detail/firm-website-link";
+import { CopyDomainButton } from "@/components/master-list/detail/copy-domain-button";
 import { FocusReportSection } from "@/components/master-list/detail/focus-report-section";
 import {
   classificationDisplay,
@@ -892,6 +895,9 @@ export function BrokerDealerDetailClient({ brokerDealerId }: { brokerDealerId: s
             website={bd.website}
             fallbackDomain={headerFallbackDomain}
           />
+          <div className="mt-1">
+            <CopyDomainButton domain={resolvedDomain} />
+          </div>
           <div className="mt-2 flex flex-wrap items-center gap-x-3 gap-y-1 text-[12px] text-[var(--text-muted,#94a3b8)]">
             <span>
               CIK <span className="font-mono text-[var(--text-dim,#475569)]">{bd.cik ?? "N/A"}</span>
@@ -908,6 +914,19 @@ export function BrokerDealerDetailClient({ brokerDealerId }: { brokerDealerId: s
           </div>
         </div>
         <div className="flex shrink-0 items-center gap-2.5">
+          <Button
+            variant="outline"
+            type="button"
+            onClick={() =>
+              askDoxie({
+                prompt: `Tell me about ${bd.name}${bd.crd_number ? ` (CRD ${bd.crd_number})` : ""} — summarize the profile and latest filings.`,
+              })
+            }
+            title="Open Doxie with a question about this firm"
+          >
+            <Sparkles className="h-4 w-4" strokeWidth={2} />
+            Ask Doxie
+          </Button>
           <Button
             variant="outline"
             type="button"
@@ -1617,17 +1636,19 @@ export function BrokerDealerDetailClient({ brokerDealerId }: { brokerDealerId: s
       </div>
       </div>
 
-      {/* ── Discovered emails (full width) ── */}
-      <div className="mt-4">
-        <EmailScansSection
-          entityKind="bd"
-          entityId={Number(brokerDealerId)}
-          currentScanId={currentScanId}
-          resolvedDomain={resolvedDomain}
-          isHydrating={isHydratingScan}
-          onScanCreated={setCurrentScanId}
-        />
-      </div>
+      {/* ── Discovered emails (full width) — hidden: no data extraction in-app ── */}
+      {EMAIL_EXTRACTION_ENABLED && (
+        <div className="mt-4">
+          <EmailScansSection
+            entityKind="bd"
+            entityId={Number(brokerDealerId)}
+            currentScanId={currentScanId}
+            resolvedDomain={resolvedDomain}
+            isHydrating={isHydratingScan}
+            onScanCreated={setCurrentScanId}
+          />
+        </div>
+      )}
     </div>
   );
 }

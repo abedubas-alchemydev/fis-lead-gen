@@ -1,11 +1,10 @@
 """Resolver-chain tests for ``app.services.website_resolver``.
 
-Locks the chain order (Apollo → serper.dev → SerpAPI), the validation
-gates (HEAD reachability, blocklist, title-token), and the provider-
-error vs. clean-miss reason strings the endpoint relies on. Apollo /
-serper.dev / SerpAPI clients are stubbed with ``AsyncMock``; HEAD/GET
-to candidate URLs go through respx so the validator's behavior is also
-covered.
+Locks the chain order (Apollo → SerpAPI), the validation gates (HEAD
+reachability, blocklist, title-token), and the provider-error vs.
+clean-miss reason strings the endpoint relies on. Apollo / SerpAPI
+clients are stubbed with ``AsyncMock``; HEAD/GET to candidate URLs go
+through respx so the validator's behavior is also covered.
 """
 
 from __future__ import annotations
@@ -18,7 +17,6 @@ import respx
 
 from app.services.apollo import ApolloError, ApolloOrganization
 from app.services.serpapi import SerpAPIError, SerpResult
-from app.services.serper import SerperError
 from app.services.website_resolver import (
     _firm_acronym_token,
     _firm_tokens,
@@ -315,9 +313,8 @@ async def test_domain_match_rejects_substring_in_middle_of_segment() -> None:
 
 @respx.mock
 async def test_search_tiers_unset_falls_through_to_clean_miss() -> None:
-    """Apollo misses and neither serper.dev nor SerpAPI keys are
-    configured (clients passed as None / omitted). The chain falls
-    through to ``no_valid_candidate`` cleanly."""
+    """Apollo misses and SerpAPI is unset (client omitted). The chain
+    falls through to ``no_valid_candidate`` cleanly."""
     apollo = AsyncMock()
     apollo.search_organization = AsyncMock(return_value=None)
 
@@ -467,75 +464,6 @@ async def test_apollo_wins_serpapi_not_called() -> None:
 
     assert (website, source, reason) == (_CANDIDATE_URL, "apollo", None)
     serpapi.search_firm.assert_not_awaited()
-
-
-# ─────────────────────────── serper.dev tier 2 ─────────────────────────────
-
-
-_SERPER_URL = "https://acmesecurities-from-serper.example.test"
-
-
-@respx.mock
-async def test_serper_runs_before_serpapi_when_apollo_misses() -> None:
-    """Tier order is Apollo → serper.dev → SerpAPI. When Apollo misses
-    and serper.dev returns a valid candidate, SerpAPI must NOT fire
-    (saves the more expensive quota)."""
-    apollo = AsyncMock()
-    apollo.search_organization = AsyncMock(return_value=None)
-    serper = AsyncMock()
-    serper.search_firm = AsyncMock(
-        return_value=[
-            SerpResult(url=_SERPER_URL, domain="acmesecurities-from-serper.example.test", title="Acme Securities — Home"),
-        ],
-    )
-    serpapi = AsyncMock()
-    serpapi.search_firm = AsyncMock(return_value=_serp_results(_SERPAPI_URL))
-    _mock_validate_pass(_SERPER_URL)
-
-    website, source, reason = await resolve_website(
-        _FIRM_NAME, None, apollo, serpapi=serpapi, serper=serper,
-    )
-
-    assert (website, source, reason) == (_SERPER_URL, "serper", None)
-    serpapi.search_firm.assert_not_awaited()
-
-
-@respx.mock
-async def test_serper_errors_falls_through_to_serpapi() -> None:
-    """When serper.dev errors (e.g., 429 quota burn), the chain must
-    fall through to SerpAPI rather than recording all_providers_errored."""
-    apollo = AsyncMock()
-    apollo.search_organization = AsyncMock(return_value=None)
-    serper = AsyncMock()
-    serper.search_firm = AsyncMock(side_effect=SerperError("serper.dev returned 429"))
-    serpapi = AsyncMock()
-    serpapi.search_firm = AsyncMock(return_value=_serp_results(_SERPAPI_URL))
-    _mock_validate_pass(_SERPAPI_URL)
-
-    website, source, reason = await resolve_website(
-        _FIRM_NAME, None, apollo, serpapi=serpapi, serper=serper,
-    )
-
-    assert (website, source, reason) == (_SERPAPI_URL, "serpapi", None)
-
-
-@respx.mock
-async def test_serper_none_falls_through_to_serpapi() -> None:
-    """When serper.dev key is unset (client passed as None), the chain
-    skips that tier silently and uses SerpAPI as before. This is the
-    no-config-change path so existing deployments without
-    SERPER_API_KEY keep working."""
-    apollo = AsyncMock()
-    apollo.search_organization = AsyncMock(return_value=None)
-    serpapi = AsyncMock()
-    serpapi.search_firm = AsyncMock(return_value=_serp_results(_SERPAPI_URL))
-    _mock_validate_pass(_SERPAPI_URL)
-
-    website, source, reason = await resolve_website(
-        _FIRM_NAME, None, apollo, serpapi=serpapi, serper=None,
-    )
-
-    assert (website, source, reason) == (_SERPAPI_URL, "serpapi", None)
 
 
 # ─────────────────────── subdomain + file-download rejects ──────────────

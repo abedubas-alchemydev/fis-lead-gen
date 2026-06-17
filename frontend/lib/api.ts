@@ -130,6 +130,10 @@ import type {
   OutreachSendsListResponse,
   OutreachSendsScope,
   OutreachSignature,
+  SavedOutreachDraft,
+  SavedOutreachDraftDetail,
+  SavedOutreachDraftSaveRequest,
+  SavedOutreachDraftsListResponse,
   RecipientSearchResponse,
   FirmSearchResponse,
   FirmContactsResponse,
@@ -1115,6 +1119,59 @@ export async function composeSendOutreach(
   });
 }
 
+// ── Outreach drafts (Drafts tab) ──────────────────────────────────────
+// Saved-but-unsent composer drafts. "Sending" a draft is the composer
+// loading it back in and calling composeSendOutreach, then deleting it —
+// there's no send-from-draft endpoint, just CRUD here.
+
+export async function createOutreachDraft(
+  payload: SavedOutreachDraftSaveRequest
+): Promise<SavedOutreachDraftDetail> {
+  return apiRequest<SavedOutreachDraftDetail>("/api/v1/outreach/drafts", {
+    method: "POST",
+    body: JSON.stringify(payload)
+  });
+}
+
+export async function listOutreachDrafts(opts?: {
+  limit?: number;
+  offset?: number;
+}): Promise<SavedOutreachDraftsListResponse> {
+  return apiRequest<SavedOutreachDraftsListResponse>(
+    buildApiPath("/api/v1/outreach/drafts", {
+      limit: opts?.limit,
+      offset: opts?.offset
+    })
+  );
+}
+
+export async function getOutreachDraft(
+  draftId: number
+): Promise<SavedOutreachDraftDetail> {
+  return apiRequest<SavedOutreachDraftDetail>(
+    `/api/v1/outreach/drafts/${draftId}`
+  );
+}
+
+export async function updateOutreachDraft(
+  draftId: number,
+  payload: SavedOutreachDraftSaveRequest
+): Promise<SavedOutreachDraftDetail> {
+  return apiRequest<SavedOutreachDraftDetail>(
+    `/api/v1/outreach/drafts/${draftId}`,
+    {
+      method: "PUT",
+      body: JSON.stringify(payload)
+    }
+  );
+}
+
+export async function deleteOutreachDraft(draftId: number): Promise<void> {
+  await apiRequest<void>(`/api/v1/outreach/drafts/${draftId}`, {
+    method: "DELETE"
+  });
+}
+
 // Admin-only flat view of every firm a target user has saved across all
 // their favorite lists. Backend gates with role === "admin"; a non-admin
 // caller will receive 403 from apiRequest as an ApiError.
@@ -1286,6 +1343,12 @@ export interface DoxieChatMessage {
 export interface DoxiePageContext {
   path?: string;
   title?: string;
+  // Sent only from firm detail routes with a numeric id segment
+  // (/master-list/{id} → broker_dealer, /advisor-list/{id} →
+  // investment_advisor) so the BE can ground "this firm" to the exact
+  // row being viewed. Never persisted server-side.
+  entity_type?: "broker_dealer" | "investment_advisor";
+  entity_id?: number;
 }
 
 export async function sendDoxieMessage(
@@ -1339,13 +1402,67 @@ export async function startNewDoxieChat(): Promise<number> {
   return response.conversation_id;
 }
 
+// ── Doxie conversation history browser ────────────────────────────────────
+// List / transcript / reopen for past conversations. ``preview`` is the
+// BE-derived first user message (already truncated for list display).
+
+export interface DoxieConversationSummary {
+  id: number;
+  started_at: string;
+  updated_at: string;
+  archived_at: string | null;
+  is_active: boolean;
+  message_count: number;
+  preview: string;
+}
+
+// Newest-first, capped at 50 server-side. Includes the active
+// conversation (``is_active: true``) alongside archived ones.
+export async function listDoxieConversations(): Promise<DoxieConversationSummary[]> {
+  const response = await apiRequest<{ conversations: DoxieConversationSummary[] }>(
+    "/api/v1/chatbot/conversations",
+    { method: "GET" }
+  );
+  return response.conversations;
+}
+
+// Read-only transcript of one conversation (active or archived). 404s
+// when the id isn't the current user's.
+export async function loadDoxieConversationMessages(
+  conversationId: number
+): Promise<DoxieHistoryResponse> {
+  return apiRequest<DoxieHistoryResponse>(
+    `/api/v1/chatbot/conversations/${conversationId}/messages`,
+    { method: "GET" }
+  );
+}
+
+// Make an archived conversation the active one again (archives the
+// current active thread). Idempotent when it's already active.
+export async function reopenDoxieConversation(
+  conversationId: number
+): Promise<DoxieConversationSummary> {
+  return apiRequest<DoxieConversationSummary>(
+    `/api/v1/chatbot/conversations/${conversationId}/reopen`,
+    { method: "POST" }
+  );
+}
+
 // ── Doxie streaming chat (SSE) ────────────────────────────────────────────
 // Events emitted by the BE stream endpoint. Mirrors the dicts yielded by
 // `ChatbotService.chat_stream` (see backend/app/services/chatbot.py).
 export type DoxieStreamEvent =
   | { type: "text_delta"; text: string }
   | { type: "tool_call"; name: string }
-  | { type: "tool_result"; name: string; error?: string | null }
+  | {
+      type: "tool_result";
+      name: string;
+      error?: string | null;
+      // Mirrored result JSON — present ONLY for the whitelisted outreach
+      // draft tools (see STREAM_RESULT_TOOLS in backend chatbot.py) so
+      // the FE can render an interactive draft card. Other tools omit it.
+      result?: Record<string, unknown> | null;
+    }
   | { type: "done"; reply: string }
   | { type: "error"; code: string; message: string };
 

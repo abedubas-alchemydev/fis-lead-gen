@@ -18,10 +18,14 @@ import json
 import logging
 import re
 from dataclasses import dataclass
+from typing import TYPE_CHECKING
 
 import httpx
 
 from app.core.config import settings
+
+if TYPE_CHECKING:
+    from app.models.investment_advisor import InvestmentAdvisor
 
 logger = logging.getLogger(__name__)
 
@@ -91,6 +95,21 @@ class ServiceContext:
 class OutreachDraft:
     subject: str
     body: str
+
+
+def advisor_firm_operations(advisor: InvestmentAdvisor) -> str | None:
+    """Synthesize a firm_operations_text-equivalent blurb for advisors.
+
+    Advisors don't have a free-text firm_operations field on the model
+    -- the closest analog is the Form ADV Item 5.G advisory_activities
+    list. Joining them produces a one-line summary the LLM can use as
+    soft context.
+    """
+
+    activities = advisor.advisory_activities or []
+    if not activities:
+        return None
+    return "Advisory activities: " + ", ".join(str(a) for a in activities if a)
 
 
 _TONE_CONSTRAINTS = (

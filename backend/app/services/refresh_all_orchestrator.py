@@ -71,7 +71,6 @@ from app.services.finra import FinraService
 from app.services.firm_alias_enricher import ensure_resolver_aliases
 from app.services.focus_reports import FocusReportService
 from app.services.serpapi import SerpAPIClient
-from app.services.serper import SerperClient
 from app.services.service_models import FinraBrokerDealerRecord
 from app.services.website_resolver import resolve_website
 
@@ -377,16 +376,11 @@ def required_provider_keys(pipelines: Iterable[str]) -> list[str]:
             missing.append("Gemini")
 
     if SUB_RESOLVE_WEBSITE in pipelines:
-        # The chain runs Apollo → serper.dev (optional) → SerpAPI; if
-        # all three are missing the chain has no way to land a
-        # candidate. Apollo alone is enough to proceed; serper.dev and
-        # SerpAPI fall through silently when unset.
-        if not (
-            settings.apollo_api_key
-            or settings.serper_api_key
-            or settings.serpapi_api_key
-        ):
-            missing.append("Apollo/serper/SerpAPI (none configured)")
+        # The chain runs Apollo → SerpAPI; if both are missing the chain
+        # has no way to land a candidate. Apollo alone is enough to
+        # proceed; SerpAPI falls through silently when unset.
+        if not (settings.apollo_api_key or settings.serpapi_api_key):
+            missing.append("Apollo/SerpAPI (none configured)")
 
     if SUB_ENRICH in pipelines and not settings.apollo_api_key:
         missing.append("Apollo (required for contact enrichment)")
@@ -496,10 +490,9 @@ async def _run_resolve_website(parent_run_id: int, bd_id: int, trigger_source: s
                 return "completed", summary
 
             apollo = ApolloClient(settings.apollo_api_key) if settings.apollo_api_key else None
-            serper = SerperClient(settings.serper_api_key) if settings.serper_api_key else None
             serpapi = SerpAPIClient(settings.serpapi_api_key) if settings.serpapi_api_key else None
 
-            if apollo is None and serper is None and serpapi is None:
+            if apollo is None and serpapi is None:
                 summary = "No website-resolver provider keys configured."
                 await _finalize_child(child_id, status="failed", success=0, failure=1, summary=summary)
                 return "failed", summary
@@ -515,7 +508,6 @@ async def _run_resolve_website(parent_run_id: int, bd_id: int, trigger_source: s
                 broker_dealer.crd_number,
                 apollo,
                 serpapi,
-                serper,
                 dba_names=broker_dealer.dba_names,
                 resolver_aliases=aliases,
             )

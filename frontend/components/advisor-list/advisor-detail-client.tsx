@@ -34,7 +34,10 @@ import {
   type AdvisorListQueryState,
 } from "@/lib/advisor-list-state";
 import { formatCurrency, formatDate } from "@/lib/format";
+import { askDoxie } from "@/lib/doxie-events";
 import { EmailScansSection } from "@/components/email-extractor/email-scans-section";
+import { CopyDomainButton } from "@/components/master-list/detail/copy-domain-button";
+import { EMAIL_EXTRACTION_ENABLED } from "@/lib/feature-flags";
 import {
   listScansForEntity,
   pickHydratableScan,
@@ -602,6 +605,7 @@ export function AdvisorDetailClient({ advisorId }: { advisorId: string }) {
                 {cleanWebsiteDisplay(advisor.website)}
               </a>
             ) : null}
+            <CopyDomainButton domain={resolvedDomain} />
             <a
               href={`https://www.google.com/search?q=${encodeURIComponent(`${advisor.name} investment advisor`)}`}
               target="_blank"
@@ -652,6 +656,19 @@ export function AdvisorDetailClient({ advisorId }: { advisorId: string }) {
           </div>
         </div>
         <div className="flex shrink-0 items-center gap-2.5">
+          <Button
+            type="button"
+            variant="outline"
+            onClick={() =>
+              askDoxie({
+                prompt: `Tell me about ${advisor.name}${advisor.crd_number ? ` (CRD ${advisor.crd_number})` : ""} — summarize the profile and latest filings.`,
+              })
+            }
+            title="Open Doxie with a question about this firm"
+          >
+            <Sparkles className="h-4 w-4" strokeWidth={2} />
+            Ask Doxie
+          </Button>
           <Button
             type="button"
             variant="outline"
@@ -725,10 +742,14 @@ export function AdvisorDetailClient({ advisorId }: { advisorId: string }) {
       {/* ── 2-column section layout — independent flex columns (no height-locking) ───────────────────────────────────────── */}
       <div className="flex flex-col gap-4 xl:flex-row">
       <div className="flex min-w-0 flex-1 flex-col gap-4">
-        {/* Form ADV details */}
+        {/* Form ADV financials — regulatory AUM only. The advisory-activities,
+            client-types, client-counts, and operations blocks moved to the
+            right "Overview" panel so the business-profile content sits below
+            the left column, mirroring the broker-dealer detail layout where
+            "Types of Business" lives in the right "Assessment" column. */}
         <SectionPanel
           eyebrow="Form ADV"
-          title="Advisory activities & client mix"
+          title="Regulatory assets under management"
         >
           <div className="grid gap-3 md:grid-cols-2">
             <MiniStat
@@ -742,74 +763,6 @@ export function AdvisorDetailClient({ advisorId }: { advisorId: string }) {
               compact
             />
           </div>
-
-          <div className="mt-4">
-            <p className="text-[13px] font-semibold text-[var(--text,#0f172a)]">
-              Advisory activities
-            </p>
-            {advisoryActivities.length > 0 ? (
-              <div className="mt-2 flex flex-wrap gap-2">
-                {advisoryActivities.map((activity) => (
-                  <Pill key={activity} variant="info">
-                    {activity}
-                  </Pill>
-                ))}
-              </div>
-            ) : (
-              <p className="mt-2 text-sm text-[var(--text-muted,#94a3b8)]">
-                Not extracted yet.
-              </p>
-            )}
-          </div>
-
-          <div className="mt-4">
-            <p className="text-[13px] font-semibold text-[var(--text,#0f172a)]">
-              Client types
-            </p>
-            {clientTypes.length > 0 ? (
-              <div className="mt-2 flex flex-wrap gap-2">
-                {clientTypes.map((type) => (
-                  <span
-                    key={type}
-                    className="rounded-full border border-[var(--border,rgba(30,64,175,0.1))] bg-[var(--surface-2,#f1f6fd)] px-3 py-1 text-[11px] text-[var(--text-dim,#475569)]"
-                  >
-                    {type}
-                  </span>
-                ))}
-              </div>
-            ) : (
-              <p className="mt-2 text-sm text-[var(--text-muted,#94a3b8)]">
-                Not extracted yet.
-              </p>
-            )}
-          </div>
-
-          {clientCounts && Object.keys(clientCounts).length > 0 ? (
-            <div className="mt-4 rounded-2xl bg-[var(--surface-2,#f1f6fd)] px-4 py-3">
-              <p className="text-[11px] font-semibold uppercase tracking-[0.08em] text-[var(--text-muted,#94a3b8)]">
-                Client counts (Item 5.D.3)
-              </p>
-              <dl className="mt-2 grid gap-x-4 gap-y-1 text-[13px] text-[var(--text-dim,#475569)] sm:grid-cols-2">
-                {Object.entries(clientCounts).map(([key, count]) => (
-                  <div
-                    key={key}
-                    className="flex items-baseline justify-between gap-2"
-                  >
-                    <dt className="capitalize">{key.replace(/_/g, " ")}</dt>
-                    <dd className="font-mono tabular-nums text-[var(--text,#0f172a)]">
-                      {count.toLocaleString()}
-                    </dd>
-                  </div>
-                ))}
-              </dl>
-            </div>
-          ) : null}
-
-          {advisor.firm_operations_text ? (
-            <p className="mt-4 text-xs leading-5 text-[var(--text-muted,#94a3b8)]">
-              {advisor.firm_operations_text}
-            </p>
-          ) : null}
         </SectionPanel>
 
         {/* People */}
@@ -969,8 +922,12 @@ export function AdvisorDetailClient({ advisorId }: { advisorId: string }) {
       </div>
 
       <div className="flex min-w-0 flex-1 flex-col gap-4">
-        {/* Firm overview */}
-        <SectionPanel eyebrow="Overview" title="Registration & filings">
+        {/* Firm overview — registration plus the advisory-activities, client-
+            types, and client-counts blocks moved out of the left "Form ADV"
+            panel so the business-profile content sits in the right column
+            below the left section, mirroring the broker-dealer detail's
+            "Types of Business" placement in its right "Assessment" column. */}
+        <SectionPanel eyebrow="Overview" title="Registration & activities">
           <div className="grid gap-3 md:grid-cols-2">
             <MiniStat
               label="Status"
@@ -993,6 +950,74 @@ export function AdvisorDetailClient({ advisorId }: { advisorId: string }) {
               compact
             />
           </div>
+
+          <div className="mt-4">
+            <p className="text-[13px] font-semibold text-[var(--text,#0f172a)]">
+              Advisory activities
+            </p>
+            {advisoryActivities.length > 0 ? (
+              <div className="mt-2 flex flex-wrap gap-2">
+                {advisoryActivities.map((activity) => (
+                  <Pill key={activity} variant="info">
+                    {activity}
+                  </Pill>
+                ))}
+              </div>
+            ) : (
+              <p className="mt-2 text-sm text-[var(--text-muted,#94a3b8)]">
+                Not extracted yet.
+              </p>
+            )}
+          </div>
+
+          <div className="mt-4">
+            <p className="text-[13px] font-semibold text-[var(--text,#0f172a)]">
+              Client types
+            </p>
+            {clientTypes.length > 0 ? (
+              <div className="mt-2 flex flex-wrap gap-2">
+                {clientTypes.map((type) => (
+                  <span
+                    key={type}
+                    className="rounded-full border border-[var(--border,rgba(30,64,175,0.1))] bg-[var(--surface-2,#f1f6fd)] px-3 py-1 text-[11px] text-[var(--text-dim,#475569)]"
+                  >
+                    {type}
+                  </span>
+                ))}
+              </div>
+            ) : (
+              <p className="mt-2 text-sm text-[var(--text-muted,#94a3b8)]">
+                Not extracted yet.
+              </p>
+            )}
+          </div>
+
+          {clientCounts && Object.keys(clientCounts).length > 0 ? (
+            <div className="mt-4 rounded-2xl bg-[var(--surface-2,#f1f6fd)] px-4 py-3">
+              <p className="text-[11px] font-semibold uppercase tracking-[0.08em] text-[var(--text-muted,#94a3b8)]">
+                Client counts (Item 5.D.3)
+              </p>
+              <dl className="mt-2 grid gap-x-4 gap-y-1 text-[13px] text-[var(--text-dim,#475569)] sm:grid-cols-2">
+                {Object.entries(clientCounts).map(([key, count]) => (
+                  <div
+                    key={key}
+                    className="flex items-baseline justify-between gap-2"
+                  >
+                    <dt className="capitalize">{key.replace(/_/g, " ")}</dt>
+                    <dd className="font-mono tabular-nums text-[var(--text,#0f172a)]">
+                      {count.toLocaleString()}
+                    </dd>
+                  </div>
+                ))}
+              </dl>
+            </div>
+          ) : null}
+
+          {advisor.firm_operations_text ? (
+            <p className="mt-4 text-xs leading-5 text-[var(--text-muted,#94a3b8)]">
+              {advisor.firm_operations_text}
+            </p>
+          ) : null}
 
           {advisor.filings_index_url ? (
             <a
@@ -1083,17 +1108,19 @@ export function AdvisorDetailClient({ advisorId }: { advisorId: string }) {
       </div>
       </div>
 
-      {/* ── Discovered emails (full width) ── */}
-      <div className="mt-4">
-        <EmailScansSection
-          entityKind="advisor"
-          entityId={Number(advisorId)}
-          currentScanId={currentScanId}
-          resolvedDomain={resolvedDomain}
-          isHydrating={isHydratingScan}
-          onScanCreated={setCurrentScanId}
-        />
-      </div>
+      {/* ── Discovered emails (full width) — hidden: no data extraction in-app ── */}
+      {EMAIL_EXTRACTION_ENABLED && (
+        <div className="mt-4">
+          <EmailScansSection
+            entityKind="advisor"
+            entityId={Number(advisorId)}
+            currentScanId={currentScanId}
+            resolvedDomain={resolvedDomain}
+            isHydrating={isHydratingScan}
+            onScanCreated={setCurrentScanId}
+          />
+        </div>
+      )}
     </div>
   );
 }

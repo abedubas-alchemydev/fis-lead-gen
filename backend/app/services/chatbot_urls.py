@@ -29,6 +29,15 @@ Two contract subtleties worth flagging:
    is ``prospect_priority`` (renamed in the FE; old URL still
    silently falls back to default). ``bd_list_url`` accepts the BE name
    and emits the FE key.
+
+4. **``ids`` is an authoritative id-set deep-link**: used by
+   ``semantic_firm_search``, whose result set is a specific list of firm
+   ids that no name/``q`` search can reproduce (``q`` is a substring
+   match, not an embedding lookup). Repeat-key encoded like the other
+   multi-value params; on the BE it bypasses the primary/alternative
+   list-mode filter so every cited firm shows regardless of its
+   deficiency classification. Mirrored on the FE by ``parseIds`` in
+   ``master-list-state.ts``.
 """
 
 from __future__ import annotations
@@ -45,6 +54,10 @@ MY_FAVORITES_URL = "/my-favorites"
 VISITED_FIRMS_URL = "/visited-firms"
 VAULT_URL = "/vault"
 SETTINGS_USERS_URL = "/settings/users"
+# Outreach workspace tabs (?tab= values come from outreach-workspace-client).
+OUTREACH_SENT_URL = "/outreach/sent"
+OUTREACH_DRAFTS_URL = "/outreach/sent?tab=drafts"
+OUTREACH_CREATE_URL = "/outreach/sent?tab=create"
 
 
 # Defaults must match the FE state modules so we strip the same values.
@@ -141,6 +154,7 @@ def _add_multi(parts: list[tuple[str, object]], key: str, values: Iterable[str] 
 
 def bd_list_url(
     *,
+    ids: Iterable[int] | None = None,
     q: str | None = None,
     state: str | None = None,
     health: str | None = None,
@@ -165,6 +179,11 @@ def bd_list_url(
     the FE defaults are also stripped so the link reads cleanly.
     """
     parts: list[tuple[str, object]] = []
+    # Explicit firm-id set (Doxie semantic-search deep-link). Repeat-key
+    # encoded like the other multi-value filters; the FE reads it back via
+    # getAll('ids'). Authoritative on the BE — it bypasses the list-mode
+    # deficiency filter so every cited firm shows.
+    _add_multi(parts, "ids", [str(i) for i in ids] if ids else None)
     _add(parts, "q", q, "")
     _add(parts, "state", state, "")
     _add(parts, "health", health, _BD_DEFAULTS["health"])

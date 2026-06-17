@@ -113,19 +113,11 @@ class Settings(BaseSettings):
     clearing_pipeline_limit: int | None = None
     contact_enrichment_provider: str = "disabled"
     apollo_api_key: str | None = None
-    # Tier 3 of the firm-website resolver chain
-    # (Apollo -> Hunter -> serper.dev -> SerpAPI). Slotted ahead of SerpAPI
-    # because serper.dev is ~50× cheaper per query and ships a 2,500-query
-    # one-time free credit on signup, so it's the right primary search tier
-    # for both the lazy on-demand resolver and the bulk backfill scripts.
-    # Optional: when unset, the resolver skips this tier and falls straight
-    # through to SerpAPI.
-    serper_api_key: str | None = None
-    # Tier 4 of the firm-website resolver chain — fallback when serper.dev
-    # is unset or misses. Free-tier key gives 250 searches/month; bulk
-    # backfills should run on a paid plan. Optional: when unset, the
-    # resolver skips this tier the same way it skips Hunter when
-    # hunter_api_key is unset.
+    # Tier 2 of the firm-website resolver chain (Apollo -> SerpAPI), and the
+    # search backend for LinkedIn-profile recovery + Doxie's web research.
+    # Free-tier key gives 250 searches/month; bulk backfills should run on a
+    # paid plan. Optional: when unset, the resolver skips the search tier the
+    # same way it skips Hunter when hunter_api_key is unset.
     serpapi_api_key: str | None = None
     # Cooldown window between successive Apollo /enrich attempts for the same
     # broker-dealer. Stops the detail-page useEffect from re-firing /enrich
@@ -206,10 +198,10 @@ class Settings(BaseSettings):
     # to re-enable with no code change:
     #   * ``pdl`` -- near-zero match rate on small broker-dealers despite being
     #     billed per call (6 contact rows total at audit).
-    #   * ``linkedin_search`` -- costs a serper/SerpAPI call per officer in the
+    #   * ``linkedin_search`` -- costs a SerpAPI call per officer in the
     #     parallel fan-out while Apollo already supplies LinkedIn for ~97% of
-    #     its matches, so it won 0 rows. Re-add (with ``SERPER_API_KEY``) only
-    #     if a LinkedIn-recovery gap reappears.
+    #     its matches, so it won 0 rows. Re-add (with ``SERPAPI_API_KEY``)
+    #     only if a LinkedIn-recovery gap reappears.
     contact_discovery_chain: str = "apollo_match,hunter,snov"
     contact_discovery_min_confidence: float = 60.0
     contact_discovery_timeout: float = 10.0
@@ -220,14 +212,14 @@ class Settings(BaseSettings):
     # search can't stall the parallel discovery fan-out.
     snov_request_timeout: float = 12.0
     # Last-resort "web fallback" stage: after the provider chain, for People
-    # still missing a channel, search public LinkedIn URLs (serper/SerpAPI) and
+    # still missing a channel, search public LinkedIn URLs (SerpAPI) and
     # crawl the firm's OWN public site for literal published emails (and, when
     # ``web_fallback_phones_enabled``, phones co-located with the person). No
     # LinkedIn-page scraping (auth-walled/ToS) and no email guessing -- only
     # addresses actually published on the firm site that match the person's
     # name. Off by default: it adds a per-firm crawl + per-gap-officer search,
     # so it's opt-in like ``linkedin_search`` (see CONTACT_DISCOVERY_CHAIN note
-    # above). Enable via WEB_FALLBACK_ENABLED once a serper/SerpAPI key is set.
+    # above). Enable via WEB_FALLBACK_ENABLED once a SerpAPI key is set.
     web_fallback_enabled: bool = False
     web_fallback_phones_enabled: bool = False
     # Confidence stamped on a web-sourced email/phone. 0..100 to match
@@ -235,6 +227,26 @@ class Settings(BaseSettings):
     # so the merge keeps it, below LinkedIn org-confirmed (80). Raising the
     # min-confidence floor above this disables web emails with no code change.
     web_fallback_email_confidence: float = 70.0
+    # Email-extractor "Enrich" provider chain (reverse-email -> person), walked
+    # by services/email_extractor/enrichment/orchestrator.py. Unlike the
+    # contact-discovery fan-out, this runs IN ORDER and gap-fills: the first
+    # provider to return a field wins it, later providers fill only the fields
+    # still empty (so Apollo's name/title/LinkedIn + a phone + personal email
+    # from PDL combine on one row). Unconfigured providers (missing key/flag)
+    # are skipped. Registered names: apollo, pdl, hunter, snov, name_lookup,
+    # web_scraper. ``pdl`` sits right after Apollo because it's the one paid API
+    # that returns person phones + personal emails (Apollo's sync phone is empty
+    # on our plan, Snov returns neither) -- the two fields the button most often
+    # still misses. ``name_lookup`` is the coverage net: where every other link
+    # is a reverse-EMAIL lookup, it derives the name from the local-part and runs
+    # the brokers' NAME+domain match (a different index path), so it hits people
+    # not indexed by that address and fills the channel left empty on partial
+    # rows. It runs after the reverse-email links so the ``needed`` gating spends
+    # a second broker call only on real gaps. Reorder or trim via env with no
+    # code change (e.g. drop ``web_scraper`` to disable the site-crawl fallback).
+    # ``web_scraper`` additionally requires ``web_fallback_enabled``; ``pdl`` and
+    # ``name_lookup`` require ``pdl_api_key`` / a name+domain broker key.
+    email_enrichment_chain: str = "apollo,pdl,hunter,snov,name_lookup,web_scraper"
     gemini_api_key: str | None = None
     gemini_api_base: str = "https://generativelanguage.googleapis.com/v1beta"
     # Production default for the structured-PDF extraction path
@@ -259,7 +271,9 @@ class Settings(BaseSettings):
     # pipeline). Flash is the production default — sub-second TTFB and ~5×
     # cheaper than Pro per token, sufficient for general-purpose conversation.
     gemini_chat_model: str = "gemini-2.5-flash"
-    gemini_chat_max_output_tokens: int = 1024
+    # 4096 (was 1024) — tool-rich answers (firm rundowns, outreach drafts,
+    # multi-firm comparisons) were truncating mid-reply at 1024.
+    gemini_chat_max_output_tokens: int = 4096
     gemini_chat_temperature: float = 0.7
     # When True, the LLM-bound clearing-extraction path uploads PDFs to the
     # provider Files API (Gemini / OpenAI) instead of inline base64. ADR-0001

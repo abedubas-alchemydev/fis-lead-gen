@@ -1,11 +1,15 @@
 "use client";
 
 import clsx from "clsx";
+import { Check, Copy, RotateCcw } from "lucide-react";
 import type { Route } from "next";
 import { useRouter } from "next/navigation";
-import type { AnchorHTMLAttributes, ReactNode } from "react";
+import { useState, type AnchorHTMLAttributes, type ReactNode } from "react";
 import ReactMarkdown from "react-markdown";
 import rehypeSanitize from "rehype-sanitize";
+
+import { draftForMessage } from "./chatbot-draft";
+import { ChatbotDraftCard } from "./chatbot-draft-card";
 
 export type ChatRole = "user" | "assistant";
 
@@ -24,6 +28,13 @@ export interface ChatMessage {
   // only parses markdown when this is true so a half-streamed
   // ``[Apex](/master-li`` doesn't flash a broken link mid-stream.
   isFinalized?: boolean;
+  // FE-only message (e.g. the conversational Vault-upload exchange) that
+  // renders in the thread but is NOT sent to the model as history.
+  localOnly?: boolean;
+  // Error bubbles produced by a failed chat turn can offer a Retry button
+  // (re-runs the same turn). Other error bubbles — e.g. a failed
+  // new-chat call — have no turn to re-run, so they stay plain.
+  retryable?: boolean;
 }
 
 // Prefixes the FE recognises as in-app routes. URLs starting with one of
@@ -193,6 +204,7 @@ export function ChatbotMessage({
   toolStatus,
   isFinalized,
   onInternalNavigate,
+  onRetry,
 }: {
   role: ChatRole;
   content: string;
@@ -201,8 +213,12 @@ export function ChatbotMessage({
   toolStatus?: string;
   isFinalized?: boolean;
   onInternalNavigate?: () => void;
+  // Present only on retryable error bubbles — renders a Retry button that
+  // re-runs the failed turn.
+  onRetry?: () => void;
 }) {
   const isUser = role === "user";
+  const [copied, setCopied] = useState(false);
   // Show the pending-state bubble (dots, optionally with a tool label)
   // only when no text has streamed in yet. Once any token arrives,
   // switch to rendering the accumulating content.
@@ -216,32 +232,83 @@ export function ChatbotMessage({
   // links. Error bubbles stay plain too — the error text is FE-authored.
   const shouldRenderMarkdown = !isUser && !error && isFinalized && content.length > 0;
 
+  // Copy lives only on settled assistant replies — streaming text would
+  // copy a half-answer, and FE-authored error text isn't worth copying.
+  const showCopy = shouldRenderMarkdown;
+
+  // Interactive outreach-draft card. Only finalized assistant replies
+  // qualify, and only when the just-streamed turn captured draft data
+  // for this exact content (live session only — reloaded history has no
+  // capture, so it renders as plain text like before).
+  const draft = shouldRenderMarkdown ? draftForMessage(content) : undefined;
+
+  function handleCopy() {
+    if (!navigator.clipboard) return;
+    navigator.clipboard
+      .writeText(content)
+      .then(() => {
+        setCopied(true);
+        window.setTimeout(() => setCopied(false), 1500);
+      })
+      .catch(() => {
+        /* clipboard permission denied — button just stays "Copy" */
+      });
+  }
+
   return (
     <div className={clsx("flex w-full", isUser ? "justify-end" : "justify-start")}>
-      <div
-        className={clsx(
-          "max-w-[80%] whitespace-pre-wrap break-words px-3 py-2 text-sm shadow-sm",
-          isUser
-            ? "rounded-2xl rounded-tr-md bg-[var(--doxie,#6366f1)] text-white"
-            : error
-              ? "rounded-2xl rounded-tl-md bg-[var(--surface-2,#f1f6fd)] text-[var(--danger,#dc2626)]"
-              : "rounded-2xl rounded-tl-md bg-[var(--surface-2,#f1f6fd)] text-[var(--text,#0f172a)]"
-        )}
-      >
-        {showPendingState ? (
-          toolStatus ? (
-            <span className="inline-flex items-center gap-2">
+      <div className={clsx("flex max-w-[80%] flex-col", isUser ? "items-end" : "items-start")}>
+        <div
+          className={clsx(
+            "whitespace-pre-wrap break-words px-3 py-2 text-sm shadow-sm",
+            isUser
+              ? "rounded-2xl rounded-tr-md bg-[var(--doxie,#6366f1)] text-white"
+              : error
+                ? "rounded-2xl rounded-tl-md bg-[var(--surface-2,#f1f6fd)] text-[var(--danger,#dc2626)]"
+                : "rounded-2xl rounded-tl-md bg-[var(--surface-2,#f1f6fd)] text-[var(--text,#0f172a)]"
+          )}
+        >
+          {showPendingState ? (
+            toolStatus ? (
+              <span className="inline-flex items-center gap-2">
+                <TypingDots />
+                <span className="text-[var(--text-muted,#94a3b8)]">{toolStatus}</span>
+              </span>
+            ) : (
               <TypingDots />
-              <span className="text-[var(--text-muted,#94a3b8)]">{toolStatus}</span>
-            </span>
+            )
+          ) : shouldRenderMarkdown ? (
+            <AssistantMarkdown content={content} onInternalNavigate={onInternalNavigate} />
           ) : (
-            <TypingDots />
-          )
-        ) : shouldRenderMarkdown ? (
-          <AssistantMarkdown content={content} onInternalNavigate={onInternalNavigate} />
-        ) : (
-          content
-        )}
+            content
+          )}
+        </div>
+        {draft ? (
+          <ChatbotDraftCard draft={draft} onInternalNavigate={onInternalNavigate} />
+        ) : null}
+        {showCopy ? (
+          <button
+            type="button"
+            onClick={handleCopy}
+            aria-label={copied ? "Copied" : "Copy message"}
+            title="Copy message"
+            className="mt-1 inline-flex items-center gap-1 rounded px-1 py-0.5 text-[11px] text-[var(--text-muted,#94a3b8)] opacity-60 transition hover:text-[var(--text,#0f172a)] hover:opacity-100 focus:opacity-100 focus:outline-none focus:ring-1 focus:ring-[var(--doxie,#6366f1)]/40"
+          >
+            {copied ? <Check size={12} strokeWidth={2} /> : <Copy size={12} strokeWidth={2} />}
+            {copied ? "Copied" : "Copy"}
+          </button>
+        ) : null}
+        {error && onRetry ? (
+          <button
+            type="button"
+            onClick={onRetry}
+            aria-label="Retry"
+            className="mt-1 inline-flex items-center gap-1 rounded px-1 py-0.5 text-[11px] font-medium text-[var(--doxie,#6366f1)] transition hover:brightness-110 focus:outline-none focus:ring-1 focus:ring-[var(--doxie,#6366f1)]/40"
+          >
+            <RotateCcw size={12} strokeWidth={2} />
+            Retry
+          </button>
+        ) : null}
       </div>
     </div>
   );

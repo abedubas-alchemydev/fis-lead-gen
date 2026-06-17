@@ -45,6 +45,7 @@ from app.services.edgar import EdgarService, build_edgar_filing_url
 from app.schemas.pipeline import ClearingArrangementItem, ClearingArrangementsResponse
 from app.services.alerts import AlertRepository
 from app.core.feature_permissions import MASTER_LIST
+from app.services.audit import record_audit
 from app.services.auth import ensure_feature, get_current_user
 from app.services.broker_dealers import BrokerDealerRepository
 from app.services.unknown_reasons import (
@@ -90,7 +91,6 @@ from app.services.refresh_all_orchestrator import (
     run_refresh_all,
 )
 from app.services.serpapi import SerpAPIClient
-from app.services.serper import SerperClient
 from app.services.service_models import FinraBrokerDealerRecord
 from app.services.firm_alias_enricher import ensure_resolver_aliases
 from app.services.pipeline_reaper import STALE_REFRESH_RUN_AGE
@@ -122,6 +122,36 @@ def _parse_states(state: list[str] | None) -> list[str]:
     parsed: list[str] = []
     for value in state:
         parsed.extend(part.strip() for part in value.split(",") if part.strip())
+    return parsed
+
+
+def _parse_ids(ids: list[str] | None) -> list[int]:
+    """Parse the ``ids`` deep-link param into a deduped list of positive ints.
+
+    Accepts both repeat-key (``?ids=1&ids=2``) and comma-joined
+    (``?ids=1,2``) forms — the FE emits repeat-key via ``buildApiPath``, but
+    a Doxie deep-link or hand-edited URL may comma-join. Non-integer and
+    non-positive tokens are dropped silently so one malformed id can't 422
+    the whole list; first-occurrence order is preserved.
+    """
+    if not ids:
+        return []
+
+    seen: set[int] = set()
+    parsed: list[int] = []
+    for value in ids:
+        for part in value.split(","):
+            part = part.strip()
+            if not part:
+                continue
+            try:
+                as_int = int(part)
+            except ValueError:
+                continue
+            if as_int <= 0 or as_int in seen:
+                continue
+            seen.add(as_int)
+            parsed.append(as_int)
     return parsed
 
 
@@ -208,6 +238,10 @@ async def list_broker_dealers(
     clearing_partner_filter: list[str] | None = Query(default=None, alias="clearing_partner"),
     clearing_type_filter: list[str] | None = Query(default=None, alias="clearing_type"),
     types_of_business_filter: list[str] | None = Query(default=None, alias="types_of_business"),
+    # Explicit firm-id set (Doxie semantic-search deep-link). Repeat-key or
+    # comma-joined; parsed + validated by ``_parse_ids``. Authoritative —
+    # the repo filters to exactly these ids and skips the list-mode filter.
+    ids: list[str] | None = Query(default=None),
     min_net_capital: float | None = Query(default=None, ge=0),
     max_net_capital: float | None = Query(default=None, ge=0),
     registered_after: date | None = Query(default=None),
@@ -264,6 +298,7 @@ async def list_broker_dealers(
         registered_after=registered_after,
         registered_before=registered_before,
         segment=segment,
+        ids=_parse_ids(ids),
         list_mode=list_mode,
         sort_by=sort_by,
         sort_dir=sort_dir,
@@ -1220,7 +1255,7 @@ async def get_filing_history(
 @router.post("/{broker_dealer_id}/health-check")
 async def trigger_health_check(
     broker_dealer_id: int,
-    _: AuthenticatedUser = Depends(_require_master_list),
+    current_user: AuthenticatedUser = Depends(_require_master_list),
     db: AsyncSession = Depends(get_db_session),
 ) -> dict[str, object]:
     """Triggered Enrichment / Health Check (Revision 2.2).
@@ -1274,6 +1309,18 @@ async def trigger_health_check(
             if enriched_record.types_of_business_other and enriched_record.types_of_business_other != broker_dealer.types_of_business_other:
                 broker_dealer.types_of_business_other = enriched_record.types_of_business_other
                 changes.append("types_of_business_other")
+
+        # Record the FINRA lookup for the audit trail — only when a CRD
+        # number was present, i.e. we actually queried FINRA detail.
+        await record_audit(
+            db,
+            action="finra_health_check",
+            user_id=current_user.id,
+            details={
+                "broker_dealer_id": broker_dealer_id,
+                "crd_number": broker_dealer.crd_number,
+            },
+        )
 
     # Re-apply the niche-restricted flag only. clearing_classification is NOT
     # derived here anymore: the old determine_clearing_classification() regex
@@ -1343,11 +1390,6 @@ async def resolve_broker_dealer_website(
             detail="Apollo API key is not configured.",
         )
     apollo = ApolloClient(apollo_key)
-    serper = (
-        SerperClient(settings.serper_api_key)
-        if settings.serper_api_key
-        else None
-    )
     serpapi = (
         SerpAPIClient(settings.serpapi_api_key)
         if settings.serpapi_api_key
@@ -1368,7 +1410,6 @@ async def resolve_broker_dealer_website(
         broker_dealer.crd_number,
         apollo,
         serpapi,
-        serper,
         dba_names=broker_dealer.dba_names,
         resolver_aliases=aliases,
     )

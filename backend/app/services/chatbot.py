@@ -32,13 +32,17 @@ import json
 import logging
 from collections import OrderedDict
 from dataclasses import dataclass
+from datetime import datetime, timezone
 from time import monotonic
 from typing import Any, AsyncIterator, Mapping, Sequence
 
 import httpx
+from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.config import settings
+from app.models.broker_dealer import BrokerDealer
+from app.models.investment_advisor import InvestmentAdvisor
 from app.schemas.auth import AuthenticatedUser
 from app.schemas.chatbot import ChatbotMessage, ChatbotPageContext
 from app.services.chatbot_app_knowledge import FEATURE_LABELS_FOR_PROMPT
@@ -98,6 +102,18 @@ DOXIE_TOOL_USAGE_PROMPT = (
     "domain concept (Form 4, Form ADV, X-17A-5/FOCUS, 13F, clearing "
     "partner) means in the app — call the get_app_help tool with the "
     "user's topic and embed the returned route as the reply's deep-link.\n\n"
+    "When a user asks how to identify or find self-clearing broker-dealers "
+    "(or wants a framework or recommendation for spotting them), explain the "
+    "signals the platform uses: a self-clearing firm typically (1) reports "
+    "net capital at or above the SEC Rule 15c3-1 $250k carrying-firm floor, "
+    "(2) holds direct memberships in clearing agencies (DTC, NSCC, OCC, or "
+    "FICC), (3) shows no introducing/clearing partner on Form BD Item 12, and "
+    "(4) describes holding customer funds or securities in its operations "
+    "text. Each firm's current_clearing_type field (self_clearing, "
+    "fully_disclosed, omnibus, non_carrying) returned by the search and "
+    "profile tools is the platform's own classification — use the "
+    "broker-dealer search/list tools and read that field to surface and "
+    "recommend the self-clearing ones.\n\n"
     "If the user's request hinges on a term you genuinely don't know — "
     "obscure jargon, a niche acronym, or a brand-new or unfamiliar name you "
     "cannot confidently define — call research_term to learn it first, then "
@@ -106,14 +122,93 @@ DOXIE_TOOL_USAGE_PROMPT = (
     "answer directly and do NOT call research_term — reserve it for terms you "
     "truly don't know. When a definition does come from research_term, cite "
     "one source briefly as a markdown link. Never use it for a specific "
-    "firm's data, filings, or contacts — the database tools own that."
+    "firm's data, filings, or contacts — the database tools own that.\n\n"
+    "A few tools take real actions instead of just reading data: "
+    "run_email_extractor starts a background email scan for a domain, "
+    "draft_outreach_email composes a cold-email draft (it does NOT send), "
+    "save_outreach_draft stores a draft on the Outreach Drafts tab, and "
+    "send_outreach_draft transmits a saved draft as a real email. "
+    "favorite_firm / unfavorite_firm and mark_alerts_read also change "
+    "real state (and alerts are shared across users). Only call action "
+    "tools when the user clearly asks for that action. After calling one, "
+    "tell the user what happened — the scan id and where to track it, or "
+    "that the draft is ready and was not sent.\n\n"
+    "Outreach flow: find the contact with list_firm_contacts on the firm, "
+    "draft with draft_outreach_email, then save_outreach_draft so the user "
+    "can review it on the Drafts tab. Sending is a two-step gate: first "
+    "show the user the draft's recipient, subject, and body and ask "
+    "whether to send; only when the user's LATEST message explicitly "
+    "confirms (e.g. 'yes, send it') may you call send_outreach_draft with "
+    "confirm=true. Never send unprompted, never treat an earlier 'yes' as "
+    "standing permission, and never retry a failed send without asking. "
+    "After a send, tell the user it went out and link Sent history."
 )
 
 
-# Safety brakes — see module docstring for rationale.
-MAX_TOOL_ITERATIONS = 5
+# Safety brakes — see module docstring for rationale. The iteration cap
+# sits at 8 (up from 5) because legitimate multi-step asks — e.g. find a
+# firm → load its profile → list contacts → draft outreach — already burn
+# four round-trips before a single retry or disambiguation; the wall
+# clock below stays the hard backstop against pathological loops.
+MAX_TOOL_ITERATIONS = 8
 TOOL_EXECUTION_TIMEOUT_S = 5.0
 CHAT_WALL_CLOCK_BUDGET_S = 60.0
+
+# Entity types the FE may claim in ``page_context``. Maps the wire value
+# to the firm table + the human label used in the system-prompt line.
+# Unknown types resolve to None — silent fallback to the plain path/title
+# context, never a 4xx/5xx (see ``_resolve_entity_context``).
+_PAGE_ENTITY_TYPES: dict[str, tuple[type, str]] = {
+    "broker_dealer": (BrokerDealer, "broker-dealer"),
+    "investment_advisor": (InvestmentAdvisor, "investment advisor"),
+}
+
+
+# ─── Streamed tool-result payloads (outreach draft card) ─────────────────
+#
+# The FE renders an interactive draft card on the assistant message when a
+# streamed turn produced an outreach draft. That needs the draft fields
+# (subject / body / recipients / draft_id) on the ``tool_result`` SSE
+# event — for these tools ONLY. Strict whitelist: every other tool's data
+# stays server-side (the model sees it via ``functionResponse``; the user
+# sees it through the model's prose).
+STREAM_RESULT_TOOLS: frozenset[str] = frozenset(
+    {
+        "draft_outreach_email",
+        "save_outreach_draft",
+        "get_outreach_draft",
+    }
+)
+
+# Serialized-size cap for a mirrored tool result. A max-size saved draft
+# (998-char subject + 20k-char body + recipients) fits with headroom;
+# anything larger is dropped rather than truncated — a clipped JSON
+# payload is worse than no card (the chat text flow still has the draft).
+STREAM_RESULT_MAX_CHARS = 24_000
+
+
+def _stream_tool_result_payload(
+    name: str, result: Mapping[str, Any]
+) -> dict[str, Any] | None:
+    """The result payload to mirror onto a ``tool_result`` SSE event.
+
+    ``None`` (the overwhelmingly common case) means "omit the field".
+    Only the whitelisted outreach-draft tools qualify, and only when the
+    result is a successful (non-error), JSON-serializable dict under the
+    size cap.
+    """
+    if name not in STREAM_RESULT_TOOLS:
+        return None
+    if result.get("error"):
+        # Error dicts carry no draft fields — nothing to render.
+        return None
+    try:
+        serialized = json.dumps(result)
+    except (TypeError, ValueError):
+        return None
+    if len(serialized) > STREAM_RESULT_MAX_CHARS:
+        return None
+    return dict(result)
 
 
 # ─── Tool result cache ────────────────────────────────────────────────────
@@ -207,6 +302,26 @@ class _FunctionCall:
     args: dict[str, Any]
 
 
+def _function_declaration(tool: Tool) -> dict[str, Any]:
+    """Build one Gemini ``functionDeclaration`` for a tool.
+
+    ``parameters`` is OMITTED entirely for no-argument tools (schemas with
+    an empty ``properties``). Gemini's REST API rejects a ``parameters``
+    object whose ``properties`` is empty ("should be non-empty"), and that
+    400 would sink the WHOLE turn — not just the offending tool — so a
+    single no-arg tool like ``list_vault_folders`` could otherwise break
+    the entire chatbot. A declaration with no ``parameters`` is the
+    documented way to declare a no-arg function.
+    """
+    declaration: dict[str, Any] = {
+        "name": tool.name,
+        "description": tool.description,
+    }
+    if tool.parameters_schema.get("properties"):
+        declaration["parameters"] = tool.parameters_schema
+    return declaration
+
+
 class ChatbotService:
     """Stateless wrapper around Gemini's ``generateContent`` with tools."""
 
@@ -236,6 +351,9 @@ class ChatbotService:
         )
 
         contents = self._build_contents(messages)
+        # Resolved once per request (one lightweight SELECT), reused across
+        # every loop iteration's system prompt.
+        entity_line = await self._resolve_entity_context(db, page_context)
         deadline = monotonic() + CHAT_WALL_CLOCK_BUDGET_S
 
         for iteration in range(MAX_TOOL_ITERATIONS + 1):
@@ -254,6 +372,7 @@ class ChatbotService:
                 contents=contents,
                 page_context=page_context,
                 tools=active_tools,
+                entity_line=entity_line,
             )
             response_payload = await self._post_with_retries(payload)
             function_calls, model_parts = self._extract_function_calls_and_parts(
@@ -326,10 +445,17 @@ class ChatbotService:
         contents: list[dict[str, Any]],
         page_context: ChatbotPageContext | None,
         tools: Mapping[str, Tool],
+        entity_line: str | None = None,
     ) -> dict[str, Any]:
         payload: dict[str, Any] = {
             "systemInstruction": {
-                "parts": [{"text": self._build_system_text(page_context, tools)}]
+                "parts": [
+                    {
+                        "text": self._build_system_text(
+                            page_context, tools, entity_line
+                        )
+                    }
+                ]
             },
             "contents": contents,
             "generationConfig": {
@@ -341,11 +467,7 @@ class ChatbotService:
             payload["tools"] = [
                 {
                     "functionDeclarations": [
-                        {
-                            "name": tool.name,
-                            "description": tool.description,
-                            "parameters": tool.parameters_schema,
-                        }
+                        _function_declaration(tool)
                         for tool in tools.values()
                     ]
                 }
@@ -357,11 +479,21 @@ class ChatbotService:
         cls,
         page_context: ChatbotPageContext | None,
         tools: Mapping[str, Tool],
+        entity_line: str | None = None,
     ) -> str:
         text = DOXIE_SYSTEM_PROMPT
         if tools:
             text = f"{text}\n\n{DOXIE_TOOL_USAGE_PROMPT}"
+        # Computed per turn (NOT at import) so long-lived Cloud Run
+        # processes don't freeze the date at process start. Grounds
+        # "latest filing", "this year", "how stale is this" questions.
+        today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+        text = f"{text}\n\nToday's date is {today} (UTC)."
         context_block = cls._format_page_context(page_context)
+        if entity_line:
+            # Extend the page-context line with the resolved firm so
+            # "this firm" is grounded without a tool round-trip.
+            context_block = f"{context_block} {entity_line}".strip()
         if context_block:
             text = f"{text}\n\n{context_block}"
         return text
@@ -380,6 +512,53 @@ class ChatbotService:
         return (
             "Current page context (the user is viewing this page right now): "
             + ", ".join(parts)
+        )
+
+    @staticmethod
+    async def _resolve_entity_context(
+        db: AsyncSession, context: ChatbotPageContext | None
+    ) -> str | None:
+        """Resolve ``page_context.entity_*`` into a system-prompt sentence.
+
+        One lightweight SELECT (name + CRD) against the claimed firm
+        table. Any miss — unknown ``entity_type``, no row for the id, or
+        a DB error — returns ``None`` so the prompt silently falls back
+        to the plain path/title behaviour. The entity fields are never
+        persisted; only path/title land on the ``chatbot_message`` row.
+        """
+        if (
+            context is None
+            or context.entity_type is None
+            or context.entity_id is None
+        ):
+            return None
+        entity = _PAGE_ENTITY_TYPES.get(context.entity_type)
+        if entity is None:
+            return None
+        model, label = entity
+        try:
+            result = await db.execute(
+                select(model.name, model.crd_number).where(
+                    model.id == context.entity_id
+                )
+            )
+            row = result.first()
+        except Exception:  # noqa: BLE001 — context is a nicety, never fatal
+            logger.warning(
+                "doxie page-entity lookup failed entity_type=%s entity_id=%s",
+                context.entity_type,
+                context.entity_id,
+                exc_info=True,
+            )
+            return None
+        if row is None:
+            return None
+        name, crd_number = row
+        crd_part = f"CRD {crd_number}, " if crd_number else ""
+        return (
+            f"The user is currently viewing the detail page for {label} "
+            f"{name} ({crd_part}id {context.entity_id}) — "
+            '"this firm" refers to it.'
         )
 
     async def _dispatch_tool(
@@ -482,9 +661,12 @@ class ChatbotService:
         - ``{type: "tool_call", name: "..."}`` — emitted just before
           dispatching a tool. The FE shows a per-tool status indicator
           (e.g. "Looking up Acme Securities…").
-        - ``{type: "tool_result", name: "...", error?: "..."}`` — emitted
-          after the tool returns; ``error`` is set when the tool returned
-          a structured error dict so the FE can dim the status line.
+        - ``{type: "tool_result", name: "...", error?: "...", result?: {...}}``
+          — emitted after the tool returns; ``error`` is set when the tool
+          returned a structured error dict so the FE can dim the status
+          line. ``result`` mirrors the full result JSON for the outreach
+          draft tools only (``STREAM_RESULT_TOOLS``) so the FE can render
+          an interactive draft card; all other tools omit it.
         - ``{type: "done", reply: "..."}`` — final event; carries the full
           assistant reply so the endpoint can persist it without
           re-concatenating deltas.
@@ -516,6 +698,9 @@ class ChatbotService:
             TOOL_REGISTRY if tools is None else tools
         )
         contents = self._build_contents(messages)
+        # Resolved once per request (one lightweight SELECT), reused across
+        # every loop iteration's system prompt.
+        entity_line = await self._resolve_entity_context(db, page_context)
         deadline = monotonic() + CHAT_WALL_CLOCK_BUDGET_S
 
         for iteration in range(MAX_TOOL_ITERATIONS + 1):
@@ -537,6 +722,7 @@ class ChatbotService:
                 contents=contents,
                 page_context=page_context,
                 tools=active_tools,
+                entity_line=entity_line,
             )
 
             accumulated_parts: list[dict[str, Any]] = []
@@ -614,7 +800,7 @@ class ChatbotService:
                 result = await self._dispatch_tool(
                     call, tools=active_tools, user=user, db=db
                 )
-                yield {
+                result_event: dict[str, Any] = {
                     "type": "tool_result",
                     "name": call.name,
                     # Surface only the error code (not the data) — the FE
@@ -622,6 +808,13 @@ class ChatbotService:
                     # full result in the next iteration's contents.
                     "error": result.get("error"),
                 }
+                # Exception: the outreach-draft tools mirror their result
+                # JSON so the FE can render an interactive draft card.
+                # Whitelist + size cap live in the helper.
+                mirrored = _stream_tool_result_payload(call.name, result)
+                if mirrored is not None:
+                    result_event["result"] = mirrored
+                yield result_event
                 response_parts.append(
                     {
                         "functionResponse": {

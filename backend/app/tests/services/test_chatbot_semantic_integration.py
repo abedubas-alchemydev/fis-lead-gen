@@ -22,8 +22,10 @@ from app.db.session import SessionLocal
 from app.models.broker_dealer import BrokerDealer
 from app.models.chatbot_firm_embedding import (
     ENTITY_TYPE_BROKER_DEALER,
+    ENTITY_TYPE_INVESTMENT_ADVISOR,
     ChatbotFirmEmbedding,
 )
+from app.models.investment_advisor import InvestmentAdvisor
 from app.services import chatbot_semantic
 from app.services.chatbot_semantic import ChatbotSemanticService
 
@@ -264,6 +266,115 @@ async def test_search_empty_query_short_circuits(
     assert hits == []
     # embed_query must not have been called for a blank input.
     assert patch_embedding_api["query_calls"] == []
+
+
+# ── Investment advisors ─────────────────────────────────────────────────
+
+
+async def _seed_ia(name: str, *, firm_operations_text: str | None = None) -> int:
+    """Insert one minimal InvestmentAdvisor, return its id."""
+    async with SessionLocal() as session:
+        advisor = InvestmentAdvisor(
+            name=name,
+            city="Boston",
+            state="MA",
+            status="active",
+            firm_operations_text=firm_operations_text,
+        )
+        session.add(advisor)
+        await session.commit()
+        await session.refresh(advisor)
+        return advisor.id
+
+
+async def test_ia_backfill_inserts_and_skips_like_bd(
+    patch_embedding_api: dict[str, list[Any]],
+) -> None:
+    """IA rows land under their own entity_type, and the hash-skip makes
+    an immediate re-run a no-op for the unchanged row."""
+    name = f"advisor-{secrets.token_hex(4)}"
+    ia_id = await _seed_ia(name, firm_operations_text="pension consulting")
+
+    service = ChatbotSemanticService()
+    async with SessionLocal() as session:
+        first = await service.backfill_investment_advisors(session)
+    assert first.embedded >= 1
+    assert first.failed == 0
+
+    async with SessionLocal() as session:
+        row = (
+            await session.execute(
+                select(ChatbotFirmEmbedding).where(
+                    ChatbotFirmEmbedding.entity_id == ia_id,
+                    ChatbotFirmEmbedding.entity_type
+                    == ENTITY_TYPE_INVESTMENT_ADVISOR,
+                )
+            )
+        ).scalar_one()
+    assert name in row.content
+    assert len(row.embedding) == 768
+
+    pre_calls = len(patch_embedding_api["chunks_calls"])
+    async with SessionLocal() as session:
+        await service.backfill_investment_advisors(session)
+    new_calls = patch_embedding_api["chunks_calls"][pre_calls:]
+    # The unchanged advisor must not appear in any fresh embed batch.
+    assert not any(name in t for batch in new_calls for t in batch)
+
+
+async def test_mixed_entity_search_filters_and_ranks(
+    patch_embedding_api: dict[str, list[Any]],
+) -> None:
+    """With both registries embedded, an entity_types filter scopes hits
+    and the unfiltered search can return the IA row."""
+    ia_name = f"advisor-{secrets.token_hex(4)}"
+    ia_id = await _seed_ia(
+        ia_name, firm_operations_text="municipal pension consulting"
+    )
+    await _seed_bd(f"bd-{secrets.token_hex(4)}")
+
+    service = ChatbotSemanticService()
+    async with SessionLocal() as session:
+        await service.backfill_broker_dealers(session)
+        await service.backfill_investment_advisors(session)
+
+    async with SessionLocal() as session:
+        ia_row = (
+            await session.execute(
+                select(ChatbotFirmEmbedding).where(
+                    ChatbotFirmEmbedding.entity_id == ia_id,
+                    ChatbotFirmEmbedding.entity_type
+                    == ENTITY_TYPE_INVESTMENT_ADVISOR,
+                )
+            )
+        ).scalar_one()
+        ia_content = ia_row.content
+
+    # Querying with the IA row's own content pins similarity ≈ 1.0.
+    async with SessionLocal() as session:
+        both = await service.search(
+            session,
+            query=ia_content,
+            entity_types=[
+                ENTITY_TYPE_BROKER_DEALER,
+                ENTITY_TYPE_INVESTMENT_ADVISOR,
+            ],
+            limit=5,
+        )
+        bd_only = await service.search(
+            session,
+            query=ia_content,
+            entity_types=[ENTITY_TYPE_BROKER_DEALER],
+            limit=5,
+        )
+
+    assert both and both[0].entity_type == ENTITY_TYPE_INVESTMENT_ADVISOR
+    assert both[0].entity_id == ia_id
+    assert both[0].similarity > 0.99
+    # The BD-scoped search must never leak the advisor row.
+    assert all(
+        h.entity_type == ENTITY_TYPE_BROKER_DEALER for h in bd_only
+    )
 
 
 # Avoid unused-symbol lints when integration mode is off.

@@ -6,6 +6,7 @@ import {
   AlertCircle,
   CheckCircle2,
   Loader2,
+  Save,
   Sparkles,
 } from "lucide-react";
 import clsx from "clsx";
@@ -14,6 +15,8 @@ import { Button, buttonBase, buttonSizes } from "@/components/ui/button";
 import {
   ApiError,
   composeSendOutreach,
+  createOutreachDraft,
+  deleteOutreachDraft,
   generateAdhocOutreachDraft,
   generateAdvisorOutreachDraft,
   generateInvestorOutreachDraft,
@@ -21,8 +24,10 @@ import {
   getLinkedProviders,
   getOutreachSignature,
   listVaultFolders,
+  updateOutreachDraft,
 } from "@/lib/api";
 import { authClient } from "@/lib/auth-client";
+import { useToast } from "@/components/ui/use-toast";
 import {
   RecipientPicker,
   recipientEmail,
@@ -31,6 +36,9 @@ import {
 import type {
   EmailProviderId,
   LinkedProviderItem,
+  OutreachComposeRecipient,
+  SavedOutreachDraftDetail,
+  SavedOutreachDraftSaveRequest,
   VaultFolder,
 } from "@/lib/types";
 
@@ -103,26 +111,77 @@ function resolveDefaultSenderAccountId(
   return (withScope ?? linkedProviders[0]).account_id;
 }
 
-export function CreateOutreachTab() {
+// A saved draft stores recipients in the compose shape (To = {email, name},
+// Cc/Bcc = address strings). Loading one back into the composer rehydrates
+// them as `adhoc` chips — lossless for sending (compose-send only needs the
+// address + optional name) and the firm/contact linkage isn't needed again.
+function draftToRecipients(
+  recipients: OutreachComposeRecipient[] | undefined,
+): RecipientValue[] {
+  return (recipients ?? [])
+    .filter((r) => r.email)
+    .map((r) => ({ kind: "adhoc", email: r.email, name: r.name ?? null }));
+}
+
+function draftEmailsToRecipients(
+  emails: string[] | undefined,
+): RecipientValue[] {
+  return (emails ?? [])
+    .filter(Boolean)
+    .map((email) => ({ kind: "adhoc", email }));
+}
+
+export function CreateOutreachTab({
+  initialDraft = null,
+  onDraftSaved,
+}: {
+  // When set, the composer opens pre-filled from this saved draft (the
+  // Drafts tab "Edit" flow). The parent remounts via `key` when the chosen
+  // draft changes, so hydrating once from useState initializers is enough.
+  initialDraft?: SavedOutreachDraftDetail | null;
+  // Fired after a draft is saved or sent so the workspace can refresh.
+  onDraftSaved?: () => void;
+} = {}) {
+  const toast = useToast();
   // To / Cc / Bcc, like a real email composer. One message is sent to
   // all of them (compose-send); To & Cc are visible to each other, Bcc
   // is hidden. Cc / Bcc rows stay collapsed until revealed (Gmail-style).
-  const [to, setTo] = useState<RecipientValue[]>([]);
-  const [cc, setCc] = useState<RecipientValue[]>([]);
-  const [bcc, setBcc] = useState<RecipientValue[]>([]);
-  const [showCc, setShowCc] = useState(false);
-  const [showBcc, setShowBcc] = useState(false);
+  const [to, setTo] = useState<RecipientValue[]>(() =>
+    draftToRecipients(initialDraft?.to),
+  );
+  const [cc, setCc] = useState<RecipientValue[]>(() =>
+    draftEmailsToRecipients(initialDraft?.cc),
+  );
+  const [bcc, setBcc] = useState<RecipientValue[]>(() =>
+    draftEmailsToRecipients(initialDraft?.bcc),
+  );
+  const [showCc, setShowCc] = useState(() => (initialDraft?.cc?.length ?? 0) > 0);
+  const [showBcc, setShowBcc] = useState(
+    () => (initialDraft?.bcc?.length ?? 0) > 0,
+  );
   const [sentCount, setSentCount] = useState(0);
   const [folders, setFolders] = useState<VaultFolder[]>([]);
   const [foldersLoading, setFoldersLoading] = useState(true);
-  const [folderId, setFolderId] = useState<number | null>(null);
+  const [folderId, setFolderId] = useState<number | null>(
+    initialDraft?.folder_id ?? null,
+  );
   const [linkedProviders, setLinkedProviders] = useState<LinkedProviderItem[]>(
     [],
   );
-  const [senderAccountId, setSenderAccountId] = useState<string | null>(null);
-  const userOverrodeSenderRef = useRef(false);
-  const [subject, setSubject] = useState("");
-  const [body, setBody] = useState("");
+  const [senderAccountId, setSenderAccountId] = useState<string | null>(
+    initialDraft?.sender_account_id ?? null,
+  );
+  // A draft's saved sender counts as a user override so the (folder,
+  // providers) effect doesn't reset it when the composer loads.
+  const userOverrodeSenderRef = useRef(initialDraft?.sender_account_id != null);
+  const [subject, setSubject] = useState(initialDraft?.subject ?? "");
+  const [body, setBody] = useState(initialDraft?.body ?? "");
+  // The draft this composer is bound to. Set when editing an existing draft
+  // or after the first Save; drives update-vs-create and delete-on-send.
+  const [draftId, setDraftId] = useState<number | null>(
+    initialDraft?.id ?? null,
+  );
+  const [savingDraft, setSavingDraft] = useState(false);
   const [footer, setFooter] = useState("");
   // Default footer = the user's saved signature; kept in a ref so Reset
   // can restore it. userEditedFooterRef guards against a late signature
@@ -134,6 +193,10 @@ export function CreateOutreachTab() {
   const [linkActionProvider, setLinkActionProvider] =
     useState<EmailProviderId | null>(null);
 
+  // Captured once at mount (the parent remounts via `key` when the edited
+  // draft changes), so the folders effect can stay mount-only and still avoid
+  // clobbering a draft's hydrated service without taking a reactive dep.
+  const isEditingDraftRef = useRef(initialDraft != null);
   const isMountedRef = useRef(true);
   useEffect(() => {
     isMountedRef.current = true;
@@ -151,7 +214,9 @@ export function CreateOutreachTab() {
         const result = await listVaultFolders();
         if (cancelled || !isMountedRef.current) return;
         setFolders(result);
-        setFolderId(result[0]?.id ?? null);
+        // Don't clobber a folder hydrated from a draft being edited; only
+        // auto-pick the first service on a fresh compose.
+        if (!isEditingDraftRef.current) setFolderId(result[0]?.id ?? null);
       } catch {
         // Empty list -> the Service select still renders disabled and
         // adhoc sends still work. Show no error toast for this; it'd
@@ -236,6 +301,15 @@ export function CreateOutreachTab() {
     subject.trim().length > 0 &&
     body.trim().length > 0 &&
     (stage === "idle" || stage === "error");
+  // A draft can be saved as soon as there's anything worth keeping — no
+  // recipient or full subject/body required, unlike Send.
+  const canSaveDraft =
+    (hasRecipients ||
+      subject.trim().length > 0 ||
+      body.trim().length > 0) &&
+    stage !== "generating" &&
+    stage !== "sending" &&
+    !savingDraft;
 
   async function handleGenerate() {
     // Draft from the first firm-linked contact (for RAG context); fall
@@ -317,6 +391,19 @@ export function CreateOutreachTab() {
       if (!isMountedRef.current) return;
       setSentCount(to.length + cc.length + bcc.length);
       setStage("sent");
+      // A sent draft shouldn't linger in Drafts. Best-effort delete — a
+      // failure just leaves a stale draft the user can remove manually, so
+      // it must never turn a successful send into an error.
+      if (draftId != null) {
+        try {
+          await deleteOutreachDraft(draftId);
+        } catch {
+          // swallow — the send already succeeded.
+        }
+        if (!isMountedRef.current) return;
+        setDraftId(null);
+        onDraftSaved?.();
+      }
     } catch (err) {
       if (!isMountedRef.current) return;
       setError(buildSendErrorMessage(err, providerId));
@@ -326,6 +413,50 @@ export function CreateOutreachTab() {
           : null;
       setLinkActionProvider(action?.provider ?? null);
       setStage("error");
+    }
+  }
+
+  // The composer state projected into the draft save shape. To carries
+  // display names where known; Cc/Bcc are address-only — the same mapping
+  // the send path uses, so a saved draft round-trips back identically.
+  function buildDraftPayload(): SavedOutreachDraftSaveRequest {
+    return {
+      subject,
+      body,
+      to: to.map((v) => ({
+        email: recipientEmail(v),
+        name:
+          v.kind === "adhoc" ? v.name ?? null : v.result.contact_name || null,
+      })),
+      cc: cc.map(recipientEmail),
+      bcc: bcc.map(recipientEmail),
+      sender_account_id: senderAccountId,
+      folder_id: folderId,
+      // Preserve a Doxie-authored draft's provenance across a human edit;
+      // anything else is a manual save.
+      source: initialDraft?.source === "doxie" ? "doxie" : "manual",
+    };
+  }
+
+  async function handleSaveDraft() {
+    if (savingDraft) return;
+    setSavingDraft(true);
+    setError(null);
+    try {
+      const payload = buildDraftPayload();
+      const saved =
+        draftId != null
+          ? await updateOutreachDraft(draftId, payload)
+          : await createOutreachDraft(payload);
+      if (!isMountedRef.current) return;
+      setDraftId(saved.id);
+      toast.success("Draft saved.");
+      onDraftSaved?.();
+    } catch (err) {
+      if (!isMountedRef.current) return;
+      setError(errorMessage(err));
+    } finally {
+      if (isMountedRef.current) setSavingDraft(false);
     }
   }
 
@@ -386,6 +517,10 @@ export function CreateOutreachTab() {
     setLinkActionProvider(null);
     setStage("idle");
     userOverrodeSenderRef.current = false;
+    // Detach from any draft being edited so a post-reset Save creates a new
+    // one rather than overwriting the draft the user just cleared.
+    setDraftId(null);
+    setSavingDraft(false);
   }
 
   if (stage === "sent") {
@@ -685,6 +820,19 @@ export function CreateOutreachTab() {
             disabled={stage === "generating" || stage === "sending"}
           >
             Reset
+          </Button>
+          <Button
+            type="button"
+            variant="outline"
+            onClick={() => void handleSaveDraft()}
+            disabled={!canSaveDraft}
+          >
+            {savingDraft ? (
+              <Loader2 className="h-3.5 w-3.5 animate-spin" />
+            ) : (
+              <Save className="h-3.5 w-3.5" />
+            )}
+            {draftId != null ? "Update draft" : "Save draft"}
           </Button>
           <Button
             type="button"

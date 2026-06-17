@@ -10,7 +10,7 @@ from __future__ import annotations
 
 import json
 import secrets
-from datetime import datetime
+from datetime import datetime, timezone
 
 import httpx
 import pytest
@@ -187,6 +187,243 @@ async def test_chat_folds_page_context_into_system_prompt(
     assert "Acme Securities" in sys_text
 
 
+@respx.mock
+@pytest.mark.asyncio
+async def test_chat_system_prompt_contains_todays_utc_date(
+    patch_gemini: None,
+    user: AuthenticatedUser,
+    db_stub: object,
+) -> None:
+    """The per-turn system prompt must carry today's UTC date — computed at
+    request time, not import time — so Doxie can reason about recency."""
+    captured: dict[str, bytes] = {}
+
+    def capture(request: httpx.Request) -> httpx.Response:
+        captured["body"] = request.content
+        return httpx.Response(200, json=_reply_payload())
+
+    respx.post(_GEMINI_CHAT_URL).mock(side_effect=capture)
+
+    before = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+    await ChatbotService().chat(
+        messages=[ChatbotMessage(role="user", content="What day is it?")],
+        user=user,
+        db=db_stub,
+        tools={},
+    )
+    after = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+
+    sys_text = json.loads(captured["body"])["systemInstruction"]["parts"][0]["text"]
+    # ``before``/``after`` bracket the call so a midnight rollover mid-test
+    # can't flake the assertion.
+    assert (
+        f"Today's date is {before} (UTC)." in sys_text
+        or f"Today's date is {after} (UTC)." in sys_text
+    )
+
+
+# ── Entity-aware page context ────────────────────────────────────────────
+
+
+class _FakeRowResult:
+    def __init__(self, row: tuple[str, str | None] | None) -> None:
+        self._row = row
+
+    def first(self) -> tuple[str, str | None] | None:
+        return self._row
+
+
+class _FakeEntityDb:
+    """Stands in for ``AsyncSession`` in entity-context tests: returns the
+    configured ``(name, crd_number)`` row for any SELECT (or raises) and
+    counts calls so tests can assert the lookup was/wasn't attempted."""
+
+    def __init__(
+        self,
+        row: tuple[str, str | None] | None = None,
+        raises: Exception | None = None,
+    ) -> None:
+        self.row = row
+        self.raises = raises
+        self.execute_calls = 0
+
+    async def execute(self, _stmt: object) -> _FakeRowResult:
+        self.execute_calls += 1
+        if self.raises is not None:
+            raise self.raises
+        return _FakeRowResult(self.row)
+
+
+def _capture_route(captured: dict[str, bytes]) -> None:
+    def capture(request: httpx.Request) -> httpx.Response:
+        captured["body"] = request.content
+        return httpx.Response(200, json=_reply_payload())
+
+    respx.post(_GEMINI_CHAT_URL).mock(side_effect=capture)
+
+
+def _sys_text(captured: dict[str, bytes]) -> str:
+    return json.loads(captured["body"])["systemInstruction"]["parts"][0]["text"]
+
+
+@respx.mock
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("entity_type", "label", "page_path"),
+    [
+        ("broker_dealer", "broker-dealer", "/master-list/678"),
+        ("investment_advisor", "investment advisor", "/advisor-list/678"),
+    ],
+)
+async def test_chat_entity_context_resolves_firm_into_system_prompt(
+    patch_gemini: None,
+    user: AuthenticatedUser,
+    entity_type: str,
+    label: str,
+    page_path: str,
+) -> None:
+    captured: dict[str, bytes] = {}
+    _capture_route(captured)
+    db = _FakeEntityDb(row=("Acme Securities", "12345"))
+
+    await ChatbotService().chat(
+        messages=[ChatbotMessage(role="user", content="Is this firm self-clearing?")],
+        user=user,
+        db=db,
+        page_context=ChatbotPageContext(
+            path=page_path,
+            title="Acme Securities — DOX",
+            entity_type=entity_type,
+            entity_id=678,
+        ),
+        tools={},
+    )
+
+    sys_text = _sys_text(captured)
+    assert (
+        f"The user is currently viewing the detail page for {label} "
+        f"Acme Securities (CRD 12345, id 678)" in sys_text
+    )
+    assert '"this firm" refers to it' in sys_text
+    # Path/title context still rides along with the firm line.
+    assert f"path={page_path}" in sys_text
+    assert db.execute_calls == 1
+
+
+@respx.mock
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "db",
+    [
+        pytest.param(_FakeEntityDb(row=None), id="id-not-found"),
+        pytest.param(_FakeEntityDb(raises=RuntimeError("db down")), id="db-error"),
+    ],
+)
+async def test_chat_entity_context_miss_falls_back_to_path_title(
+    patch_gemini: None,
+    user: AuthenticatedUser,
+    db: _FakeEntityDb,
+) -> None:
+    """Unknown id or a DB failure must degrade silently to the plain
+    path/title context — no firm line, no error surfaced to the user."""
+    captured: dict[str, bytes] = {}
+    _capture_route(captured)
+
+    reply = await ChatbotService().chat(
+        messages=[ChatbotMessage(role="user", content="What is this firm?")],
+        user=user,
+        db=db,
+        page_context=ChatbotPageContext(
+            path="/master-list/999999",
+            title="Broker Dealers — DOX",
+            entity_type="broker_dealer",
+            entity_id=999999,
+        ),
+        tools={},
+    )
+
+    assert reply == "Hello from Doxie!"
+    sys_text = _sys_text(captured)
+    assert "path=/master-list/999999" in sys_text
+    assert "detail page for" not in sys_text
+    assert db.execute_calls == 1
+
+
+@respx.mock
+@pytest.mark.asyncio
+async def test_chat_entity_context_unknown_type_skips_db_lookup(
+    patch_gemini: None,
+    user: AuthenticatedUser,
+) -> None:
+    """An entity_type the BE doesn't recognise (FE/BE version skew) must
+    not even hit the DB — same silent fallback to path/title."""
+    captured: dict[str, bytes] = {}
+    _capture_route(captured)
+    db = _FakeEntityDb(row=("Should Not Appear", "1"))
+
+    await ChatbotService().chat(
+        messages=[ChatbotMessage(role="user", content="What's this?")],
+        user=user,
+        db=db,
+        page_context=ChatbotPageContext(
+            path="/vault/3", entity_type="vault_folder", entity_id=3
+        ),
+        tools={},
+    )
+
+    sys_text = _sys_text(captured)
+    assert "path=/vault/3" in sys_text
+    assert "detail page for" not in sys_text
+    assert db.execute_calls == 0
+
+
+@respx.mock
+@pytest.mark.asyncio
+async def test_chat_entity_context_omits_crd_when_firm_has_none(
+    patch_gemini: None,
+    user: AuthenticatedUser,
+) -> None:
+    captured: dict[str, bytes] = {}
+    _capture_route(captured)
+    db = _FakeEntityDb(row=("Acme Securities", None))
+
+    await ChatbotService().chat(
+        messages=[ChatbotMessage(role="user", content="Tell me about this firm.")],
+        user=user,
+        db=db,
+        page_context=ChatbotPageContext(
+            path="/master-list/678",
+            entity_type="broker_dealer",
+            entity_id=678,
+        ),
+        tools={},
+    )
+
+    sys_text = _sys_text(captured)
+    assert "detail page for broker-dealer Acme Securities (id 678)" in sys_text
+
+
+def test_page_context_schema_accepts_payloads_with_and_without_entity_fields() -> None:
+    """Backwards compatibility: old clients omit the entity fields; new
+    clients send them from firm detail routes. Both shapes validate."""
+    bare = ChatbotPageContext.model_validate(
+        {"path": "/master-list", "title": "Broker Dealers"}
+    )
+    assert bare.entity_type is None
+    assert bare.entity_id is None
+
+    rich = ChatbotPageContext.model_validate(
+        {
+            "path": "/master-list/678",
+            "title": "Acme Securities — DOX",
+            "entity_type": "broker_dealer",
+            "entity_id": 678,
+        }
+    )
+    assert rich.entity_type == "broker_dealer"
+    assert rich.entity_id == 678
+
+
 @pytest.mark.asyncio
 async def test_chat_raises_when_api_key_missing(
     monkeypatch: pytest.MonkeyPatch,
@@ -279,3 +516,34 @@ async def test_chat_raises_on_empty_safety_blocked_response(
             tools={},
         )
     assert "SAFETY" in str(exc.value)
+
+
+def test_function_declaration_omits_parameters_for_no_arg_tools() -> None:
+    """Gemini 400s the WHOLE turn if a ``parameters`` object has empty
+    ``properties``, so no-arg tools (e.g. list_vault_folders) must declare
+    NO ``parameters`` field while tools with args keep theirs."""
+    from app.services.chatbot import _function_declaration
+    from app.services.chatbot_tools import TOOL_REGISTRY
+
+    no_arg = _function_declaration(TOOL_REGISTRY["list_vault_folders"])
+    assert no_arg["name"] == "list_vault_folders"
+    assert "parameters" not in no_arg
+
+    with_args = _function_declaration(TOOL_REGISTRY["ask_vault"])
+    assert with_args["parameters"]["properties"]
+
+
+def test_no_advertised_tool_emits_empty_properties() -> None:
+    """Regression guard for every tool in the live registry: a declaration
+    either omits ``parameters`` or carries a non-empty ``properties`` — never
+    the empty-``properties`` object Gemini rejects."""
+    from app.services.chatbot import _function_declaration
+    from app.services.chatbot_tools import TOOL_REGISTRY
+
+    for tool in TOOL_REGISTRY.values():
+        decl = _function_declaration(tool)
+        if "parameters" in decl:
+            assert decl["parameters"].get("properties"), (
+                f"{tool.name} declares parameters with empty properties — "
+                "Gemini will 400 the whole chat turn"
+            )

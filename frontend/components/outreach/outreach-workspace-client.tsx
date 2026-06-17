@@ -1,41 +1,46 @@
 "use client";
 
-import { useCallback } from "react";
+import { useCallback, useState } from "react";
 import type { ReadonlyURLSearchParams } from "next/navigation";
 
 import { CreateOutreachTab } from "@/components/outreach/create-outreach-tab";
+import { DraftsTab } from "@/components/outreach/drafts-tab";
 import { SentHistoryTab } from "@/components/outreach/sent-history-tab";
 import { useUrlSyncedState } from "@/lib/use-url-synced-state";
+import type { SavedOutreachDraftDetail } from "@/lib/types";
 
-// /outreach/sent is a two-tab workspace:
-//   - "Sent history" (default) -- the audit list of every email the
-//     user (or, for admins on scope=all, every user) has transmitted.
+// /outreach/sent is a three-tab workspace:
 //   - "Create outreach" -- compose-and-send for an arbitrary recipient,
-//     either picked from existing contacts or typed as a free-form
-//     email. See create-outreach-tab.tsx.
+//     picked from existing contacts or typed as a free-form email. Can be
+//     saved as a draft instead of sent.
+//   - "Drafts" -- saved-but-unsent composer drafts (incl. Doxie-authored
+//     ones). "Edit" loads a draft back into Create, pre-filled.
+//   - "Sent history" (default) -- the audit list of every email sent.
 //
 // Tab state is URL-synced so share-links + Back/Forward round-trip.
 // Default = "history" because the route is /outreach/sent and we want
 // existing bookmarks / sidebar nav to keep landing on the audit list.
 
-type OutreachTab = "create" | "history";
+type OutreachTab = "create" | "drafts" | "history";
 
 type WorkspaceState = { tab: OutreachTab };
 
 // `parse` + `build` must be stable module-level references for
 // `useUrlSyncedState` to avoid effect re-runs every render.
 function parseUrl(sp: ReadonlyURLSearchParams): WorkspaceState {
-  return { tab: sp.get("tab") === "create" ? "create" : "history" };
+  const tab = sp.get("tab");
+  return { tab: tab === "create" || tab === "drafts" ? tab : "history" };
 }
 
 function buildUrl(state: WorkspaceState): string {
-  return state.tab === "create"
-    ? "/outreach/sent?tab=create"
-    : "/outreach/sent";
+  if (state.tab === "create") return "/outreach/sent?tab=create";
+  if (state.tab === "drafts") return "/outreach/sent?tab=drafts";
+  return "/outreach/sent";
 }
 
 const TABS: ReadonlyArray<{ value: OutreachTab; label: string }> = [
   { value: "create", label: "Create outreach" },
+  { value: "drafts", label: "Drafts" },
   { value: "history", label: "Sent history" },
 ];
 
@@ -48,10 +53,38 @@ export function OutreachWorkspaceClient({
 }) {
   const { state, updateState } = useUrlSyncedState(parseUrl, buildUrl);
   const tab = state.tab;
-  const setTab = useCallback(
-    (next: OutreachTab) => updateState({ tab: next }),
+  // The draft currently being edited (Drafts tab "Edit" -> Create tab).
+  // Lifted here so the Drafts tab can hand a draft to the composer across
+  // the tab switch; cleared whenever the user opens Create fresh.
+  const [editingDraft, setEditingDraft] =
+    useState<SavedOutreachDraftDetail | null>(null);
+
+  const goToTab = useCallback(
+    (next: OutreachTab) => {
+      // A manual click on "Create outreach" starts a fresh compose; the
+      // Edit-draft flow uses editFromDraft (which keeps the draft) instead.
+      if (next === "create") setEditingDraft(null);
+      updateState({ tab: next });
+    },
     [updateState],
   );
+
+  const editFromDraft = useCallback(
+    (draft: SavedOutreachDraftDetail) => {
+      setEditingDraft(draft);
+      updateState({ tab: "create" });
+    },
+    [updateState],
+  );
+
+  const description =
+    tab === "create"
+      ? "Compose a new outreach email to a contact in your pipeline, or send a one-off to any email address. Save it as a draft to finish later, or send it now via your linked Gmail / Microsoft / Yahoo account."
+      : tab === "drafts"
+        ? "Emails you've saved but haven't sent yet, including drafts Doxie generated for you. Open one to keep editing, then send it from the composer."
+        : isAdmin
+          ? "Every outreach email sent across all users, including failed attempts and the reason they didn't go through. Click a row to read the full message."
+          : "Every outreach email you've sent, plus any failed attempts and the reason they didn't go through. Click a row to read the full message.";
 
   return (
     <section className="space-y-6">
@@ -64,11 +97,7 @@ export function OutreachWorkspaceClient({
             Outreach
           </h1>
           <p className="mt-2 max-w-3xl text-[13px] leading-5 text-[var(--text-dim,#475569)]">
-            {tab === "create"
-              ? "Compose a new outreach email to a contact in your pipeline, or send a one-off to any email address. Drafts are powered by your linked Gmail / Microsoft / Yahoo account."
-              : isAdmin
-                ? "Every outreach email sent across all users, including failed attempts and the reason they didn't go through. Click a row to read the full message."
-                : "Every outreach email you've sent, plus any failed attempts and the reason they didn't go through. Click a row to read the full message."}
+            {description}
           </p>
         </div>
       </div>
@@ -82,7 +111,7 @@ export function OutreachWorkspaceClient({
               key={entry.value}
               type="button"
               aria-pressed={active}
-              onClick={() => setTab(entry.value)}
+              onClick={() => goToTab(entry.value)}
               className={`inline-flex items-center gap-2 rounded-[10px] px-4 py-2 text-[13px] transition ${
                 active
                   ? "bg-gradient-to-br from-[#6366f1] to-[#8b5cf6] font-semibold text-white shadow-[0_6px_16px_rgba(99,102,241,0.35)]"
@@ -96,7 +125,14 @@ export function OutreachWorkspaceClient({
       </div>
 
       {tab === "create" ? (
-        <CreateOutreachTab />
+        <CreateOutreachTab
+          // Remount when the chosen draft changes so the composer re-hydrates
+          // from initialDraft via its useState initializers.
+          key={editingDraft ? `draft-${editingDraft.id}` : "new"}
+          initialDraft={editingDraft}
+        />
+      ) : tab === "drafts" ? (
+        <DraftsTab onEditDraft={editFromDraft} />
       ) : (
         <SentHistoryTab isAdmin={isAdmin} currentUserId={currentUserId} />
       )}

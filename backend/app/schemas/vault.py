@@ -426,6 +426,72 @@ class OutreachSendDetailResponse(OutreachSendItem):
     body: str
 
 
+# ── Outreach drafts ───────────────────────────────────────────────────
+# A saved-but-unsent composer draft (the Outreach "Drafts" tab). Mirrors
+# the compose-send payload (To/Cc/Bcc + subject + body + folder + sender)
+# so a draft round-trips losslessly back into the composer, but addresses
+# are loose strings (not EmailStr) so a half-typed draft still saves —
+# validation happens on the send path, never here.
+
+
+class OutreachDraftRecipient(BaseModel):
+    """One ``To`` recipient on a draft: address plus optional display name.
+
+    ``email`` is a plain string (not ``EmailStr``) so an in-progress draft
+    with a partially-typed address can still be saved. The compose-send
+    path it ultimately feeds re-validates the address as deliverable.
+    """
+
+    email: str = Field(default="", max_length=320)
+    name: str | None = Field(default=None, max_length=255)
+
+
+class OutreachDraftSaveRequest(BaseModel):
+    """Body for ``POST /outreach/drafts`` and ``PUT /outreach/drafts/{id}``.
+
+    Every field is optional/defaulted so a blank or partially-filled draft
+    saves. ``to`` carries display names; ``cc`` / ``bcc`` are address-only,
+    matching the compose-send shape.
+    """
+
+    subject: str = Field(default="", max_length=998)
+    body: str = Field(default="", max_length=100_000)
+    to: list[OutreachDraftRecipient] = Field(default_factory=list, max_length=100)
+    cc: list[str] = Field(default_factory=list, max_length=100)
+    bcc: list[str] = Field(default_factory=list, max_length=100)
+    sender_account_id: str | None = Field(default=None, max_length=255)
+    folder_id: int | None = Field(default=None, gt=0)
+    source: Literal["manual", "doxie"] = "manual"
+
+
+class OutreachDraftItem(BaseModel):
+    """One row in the Drafts list. Omits ``body`` to keep the list light —
+    fetch the full draft via ``GET /outreach/drafts/{id}`` on open."""
+
+    id: int
+    subject: str = ""
+    to: list[OutreachDraftRecipient] = Field(default_factory=list)
+    cc: list[str] = Field(default_factory=list)
+    bcc: list[str] = Field(default_factory=list)
+    folder_id: int | None = None
+    folder_name: str | None = None
+    sender_account_id: str | None = None
+    source: str = "manual"
+    created_at: datetime
+    updated_at: datetime
+
+
+class OutreachDraftDetail(OutreachDraftItem):
+    body: str = ""
+
+
+class OutreachDraftsListResponse(BaseModel):
+    items: list[OutreachDraftItem]
+    total: int
+    limit: int
+    offset: int
+
+
 class LinkedProviderItem(BaseModel):
     """One linked OAuth account for the calling user.
 

@@ -24,30 +24,49 @@ Design rules followed throughout this module:
 
 from __future__ import annotations
 
+import asyncio
 import base64
 import logging
 from dataclasses import dataclass
-from datetime import date, datetime
+from datetime import date, datetime, timedelta, timezone
 from decimal import Decimal
 from pathlib import Path
 from typing import Any, Awaitable, Callable, Mapping
+from urllib.parse import urlparse
 
 from fastapi import HTTPException
-from sqlalchemy import select
+from sqlalchemy import delete, func, select
 from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy.orm import selectinload
 
 from app.core.feature_permissions import (
     ALERTS,
+    EMAIL_EXTRACTOR,
     INSTITUTIONAL_INVESTORS,
     INVESTMENT_ADVISORS,
     INVESTORS,
     MASTER_LIST,
+    MY_FAVORITES,
+    SENT_OUTREACH,
     VAULT,
 )
+from app.models.advisor_contact import AdvisorContact
 from app.models.advisor_filing import AdvisorFiling
+from app.models.broker_dealer import BrokerDealer
+from app.models.discovered_email import DiscoveredEmail
+from app.models.executive_contact import ExecutiveContact
+from app.models.extraction_run import ExtractionRun, RunStatus
+from app.models.favorite_list import FavoriteList, FavoriteListItem
 from app.models.form4_transaction import Form4Transaction
+from app.models.institutional_investor import InstitutionalInvestor
+from app.models.investment_advisor import InvestmentAdvisor
+from app.models.investor_contact import InvestorContact
 from app.models.investor_filing import InvestorFiling
+from app.models.outreach_draft import OutreachDraft
+from app.models.outreach_send import OutreachSend
+from app.models.pipeline_run import PipelineRun
 from app.models.vault_folder import VaultFolder
+from app.models.vault_folder_file import VaultFolderFile
 from app.schemas.auth import AuthenticatedUser
 from app.schemas.broker_dealer import (
     BrokerDealerListItem,
@@ -72,9 +91,14 @@ from app.services.chatbot_learned_terms import (
 from app.services.chatbot_semantic import (
     ChatbotSemanticService,
     ENTITY_TYPE_BROKER_DEALER,
+    ENTITY_TYPE_INVESTMENT_ADVISOR,
 )
 from app.services.chatbot_urls import (
     ALERTS_URL,
+    MY_FAVORITES_URL,
+    OUTREACH_CREATE_URL,
+    OUTREACH_DRAFTS_URL,
+    OUTREACH_SENT_URL,
     VAULT_URL,
     bd_detail_url,
     bd_list_url,
@@ -108,7 +132,27 @@ from app.services.sec_pdf_fetcher import (
     fetch_filing_pdf_bytes,
     fetch_sec_pdf_bytes,
 )
-from app.services.vault_retrieval import retrieve_chunks
+from app.services.email_extractor import aggregator as email_extractor_aggregator
+from app.services.outreach import (
+    ContactContext,
+    FirmContext,
+    OutreachConfigurationError,
+    OutreachDraftError,
+    ServiceContext,
+    advisor_firm_operations,
+    generate_outreach_draft,
+)
+from app.services.outreach_send import (
+    dedupe_recipients,
+    provider_send_and_record,
+    resolve_sender_account,
+)
+from app.services import user_lists
+from app.services.pipeline_reaper import STALE_REFRESH_RUN_AGE
+from app.services.vault_retrieval import (
+    retrieve_chunks,
+    retrieve_chunks_for_folders,
+)
 from app.services.web_research import search_web
 
 logger = logging.getLogger(__name__)
@@ -134,6 +178,26 @@ WEB_RESEARCH_LIMIT_MAX = 6
 # one ~2s retry; give the tool headroom above the 5s TOOL_EXECUTION_TIMEOUT_S
 # default so a fallback search isn't chopped mid-call.
 WEB_RESEARCH_TOOL_TIMEOUT_S = 15.0
+# Outreach-copilot tools. Subject cap mirrors the outreach_drafts column
+# (RFC 5322 line limit); body cap mirrors the composer textarea ceiling.
+FIRM_CONTACTS_LIMIT = 25
+DRAFTS_LIST_LIMIT_DEFAULT = 10
+DRAFTS_LIST_LIMIT_MAX = 25
+DRAFT_SUBJECT_MAX_CHARS = 998
+DRAFT_BODY_MAX_CHARS = 20_000
+DRAFT_RECIPIENTS_CAP = 10
+# OAuth token refresh + the provider send API routinely exceed the 5s
+# default tool budget — same headroom the PDF tools get.
+SEND_DRAFT_TOOL_TIMEOUT_S = 30.0
+# Status & quick-action tools.
+EMAIL_SCANS_LIMIT_DEFAULT = 10
+EMAIL_SCANS_LIMIT_MAX = 25
+EMAIL_SCAN_RESULTS_CAP = 25
+FAVORITES_LIST_LIMIT_DEFAULT = 10
+FAVORITES_LIST_LIMIT_MAX = 25
+MARK_ALERTS_IDS_CAP = 50
+CONTACT_EMAIL_RESULTS_CAP = 10
+CONTACT_DOMAIN_RESULTS_CAP = 15
 
 
 @dataclass(frozen=True)
@@ -480,6 +544,17 @@ PDF_TOOL_TIMEOUT_S = 30.0
 # when each chunk is ~500 tokens).
 VAULT_TOP_K_MAX = 8
 VAULT_TOP_K_DEFAULT = 5
+# Vault browse caps. A user rarely has more than a handful of folders /
+# files; the ceiling just stops a runaway list from flooding the prompt.
+VAULT_FOLDER_LIST_CAP = 50
+VAULT_FILE_LIST_CAP = 50
+# Folder-description snippet length in the folder listing — the full
+# description can be up to 20k chars, far more than the model needs to
+# pick the right folder.
+VAULT_DESC_SNIPPET_CHARS = 240
+# get_vault_file returns a whole document's extracted text. Cap it so one
+# large file can't blow the prompt budget; the tool flags when truncated.
+VAULT_FILE_TEXT_MAX_CHARS = 20_000
 
 
 # Form 4 / Investors tab — values mirror the FE's days preset whitelist
@@ -859,14 +934,53 @@ async def _execute_semantic_firm_search(
 ) -> dict[str, Any]:
     """Conceptual / semantic firm lookup via the RAG embedding index.
 
-    Distinct from ``search_broker_dealers`` (substring on name/CRD/CIK).
-    Use when the user's query is descriptive — "broker-dealers
-    specializing in retail HNW clients", "firms similar to Acme" —
-    rather than a specific identifier or name fragment.
+    Distinct from the substring search tools. Use when the user's query
+    is descriptive — "broker-dealers specializing in retail HNW clients",
+    "advisors serving pension funds", "firms similar to Acme" — rather
+    than a specific identifier or name fragment.
+
+    Covers broker-dealers AND investment advisors. The eligible entity
+    types are the intersection of the caller's feature permissions
+    (MASTER_LIST ↔ BDs, INVESTMENT_ADVISORS ↔ IAs) with the optional
+    ``entity_type`` filter, so a single registry permission still works.
     """
-    denial = _check_feature(user, MASTER_LIST)
-    if denial is not None:
-        return denial
+    requested = (_opt_str(args, "entity_type") or "any").lower()
+    if requested not in ("broker_dealer", "investment_advisor", "any"):
+        return {
+            "error": "invalid_args",
+            "message": (
+                "Argument 'entity_type' must be 'broker_dealer', "
+                "'investment_advisor', or 'any'."
+            ),
+        }
+
+    eligible: list[str] = []
+    if requested in ("broker_dealer", "any") and _user_can_see_feature(
+        user, MASTER_LIST
+    ):
+        eligible.append(ENTITY_TYPE_BROKER_DEALER)
+    if requested in ("investment_advisor", "any") and _user_can_see_feature(
+        user, INVESTMENT_ADVISORS
+    ):
+        eligible.append(ENTITY_TYPE_INVESTMENT_ADVISOR)
+    if not eligible:
+        # The caller lacks every registry the request would search — the
+        # explicit gate check produces the standard denial message for
+        # whichever registry they asked for.
+        denial = _check_feature(
+            user,
+            INVESTMENT_ADVISORS
+            if requested == "investment_advisor"
+            else MASTER_LIST,
+        )
+        return denial or {
+            "error": "no_access",
+            "message": (
+                "User does not have access to any registry this search "
+                "covers."
+            ),
+        }
+
     query_or_error = _require_query(args)
     if isinstance(query_or_error, dict):
         return query_or_error
@@ -880,7 +994,7 @@ async def _execute_semantic_firm_search(
         hits = await _semantic_service.search(
             db,
             query=query_or_error,
-            entity_types=[ENTITY_TYPE_BROKER_DEALER],
+            entity_types=eligible,
             limit=limit,
         )
     except Exception:
@@ -905,44 +1019,69 @@ async def _execute_semantic_firm_search(
             ),
         }
 
-    # Fetch the BD rows for each hit so Doxie has names + identifiers to
+    # Fetch the firm rows for each hit so Doxie has names + identifiers to
     # cite. The hit's ``content`` snippet is what the embedding actually
     # matched — surfacing it lets Doxie quote the relevant phrase.
-    bd_ids = [h.entity_id for h in hits if h.entity_type == ENTITY_TYPE_BROKER_DEALER]
     items: list[dict[str, Any]] = []
     for hit in hits:
-        if hit.entity_type != ENTITY_TYPE_BROKER_DEALER:
-            continue
         try:
-            bd = await _bd_repo.get_broker_dealer(db, hit.entity_id)
+            if hit.entity_type == ENTITY_TYPE_BROKER_DEALER:
+                bd = await _bd_repo.get_broker_dealer(db, hit.entity_id)
+                if bd is None:
+                    # Embedding row points at a deleted firm — stale index
+                    # entry. Skip silently; a re-backfill cleans it up.
+                    continue
+                summary = _project_bd_summary(
+                    BrokerDealerListItem.model_validate(bd)
+                )
+            elif hit.entity_type == ENTITY_TYPE_INVESTMENT_ADVISOR:
+                advisor = await _ia_repo.get_investment_advisor(
+                    db, hit.entity_id
+                )
+                if advisor is None:
+                    continue
+                summary = _project_ia_summary(
+                    InvestmentAdvisorListItem.model_validate(advisor)
+                )
+            else:
+                continue
         except Exception:
             logger.exception(
-                "doxie tool failed loading bd id=%s tool=semantic_firm_search",
+                "doxie tool failed loading %s id=%s tool=semantic_firm_search",
+                hit.entity_type,
                 hit.entity_id,
             )
             continue
-        if bd is None:
-            # Embedding row points at a deleted BD — stale index entry.
-            # Skip silently; a re-backfill will clean it up.
-            continue
-        bd_item = BrokerDealerListItem.model_validate(bd)
-        summary = _project_bd_summary(bd_item)
+        summary["entity_type"] = hit.entity_type
         summary["similarity"] = round(hit.similarity, 4)
         summary["match_snippet"] = hit.content[:200]
         items.append(summary)
 
-    return {
+    result: dict[str, Any] = {
         "items": items,
         "total_matched": len(items),
         # The total we *would have* returned if not capped by feature
         # gates or stale-row filtering. Helpful for Doxie to mention
         # when the result set is truncated.
-        "candidates_considered": len(bd_ids),
-        # Pass the user's natural-language query through as a name search
-        # on the master list. Won't always match what the embedding
-        # matched on, but it's the most useful fallback link we can offer.
-        "list_link": bd_list_url(q=query_or_error),
+        "candidates_considered": len(hits),
     }
+    # Deep-link to exactly the firms we cited. Semantic hits are a
+    # specific id set that no name/``q`` search can reproduce (``q`` is
+    # a substring match, not an embedding lookup), so stamp the ids
+    # straight onto the URL — the master list filters to them and shows
+    # an "N selected firms" chip. Only the BD list supports an id-set
+    # param today, so the link is emitted only when every hit is a BD
+    # (per-item links cover the rest); an IA id-set deep-link is a
+    # follow-up on ia_list_url/advisor-list-state.
+    bd_item_ids = [
+        it["id"]
+        for it in items
+        if it.get("entity_type") == ENTITY_TYPE_BROKER_DEALER
+        and it.get("id") is not None
+    ]
+    if items and len(bd_item_ids) == len(items):
+        result["list_link"] = bd_list_url(ids=bd_item_ids)
+    return result
 
 
 async def _execute_list_investment_advisors_by_filter(
@@ -2089,18 +2228,20 @@ async def _execute_ask_vault(
     db: AsyncSession,
     args: Mapping[str, Any],
 ) -> dict[str, Any]:
-    """RAG against a Vault folder's chunk index.
+    """Semantic search over the user's Vault chunk index.
 
-    Reuses the existing ``vault_retrieval.retrieve_chunks`` primitive
-    which already does pgvector cosine top-K over
-    ``vault_folder_chunk``. The chat tool requires the caller to pass a
-    ``folder_id`` and enforces per-user ownership in this layer (the
-    retrieval module itself doesn't gate on user_id — it trusts the
-    endpoint / tool to have already checked).
+    Embeds the question once and runs pgvector cosine top-K over
+    ``vault_folder_chunk``. ``folder_id`` is OPTIONAL: pass it to scope
+    to a single folder, or omit it to search across ALL the caller's
+    vault folders (the default — mirrors how the database search tools
+    span the whole corpus rather than one container).
 
-    A future iteration could let Doxie auto-pick the user's most-recent
-    folder when ``folder_id`` is omitted, but for now we keep it
-    explicit so the model never silently queries the wrong corpus.
+    Per-user ownership is enforced here, never in the retrieval layer:
+    a specific ``folder_id`` the caller doesn't own returns not_found
+    (opaque, matching vault_files.py), and the whole-vault path only ever
+    spans folders owned by the caller (so it can't leak another user's
+    files). Admins may target a specific foreign ``folder_id`` but their
+    whole-vault search is still scoped to their own folders.
     """
     denial = _check_feature(user, VAULT)
     if denial is not None:
@@ -2113,45 +2254,63 @@ async def _execute_ask_vault(
             "message": "Argument 'query' is required and must be non-empty.",
         }
 
-    try:
-        folder_id = int(args.get("folder_id"))
-    except (TypeError, ValueError):
-        return {
-            "error": "invalid_args",
-            "message": (
-                "Argument 'folder_id' must be an integer. The user can "
-                "find their folder id under /vault."
-            ),
-        }
+    folder_id: int | None = None
+    if args.get("folder_id") is not None:
+        try:
+            folder_id = int(args["folder_id"])
+        except (TypeError, ValueError):
+            return {
+                "error": "invalid_args",
+                "message": (
+                    "Argument 'folder_id' must be an integer, or omit it to "
+                    "search every folder. Folder ids come from "
+                    "list_vault_folders."
+                ),
+            }
 
-    # Enforce per-user folder ownership — vault folders are single-user
-    # (no shared lists). Admins are allowed through the feature gate
-    # but still don't auto-bypass folder ownership; an explicit ask
-    # for someone else's folder returns not_found so the model treats
-    # it as a missing folder rather than a 403.
+    # Resolve the (owned) folder ids to search.
     try:
-        owner_check = await db.execute(
-            select(VaultFolder.user_id).where(VaultFolder.id == folder_id)
-        )
-        owner_id = owner_check.scalar_one_or_none()
+        if folder_id is not None:
+            owner_id = (
+                await db.execute(
+                    select(VaultFolder.user_id).where(VaultFolder.id == folder_id)
+                )
+            ).scalar_one_or_none()
+            if owner_id is None or (owner_id != user.id and user.role != "admin"):
+                return {
+                    "error": "not_found",
+                    "message": f"No vault folder with id={folder_id}.",
+                }
+            folder_ids: list[int] = [folder_id]
+            scope: object = folder_id
+        else:
+            folder_ids = list(
+                (
+                    await db.execute(
+                        select(VaultFolder.id).where(
+                            VaultFolder.user_id == user.id
+                        )
+                    )
+                ).scalars().all()
+            )
+            scope = "all_folders"
     except Exception:
         logger.exception("doxie tool failed", extra={"tool": "ask_vault"})
         return {
             "error": "tool_error",
             "message": "Lookup failed; ask the user to try again.",
         }
-    if owner_id is None:
+
+    if not folder_ids:
         return {
-            "error": "not_found",
-            "message": f"No vault folder with id={folder_id}.",
-        }
-    if owner_id != user.id and user.role != "admin":
-        # Opaque message — don't reveal that the folder exists for
-        # someone else. Same shape vault_files.py uses for cross-tenant
-        # protection.
-        return {
-            "error": "not_found",
-            "message": f"No vault folder with id={folder_id}.",
+            "items": [],
+            "total_matched": 0,
+            "scope": scope,
+            "link": VAULT_URL,
+            "note": (
+                "The user has no vault folders yet. They can create one and "
+                "upload files under /vault."
+            ),
         }
 
     try:
@@ -2161,8 +2320,8 @@ async def _execute_ask_vault(
     top_k = max(1, min(raw_top_k, VAULT_TOP_K_MAX))
 
     try:
-        chunks = await retrieve_chunks(
-            folder_id=folder_id, query=query, db=db, top_k=top_k
+        chunks = await retrieve_chunks_for_folders(
+            folder_ids=folder_ids, query=query, db=db, top_k=top_k
         )
     except Exception:
         logger.exception("doxie tool failed", extra={"tool": "ask_vault"})
@@ -2170,7 +2329,7 @@ async def _execute_ask_vault(
             "error": "tool_error",
             "message": (
                 "Vault retrieval failed; ask the user to try again or "
-                "check that the folder finished embedding."
+                "check that their files finished embedding."
             ),
         }
 
@@ -2179,18 +2338,264 @@ async def _execute_ask_vault(
             {
                 "text": ch.text,
                 "original_filename": ch.original_filename,
+                # folder_name/id so the model can cite WHICH folder a passage
+                # came from when the search spans the whole vault.
+                "folder_name": ch.folder_name,
+                "folder_id": ch.folder_id,
                 "chunk_index": ch.chunk_index,
                 "similarity": round(ch.similarity, 4),
             }
             for ch in chunks
         ],
         "total_matched": len(chunks),
-        # Link to the Vault landing page — the folder UI lives under
-        # /vault and shows file lists; deep-link could point at the
-        # specific folder route once it lands, but bare /vault is fine.
+        # What we searched: a specific folder id, or "all_folders".
+        "scope": scope,
         "link": VAULT_URL,
-        "folder_id": folder_id,
     }
+
+
+async def _execute_list_vault_folders(
+    user: AuthenticatedUser,
+    db: AsyncSession,
+    args: Mapping[str, Any],
+) -> dict[str, Any]:
+    """List the calling user's Vault folders with file counts.
+
+    The discovery entry point for the vault tools — Doxie calls this to
+    learn what folders exist (and their ids) before searching or reading.
+    Scoped to the caller's own folders; admins see their own vault too
+    (no cross-user listing).
+    """
+    denial = _check_feature(user, VAULT)
+    if denial is not None:
+        return denial
+
+    try:
+        folders = list(
+            (
+                await db.execute(
+                    select(VaultFolder)
+                    .where(VaultFolder.user_id == user.id)
+                    .order_by(
+                        VaultFolder.updated_at.desc(), VaultFolder.id.desc()
+                    )
+                    .limit(VAULT_FOLDER_LIST_CAP)
+                )
+            ).scalars().all()
+        )
+        counts: dict[int, tuple[int, int]] = {}
+        if folders:
+            count_rows = (
+                await db.execute(
+                    select(
+                        VaultFolderFile.folder_id,
+                        func.count().label("total"),
+                        func.count()
+                        .filter(VaultFolderFile.processing_status == "ready")
+                        .label("ready"),
+                    )
+                    .where(
+                        VaultFolderFile.folder_id.in_([f.id for f in folders])
+                    )
+                    .group_by(VaultFolderFile.folder_id)
+                )
+            ).all()
+            counts = {
+                int(r.folder_id): (int(r.total), int(r.ready)) for r in count_rows
+            }
+    except Exception:
+        logger.exception(
+            "doxie tool failed", extra={"tool": "list_vault_folders"}
+        )
+        return {
+            "error": "tool_error",
+            "message": "Lookup failed; ask the user to try again.",
+        }
+
+    items = []
+    for f in folders:
+        total, ready = counts.get(f.id, (0, 0))
+        items.append(
+            _jsonable(
+                {
+                    "folder_id": f.id,
+                    "name": f.name,
+                    "description": (f.description or "")[:VAULT_DESC_SNIPPET_CHARS],
+                    "file_count": total,
+                    "ready_file_count": ready,
+                    "updated_at": f.updated_at,
+                }
+            )
+        )
+
+    return {"items": items, "total": len(items), "link": VAULT_URL}
+
+
+async def _execute_list_vault_files(
+    user: AuthenticatedUser,
+    db: AsyncSession,
+    args: Mapping[str, Any],
+) -> dict[str, Any]:
+    """List Vault files — one folder (pass ``folder_id``) or the whole vault.
+
+    Mirrors a database list tool: enumerates files with their processing
+    status so Doxie can pick one to read with get_vault_file. Scoped to
+    the caller's own folders; a specific foreign/missing ``folder_id``
+    returns not_found rather than a silently empty list.
+    """
+    denial = _check_feature(user, VAULT)
+    if denial is not None:
+        return denial
+
+    folder_id: int | None = None
+    if args.get("folder_id") is not None:
+        try:
+            folder_id = int(args["folder_id"])
+        except (TypeError, ValueError):
+            return {
+                "error": "invalid_args",
+                "message": (
+                    "Argument 'folder_id' must be an integer, or omit it to "
+                    "list files across every folder."
+                ),
+            }
+
+    try:
+        stmt = select(
+            VaultFolderFile, VaultFolder.name.label("folder_name")
+        ).join(VaultFolder, VaultFolder.id == VaultFolderFile.folder_id)
+        if folder_id is not None:
+            owner_id = (
+                await db.execute(
+                    select(VaultFolder.user_id).where(VaultFolder.id == folder_id)
+                )
+            ).scalar_one_or_none()
+            if owner_id is None or (owner_id != user.id and user.role != "admin"):
+                return {
+                    "error": "not_found",
+                    "message": f"No vault folder with id={folder_id}.",
+                }
+            stmt = stmt.where(VaultFolderFile.folder_id == folder_id)
+        else:
+            stmt = stmt.where(VaultFolder.user_id == user.id)
+        stmt = stmt.order_by(
+            VaultFolderFile.created_at.desc(), VaultFolderFile.id.desc()
+        ).limit(VAULT_FILE_LIST_CAP)
+        rows = (await db.execute(stmt)).all()
+    except Exception:
+        logger.exception(
+            "doxie tool failed", extra={"tool": "list_vault_files"}
+        )
+        return {
+            "error": "tool_error",
+            "message": "Lookup failed; ask the user to try again.",
+        }
+
+    items = [
+        _jsonable(
+            {
+                "file_id": file_row.id,
+                "folder_id": file_row.folder_id,
+                "folder_name": folder_name,
+                "original_filename": file_row.original_filename,
+                "mime_type": file_row.mime_type,
+                "size_bytes": file_row.size_bytes,
+                "processing_status": file_row.processing_status,
+                "created_at": file_row.created_at,
+            }
+        )
+        for file_row, folder_name in rows
+    ]
+
+    return {
+        "items": items,
+        "total": len(items),
+        "scope": folder_id if folder_id is not None else "all_folders",
+        "link": VAULT_URL,
+    }
+
+
+async def _execute_get_vault_file(
+    user: AuthenticatedUser,
+    db: AsyncSession,
+    args: Mapping[str, Any],
+) -> dict[str, Any]:
+    """Return one Vault file's full extracted text (capped).
+
+    The "read the whole document" tool — distinct from ask_vault, which
+    only returns the top-K matching passages. Use when the user wants a
+    file summarised or read end-to-end. Ownership is enforced via the
+    file's parent folder; text is capped at ``VAULT_FILE_TEXT_MAX_CHARS``
+    and the response flags truncation.
+    """
+    denial = _check_feature(user, VAULT)
+    if denial is not None:
+        return denial
+
+    try:
+        file_id = int(args["file_id"])
+    except (TypeError, ValueError, KeyError):
+        return {
+            "error": "invalid_args",
+            "message": (
+                "Argument 'file_id' must be an integer. File ids come from "
+                "list_vault_files."
+            ),
+        }
+
+    try:
+        row = (
+            await db.execute(
+                select(
+                    VaultFolderFile,
+                    VaultFolder.user_id.label("owner_id"),
+                    VaultFolder.name.label("folder_name"),
+                )
+                .join(VaultFolder, VaultFolder.id == VaultFolderFile.folder_id)
+                .where(VaultFolderFile.id == file_id)
+            )
+        ).first()
+    except Exception:
+        logger.exception("doxie tool failed", extra={"tool": "get_vault_file"})
+        return {
+            "error": "tool_error",
+            "message": "Lookup failed; ask the user to try again.",
+        }
+
+    if row is None:
+        return {
+            "error": "not_found",
+            "message": f"No vault file with id={file_id}.",
+        }
+    file_obj, owner_id, folder_name = row
+    if owner_id != user.id and user.role != "admin":
+        # Opaque — never reveal a file owned by someone else.
+        return {
+            "error": "not_found",
+            "message": f"No vault file with id={file_id}.",
+        }
+
+    text = file_obj.extracted_text or ""
+    truncated = len(text) > VAULT_FILE_TEXT_MAX_CHARS
+    result: dict[str, Any] = {
+        "file_id": file_obj.id,
+        "folder_id": file_obj.folder_id,
+        "folder_name": folder_name,
+        "original_filename": file_obj.original_filename,
+        "mime_type": file_obj.mime_type,
+        "size_bytes": file_obj.size_bytes,
+        "processing_status": file_obj.processing_status,
+        "extracted_text": text[:VAULT_FILE_TEXT_MAX_CHARS],
+        "text_truncated": truncated,
+        "link": VAULT_URL,
+    }
+    if file_obj.processing_status != "ready" or not text:
+        result["note"] = (
+            "This file has no readable text yet — it may still be processing "
+            f"(status: {file_obj.processing_status}) or the extraction "
+            "produced no text."
+        )
+    return _jsonable(result)
 
 
 # ── App knowledge ────────────────────────────────────────────────────────
@@ -2322,7 +2727,7 @@ async def _execute_research_term(
 
     Flow: normalize the term and check the persisted glossary first; on a
     hit, return the stored definition with no web call. On a miss, research
-    the public web (serper -> SerpAPI), persist the result so the term is
+    the public web (SerpAPI), persist the result so the term is
     "learned" for every future chat, and return it. If neither the glossary
     nor the web yields anything, return an ``unavailable`` error so Doxie can
     fall back to its own knowledge.
@@ -2573,9 +2978,17 @@ _SEMANTIC_SEARCH_PARAMETERS_SCHEMA: dict[str, Any] = {
             "description": (
                 "Free-form descriptive query — e.g. 'firms similar to "
                 "Acme Securities', 'broker-dealers focused on high-net-"
-                "worth retail clients'. Use only when the query is "
-                "conceptual; for exact name/CRD lookups call "
-                "search_broker_dealers instead."
+                "worth retail clients', 'advisors serving pension funds'. "
+                "Use only when the query is conceptual; for exact name/CRD "
+                "lookups call the matching search tool instead."
+            ),
+        },
+        "entity_type": {
+            "type": "string",
+            "enum": ["broker_dealer", "investment_advisor", "any"],
+            "description": (
+                "Restrict hits to one registry. Default 'any' searches "
+                "broker-dealers and investment advisors together."
             ),
         },
         "limit": {
@@ -2844,17 +3257,18 @@ _ASK_VAULT_SCHEMA: dict[str, Any] = {
             "description": (
                 "Free-form natural-language question. Embedded with the "
                 "same gemini-embedding-001 model used to index the "
-                "vault, then cosine top-K against the folder's chunk "
-                "index."
+                "vault, then cosine top-K against the chunk index."
             ),
         },
         "folder_id": {
             "type": "integer",
             "minimum": 1,
             "description": (
-                "Numeric id of the Vault folder to search. The user can "
-                "find it under /vault. Restricted to folders owned by "
-                "the calling user."
+                "OPTIONAL. Restrict the search to one folder. OMIT to search "
+                "across ALL of the user's vault folders (the default — prefer "
+                "this unless the user named a specific folder). Folder ids "
+                "come from list_vault_folders. Restricted to the caller's own "
+                "folders."
             ),
         },
         "top_k": {
@@ -2867,7 +3281,47 @@ _ASK_VAULT_SCHEMA: dict[str, Any] = {
             ),
         },
     },
-    "required": ["query", "folder_id"],
+    "required": ["query"],
+}
+
+
+_LIST_VAULT_FOLDERS_SCHEMA: dict[str, Any] = {
+    "type": "object",
+    "properties": {},
+}
+
+
+_LIST_VAULT_FILES_SCHEMA: dict[str, Any] = {
+    "type": "object",
+    "properties": {
+        "folder_id": {
+            "type": "integer",
+            "minimum": 1,
+            "description": (
+                "OPTIONAL. List files in just this folder. OMIT to list files "
+                "across ALL of the user's vault folders. Folder ids come from "
+                "list_vault_folders."
+            ),
+        },
+    },
+}
+
+
+_GET_VAULT_FILE_SCHEMA: dict[str, Any] = {
+    "type": "object",
+    "properties": {
+        "file_id": {
+            "type": "integer",
+            "minimum": 1,
+            "description": (
+                "Numeric id of the vault file to read (from "
+                "list_vault_files). Returns the file's full extracted text "
+                "(capped), so the model can summarise or quote the whole "
+                "document — not just the passages ask_vault would surface."
+            ),
+        },
+    },
+    "required": ["file_id"],
 }
 
 
@@ -2941,6 +3395,1956 @@ _DUAL_REGISTRATION_PARAMETERS_SCHEMA: dict[str, Any] = {
         },
     },
 }
+
+
+# ── Action tools (write-capable) ─────────────────────────────────────────
+#
+# Unlike the read-only lookups above, these cause side effects: one starts a
+# background email-extractor scan, the other generates an outreach draft via
+# Gemini Flash. They keep the same contract as every other tool — feature
+# gated, ownership checked, and never raising into the Gemini loop (expected
+# failures come back as structured error dicts).
+
+# Holds references to the detached scan tasks so the event loop doesn't
+# garbage-collect them mid-run (asyncio keeps only a weak ref otherwise).
+_BACKGROUND_SCAN_TASKS: set[asyncio.Task[None]] = set()
+
+
+_RUN_EMAIL_EXTRACTOR_PARAMETERS_SCHEMA: dict[str, Any] = {
+    "type": "object",
+    "properties": {
+        "domain": {
+            "type": "string",
+            "description": (
+                "Company domain to scan for contact emails, e.g. 'acme.com'. "
+                "Strip any 'https://' or 'www.' prefix."
+            ),
+        },
+        "person_name": {
+            "type": "string",
+            "description": "Optional person name to focus the scan on.",
+        },
+        "broker_dealer_id": {
+            "type": "integer",
+            "description": (
+                "Optional broker-dealer id to tie the scan to (from a search "
+                "or profile tool). Omit if not firm-specific."
+            ),
+        },
+        "advisor_id": {
+            "type": "integer",
+            "description": "Optional investment-advisor id to tie the scan to.",
+        },
+    },
+    "required": ["domain"],
+}
+
+
+_DRAFT_OUTREACH_PARAMETERS_SCHEMA: dict[str, Any] = {
+    "type": "object",
+    "properties": {
+        "entity_type": {
+            "type": "string",
+            "enum": ["broker_dealer", "investment_advisor"],
+            "description": (
+                "Which registry the firm belongs to. Defaults to "
+                "'broker_dealer'."
+            ),
+        },
+        "firm_id": {
+            "type": "integer",
+            "description": (
+                "Firm id the contact belongs to. 'broker_dealer_id' is "
+                "accepted as a legacy alias."
+            ),
+        },
+        "broker_dealer_id": {
+            "type": "integer",
+            "description": "Legacy alias for firm_id (broker-dealers only).",
+        },
+        "contact_id": {
+            "type": "integer",
+            "description": (
+                "Contact id to address the email to (from "
+                "list_firm_contacts). Must belong to the given firm."
+            ),
+        },
+        "folder_id": {
+            "type": "integer",
+            "description": (
+                "Vault folder id whose documents and instructions seed the "
+                "pitch (from list_vault_folders). Must belong to the user."
+            ),
+        },
+    },
+    "required": ["contact_id", "folder_id"],
+}
+
+
+async def _execute_run_email_extractor(
+    user: AuthenticatedUser,
+    db: AsyncSession,
+    args: Mapping[str, Any],
+) -> dict[str, Any]:
+    """Start a background email-extractor scan for a domain.
+
+    Mirrors ``POST /email-extractor/scans``: inserts a queued
+    ``ExtractionRun`` and kicks ``aggregator.run`` as a detached task (it
+    opens its own DB session). Returns the new scan id so the user can track
+    it on the Email Extractor page. Queue-only — the scan runs async.
+    """
+    denial = _check_feature(user, EMAIL_EXTRACTOR)
+    if denial is not None:
+        return denial
+
+    domain = _opt_str(args, "domain")
+    if not domain:
+        return {
+            "error": "invalid_args",
+            "message": "Argument 'domain' is required, e.g. 'acme.com'.",
+        }
+
+    def _opt_id(key: str) -> int | None:
+        raw = args.get(key)
+        if raw is None:
+            return None
+        try:
+            return int(raw)
+        except (TypeError, ValueError):
+            return None
+
+    try:
+        scan = ExtractionRun(
+            domain=domain,
+            person_name=_opt_str(args, "person_name"),
+            bd_id=_opt_id("broker_dealer_id"),
+            advisor_id=_opt_id("advisor_id"),
+            status=RunStatus.queued.value,
+        )
+        db.add(scan)
+        await db.commit()
+        await db.refresh(scan)
+    except Exception:
+        logger.exception("doxie tool failed", extra={"tool": "run_email_extractor"})
+        return {
+            "error": "tool_error",
+            "message": "Couldn't start the email scan; ask the user to try again.",
+        }
+
+    # Detached so the chat reply isn't blocked on the scan; keep a ref so the
+    # loop doesn't GC it before it runs.
+    task = asyncio.create_task(email_extractor_aggregator.run(scan.id))
+    _BACKGROUND_SCAN_TASKS.add(task)
+    task.add_done_callback(_BACKGROUND_SCAN_TASKS.discard)
+
+    return {
+        "scan_id": scan.id,
+        "status": scan.status,
+        "domain": domain,
+        "link": f"/email-extractor/{scan.id}",
+        "message": (
+            f"Started an email scan for {domain}. It runs in the background — "
+            "results appear on the Email Extractor page."
+        ),
+    }
+
+
+async def _execute_draft_outreach_email(
+    user: AuthenticatedUser,
+    db: AsyncSession,
+    args: Mapping[str, Any],
+) -> dict[str, Any]:
+    """Generate a cold-email ``{subject, body}`` draft for a (firm, contact).
+
+    Mirrors ``POST /outreach/draft`` / ``POST /outreach/advisor-draft``:
+    validates the vault folder belongs to the caller and the contact
+    belongs to the firm (all three misses collapse to one opaque
+    ``not_found``), pulls top-K vault chunks for RAG, then asks Gemini
+    Flash to compose the draft. Draft only — nothing is sent.
+    """
+    denial = _check_feature(user, VAULT)
+    if denial is not None:
+        return denial
+
+    entity_type = (_opt_str(args, "entity_type") or "broker_dealer").lower()
+    if entity_type not in ("broker_dealer", "investment_advisor"):
+        return {
+            "error": "invalid_args",
+            "message": (
+                "Argument 'entity_type' must be 'broker_dealer' or "
+                "'investment_advisor'."
+            ),
+        }
+
+    try:
+        # ``broker_dealer_id`` kept as an accepted alias for the firm id so
+        # pre-IA conversations (and the model's habit) keep working.
+        firm_id = int(args.get("firm_id", args.get("broker_dealer_id")))
+        contact_id = int(args["contact_id"])
+        folder_id = int(args["folder_id"])
+    except (TypeError, ValueError, KeyError):
+        return {
+            "error": "invalid_args",
+            "message": (
+                "'firm_id' (or 'broker_dealer_id'), 'contact_id', and "
+                "'folder_id' are all required integers. Folder ids come from "
+                "list_vault_folders; contact ids come from list_firm_contacts."
+            ),
+        }
+
+    try:
+        folder = (
+            await db.execute(
+                select(VaultFolder).where(
+                    VaultFolder.id == folder_id,
+                    VaultFolder.user_id == user.id,
+                )
+            )
+        ).scalar_one_or_none()
+        firm: BrokerDealer | InvestmentAdvisor | None
+        contact: ExecutiveContact | AdvisorContact | None = None
+        if entity_type == "broker_dealer":
+            firm = (
+                await db.execute(
+                    select(BrokerDealer).where(BrokerDealer.id == firm_id)
+                )
+            ).scalar_one_or_none()
+            if firm is not None:
+                contact = (
+                    await db.execute(
+                        select(ExecutiveContact).where(
+                            ExecutiveContact.id == contact_id,
+                            ExecutiveContact.bd_id == firm_id,
+                        )
+                    )
+                ).scalar_one_or_none()
+        else:
+            firm = (
+                await db.execute(
+                    select(InvestmentAdvisor).where(
+                        InvestmentAdvisor.id == firm_id
+                    )
+                )
+            ).scalar_one_or_none()
+            if firm is not None:
+                contact = (
+                    await db.execute(
+                        select(AdvisorContact).where(
+                            AdvisorContact.id == contact_id,
+                            AdvisorContact.advisor_id == firm_id,
+                        )
+                    )
+                ).scalar_one_or_none()
+    except Exception:
+        logger.exception("doxie tool failed", extra={"tool": "draft_outreach_email"})
+        return {
+            "error": "tool_error",
+            "message": "Lookup failed; ask the user to try again.",
+        }
+
+    # Collapsed not-found: folder-not-yours / firm-missing / contact-missing
+    # surface identically so a leaked id can't be confirmed.
+    if folder is None or firm is None or contact is None:
+        return {
+            "error": "not_found",
+            "message": (
+                "Couldn't find that folder, firm, or contact together — check "
+                "the ids (list_vault_folders for folders, list_firm_contacts "
+                "for contact ids) and that entity_type matches the firm."
+            ),
+        }
+
+    if entity_type == "broker_dealer":
+        clearing_partner = firm.current_clearing_partner
+        operations_text = firm.firm_operations_text
+    else:
+        # Advisors carry no clearing partner; fall back to the Form ADV
+        # advisory-activities blurb when the free-text field is empty —
+        # same shaping as POST /outreach/advisor-draft.
+        clearing_partner = None
+        operations_text = firm.firm_operations_text or advisor_firm_operations(
+            firm
+        )
+
+    firm_ctx = FirmContext(
+        name=firm.name,
+        city=firm.city,
+        state=firm.state,
+        current_clearing_partner=clearing_partner,
+        firm_operations_text=operations_text,
+    )
+    contact_ctx = ContactContext(
+        name=contact.name,
+        title=contact.title,
+        email=contact.email,
+    )
+    query_parts = [
+        firm.name,
+        contact.title or "",
+        firm.city or "",
+        firm.state or "",
+        clearing_partner or "",
+        (operations_text or "")[:500],
+        folder.name,
+    ]
+    retrieval_query = " ".join(part for part in query_parts if part)
+
+    retrieved: tuple[str, ...] = ()
+    if folder.description or retrieval_query:
+        try:
+            chunks = await retrieve_chunks(
+                folder_id=folder.id, query=retrieval_query, db=db
+            )
+            retrieved = tuple(chunk.text for chunk in chunks)
+        except Exception:
+            logger.warning(
+                "doxie draft: chunk retrieval failed for folder %s", folder.id
+            )
+
+    service_ctx = ServiceContext(
+        name=folder.name,
+        description=folder.description,
+        instructions=folder.outreach_instructions or "",
+        retrieved_chunks=retrieved,
+    )
+
+    try:
+        draft = await generate_outreach_draft(
+            firm=firm_ctx, contact=contact_ctx, service=service_ctx
+        )
+    except OutreachConfigurationError:
+        return {
+            "error": "not_configured",
+            "message": (
+                "Outreach drafting isn't configured (Gemini key missing or "
+                "invalid). Tell the user to contact an administrator."
+            ),
+        }
+    except OutreachDraftError:
+        return {
+            "error": "draft_failed",
+            "message": (
+                "The drafting service is unavailable right now; try again in "
+                "a moment."
+            ),
+        }
+    except Exception:
+        logger.exception("doxie tool failed", extra={"tool": "draft_outreach_email"})
+        return {
+            "error": "tool_error",
+            "message": "Couldn't draft the email; ask the user to try again.",
+        }
+
+    return {
+        "subject": draft.subject,
+        "body": draft.body,
+        "entity_type": entity_type,
+        "firm_id": firm_id,
+        "contact_id": contact_id,
+        "folder_id": folder_id,
+        "to_email": contact.email,
+        "to_name": contact.name,
+        "link": "/outreach/contacts",
+        "message": (
+            "Drafted a cold-email subject and body. This is a draft only — "
+            "nothing was sent. Offer to store it with save_outreach_draft so "
+            "the user can review it on the Outreach Drafts tab."
+        ),
+    }
+
+
+# ── Outreach copilot: firm contacts, saved drafts, confirmed send ────────
+
+
+_LIST_FIRM_CONTACTS_PARAMETERS_SCHEMA: dict[str, Any] = {
+    "type": "object",
+    "properties": {
+        "entity_type": {
+            "type": "string",
+            "enum": ["broker_dealer", "investment_advisor"],
+            "description": (
+                "Which registry the firm id belongs to: 'broker_dealer' "
+                "(Broker Dealers) or 'investment_advisor' (Advisors)."
+            ),
+        },
+        "firm_id": {
+            "type": "integer",
+            "description": "Numeric firm id from the matching search tool.",
+        },
+    },
+    "required": ["entity_type", "firm_id"],
+}
+
+
+_SAVE_OUTREACH_DRAFT_PARAMETERS_SCHEMA: dict[str, Any] = {
+    "type": "object",
+    "properties": {
+        "subject": {
+            "type": "string",
+            "description": "Email subject line.",
+        },
+        "body": {
+            "type": "string",
+            "description": "Full plain-text email body.",
+        },
+        "to_email": {
+            "type": "string",
+            "description": (
+                "Primary recipient address (draft_outreach_email returns it "
+                "as to_email)."
+            ),
+        },
+        "to_name": {
+            "type": "string",
+            "description": "Primary recipient display name, when known.",
+        },
+        "cc": {
+            "type": "array",
+            "items": {"type": "string"},
+            "description": "Optional CC addresses.",
+        },
+        "bcc": {
+            "type": "array",
+            "items": {"type": "string"},
+            "description": "Optional BCC addresses.",
+        },
+        "folder_id": {
+            "type": "integer",
+            "description": (
+                "Optional Vault service folder to associate (from "
+                "list_vault_folders). Must belong to the user."
+            ),
+        },
+    },
+    "required": ["subject", "body", "to_email"],
+}
+
+
+_LIST_OUTREACH_DRAFTS_PARAMETERS_SCHEMA: dict[str, Any] = {
+    "type": "object",
+    "properties": {
+        "limit": {
+            "type": "integer",
+            "description": (
+                f"Max drafts to return (default {DRAFTS_LIST_LIMIT_DEFAULT}, "
+                f"cap {DRAFTS_LIST_LIMIT_MAX})."
+            ),
+        },
+    },
+}
+
+
+_GET_OUTREACH_DRAFT_PARAMETERS_SCHEMA: dict[str, Any] = {
+    "type": "object",
+    "properties": {
+        "draft_id": {
+            "type": "integer",
+            "description": (
+                "Draft id from save_outreach_draft or list_outreach_drafts."
+            ),
+        },
+    },
+    "required": ["draft_id"],
+}
+
+
+_SEND_OUTREACH_DRAFT_PARAMETERS_SCHEMA: dict[str, Any] = {
+    "type": "object",
+    "properties": {
+        "draft_id": {
+            "type": "integer",
+            "description": (
+                "Id of the saved outreach draft to transmit (from "
+                "save_outreach_draft or list_outreach_drafts)."
+            ),
+        },
+        "confirm": {
+            "type": "boolean",
+            "description": (
+                "Set true ONLY when the user's latest message explicitly "
+                "confirms sending this exact draft (e.g. 'yes, send it'). "
+                "Never set true preemptively."
+            ),
+        },
+    },
+    "required": ["draft_id", "confirm"],
+}
+
+
+async def _execute_list_firm_contacts(
+    user: AuthenticatedUser,
+    db: AsyncSession,
+    args: Mapping[str, Any],
+) -> dict[str, Any]:
+    """Email-bearing contacts at one firm — the picker step before drafting.
+
+    Mirrors ``GET /outreach/firms/contacts``: only contacts with an email
+    are returned (the ones outreach can actually address), capped at
+    ``FIRM_CONTACTS_LIMIT``. The ``contact_id`` returned here is the handle
+    ``draft_outreach_email`` accepts. Gated on the entity's own feature key
+    (the same contacts already render on those detail pages) rather than
+    SENT_OUTREACH, so users who can see the firm can pick a contact.
+    """
+    entity_type = (_opt_str(args, "entity_type") or "").lower()
+    if entity_type not in ("broker_dealer", "investment_advisor"):
+        return {
+            "error": "invalid_args",
+            "message": (
+                "Argument 'entity_type' must be 'broker_dealer' or "
+                "'investment_advisor'."
+            ),
+        }
+
+    feature_key = (
+        MASTER_LIST if entity_type == "broker_dealer" else INVESTMENT_ADVISORS
+    )
+    denial = _check_feature(user, feature_key)
+    if denial is not None:
+        return denial
+
+    try:
+        firm_id = int(args.get("firm_id"))
+    except (TypeError, ValueError):
+        return {
+            "error": "invalid_args",
+            "message": "Argument 'firm_id' must be an integer.",
+        }
+
+    try:
+        if entity_type == "broker_dealer":
+            firm_name = (
+                await db.execute(
+                    select(BrokerDealer.name).where(BrokerDealer.id == firm_id)
+                )
+            ).scalar_one_or_none()
+            contact_stmt = (
+                select(ExecutiveContact)
+                .where(ExecutiveContact.bd_id == firm_id)
+                .where(ExecutiveContact.email.isnot(None))
+                .order_by(ExecutiveContact.name.asc())
+                .limit(FIRM_CONTACTS_LIMIT)
+            )
+            link = bd_detail_url(firm_id)
+        else:
+            firm_name = (
+                await db.execute(
+                    select(InvestmentAdvisor.name).where(
+                        InvestmentAdvisor.id == firm_id
+                    )
+                )
+            ).scalar_one_or_none()
+            contact_stmt = (
+                select(AdvisorContact)
+                .where(AdvisorContact.advisor_id == firm_id)
+                .where(AdvisorContact.email.isnot(None))
+                .order_by(AdvisorContact.name.asc())
+                .limit(FIRM_CONTACTS_LIMIT)
+            )
+            link = ia_detail_url(firm_id)
+        if firm_name is None:
+            return {
+                "error": "not_found",
+                "message": "No firm with that id in that registry.",
+            }
+        contacts = list((await db.execute(contact_stmt)).scalars().all())
+    except Exception:
+        logger.exception(
+            "doxie tool failed", extra={"tool": "list_firm_contacts"}
+        )
+        return {
+            "error": "tool_error",
+            "message": "Contact lookup failed; ask the user to try again.",
+        }
+
+    items = [
+        {
+            "contact_id": contact.id,
+            "name": contact.name,
+            "title": contact.title,
+            "email": contact.email,
+            "has_phone": bool(contact.phone or contact.phones),
+        }
+        for contact in contacts
+    ]
+    payload: dict[str, Any] = {
+        "entity_type": entity_type,
+        "firm_id": firm_id,
+        "firm_name": firm_name,
+        "contacts": items,
+        "count": len(items),
+        "link": link,
+    }
+    if not items:
+        payload["note"] = (
+            "No email-bearing contacts on file for this firm. The user can "
+            "run contact enrichment from the firm's detail page."
+        )
+    return _jsonable(payload)
+
+
+def _clean_address_list(args: Mapping[str, Any], key: str) -> list[str]:
+    """Project an optional list arg into trimmed plausible addresses."""
+    raw = args.get(key)
+    if not isinstance(raw, (list, tuple)):
+        return []
+    out: list[str] = []
+    for item in raw:
+        addr = str(item).strip()
+        if "@" in addr:
+            out.append(addr)
+    return out[:DRAFT_RECIPIENTS_CAP]
+
+
+async def _execute_save_outreach_draft(
+    user: AuthenticatedUser,
+    db: AsyncSession,
+    args: Mapping[str, Any],
+) -> dict[str, Any]:
+    """Persist a Doxie-authored draft so it shows on the Outreach Drafts tab.
+
+    Mirrors ``POST /outreach/drafts`` with ``source="doxie"``: the user
+    reviews (and can edit or send) the draft from the composer. Saving
+    never sends anything.
+    """
+    denial = _check_feature(user, SENT_OUTREACH)
+    if denial is not None:
+        return denial
+
+    subject = (_opt_str(args, "subject") or "")[:DRAFT_SUBJECT_MAX_CHARS]
+    body = str(args.get("body") or "").strip()[:DRAFT_BODY_MAX_CHARS]
+    to_email = _opt_str(args, "to_email") or ""
+    if not subject or not body or "@" not in to_email:
+        return {
+            "error": "invalid_args",
+            "message": (
+                "'subject', 'body', and a valid 'to_email' are all required."
+            ),
+        }
+    to_name = _opt_str(args, "to_name")
+    cc = _clean_address_list(args, "cc")
+    bcc = _clean_address_list(args, "bcc")
+
+    folder_id: int | None = None
+    if args.get("folder_id") is not None:
+        try:
+            folder_id = int(args["folder_id"])
+        except (TypeError, ValueError):
+            return {
+                "error": "invalid_args",
+                "message": "Argument 'folder_id' must be an integer.",
+            }
+
+    try:
+        if folder_id is not None:
+            owns = (
+                await db.execute(
+                    select(VaultFolder.id).where(
+                        VaultFolder.id == folder_id,
+                        VaultFolder.user_id == user.id,
+                    )
+                )
+            ).scalar_one_or_none()
+            if owns is None:
+                return {
+                    "error": "not_found",
+                    "message": (
+                        "No Vault folder with that id — list_vault_folders "
+                        "shows the user's folders."
+                    ),
+                }
+        draft = OutreachDraft(
+            user_id=user.id,
+            subject=subject,
+            body=body,
+            to_recipients=[{"email": to_email, "name": to_name}],
+            cc_emails=cc or None,
+            bcc_emails=bcc or None,
+            folder_id=folder_id,
+            source="doxie",
+        )
+        db.add(draft)
+        await db.commit()
+        await db.refresh(draft)
+    except Exception:
+        logger.exception(
+            "doxie tool failed", extra={"tool": "save_outreach_draft"}
+        )
+        return {
+            "error": "tool_error",
+            "message": "Couldn't save the draft; ask the user to try again.",
+        }
+
+    return _jsonable(
+        {
+            "draft_id": draft.id,
+            "subject": subject,
+            "to": to_email,
+            "folder_id": folder_id,
+            "link": OUTREACH_DRAFTS_URL,
+            "message": (
+                "Saved to the Outreach Drafts tab for review. Nothing was "
+                "sent."
+            ),
+        }
+    )
+
+
+async def _execute_list_outreach_drafts(
+    user: AuthenticatedUser,
+    db: AsyncSession,
+    args: Mapping[str, Any],
+) -> dict[str, Any]:
+    """The caller's saved drafts, newest-edited first (no bodies)."""
+    denial = _check_feature(user, SENT_OUTREACH)
+    if denial is not None:
+        return denial
+
+    try:
+        raw_limit = (
+            int(args["limit"])
+            if args.get("limit") is not None
+            else DRAFTS_LIST_LIMIT_DEFAULT
+        )
+    except (TypeError, ValueError):
+        raw_limit = DRAFTS_LIST_LIMIT_DEFAULT
+    limit = max(1, min(raw_limit, DRAFTS_LIST_LIMIT_MAX))
+
+    try:
+        rows = (
+            await db.execute(
+                select(OutreachDraft, VaultFolder.name)
+                .outerjoin(
+                    VaultFolder, VaultFolder.id == OutreachDraft.folder_id
+                )
+                .where(OutreachDraft.user_id == user.id)
+                .order_by(OutreachDraft.updated_at.desc())
+                .limit(limit)
+            )
+        ).all()
+        total = (
+            await db.execute(
+                select(func.count())
+                .select_from(OutreachDraft)
+                .where(OutreachDraft.user_id == user.id)
+            )
+        ).scalar_one()
+    except Exception:
+        logger.exception(
+            "doxie tool failed", extra={"tool": "list_outreach_drafts"}
+        )
+        return {
+            "error": "tool_error",
+            "message": "Couldn't load drafts; ask the user to try again.",
+        }
+
+    items = []
+    for draft, folder_name in rows:
+        to = [
+            str(r.get("email", ""))
+            for r in (draft.to_recipients or [])
+            if isinstance(r, dict) and r.get("email")
+        ]
+        items.append(
+            {
+                "draft_id": draft.id,
+                "subject": draft.subject or "",
+                "to": to,
+                "folder_name": folder_name,
+                "source": draft.source,
+                "updated_at": draft.updated_at,
+            }
+        )
+    return _jsonable(
+        {
+            "drafts": items,
+            "count": len(items),
+            "total": int(total),
+            "list_link": OUTREACH_DRAFTS_URL,
+        }
+    )
+
+
+async def _execute_get_outreach_draft(
+    user: AuthenticatedUser,
+    db: AsyncSession,
+    args: Mapping[str, Any],
+) -> dict[str, Any]:
+    """One full draft (incl. body) — what send_outreach_draft would transmit."""
+    denial = _check_feature(user, SENT_OUTREACH)
+    if denial is not None:
+        return denial
+
+    try:
+        draft_id = int(args.get("draft_id"))
+    except (TypeError, ValueError):
+        return {
+            "error": "invalid_args",
+            "message": "Argument 'draft_id' must be an integer.",
+        }
+
+    try:
+        row = (
+            await db.execute(
+                select(OutreachDraft, VaultFolder.name)
+                .outerjoin(
+                    VaultFolder, VaultFolder.id == OutreachDraft.folder_id
+                )
+                .where(
+                    OutreachDraft.id == draft_id,
+                    OutreachDraft.user_id == user.id,
+                )
+            )
+        ).first()
+    except Exception:
+        logger.exception(
+            "doxie tool failed", extra={"tool": "get_outreach_draft"}
+        )
+        return {
+            "error": "tool_error",
+            "message": "Couldn't load the draft; ask the user to try again.",
+        }
+
+    # Opaque not-found: "doesn't exist" and "belongs to another user" look
+    # identical, same as the drafts endpoints.
+    if row is None:
+        return {
+            "error": "not_found",
+            "message": (
+                "No draft with that id — list_outreach_drafts shows the "
+                "user's drafts."
+            ),
+        }
+
+    draft, folder_name = row
+    to = [
+        {"email": str(r.get("email", "")), "name": r.get("name")}
+        for r in (draft.to_recipients or [])
+        if isinstance(r, dict)
+    ]
+    return _jsonable(
+        {
+            "draft_id": draft.id,
+            "subject": draft.subject or "",
+            "body": draft.body or "",
+            "to": to,
+            "cc": [str(x) for x in (draft.cc_emails or [])],
+            "bcc": [str(x) for x in (draft.bcc_emails or [])],
+            "folder_id": draft.folder_id,
+            "folder_name": folder_name,
+            "source": draft.source,
+            "updated_at": draft.updated_at,
+            "link": OUTREACH_DRAFTS_URL,
+        }
+    )
+
+
+async def _load_owned_draft_row(
+    db: AsyncSession, draft_id: int, user_id: str
+) -> OutreachDraft | None:
+    """One owned draft row or None. Module-level seam so unit tests can
+    monkeypatch the lookup without a live session."""
+    return (
+        await db.execute(
+            select(OutreachDraft).where(
+                OutreachDraft.id == draft_id,
+                OutreachDraft.user_id == user_id,
+            )
+        )
+    ).scalar_one_or_none()
+
+
+def _send_failure_dict(exc: HTTPException) -> dict[str, Any]:
+    """Translate send-path HTTPExceptions into Doxie error dicts.
+
+    ``provider_send_and_record`` has already recorded the failed attempt in
+    Sent history by the time these surface; the dict just tells the model
+    how the user can fix it (the OAuth linking/consent flows live on the
+    Outreach page, not in chat).
+    """
+    detail = str(exc.detail or "")
+    if detail.endswith("_account_not_linked") or detail == "sender_account_not_found":
+        return {
+            "error": "no_linked_account",
+            "message": (
+                "No linked email account can send this. The user needs to "
+                "connect Gmail, Outlook, or Yahoo on the Outreach page "
+                "first."
+            ),
+            "link": OUTREACH_CREATE_URL,
+        }
+    if detail.endswith("_scope_required"):
+        return {
+            "error": "send_permission_needed",
+            "message": (
+                "The linked email account hasn't granted send permission. "
+                "Sending once from the Outreach compose page will prompt "
+                "the user to re-consent."
+            ),
+            "link": OUTREACH_CREATE_URL,
+        }
+    if detail.endswith("_oauth_not_configured"):
+        return {
+            "error": "not_configured",
+            "message": (
+                "Email sending isn't configured on the server. Tell the "
+                "user to contact an administrator."
+            ),
+        }
+    return {
+        "error": "send_failed",
+        "message": (
+            "The email provider rejected the send; the attempt is recorded "
+            "as failed in Sent history. Try again in a moment."
+        ),
+        "link": OUTREACH_SENT_URL,
+    }
+
+
+async def _execute_send_outreach_draft(
+    user: AuthenticatedUser,
+    db: AsyncSession,
+    args: Mapping[str, Any],
+) -> dict[str, Any]:
+    """Transmit a saved draft, byte-for-byte, via the user's linked mailbox.
+
+    The draft_id indirection is the safety contract: what gets sent is
+    exactly the saved draft the user reviewed — the model cannot slip in
+    different text at send time. ``confirm`` must be true, and the system
+    prompt instructs the model to set it only after the user's latest
+    message explicitly says to send. Mirrors the composer's compose-send:
+    adhoc-shaped audit row, then the draft is deleted on success.
+    """
+    denial = _check_feature(user, SENT_OUTREACH)
+    if denial is not None:
+        return denial
+
+    try:
+        draft_id = int(args.get("draft_id"))
+    except (TypeError, ValueError):
+        return {
+            "error": "invalid_args",
+            "message": "Argument 'draft_id' must be an integer.",
+        }
+
+    if args.get("confirm") is not True:
+        return {
+            "error": "confirmation_required",
+            "message": (
+                "Not sent. Show the user the draft's recipient, subject, "
+                "and body, and ask whether to send it. Call again with "
+                "confirm=true only after they explicitly say to send."
+            ),
+        }
+
+    try:
+        draft = await _load_owned_draft_row(db, draft_id, user.id)
+    except Exception:
+        logger.exception(
+            "doxie tool failed", extra={"tool": "send_outreach_draft"}
+        )
+        return {
+            "error": "tool_error",
+            "message": "Couldn't load the draft; ask the user to try again.",
+        }
+    if draft is None:
+        return {
+            "error": "not_found",
+            "message": (
+                "No draft with that id — list_outreach_drafts shows the "
+                "user's drafts."
+            ),
+        }
+
+    # Capture everything off the row up front: the send helper commits the
+    # session, which may expire the ORM instance mid-flow.
+    subject = draft.subject or ""
+    body = draft.body or ""
+    folder_id = draft.folder_id
+    sender_account_id = draft.sender_account_id
+    to_pairs = [
+        (str(r.get("email", "")).strip(), r.get("name"))
+        for r in (draft.to_recipients or [])
+        if isinstance(r, dict)
+    ]
+    to_all = [email for email, _ in to_pairs if "@" in email]
+    cc_all = [
+        str(x).strip() for x in (draft.cc_emails or []) if "@" in str(x)
+    ]
+    bcc_all = [
+        str(x).strip() for x in (draft.bcc_emails or []) if "@" in str(x)
+    ]
+
+    if not to_all or not subject.strip() or not body.strip():
+        return {
+            "error": "draft_incomplete",
+            "message": (
+                "The draft is missing a recipient, subject, or body — it "
+                "can't be sent as-is. The user can finish it on the Drafts "
+                "tab, or save a complete replacement."
+            ),
+            "link": OUTREACH_DRAFTS_URL,
+        }
+
+    to_emails, cc_emails, bcc_emails = dedupe_recipients(
+        to_all, cc_all, bcc_all
+    )
+    primary_name = next(
+        (name for email, name in to_pairs if email == to_emails[0]), None
+    )
+
+    try:
+        folder = None
+        if folder_id is not None:
+            folder = (
+                await db.execute(
+                    select(VaultFolder).where(
+                        VaultFolder.id == folder_id,
+                        VaultFolder.user_id == user.id,
+                    )
+                )
+            ).scalar_one_or_none()
+        sender_account = await resolve_sender_account(
+            db=db,
+            current_user=user,
+            folder=folder,
+            explicit_account_id=sender_account_id,
+        )
+        # Adhoc-shaped audit row (no firm/contact FK), same as the
+        # composer's compose-send path.
+        audit = OutreachSend(
+            user_id=user.id,
+            folder_id=folder_id,
+            subject=subject,
+            body=body,
+            status="failed",
+            provider=sender_account.provider_id,
+            recipient_email=to_emails[0],
+            recipient_name=primary_name,
+        )
+        response = await provider_send_and_record(
+            db=db,
+            current_user=user,
+            audit=audit,
+            sender_account=sender_account,
+            to_emails=to_emails,
+            subject=subject,
+            body=body,
+            cc_emails=cc_emails or None,
+            bcc_emails=bcc_emails or None,
+        )
+    except HTTPException as exc:
+        return _send_failure_dict(exc)
+    except Exception:
+        logger.exception(
+            "doxie tool failed", extra={"tool": "send_outreach_draft"}
+        )
+        return {
+            "error": "tool_error",
+            "message": "Couldn't send the draft; ask the user to try again.",
+        }
+
+    # Sent — drop the draft like the composer does. Best-effort: a delete
+    # hiccup must not turn a successful send into an error reply.
+    draft_deleted = True
+    try:
+        await db.execute(
+            delete(OutreachDraft).where(
+                OutreachDraft.id == draft_id,
+                OutreachDraft.user_id == user.id,
+            )
+        )
+        await db.commit()
+    except Exception:
+        draft_deleted = False
+        logger.warning(
+            "doxie send: draft %s not deleted after send", draft_id
+        )
+
+    return _jsonable(
+        {
+            "sent": True,
+            "send_id": response.id,
+            "to": to_emails,
+            "cc": cc_emails,
+            "bcc": bcc_emails,
+            "subject": subject,
+            "draft_deleted": draft_deleted,
+            "link": OUTREACH_SENT_URL,
+            "message": (
+                "Sent from the user's linked mailbox and recorded in Sent "
+                "history. The draft was removed."
+            ),
+        }
+    )
+
+
+# ── Status & quick-action tools ──────────────────────────────────────────
+
+
+_LIST_EMAIL_SCANS_PARAMETERS_SCHEMA: dict[str, Any] = {
+    "type": "object",
+    "properties": {
+        "limit": {
+            "type": "integer",
+            "description": (
+                f"Max scans to return (default {EMAIL_SCANS_LIMIT_DEFAULT}, "
+                f"cap {EMAIL_SCANS_LIMIT_MAX})."
+            ),
+        },
+        "broker_dealer_id": {
+            "type": "integer",
+            "description": "Only scans tied to this broker-dealer id.",
+        },
+        "advisor_id": {
+            "type": "integer",
+            "description": "Only scans tied to this investment-advisor id.",
+        },
+    },
+}
+
+
+_GET_EMAIL_SCAN_RESULTS_PARAMETERS_SCHEMA: dict[str, Any] = {
+    "type": "object",
+    "properties": {
+        "scan_id": {
+            "type": "integer",
+            "description": (
+                "Scan id from run_email_extractor or list_email_scans."
+            ),
+        },
+    },
+    "required": ["scan_id"],
+}
+
+
+_DATA_FRESHNESS_PARAMETERS_SCHEMA: dict[str, Any] = {
+    "type": "object",
+    "properties": {},
+}
+
+
+_FAVORITE_FIRM_PARAMETERS_SCHEMA: dict[str, Any] = {
+    "type": "object",
+    "properties": {
+        "entity_type": {
+            "type": "string",
+            "enum": ["broker_dealer", "investment_advisor"],
+            "description": "Which registry the firm id belongs to.",
+        },
+        "firm_id": {
+            "type": "integer",
+            "description": "Numeric firm id from the matching search tool.",
+        },
+    },
+    "required": ["entity_type", "firm_id"],
+}
+
+
+_LIST_MY_FAVORITES_PARAMETERS_SCHEMA: dict[str, Any] = {
+    "type": "object",
+    "properties": {
+        "limit": {
+            "type": "integer",
+            "description": (
+                f"Max favorites to return (default "
+                f"{FAVORITES_LIST_LIMIT_DEFAULT}, cap "
+                f"{FAVORITES_LIST_LIMIT_MAX})."
+            ),
+        },
+    },
+}
+
+
+_MARK_ALERTS_READ_PARAMETERS_SCHEMA: dict[str, Any] = {
+    "type": "object",
+    "properties": {
+        "alert_ids": {
+            "type": "array",
+            "items": {"type": "integer"},
+            "description": (
+                "Specific alert ids to mark read (from get_recent_alerts; "
+                f"cap {MARK_ALERTS_IDS_CAP})."
+            ),
+        },
+        "all": {
+            "type": "boolean",
+            "description": "Mark every unread alert read instead of ids.",
+        },
+    },
+}
+
+
+_FIND_CONTACT_BY_EMAIL_PARAMETERS_SCHEMA: dict[str, Any] = {
+    "type": "object",
+    "properties": {
+        "email": {
+            "type": "string",
+            "description": "Exact email address to look up.",
+        },
+    },
+    "required": ["email"],
+}
+
+
+_FIND_CONTACTS_BY_DOMAIN_PARAMETERS_SCHEMA: dict[str, Any] = {
+    "type": "object",
+    "properties": {
+        "domain": {
+            "type": "string",
+            "description": (
+                "Company domain, e.g. 'acme.com'. Full URLs are accepted "
+                "and normalized."
+            ),
+        },
+    },
+    "required": ["domain"],
+}
+
+
+def _scan_link(scan_id: int) -> str:
+    return f"/email-extractor/{scan_id}"
+
+
+async def _execute_list_email_scans(
+    user: AuthenticatedUser,
+    db: AsyncSession,
+    args: Mapping[str, Any],
+) -> dict[str, Any]:
+    """Recent email-extractor scans, newest first.
+
+    Mirrors ``GET /email-extractor/scans`` (scans are shared across users,
+    same as that endpoint) so Doxie can answer "how did my scan go?" after
+    ``run_email_extractor`` kicked one off.
+    """
+    denial = _check_feature(user, EMAIL_EXTRACTOR)
+    if denial is not None:
+        return denial
+
+    try:
+        raw_limit = (
+            int(args["limit"])
+            if args.get("limit") is not None
+            else EMAIL_SCANS_LIMIT_DEFAULT
+        )
+    except (TypeError, ValueError):
+        raw_limit = EMAIL_SCANS_LIMIT_DEFAULT
+    limit = max(1, min(raw_limit, EMAIL_SCANS_LIMIT_MAX))
+
+    def _opt_id(key: str) -> int | None:
+        raw = args.get(key)
+        if raw is None:
+            return None
+        try:
+            return int(raw)
+        except (TypeError, ValueError):
+            return None
+
+    bd_id = _opt_id("broker_dealer_id")
+    advisor_id = _opt_id("advisor_id")
+
+    try:
+        stmt = select(ExtractionRun).order_by(ExtractionRun.created_at.desc())
+        if bd_id is not None:
+            stmt = stmt.where(ExtractionRun.bd_id == bd_id)
+        if advisor_id is not None:
+            stmt = stmt.where(ExtractionRun.advisor_id == advisor_id)
+        scans = list((await db.execute(stmt.limit(limit))).scalars().all())
+    except Exception:
+        logger.exception("doxie tool failed", extra={"tool": "list_email_scans"})
+        return {
+            "error": "tool_error",
+            "message": "Couldn't load scans; ask the user to try again.",
+        }
+
+    items = [
+        {
+            "scan_id": scan.id,
+            "domain": scan.domain,
+            "person_name": scan.person_name,
+            "status": scan.status,
+            "total_items": scan.total_items,
+            "success_count": scan.success_count,
+            "failure_count": scan.failure_count,
+            "created_at": scan.created_at,
+            "completed_at": scan.completed_at,
+            "link": _scan_link(scan.id),
+        }
+        for scan in scans
+    ]
+    return _jsonable(
+        {"scans": items, "count": len(items), "list_link": "/email-extractor"}
+    )
+
+
+async def _execute_get_email_scan_results(
+    user: AuthenticatedUser,
+    db: AsyncSession,
+    args: Mapping[str, Any],
+) -> dict[str, Any]:
+    """One scan's status plus its discovered emails (capped)."""
+    denial = _check_feature(user, EMAIL_EXTRACTOR)
+    if denial is not None:
+        return denial
+
+    try:
+        scan_id = int(args.get("scan_id"))
+    except (TypeError, ValueError):
+        return {
+            "error": "invalid_args",
+            "message": "Argument 'scan_id' must be an integer.",
+        }
+
+    try:
+        scan = (
+            await db.execute(
+                select(ExtractionRun)
+                .options(selectinload(ExtractionRun.discovered_emails))
+                .where(ExtractionRun.id == scan_id)
+            )
+        ).scalar_one_or_none()
+    except Exception:
+        logger.exception(
+            "doxie tool failed", extra={"tool": "get_email_scan_results"}
+        )
+        return {
+            "error": "tool_error",
+            "message": "Couldn't load the scan; ask the user to try again.",
+        }
+
+    if scan is None:
+        return {
+            "error": "not_found",
+            "message": (
+                "No email scan with that id — list_email_scans shows recent "
+                "scans."
+            ),
+        }
+
+    emails = list(scan.discovered_emails or [])
+    shown = emails[:EMAIL_SCAN_RESULTS_CAP]
+    items = [
+        {
+            "email": e.email,
+            "source": e.source,
+            "confidence": e.confidence,
+            "enriched_name": e.enriched_name,
+            "enriched_title": e.enriched_title,
+            "enrichment_status": e.enrichment_status,
+        }
+        for e in shown
+    ]
+    return _jsonable(
+        {
+            "scan_id": scan.id,
+            "domain": scan.domain,
+            "status": scan.status,
+            "total_found": len(emails),
+            "shown": len(items),
+            "results": items,
+            "link": _scan_link(scan.id),
+        }
+    )
+
+
+# Parent pipelines a user might reasonably ask "is the data fresh?" about.
+# Sub-pipeline rows (``*_resolve_website`` etc.) fire as children of these
+# and would only add noise.
+_DATA_FRESHNESS_PIPELINES: tuple[str, ...] = (
+    "populate_all",
+    "initial_load",
+    "initial_load_advisors",
+    "daily_filing_monitor",
+    "clearing_pdf_pipeline",
+    "registration_watcher",
+    "deficiency_watcher",
+    "form4_watcher",
+    "broker_dealer_refresh_all",
+    "investment_advisor_refresh_all",
+    "broker_dealer_gap_fill",
+    "investment_advisor_gap_fill",
+)
+
+
+def _stall_threshold(pipeline_name: str) -> timedelta:
+    """How long a run may stay ``running`` before we flag it.
+
+    populate_all / initial_load legitimately run 30-90+ minutes. The
+    refresh/gap-fill family is reaped at ``STALE_REFRESH_RUN_AGE`` by
+    pipeline_reaper, so anything older than that is already suspect.
+    Everything else gets a flat hour.
+    """
+    if pipeline_name == "populate_all" or pipeline_name.startswith(
+        "initial_load"
+    ):
+        return timedelta(hours=2)
+    if pipeline_name.endswith("_refresh_all") or pipeline_name.endswith(
+        "_gap_fill"
+    ):
+        return STALE_REFRESH_RUN_AGE
+    return timedelta(hours=1)
+
+
+async def _execute_get_data_freshness(
+    user: AuthenticatedUser,  # noqa: ARG001 — informational, no gate
+    db: AsyncSession,
+    args: Mapping[str, Any],  # noqa: ARG001 — no parameters
+) -> dict[str, Any]:
+    """Read-only data-freshness report over ``pipeline_runs``.
+
+    Counters and timestamps only — consistent with the any-authenticated
+    ``GET /pipeline/run/{id}`` contract, so no permission gate. The tool
+    cannot trigger anything; the description says so to keep the model
+    from promising a refresh it can't start.
+    """
+    try:
+        latest_stmt = (
+            select(PipelineRun)
+            .where(
+                PipelineRun.pipeline_name.in_(_DATA_FRESHNESS_PIPELINES),
+                PipelineRun.status == "completed",
+            )
+            .order_by(
+                PipelineRun.pipeline_name, PipelineRun.completed_at.desc()
+            )
+            .distinct(PipelineRun.pipeline_name)
+        )
+        latest = list((await db.execute(latest_stmt)).scalars().all())
+        active_stmt = (
+            select(PipelineRun)
+            .where(
+                PipelineRun.pipeline_name.in_(_DATA_FRESHNESS_PIPELINES),
+                PipelineRun.status.in_(("running", "queued")),
+            )
+            .order_by(PipelineRun.started_at.desc())
+            .limit(25)
+        )
+        active = list((await db.execute(active_stmt)).scalars().all())
+    except Exception:
+        logger.exception(
+            "doxie tool failed", extra={"tool": "get_data_freshness"}
+        )
+        return {
+            "error": "tool_error",
+            "message": (
+                "Couldn't read pipeline history; ask the user to try again."
+            ),
+        }
+
+    now = datetime.now(timezone.utc)
+    last_completed = [
+        {
+            "pipeline": run.pipeline_name,
+            "completed_at": run.completed_at,
+            "total_items": run.total_items,
+            "success_count": run.success_count,
+            "failure_count": run.failure_count,
+        }
+        for run in sorted(
+            latest, key=lambda r: r.completed_at or now, reverse=True
+        )
+    ]
+    in_flight = []
+    for run in active:
+        started = run.started_at
+        stalled = bool(
+            run.status == "running"
+            and started is not None
+            and now - started > _stall_threshold(run.pipeline_name)
+        )
+        in_flight.append(
+            {
+                "pipeline": run.pipeline_name,
+                "status": run.status,
+                "started_at": started,
+                "possibly_stalled": stalled,
+            }
+        )
+    return _jsonable(
+        {
+            "last_completed": last_completed,
+            "in_flight": in_flight,
+            "note": (
+                "Read-only report — Doxie cannot start or stop pipelines; "
+                "admins trigger refreshes from the Settings pages."
+            ),
+        }
+    )
+
+
+async def _favorite_action(
+    user: AuthenticatedUser,
+    db: AsyncSession,
+    args: Mapping[str, Any],
+    *,
+    favorite: bool,
+) -> dict[str, Any]:
+    """Shared body for favorite_firm / unfavorite_firm.
+
+    Wraps the same ``user_lists`` default-list helpers the heart toggles
+    use, so favorites land exactly where the My Favorites page reads.
+    Unfavoriting touches only the default list (custom lists keep theirs),
+    same as the app's toggle.
+    """
+    tool_name = "favorite_firm" if favorite else "unfavorite_firm"
+    denial = _check_feature(user, MY_FAVORITES)
+    if denial is not None:
+        return denial
+
+    entity_type = (_opt_str(args, "entity_type") or "").lower()
+    if entity_type not in ("broker_dealer", "investment_advisor"):
+        return {
+            "error": "invalid_args",
+            "message": (
+                "Argument 'entity_type' must be 'broker_dealer' or "
+                "'investment_advisor'."
+            ),
+        }
+    try:
+        firm_id = int(args.get("firm_id"))
+    except (TypeError, ValueError):
+        return {
+            "error": "invalid_args",
+            "message": "Argument 'firm_id' must be an integer.",
+        }
+
+    try:
+        if entity_type == "broker_dealer":
+            firm_name = (
+                await db.execute(
+                    select(BrokerDealer.name).where(BrokerDealer.id == firm_id)
+                )
+            ).scalar_one_or_none()
+        else:
+            firm_name = (
+                await db.execute(
+                    select(InvestmentAdvisor.name).where(
+                        InvestmentAdvisor.id == firm_id
+                    )
+                )
+            ).scalar_one_or_none()
+        if firm_name is None:
+            return {
+                "error": "not_found",
+                "message": "No firm with that id in that registry.",
+            }
+        if entity_type == "broker_dealer":
+            if favorite:
+                await user_lists.add_favorite(db, user.id, firm_id)
+            else:
+                await user_lists.remove_favorite(db, user.id, firm_id)
+        else:
+            if favorite:
+                await user_lists.add_advisor_favorite(db, user.id, firm_id)
+            else:
+                await user_lists.remove_advisor_favorite(db, user.id, firm_id)
+    except Exception:
+        logger.exception("doxie tool failed", extra={"tool": tool_name})
+        return {
+            "error": "tool_error",
+            "message": "Couldn't update favorites; ask the user to try again.",
+        }
+
+    result_key = "favorited" if favorite else "unfavorited"
+    payload: dict[str, Any] = {
+        result_key: True,
+        "entity_type": entity_type,
+        "firm_id": firm_id,
+        "firm_name": firm_name,
+        "link": MY_FAVORITES_URL,
+    }
+    if not favorite:
+        payload["note"] = (
+            "Removed from the default Favorites list; custom lists are "
+            "untouched."
+        )
+    return _jsonable(payload)
+
+
+async def _execute_favorite_firm(
+    user: AuthenticatedUser,
+    db: AsyncSession,
+    args: Mapping[str, Any],
+) -> dict[str, Any]:
+    return await _favorite_action(user, db, args, favorite=True)
+
+
+async def _execute_unfavorite_firm(
+    user: AuthenticatedUser,
+    db: AsyncSession,
+    args: Mapping[str, Any],
+) -> dict[str, Any]:
+    return await _favorite_action(user, db, args, favorite=False)
+
+
+async def _execute_list_my_favorites(
+    user: AuthenticatedUser,
+    db: AsyncSession,
+    args: Mapping[str, Any],
+) -> dict[str, Any]:
+    """The caller's favorited firms across all their lists, newest first."""
+    denial = _check_feature(user, MY_FAVORITES)
+    if denial is not None:
+        return denial
+
+    try:
+        raw_limit = (
+            int(args["limit"])
+            if args.get("limit") is not None
+            else FAVORITES_LIST_LIMIT_DEFAULT
+        )
+    except (TypeError, ValueError):
+        raw_limit = FAVORITES_LIST_LIMIT_DEFAULT
+    limit = max(1, min(raw_limit, FAVORITES_LIST_LIMIT_MAX))
+
+    try:
+        rows = (
+            await db.execute(
+                select(
+                    FavoriteListItem.broker_dealer_id,
+                    FavoriteListItem.advisor_id,
+                    FavoriteListItem.created_at,
+                    FavoriteList.name.label("list_name"),
+                    BrokerDealer.name.label("bd_name"),
+                    InvestmentAdvisor.name.label("ia_name"),
+                )
+                .join(FavoriteList, FavoriteList.id == FavoriteListItem.list_id)
+                .outerjoin(
+                    BrokerDealer,
+                    BrokerDealer.id == FavoriteListItem.broker_dealer_id,
+                )
+                .outerjoin(
+                    InvestmentAdvisor,
+                    InvestmentAdvisor.id == FavoriteListItem.advisor_id,
+                )
+                .where(FavoriteList.user_id == user.id)
+                .order_by(FavoriteListItem.created_at.desc())
+                .limit(limit)
+            )
+        ).all()
+    except Exception:
+        logger.exception(
+            "doxie tool failed", extra={"tool": "list_my_favorites"}
+        )
+        return {
+            "error": "tool_error",
+            "message": "Couldn't load favorites; ask the user to try again.",
+        }
+
+    items: list[dict[str, Any]] = []
+    for row in rows:
+        if row.broker_dealer_id is not None:
+            items.append(
+                {
+                    "entity_type": "broker_dealer",
+                    "firm_id": row.broker_dealer_id,
+                    "name": row.bd_name,
+                    "list_name": row.list_name,
+                    "favorited_at": row.created_at,
+                    "link": bd_detail_url(row.broker_dealer_id),
+                }
+            )
+        elif row.advisor_id is not None:
+            items.append(
+                {
+                    "entity_type": "investment_advisor",
+                    "firm_id": row.advisor_id,
+                    "name": row.ia_name,
+                    "list_name": row.list_name,
+                    "favorited_at": row.created_at,
+                    "link": ia_detail_url(row.advisor_id),
+                }
+            )
+    return _jsonable(
+        {"favorites": items, "count": len(items), "list_link": MY_FAVORITES_URL}
+    )
+
+
+async def _execute_mark_alerts_read(
+    user: AuthenticatedUser,
+    db: AsyncSession,
+    args: Mapping[str, Any],
+) -> dict[str, Any]:
+    """Mark filing alerts read — specific ids or all unread.
+
+    ``FilingAlert.is_read`` is global (not per-user), exactly like the
+    app's mark-read buttons; the result notes that so the model can warn
+    when it matters.
+    """
+    denial = _check_feature(user, ALERTS)
+    if denial is not None:
+        return denial
+
+    raw_ids = args.get("alert_ids")
+    mark_all = args.get("all") is True
+    has_ids = isinstance(raw_ids, (list, tuple)) and len(raw_ids) > 0
+    if has_ids == mark_all:
+        return {
+            "error": "invalid_args",
+            "message": (
+                "Pass either 'alert_ids' (a non-empty list from "
+                "get_recent_alerts) or 'all': true — exactly one."
+            ),
+        }
+
+    try:
+        if mark_all:
+            updated = await _alerts_repo.mark_all_read(
+                db, form_types=[], priorities=[]
+            )
+            return _jsonable(
+                {
+                    "updated_count": int(updated),
+                    "link": ALERTS_URL,
+                    "note": (
+                        "Alerts are shared — this marked them read for all "
+                        "users."
+                    ),
+                }
+            )
+
+        ids: list[int] = []
+        for raw in list(raw_ids)[:MARK_ALERTS_IDS_CAP]:
+            try:
+                ids.append(int(raw))
+            except (TypeError, ValueError):
+                continue
+        if not ids:
+            return {
+                "error": "invalid_args",
+                "message": "'alert_ids' must contain integer alert ids.",
+            }
+        updated = 0
+        missing: list[int] = []
+        for alert_id in ids:
+            alert = await _alerts_repo.mark_alert_read(
+                db, alert_id, is_read=True
+            )
+            if alert is None:
+                missing.append(alert_id)
+            else:
+                updated += 1
+    except Exception:
+        logger.exception(
+            "doxie tool failed", extra={"tool": "mark_alerts_read"}
+        )
+        return {
+            "error": "tool_error",
+            "message": "Couldn't update alerts; ask the user to try again.",
+        }
+
+    payload: dict[str, Any] = {
+        "updated_count": updated,
+        "link": ALERTS_URL,
+        "note": "Alerts are shared — read status applies to all users.",
+    }
+    if missing:
+        payload["not_found_ids"] = missing
+    return _jsonable(payload)
+
+
+def _normalize_contact_domain(raw: str) -> str:
+    """Strip scheme + path + leading 'www.' so callers can paste URLs.
+
+    Copy of ``endpoints/contacts._normalize_domain`` — the tool needs the
+    same forgiving input handling without importing an endpoint module.
+    """
+    raw = raw.strip().lower()
+    if "://" not in raw:
+        raw = "http://" + raw
+    netloc = urlparse(raw).netloc or raw
+    if netloc.startswith("www."):
+        netloc = netloc[4:]
+    return netloc.split(":")[0]
+
+
+async def _collect_contact_hits(
+    db: AsyncSession,
+    *,
+    email_needle: str | None = None,
+    domain: str | None = None,
+    cap: int,
+) -> list[dict[str, Any]]:
+    """Lean DB-only sweep across the three contact tables + the
+    discovered-emails buffer. Exactly one of email_needle / domain is set.
+    Deliberately never calls Apollo — no surprise credit spend from chat
+    (the /contacts endpoints offer that as an explicit opt-in instead).
+    """
+    hits: list[dict[str, Any]] = []
+    specs = (
+        (
+            ExecutiveContact,
+            ExecutiveContact.bd_id,
+            BrokerDealer,
+            "broker_dealer",
+            bd_detail_url,
+        ),
+        (
+            AdvisorContact,
+            AdvisorContact.advisor_id,
+            InvestmentAdvisor,
+            "investment_advisor",
+            ia_detail_url,
+        ),
+        (
+            InvestorContact,
+            InvestorContact.investor_id,
+            InstitutionalInvestor,
+            "institutional_investor",
+            ii_detail_url,
+        ),
+    )
+    for model, fk_col, firm_model, firm_type, link_fn in specs:
+        if len(hits) >= cap:
+            break
+        stmt = select(
+            model.id,
+            fk_col.label("firm_id"),
+            model.name,
+            model.title,
+            model.email,
+            firm_model.name.label("firm_name"),
+        ).join(firm_model, firm_model.id == fk_col)
+        if email_needle is not None:
+            stmt = stmt.where(func.lower(model.email) == email_needle)
+        else:
+            stmt = stmt.where(func.lower(model.email).like(f"%@{domain}"))
+        stmt = stmt.limit(cap - len(hits))
+        for row in (await db.execute(stmt)).all():
+            hits.append(
+                {
+                    "source": model.__tablename__,
+                    "firm_type": firm_type,
+                    "firm_id": row.firm_id,
+                    "firm_name": row.firm_name,
+                    "contact_id": row.id,
+                    "name": row.name,
+                    "title": row.title,
+                    "email": row.email,
+                    "link": link_fn(row.firm_id),
+                }
+            )
+
+    # Extractor finds that may not be saved contacts yet.
+    if len(hits) < cap:
+        de_stmt = select(DiscoveredEmail).order_by(
+            DiscoveredEmail.created_at.desc()
+        )
+        if email_needle is not None:
+            de_stmt = de_stmt.where(
+                func.lower(DiscoveredEmail.email) == email_needle
+            )
+        else:
+            de_stmt = de_stmt.where(DiscoveredEmail.domain == domain)
+        discovered = (
+            (await db.execute(de_stmt.limit(cap - len(hits)))).scalars().all()
+        )
+        for de in discovered:
+            if de.bd_id is not None:
+                firm_type = "broker_dealer"
+                firm_id: int | None = de.bd_id
+            elif de.advisor_id is not None:
+                firm_type = "investment_advisor"
+                firm_id = de.advisor_id
+            else:
+                firm_type = None
+                firm_id = None
+            hits.append(
+                {
+                    "source": "discovered_email",
+                    "firm_type": firm_type,
+                    "firm_id": firm_id,
+                    "firm_name": de.enriched_company,
+                    "contact_id": None,
+                    "name": de.enriched_name,
+                    "title": de.enriched_title,
+                    "email": de.email,
+                    "link": _scan_link(de.run_id),
+                }
+            )
+    return hits
+
+
+async def _execute_find_contact_by_email(
+    user: AuthenticatedUser,  # noqa: ARG001 — no gate, mirrors /contacts
+    db: AsyncSession,
+    args: Mapping[str, Any],
+) -> dict[str, Any]:
+    """Exact-address lookup across all contact tables + discovered emails."""
+    email_value = (_opt_str(args, "email") or "").lower()
+    if "@" not in email_value:
+        return {
+            "error": "invalid_args",
+            "message": (
+                "Argument 'email' must be a full address, e.g. "
+                "'sarah@acme.com'."
+            ),
+        }
+    try:
+        hits = await _collect_contact_hits(
+            db, email_needle=email_value, cap=CONTACT_EMAIL_RESULTS_CAP
+        )
+    except Exception:
+        logger.exception(
+            "doxie tool failed", extra={"tool": "find_contact_by_email"}
+        )
+        return {
+            "error": "tool_error",
+            "message": "Contact lookup failed; ask the user to try again.",
+        }
+    payload: dict[str, Any] = {
+        "email": email_value,
+        "hits": hits,
+        "count": len(hits),
+    }
+    if not hits:
+        payload["note"] = (
+            "No contact with that address on file (contact tables and "
+            "discovered emails)."
+        )
+    return _jsonable(payload)
+
+
+async def _execute_find_contacts_by_domain(
+    user: AuthenticatedUser,  # noqa: ARG001 — no gate, mirrors /contacts
+    db: AsyncSession,
+    args: Mapping[str, Any],
+) -> dict[str, Any]:
+    """Everyone we know with an email at one company domain."""
+    raw_domain = _opt_str(args, "domain")
+    if not raw_domain:
+        return {
+            "error": "invalid_args",
+            "message": "Argument 'domain' is required, e.g. 'acme.com'.",
+        }
+    domain = _normalize_contact_domain(raw_domain)
+    if "." not in domain:
+        return {
+            "error": "invalid_args",
+            "message": "Argument 'domain' must look like 'acme.com'.",
+        }
+    try:
+        hits = await _collect_contact_hits(
+            db, domain=domain, cap=CONTACT_DOMAIN_RESULTS_CAP
+        )
+    except Exception:
+        logger.exception(
+            "doxie tool failed", extra={"tool": "find_contacts_by_domain"}
+        )
+        return {
+            "error": "tool_error",
+            "message": "Contact lookup failed; ask the user to try again.",
+        }
+    payload: dict[str, Any] = {
+        "domain": domain,
+        "hits": hits,
+        "count": len(hits),
+    }
+    if not hits:
+        payload["note"] = (
+            "No contacts with an email at that domain. run_email_extractor "
+            "can scan the domain to discover some."
+        )
+    return _jsonable(payload)
 
 
 TOOL_REGISTRY: dict[str, Tool] = {
@@ -3044,15 +5448,19 @@ TOOL_REGISTRY: dict[str, Tool] = {
     "semantic_firm_search": Tool(
         name="semantic_firm_search",
         description=(
-            "Conceptual / semantic search over broker-dealer firms via "
-            "vector embeddings. Use when the user's query is descriptive "
-            "rather than naming a specific firm — examples: 'firms similar "
-            "to Acme Securities', 'broker-dealers focused on retail HNW', "
-            "'small BDs that clear self'. For exact name / CRD lookups, "
-            "call search_broker_dealers instead. Returns hits with a "
-            "similarity score and a snippet of the matched summary."
+            "Conceptual / semantic search over broker-dealers and "
+            "investment advisors via vector embeddings. Use when the "
+            "user's query is descriptive rather than naming a specific "
+            "firm — examples: 'firms similar to Acme Securities', "
+            "'broker-dealers focused on retail HNW', 'advisors serving "
+            "pension clients'. Optional entity_type narrows to one "
+            "registry. For exact name / CRD lookups, call the matching "
+            "search tool instead. Returns hits with a similarity score "
+            "and a snippet of the matched summary."
         ),
         parameters_schema=_SEMANTIC_SEARCH_PARAMETERS_SCHEMA,
+        # Nominal key — execute derives eligible registries from the
+        # caller's MASTER_LIST / INVESTMENT_ADVISORS permissions.
         feature_key=MASTER_LIST,
         execute=_execute_semantic_firm_search,
     ),
@@ -3188,21 +5596,60 @@ TOOL_REGISTRY: dict[str, Tool] = {
     "ask_vault": Tool(
         name="ask_vault",
         description=(
-            "RAG over a user's Vault folder. Embeds the question with "
-            "gemini-embedding-001, runs pgvector cosine top-K against "
-            "the folder's pre-indexed chunks, and returns the matched "
-            "passages with their source filename. Restricted to folders "
-            "owned by the calling user. Use when the user references "
-            "internal docs they've uploaded (e.g. compliance playbooks, "
-            "internal memos)."
+            "Semantic search over the user's Vault — the documents they've "
+            "uploaded (compliance playbooks, internal memos, contracts, "
+            "rate sheets, etc.). Embeds the question with gemini-embedding-001 "
+            "and returns the best-matching passages with their source "
+            "filename and folder. By DEFAULT searches the user's WHOLE vault; "
+            "pass folder_id only to narrow to one folder. Use whenever the "
+            "user asks about their own internal/uploaded content. To read a "
+            "whole document rather than matching passages, use get_vault_file."
         ),
         parameters_schema=_ASK_VAULT_SCHEMA,
         feature_key=VAULT,
         execute=_execute_ask_vault,
         # Vault retrieval is cheap (one embedding + one pg query); the
-        # default 5s is fine. Caching is also OK because retrieve_chunks
-        # is purely a function of (folder_id, query) at a point in time
+        # default 5s is fine. Caching is also OK because retrieval is
+        # purely a function of (folder set, query) at a point in time
         # and the chat-level TTL is short.
+    ),
+    "list_vault_folders": Tool(
+        name="list_vault_folders",
+        description=(
+            "List the user's Vault folders with their ids, descriptions, and "
+            "file counts. The discovery entry point for the vault — call this "
+            "first when the user asks what's in their vault, or to get a "
+            "folder id for ask_vault / list_vault_files. Returns only the "
+            "caller's own folders."
+        ),
+        parameters_schema=_LIST_VAULT_FOLDERS_SCHEMA,
+        feature_key=VAULT,
+        execute=_execute_list_vault_folders,
+    ),
+    "list_vault_files": Tool(
+        name="list_vault_files",
+        description=(
+            "List the files in the user's Vault — one folder (pass folder_id) "
+            "or every folder (omit it). Returns each file's id, name, type, "
+            "size, and processing status. Use to see what documents exist and "
+            "to get a file_id for get_vault_file. Returns only the caller's "
+            "own files."
+        ),
+        parameters_schema=_LIST_VAULT_FILES_SCHEMA,
+        feature_key=VAULT,
+        execute=_execute_list_vault_files,
+    ),
+    "get_vault_file": Tool(
+        name="get_vault_file",
+        description=(
+            "Read one Vault file's full extracted text (capped), so you can "
+            "summarise or quote the whole document — not just the passages "
+            "ask_vault surfaces. Takes a file_id from list_vault_files. "
+            "Returns only files the caller owns."
+        ),
+        parameters_schema=_GET_VAULT_FILE_SCHEMA,
+        feature_key=VAULT,
+        execute=_execute_get_vault_file,
     ),
     "get_app_help": Tool(
         name="get_app_help",
@@ -3269,4 +5716,228 @@ TOOL_REGISTRY: dict[str, Tool] = {
         feature_key=MASTER_LIST,
         execute=_execute_find_dual_registered_firms,
     ),
+    "run_email_extractor": Tool(
+        name="run_email_extractor",
+        description=(
+            "Start an email-extractor scan for a company domain to discover "
+            "contact emails. Use when the user asks to 'find emails for', "
+            "'scan', or 'run the email extractor on' a firm or domain. "
+            "Optionally tie it to a broker-dealer or investment-advisor id. "
+            "Returns a scan id; the scan runs in the background and results "
+            "show on the Email Extractor page. This performs a real action — "
+            "only call it when the user clearly wants a scan started."
+        ),
+        parameters_schema=_RUN_EMAIL_EXTRACTOR_PARAMETERS_SCHEMA,
+        feature_key=EMAIL_EXTRACTOR,
+        execute=_execute_run_email_extractor,
+        # Each call is a distinct action — never serve from the dedup cache.
+        cacheable=False,
+    ),
+    "draft_outreach_email": Tool(
+        name="draft_outreach_email",
+        description=(
+            "Generate a cold-email draft (subject + body) for a specific "
+            "contact at a broker-dealer or investment advisor, grounded in a "
+            "Vault folder's documents and instructions. Use when the user "
+            "asks to 'draft', 'write', or 'compose an outreach/cold email' "
+            "to a contact. Needs entity_type + firm_id, contact_id (from "
+            "list_firm_contacts), and the Vault folder_id (from "
+            "list_vault_folders). Returns a draft only — it does not send."
+        ),
+        parameters_schema=_DRAFT_OUTREACH_PARAMETERS_SCHEMA,
+        feature_key=VAULT,
+        execute=_execute_draft_outreach_email,
+        # Gemini Flash round-trip + RAG retrieval can exceed the 5s default.
+        timeout_s=30.0,
+        cacheable=False,
+    ),
+    "list_firm_contacts": Tool(
+        name="list_firm_contacts",
+        description=(
+            "List the email-bearing contacts at one broker-dealer or "
+            "investment advisor — name, title, email, and the contact_id "
+            "that draft_outreach_email needs. Use this to find who can be "
+            "emailed at a firm before drafting outreach."
+        ),
+        parameters_schema=_LIST_FIRM_CONTACTS_PARAMETERS_SCHEMA,
+        # Nominal key — execute checks MASTER_LIST or INVESTMENT_ADVISORS
+        # per entity_type, same pattern as list_filings_for_firm.
+        feature_key=MASTER_LIST,
+        execute=_execute_list_firm_contacts,
+    ),
+    "save_outreach_draft": Tool(
+        name="save_outreach_draft",
+        description=(
+            "Save an email draft (subject, body, recipient) to the user's "
+            "Outreach Drafts tab for review. Use right after "
+            "draft_outreach_email, or when the user asks to save an email "
+            "for later. Saving does NOT send anything."
+        ),
+        parameters_schema=_SAVE_OUTREACH_DRAFT_PARAMETERS_SCHEMA,
+        feature_key=SENT_OUTREACH,
+        execute=_execute_save_outreach_draft,
+        # A write — never serve from the dedup cache.
+        cacheable=False,
+    ),
+    "list_outreach_drafts": Tool(
+        name="list_outreach_drafts",
+        description=(
+            "List the user's saved outreach drafts (newest first): draft_id, "
+            "subject, recipients, and source. Use when the user asks what "
+            "drafts they have or wants to resume/send one."
+        ),
+        parameters_schema=_LIST_OUTREACH_DRAFTS_PARAMETERS_SCHEMA,
+        feature_key=SENT_OUTREACH,
+        execute=_execute_list_outreach_drafts,
+        # Skip the dedup cache so a draft saved seconds ago always shows.
+        cacheable=False,
+    ),
+    "get_outreach_draft": Tool(
+        name="get_outreach_draft",
+        description=(
+            "Read one saved outreach draft in full (subject, body, To/CC/"
+            "BCC). Use it to show the user exactly what send_outreach_draft "
+            "would transmit before asking them to confirm."
+        ),
+        parameters_schema=_GET_OUTREACH_DRAFT_PARAMETERS_SCHEMA,
+        feature_key=SENT_OUTREACH,
+        execute=_execute_get_outreach_draft,
+        # Skip the dedup cache — the user may edit the draft mid-chat.
+        cacheable=False,
+    ),
+    "send_outreach_draft": Tool(
+        name="send_outreach_draft",
+        description=(
+            "Send a saved outreach draft as a real email from the user's "
+            "linked mailbox (Gmail/Outlook/Yahoo). Transmits exactly the "
+            "saved draft. Requires confirm=true, which may ONLY be set "
+            "after the user's latest message explicitly confirms sending "
+            "this draft. The draft is deleted after a successful send and "
+            "the attempt is recorded in Sent history."
+        ),
+        parameters_schema=_SEND_OUTREACH_DRAFT_PARAMETERS_SCHEMA,
+        feature_key=SENT_OUTREACH,
+        execute=_execute_send_outreach_draft,
+        # OAuth refresh + provider API need PDF-tool-class headroom.
+        timeout_s=SEND_DRAFT_TOOL_TIMEOUT_S,
+        cacheable=False,
+    ),
+    "list_email_scans": Tool(
+        name="list_email_scans",
+        description=(
+            "List recent email-extractor scans (newest first) with status "
+            "and result counts. Use to answer 'how did my email scan go?' "
+            "or to find the scan_id for get_email_scan_results. Optional "
+            "broker_dealer_id / advisor_id filters."
+        ),
+        parameters_schema=_LIST_EMAIL_SCANS_PARAMETERS_SCHEMA,
+        feature_key=EMAIL_EXTRACTOR,
+        execute=_execute_list_email_scans,
+    ),
+    "get_email_scan_results": Tool(
+        name="get_email_scan_results",
+        description=(
+            "Read one email scan's status and its discovered emails "
+            "(addresses, source, confidence, enrichment state). Use after "
+            "run_email_extractor finishes, or with an id from "
+            "list_email_scans."
+        ),
+        parameters_schema=_GET_EMAIL_SCAN_RESULTS_PARAMETERS_SCHEMA,
+        feature_key=EMAIL_EXTRACTOR,
+        execute=_execute_get_email_scan_results,
+    ),
+    "get_data_freshness": Tool(
+        name="get_data_freshness",
+        description=(
+            "Report when each data pipeline last completed and what is "
+            "running right now (with a possibly_stalled flag). Use for "
+            "'is the data fresh?' / 'is a refresh running?'. Read-only — "
+            "it cannot start or stop anything."
+        ),
+        parameters_schema=_DATA_FRESHNESS_PARAMETERS_SCHEMA,
+        # Informational — no permission gate, same pattern as get_app_help.
+        feature_key="dashboard",
+        execute=_execute_get_data_freshness,
+    ),
+    "favorite_firm": Tool(
+        name="favorite_firm",
+        description=(
+            "Add a broker-dealer or investment advisor to the user's "
+            "Favorites (the same list as the heart toggle). This changes "
+            "real state — only call when the user clearly asks."
+        ),
+        parameters_schema=_FAVORITE_FIRM_PARAMETERS_SCHEMA,
+        feature_key=MY_FAVORITES,
+        execute=_execute_favorite_firm,
+        cacheable=False,
+    ),
+    "unfavorite_firm": Tool(
+        name="unfavorite_firm",
+        description=(
+            "Remove a broker-dealer or investment advisor from the user's "
+            "default Favorites list. This changes real state — only call "
+            "when the user clearly asks."
+        ),
+        parameters_schema=_FAVORITE_FIRM_PARAMETERS_SCHEMA,
+        feature_key=MY_FAVORITES,
+        execute=_execute_unfavorite_firm,
+        cacheable=False,
+    ),
+    "list_my_favorites": Tool(
+        name="list_my_favorites",
+        description=(
+            "List the firms the user has favorited (across their lists), "
+            "newest first, with deep links."
+        ),
+        parameters_schema=_LIST_MY_FAVORITES_PARAMETERS_SCHEMA,
+        feature_key=MY_FAVORITES,
+        execute=_execute_list_my_favorites,
+        # Skip the dedup cache so a favorite added seconds ago shows up.
+        cacheable=False,
+    ),
+    "mark_alerts_read": Tool(
+        name="mark_alerts_read",
+        description=(
+            "Mark filing alerts as read — specific alert ids (from "
+            "get_recent_alerts) or all unread. Alerts are shared, so this "
+            "marks them read for every user; only call on clear user "
+            "intent."
+        ),
+        parameters_schema=_MARK_ALERTS_READ_PARAMETERS_SCHEMA,
+        feature_key=ALERTS,
+        execute=_execute_mark_alerts_read,
+        cacheable=False,
+    ),
+    "find_contact_by_email": Tool(
+        name="find_contact_by_email",
+        description=(
+            "Look up an exact email address across every contact table and "
+            "the extractor's discovered emails — 'do we know "
+            "sarah@acme.com?'. Database-only; never spends enrichment "
+            "credits."
+        ),
+        parameters_schema=_FIND_CONTACT_BY_EMAIL_PARAMETERS_SCHEMA,
+        # No permission gate — mirrors the /contacts endpoints.
+        feature_key="dashboard",
+        execute=_execute_find_contact_by_email,
+    ),
+    "find_contacts_by_domain": Tool(
+        name="find_contacts_by_domain",
+        description=(
+            "List everyone on file with an email at one company domain — "
+            "'who do we know at acme.com?'. Database-only; never spends "
+            "enrichment credits."
+        ),
+        parameters_schema=_FIND_CONTACTS_BY_DOMAIN_PARAMETERS_SCHEMA,
+        # No permission gate — mirrors the /contacts endpoints.
+        feature_key="dashboard",
+        execute=_execute_find_contacts_by_domain,
+    ),
 }
+
+# Aggregate-analytics tools live in their own module; imported after the
+# registry exists because that module defers its imports from this one
+# (mutual reference — see its docstring for the ordering contract).
+from app.services.chatbot_tools_analytics import build_analytics_tools  # noqa: E402
+
+TOOL_REGISTRY.update(build_analytics_tools())

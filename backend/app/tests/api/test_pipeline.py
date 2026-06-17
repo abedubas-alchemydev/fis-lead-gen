@@ -26,6 +26,7 @@ from __future__ import annotations
 
 from datetime import datetime, timedelta, timezone
 from typing import Any
+from unittest.mock import AsyncMock
 
 import httpx
 import pytest
@@ -310,6 +311,121 @@ async def test_initial_load_anonymous_returns_403(stub_pipeline_runs) -> None:
     async with _client() as client:
         response = await client.post("/api/v1/pipeline/run/initial-load")
     assert response.status_code == 403
+
+
+# ────────── populate-all background: filing tuple + embed hook ──────────
+
+
+class _BgFakeDb:
+    """Just enough session surface for ``_run_populate_all_background``:
+    ``get`` hands back the shared run row, ``commit`` logs for ordering."""
+
+    def __init__(self, run_row: Any, log: list[str]) -> None:
+        self._run = run_row
+        self._log = log
+
+    async def get(self, _model: Any, _run_id: int) -> Any:
+        return self._run
+
+    async def commit(self) -> None:
+        self._log.append("commit")
+
+
+class _BgFakeSessionLocal:
+    def __init__(self, db: Any) -> None:
+        self._db = db
+
+    def __call__(self) -> "_BgFakeSessionLocal":
+        return self
+
+    async def __aenter__(self) -> Any:
+        return self._db
+
+    async def __aexit__(self, *_exc: Any) -> bool:
+        return False
+
+
+async def test_populate_all_background_completes_and_fires_embed_hook(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Covers two contracts of ``_run_populate_all_background``:
+
+    1. It unpacks ``FilingMonitorService.run``'s ``(run, ids)`` tuple — the
+       call site missed when the auto-extraction hook changed the signature
+       (#397), which marked every populate-all run "failed" on
+       ``tuple.total_items``.
+    2. The Doxie embed pass fires exactly once, AFTER the final status
+       commit, so embed duration/failure can't affect the run row.
+    """
+    log: list[str] = []
+    run_row = PipelineRun(
+        id=1,
+        pipeline_name="populate_all",
+        trigger_source="test",
+        status="queued",
+        total_items=0,
+        processed_items=0,
+        success_count=0,
+        failure_count=0,
+    )
+    fake_db = _BgFakeDb(run_row, log)
+    monkeypatch.setattr(
+        pipeline_endpoint, "SessionLocal", _BgFakeSessionLocal(fake_db)
+    )
+
+    filing_run = PipelineRun(
+        id=2,
+        pipeline_name="daily_filing_monitor",
+        trigger_source="t",
+        status="completed",
+        total_items=5,
+        processed_items=5,
+        success_count=4,
+        failure_count=1,
+    )
+    clearing_run = PipelineRun(
+        id=3,
+        pipeline_name="clearing_pipeline",
+        trigger_source="t",
+        status="completed",
+        total_items=2,
+        processed_items=2,
+        success_count=2,
+        failure_count=0,
+    )
+    monkeypatch.setattr(
+        pipeline_endpoint.filing_monitor_service,
+        "run",
+        AsyncMock(return_value=(filing_run, [11, 22])),
+    )
+    monkeypatch.setattr(
+        pipeline_endpoint.pipeline_service,
+        "run",
+        AsyncMock(return_value=clearing_run),
+    )
+    monkeypatch.setattr(
+        pipeline_endpoint.repository,
+        "refresh_lead_scores",
+        AsyncMock(return_value=None),
+    )
+
+    async def _hook() -> None:
+        log.append("embed_hook")
+
+    monkeypatch.setattr(
+        pipeline_endpoint, "run_post_pipeline_embed_backfill", _hook
+    )
+
+    await pipeline_endpoint._run_populate_all_background(1, "test")
+
+    assert run_row.status == "completed"
+    assert run_row.total_items == 7
+    assert run_row.success_count == 6
+    assert run_row.failure_count == 1
+    # The hook fires exactly once, strictly after the final status commit.
+    assert log.count("embed_hook") == 1
+    assert log[-1] == "embed_hook"
+    assert log[-2] == "commit"
 
 
 # ───────────────────────── route registration ─────────────────────────

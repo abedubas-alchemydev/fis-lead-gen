@@ -909,6 +909,51 @@ export type OutreachSendDetail = OutreachSendItem & {
   body: string;
 };
 
+// ── Outreach drafts (saved-but-unsent composer drafts) ───────────────
+// The "Drafts" tab. Named with a `Saved` prefix to distinguish from
+// `OutreachDraft` above, which is the AI-generate {subject, body} result.
+// Recipients mirror the compose-send shape so a draft loads straight back
+// into the To/Cc/Bcc composer. Maps to backend OutreachDraft* schemas.
+
+// Body for POST /outreach/drafts and PUT /outreach/drafts/{id}. Every field
+// is optional so a blank / partially-filled draft saves.
+export type SavedOutreachDraftSaveRequest = {
+  subject?: string;
+  body?: string;
+  to?: OutreachComposeRecipient[];
+  cc?: string[];
+  bcc?: string[];
+  sender_account_id?: string | null;
+  folder_id?: number | null;
+  source?: "manual" | "doxie";
+};
+
+// One row in the Drafts list. Body is omitted (fetch the detail on open).
+export type SavedOutreachDraft = {
+  id: number;
+  subject: string;
+  to: OutreachComposeRecipient[];
+  cc: string[];
+  bcc: string[];
+  folder_id: number | null;
+  folder_name: string | null;
+  sender_account_id: string | null;
+  source: string;
+  created_at: string;
+  updated_at: string;
+};
+
+export type SavedOutreachDraftDetail = SavedOutreachDraft & {
+  body: string;
+};
+
+export type SavedOutreachDraftsListResponse = {
+  items: SavedOutreachDraft[];
+  total: number;
+  limit: number;
+  offset: number;
+};
+
 // ── Admin per-user views (admin-only consumers) ──
 //
 // Mirrors backend/app/schemas/users_admin.py. The saved-firms payload
@@ -1027,7 +1072,7 @@ export type InvestmentAdvisorListItem = {
   last_filing_date: string | null;
   filings_index_url: string | null;
   website: string | null;
-  // 'iapd' | 'apollo' | 'serper' | 'serpapi' | null
+  // 'iapd' | 'apollo' | 'serpapi' | null
   website_source: string | null;
   // Form ADV Item 5.F — regulatory AUM (analog of BD latest_net_capital)
   // and the discretionary/non-discretionary split.
