@@ -435,15 +435,25 @@ def test_scheduled_router_is_wired_into_v1_api() -> None:
     """Regression guard: the new routers must be registered on the v1 api
     router. Forgetting ``include_router`` makes Cloud Scheduler attempts
     fail with 404 instead of 200, which is harder to diagnose than a
-    failing test."""
-    from app.api.v1.api import api_router
+    failing test.
 
-    paths = {route.path for route in api_router.routes if hasattr(route, "path")}
-    assert "/pipeline/run/filing-monitor" in paths
-    assert "/pipeline/run/populate-all" in paths
-    assert "/pipeline/run/initial-load" in paths
-    assert "/pipeline/wipe-bd-data" in paths
-    assert "/pipeline/set-files-api-flag" in paths
+    Inspect the fully built ``app`` rather than the module-global
+    ``api_router``. ``api_router.routes`` is populated as an import side
+    effect of ``app.api.v1.api`` (25 ``include_router`` calls at module
+    scope), so reading it directly is import-order sensitive and can come
+    back empty when this test happens to run before the suite has imported
+    that module. ``app.routes`` is the source of truth for what is actually
+    mounted (carrying the ``/api/v1`` prefix) and is stable regardless of
+    test execution order.
+    """
+    from app.main import app
+
+    paths = {route.path for route in app.routes if hasattr(route, "path")}
+    assert "/api/v1/pipeline/run/filing-monitor" in paths
+    assert "/api/v1/pipeline/run/populate-all" in paths
+    assert "/api/v1/pipeline/run/initial-load" in paths
+    assert "/api/v1/pipeline/wipe-bd-data" in paths
+    assert "/api/v1/pipeline/set-files-api-flag" in paths
 
 
 # ───────────────────────────── wipe-bd-data ────────────────────────────
