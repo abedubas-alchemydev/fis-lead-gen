@@ -146,6 +146,9 @@ ALLOWED_SORT_FIELDS = {
     "status": BrokerDealer.status,
     "last_filing_date": BrokerDealer.last_filing_date,
     "registration_date": BrokerDealer.registration_date,
+    # When WE ingested the firm — backs the dashboard "New BDs" sort so the
+    # most-recently-added firms can surface first ("Added <date>" column).
+    "created_at": BrokerDealer.created_at,
     "branch_count": BrokerDealer.branch_count,
     "latest_net_capital": BrokerDealer.latest_net_capital,
     "yoy_growth": BrokerDealer.yoy_growth,
@@ -337,6 +340,7 @@ class BrokerDealerRepository:
         max_net_capital: float | None = None,
         registered_after: date | None = None,
         registered_before: date | None = None,
+        created_after: date | None = None,
         segment: str | None = None,
         ids: list[int] | None = None,
     ) -> BrokerDealerListResponse:
@@ -434,6 +438,14 @@ class BrokerDealerRepository:
             filters.append(BrokerDealer.registration_date >= registered_after)
         if registered_before is not None:
             filters.append(BrokerDealer.registration_date <= registered_before)
+        # "New BDs" feature: filter on when WE ingested the firm (``created_at``,
+        # NOT NULL server-default) rather than the firm's historical SEC
+        # ``registration_date``. ``created_at`` is a tz-aware datetime; comparing
+        # it against a ``date`` is well-defined in Postgres (the date coerces to
+        # midnight), so a firm added at any time on/after ``created_after`` is
+        # included. Additive — the ``registered_*`` filters above are unchanged.
+        if created_after is not None:
+            filters.append(BrokerDealer.created_at >= created_after)
 
         # Named-segment preset (currently just the dashboard "High Value
         # Participants" tile). ANDs with every other filter, so a user can
