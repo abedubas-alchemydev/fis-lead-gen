@@ -16,6 +16,7 @@ flow parse Apollo's payload identically.
 from __future__ import annotations
 
 import logging
+from datetime import UTC, datetime, timedelta
 from typing import Any
 
 import httpx
@@ -37,12 +38,45 @@ logger = logging.getLogger(__name__)
 APOLLO_MATCH_URL = "https://api.apollo.io/v1/people/match"
 REQUEST_TIMEOUT_SECONDS = 20.0
 
+# ── Credit-exhaustion circuit breaker ──────────────────────────────────
+# Apollo answers an out-of-credits account with HTTP 422 + an "insufficient
+# credits" body on EVERY /people/match call. Without this, a bulk enrich-all
+# fires one dead call per email (~50/min observed on prod, scan 84) at an
+# account that can't recover mid-run. Once we see that response we open a
+# per-process breaker so is_configured() reports False -- the orchestrator then
+# skips Apollo for the cooldown window (the rest of the run + nearby runs on the
+# same instance) instead of hammering it. After the window Apollo is retried, in
+# case credits were topped up. Per-process (not distributed) is sufficient: a
+# bulk run executes as one background task on one instance.
+_CREDIT_EXHAUSTED_COOLDOWN = timedelta(minutes=30)
+_credit_exhausted_until: datetime | None = None
+
+
+def _apollo_credit_exhausted() -> bool:
+    return _credit_exhausted_until is not None and datetime.now(UTC) < _credit_exhausted_until
+
+
+def _trip_credit_breaker() -> None:
+    global _credit_exhausted_until
+    _credit_exhausted_until = datetime.now(UTC) + _CREDIT_EXHAUSTED_COOLDOWN
+    logger.warning(
+        "apollo credit-exhaustion breaker opened; skipping Apollo enrichment for %s",
+        _CREDIT_EXHAUSTED_COOLDOWN,
+    )
+
+
+def _reset_credit_breaker_for_tests() -> None:
+    global _credit_exhausted_until
+    _credit_exhausted_until = None
+
 
 class ApolloEnrichProvider(EmailEnrichmentProvider):
     name = "apollo"
 
     def is_configured(self) -> bool:
-        return bool(settings.apollo_api_key)
+        # Skip Apollo while the credit-exhaustion breaker is open so a bulk run
+        # doesn't fire one dead 422 call per row at a depleted account.
+        return bool(settings.apollo_api_key) and not _apollo_credit_exhausted()
 
     async def enrich(self, email: str, needed: set[str] | None = None) -> EnrichmentData | None:
         # One call returns the whole person record; ``needed`` is irrelevant.
@@ -71,6 +105,11 @@ class ApolloEnrichProvider(EmailEnrichmentProvider):
 
         if response.status_code != 200:
             snippet = response.text[:200] if response.text else "(no body)"
+            # Apollo answers a credit-exhausted account with 422 + "insufficient
+            # credits" on every call -- open the breaker so the rest of a bulk
+            # run skips Apollo instead of firing one dead call per row.
+            if response.status_code == 422 and "insufficient credit" in response.text.lower():
+                _trip_credit_breaker()
             raise EnrichmentError(f"http {response.status_code}: {snippet}")
 
         try:

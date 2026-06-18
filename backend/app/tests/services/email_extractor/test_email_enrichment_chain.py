@@ -237,6 +237,52 @@ def test_any_provider_configured(monkeypatch: pytest.MonkeyPatch) -> None:
     assert orchestrator.any_provider_configured() is False
 
 
+# ─────────────────────── Apollo credit breaker ────────────────────────
+
+
+@respx.mock
+async def test_apollo_credit_exhaustion_trips_breaker(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A 422 'insufficient credits' opens a per-process breaker so is_configured()
+    reports False -- the orchestrator then skips Apollo for the rest of a bulk run
+    instead of firing one dead call per row at a depleted account."""
+    from app.services.email_extractor.enrichment import apollo as apollo_mod
+
+    monkeypatch.setattr(settings, "apollo_api_key", "k", raising=False)
+    apollo_mod._reset_credit_breaker_for_tests()
+    provider = apollo_mod.ApolloEnrichProvider()
+    assert provider.is_configured() is True
+
+    respx.post(apollo_mod.APOLLO_MATCH_URL).mock(
+        return_value=httpx.Response(422, text='{"error":"You have insufficient credits!"}')
+    )
+    with pytest.raises(EnrichmentError):
+        await provider.enrich("jane@acme.com")
+
+    assert provider.is_configured() is False  # breaker open -> orchestrator skips Apollo
+    apollo_mod._reset_credit_breaker_for_tests()
+    assert provider.is_configured() is True
+
+
+@respx.mock
+async def test_apollo_non_credit_422_leaves_breaker_closed(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A non-credit 422 (e.g. a bad parameter) raises but must NOT open the credit
+    breaker -- only account-wide credit exhaustion should disable Apollo."""
+    from app.services.email_extractor.enrichment import apollo as apollo_mod
+
+    monkeypatch.setattr(settings, "apollo_api_key", "k", raising=False)
+    apollo_mod._reset_credit_breaker_for_tests()
+    respx.post(apollo_mod.APOLLO_MATCH_URL).mock(
+        return_value=httpx.Response(422, text='{"error":"invalid email address"}')
+    )
+    with pytest.raises(EnrichmentError):
+        await apollo_mod.ApolloEnrichProvider().enrich("nope")
+
+    assert apollo_mod.ApolloEnrichProvider().is_configured() is True  # stayed closed
+    apollo_mod._reset_credit_breaker_for_tests()
+
+
 # ──────────────────────────── Hunter provider ────────────────────────────
 
 
