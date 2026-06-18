@@ -1,36 +1,30 @@
 "use client";
 
-import { useEffect, useRef, useState } from "react";
-import { Globe, Loader2, Search } from "lucide-react";
+import { Globe, Search } from "lucide-react";
 
 import { Pill, type PillVariant } from "@/components/ui/pill";
-import {
-  resolveWebsite,
-  type ResolveWebsiteResponse,
-} from "@/lib/api";
-import { WEBSITE_SOURCE_BADGE, type WebsiteSourceTone } from "@/lib/format";
+import { type WebsiteSourceTone } from "@/lib/format";
 
 // Renders the clickable website row directly under the firm-name h1 on
 // /master-list/{id}.
 //
-// Rendering policy (cli02 FE-1 — auto-resolve):
+// Rendering policy (pure DB read — no paid work on mount):
 //   1. If `website` is already set on the BD record, render the Globe link
 //      directly. No API call, no badge (the persisted column doesn't carry
 //      a source label today).
-//   2. If `website` is null, render the existing "Search Google for this
-//      firm" fallback IMMEDIATELY (no dead spinner) and fire a background
-//      POST /broker-dealers/{id}/resolve-website. On a non-null response,
-//      swap the fallback for the Globe link + a small source pill (smooth
-//      fade). On null/error, keep the Google fallback unchanged.
-//   3. If `website` is null but a `fallbackDomain` is supplied (e.g. a domain
+//   2. If `website` is null but a `fallbackDomain` is supplied (e.g. a domain
 //      derived from a FOCUS-extracted filing contact's email — the same
 //      domain that lights up the Email Extractor), render it with a muted
-//      "From filing" badge ahead of the spinner/empty states. The background
-//      resolver still runs and upgrades it to a confirmed website if found.
+//      "From filing" badge.
+//   3. Otherwise render the polite "No public website on file" note alongside
+//      a "Search Google for this firm" escape hatch.
 //
-// The mount-fired call is deduped via a ref so StrictMode's dev double-
-// invoke can't fire it twice. We only fire once per page mount; a refresh
-// is the user's only retry path.
+// This component used to fire POST /broker-dealers/{id}/resolve-website on
+// mount whenever `website` was null, re-running an Apollo → Hunter → SerpAPI
+// waterfall on every visit of a website-less firm. That auto-resolve is
+// removed: website resolution now happens only on demand (the firm-detail
+// Refresh button's refresh-all includes the resolve-website leg) and via the
+// background backfill jobs.
 const TONE_TO_VARIANT: Record<WebsiteSourceTone, PillVariant> = {
   amber: "warning",
   blue: "info",
@@ -110,26 +104,17 @@ function ResolvedLink({
   );
 }
 
-function ResolvingSpinner() {
-  return (
-    <span className="inline-flex items-center gap-1.5 text-[13px] text-[var(--text-dim,#475569)]">
-      <Loader2 className="h-3.5 w-3.5 animate-spin" strokeWidth={2} />
-      Resolving website…
-    </span>
-  );
-}
-
 function NoWebsiteNote() {
-  // Shown when the lazy resolver chain (Apollo → Hunter → SerpAPI) ran
-  // and produced no valid candidate. Many small broker-dealers don't
-  // maintain a public website at all — this is the polite null-state so
-  // it's clear the system tried, rather than looking like a missing
-  // field. The Google search link still renders alongside as a manual
+  // Shown when no website is persisted (and no filing-derived fallback).
+  // Many small broker-dealers don't maintain a public website at all — this
+  // is the polite null-state rather than a bare missing field. Resolution is
+  // on-demand now (the firm-detail Refresh button) plus the background
+  // backfill jobs; the Google search link renders alongside as a manual
   // escape hatch.
   return (
     <span
       className="inline-flex items-center gap-1.5 text-[13px] text-[var(--text-dim,#475569)] italic"
-      title="We checked Hunter and Google. Many small broker-dealers don't publish a public website."
+      title="No website on file. Use Refresh to look one up, or search Google. Many small broker-dealers don't publish a public website."
     >
       <Globe className="h-3.5 w-3.5 opacity-60" strokeWidth={2} />
       No public website on file
@@ -138,84 +123,36 @@ function NoWebsiteNote() {
 }
 
 export function FirmWebsiteLink({
-  firmId,
   firmName,
   website,
   fallbackDomain = null,
 }: {
-  firmId: number;
   firmName: string;
   website: string | null;
   // Lowest-priority display fallback (e.g. a domain derived from a FOCUS-
   // extracted filing contact's email). Shown only when no website is
-  // persisted or resolved; does not suppress the background resolver.
+  // persisted.
   fallbackDomain?: string | null;
 }) {
   const persisted = (website ?? "").trim();
   const fallback = (fallbackDomain ?? "").trim();
-  const [resolved, setResolved] = useState<ResolveWebsiteResponse | null>(null);
-  // Initial isResolving=true when we'll fire the lazy lookup; this avoids a
-  // one-frame flash of the "No public website on file" note before the
-  // useEffect tick kicks in and switches us to the spinner.
-  const [isResolving, setIsResolving] = useState(!website);
-  const [lookupDone, setLookupDone] = useState(false);
-  const firedRef = useRef(false);
 
-  useEffect(() => {
-    if (persisted || firedRef.current) {
-      return;
-    }
-    firedRef.current = true;
-    setIsResolving(true);
-
-    resolveWebsite(firmId)
-      .then((r) => {
-        if (r.website) {
-          setResolved(r);
-        }
-      })
-      .catch(() => {
-        // Swallow — Google fallback stays. One call per page mount; the
-        // user's only retry path is a manual refresh.
-      })
-      .finally(() => {
-        setIsResolving(false);
-        setLookupDone(true);
-      });
-  }, [firmId, persisted]);
-
-  // Domain side precedence: persisted → resolver hit → filing-derived
-  // fallback → resolving spinner → polite "No public website on file" note.
-  // The filing fallback sits ahead of the spinner/empty states so a firm with
-  // no resolvable website still reflects the domain that lit up the Email
-  // Extractor; the background resolver keeps running and upgrades it to a
-  // confirmed website if it finds one. The Google fallback always renders
-  // alongside as a manual escape hatch.
+  // Domain side precedence: persisted → filing-derived fallback → polite
+  // "No public website on file" note. No lookup fires on mount — a
+  // website-less firm shows its current empty state, and resolution happens
+  // on demand (the firm-detail Refresh button) or via background backfill.
+  // The Google fallback always renders alongside as a manual escape hatch.
   let domainSide: JSX.Element | null = null;
   if (persisted) {
     domainSide = <ResolvedLink website={persisted} badge={null} />;
-  } else if (resolved?.website) {
-    domainSide = (
-      <ResolvedLink
-        website={resolved.website}
-        badge={
-          resolved.website_source
-            ? WEBSITE_SOURCE_BADGE[resolved.website_source]
-            : null
-        }
-      />
-    );
   } else if (fallback) {
     domainSide = <ResolvedLink website={fallback} badge={FILING_BADGE} />;
-  } else if (isResolving) {
-    domainSide = <ResolvingSpinner />;
-  } else if (lookupDone) {
+  } else {
     domainSide = <NoWebsiteNote />;
   }
 
-  // Always render the Google search link alongside (or as fallback when
-  // domainSide is null). Layout flexes so the two sit side-by-side on wide
-  // screens and stack on narrow ones.
+  // Always render the Google search link alongside. Layout flexes so the two
+  // sit side-by-side on wide screens and stack on narrow ones.
   return (
     <div className="mt-1.5 flex flex-wrap items-center gap-x-4 gap-y-1.5 transition-opacity duration-200">
       {domainSide}

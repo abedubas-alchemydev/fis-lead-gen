@@ -54,8 +54,6 @@ import {
   refreshFirm,
 } from "@/lib/api";
 import { DetailPageSkeleton } from "@/components/ui/detail-page-skeleton";
-import { RefreshingIndicator } from "@/components/ui/refreshing-indicator";
-import { joinPipelineLabels } from "@/lib/refresh-pipeline-labels";
 import { parseArrangementBlob } from "@/lib/arrangements";
 import {
   listScansForBrokerDealer,
@@ -298,17 +296,14 @@ export function BrokerDealerDetailClient({ brokerDealerId }: { brokerDealerId: s
     };
   }, [filingHistoryOpen, profile]);
 
-  // Refresh-on-visit gating. We POST /refresh-all on mount so the BE's
-  // per-pipeline gates can fill any missing column before we render.
-  // The /profile fetch below is gated on `refreshState.phase === "ready"`
-  // so the user sees the loading screen until the orchestrator's child
-  // pipelines finish (or short-circuit). Errors fall through to "ready"
-  // — refresh is best-effort, never blocks the page indefinitely.
-  type RefreshPhase =
-    | { phase: "queuing" }
-    | { phase: "polling"; runId: number; pipelinesRunning: string[] }
-    | { phase: "ready" };
-  const [refreshState, setRefreshState] = useState<RefreshPhase>({ phase: "queuing" });
+  // Manual refresh button state. The BD detail page used to POST
+  // /refresh-all on every mount; the bulk backfill runner now pre-fills
+  // every BD row's missing columns, so the page is a pure DB read by
+  // default. The Refresh button below remains as the escape hatch for
+  // forcing the per-firm orchestrator when an operator wants
+  // fresh-from-source data. Mirrors the advisor (IA) detail page.
+  const [isRefreshing, setIsRefreshing] = useState(false);
+  const [refreshError, setRefreshError] = useState<string | null>(null);
 
   // Resolve adjacent firm IDs.
   //
@@ -455,98 +450,6 @@ export function BrokerDealerDetailClient({ brokerDealerId }: { brokerDealerId: s
     });
   }, [brokerDealerId]);
 
-  // Refresh-on-visit: POST /refresh-all and poll the parent PipelineRun
-  // until terminal. Three short-circuit paths short of "ready":
-  //   - 200 status="skipped" -> no work needed, flip to ready immediately
-  //   - 202 status="queued" -> poll the new run_id
-  //   - 409 (normalized in lib/api refreshFirm) -> attach to in-flight run
-  // 429 cooldown and any unexpected ApiError fall through to ready so
-  // the user still sees the page with whatever data the DB has. The
-  // 180-second polling deadline is the same as
-  // scripts/standalone_refresh_all_loop.py used in PR #477.
-  useEffect(() => {
-    const numericId = Number(brokerDealerId);
-    if (!Number.isFinite(numericId)) {
-      setRefreshState({ phase: "ready" });
-      return;
-    }
-    let active = true;
-    let pollTimer: ReturnType<typeof setTimeout> | null = null;
-
-    function parsePipelinesRunning(notes: string | null): string[] {
-      if (!notes) return [];
-      try {
-        const parsed = JSON.parse(notes) as { ran?: unknown };
-        if (Array.isArray(parsed.ran)) {
-          return parsed.ran.filter((x): x is string => typeof x === "string");
-        }
-      } catch {
-        /* notes isn't structured JSON yet (early in lifecycle) */
-      }
-      return [];
-    }
-
-    async function pollUntilTerminal(runId: number) {
-      const deadline = Date.now() + 180_000;
-      const TERMINAL = new Set(["completed", "completed_with_errors", "failed"]);
-      while (active && Date.now() < deadline) {
-        try {
-          const detail = await getPipelineRunStatus(runId);
-          if (!active) return;
-          if (TERMINAL.has(detail.status)) {
-            setRefreshState({ phase: "ready" });
-            return;
-          }
-          // Still queued / running — update visible progress and wait.
-          setRefreshState({
-            phase: "polling",
-            runId,
-            pipelinesRunning: parsePipelinesRunning(detail.notes),
-          });
-        } catch {
-          // Transient poll error — wait and try again. If it persists,
-          // the deadline below catches us out.
-        }
-        await new Promise<void>((resolve) => {
-          pollTimer = setTimeout(resolve, 2000);
-        });
-      }
-      // Deadline elapsed — fall through and render with whatever the DB
-      // has now. The orchestrator may still be running server-side; a
-      // future visit will pick up the fresh data.
-      if (active) setRefreshState({ phase: "ready" });
-    }
-
-    async function run() {
-      try {
-        const result = await refreshFirm(numericId, "all");
-        if (!active) return;
-        if (result.status === "skipped" || result.run_id === null) {
-          // Backend short-circuited — every per-pipeline gate was closed.
-          // No PipelineRun row created, nothing to poll.
-          setRefreshState({ phase: "ready" });
-          return;
-        }
-        setRefreshState({
-          phase: "polling",
-          runId: result.run_id,
-          pipelinesRunning: [],
-        });
-        await pollUntilTerminal(result.run_id);
-      } catch {
-        // 429 cooldown, 503 missing provider, network blip, etc. — fall
-        // through so the page renders with the existing data.
-        if (active) setRefreshState({ phase: "ready" });
-      }
-    }
-    void run();
-
-    return () => {
-      active = false;
-      if (pollTimer !== null) clearTimeout(pollTimer);
-    };
-  }, [brokerDealerId]);
-
   const reloadProfile = useCallback(async () => {
     const response = await apiRequest<BrokerDealerProfileResponse>(
       `/api/v1/broker-dealers/${brokerDealerId}/profile`,
@@ -557,11 +460,49 @@ export function BrokerDealerDetailClient({ brokerDealerId }: { brokerDealerId: s
     setError(null);
   }, [brokerDealerId]);
 
-  // Fetch /profile immediately on mount — stale-while-revalidate.
-  // The refresh-on-visit useEffect above runs in parallel; when it
-  // transitions to "ready" the effect below re-fetches /profile so
-  // the user picks up whatever fresh data the orchestrator produced
-  // without ever staring at a blocking spinner.
+  // Manual refresh handler. POST /refresh-all on click, poll the parent
+  // PipelineRun until terminal (180s deadline), then re-fetch /profile so
+  // the user picks up whatever fresh data the orchestrator wrote. Errors
+  // surface via refreshError; a transient failure leaves the stale view
+  // intact. This is the deliberate, paid-work-on-click escape hatch — the
+  // page itself loads purely from the DB read. Mirrors the advisor (IA)
+  // detail page's runManualRefresh.
+  const runManualRefresh = useCallback(async () => {
+    const numericId = Number(brokerDealerId);
+    if (!Number.isFinite(numericId)) return;
+    setIsRefreshing(true);
+    setRefreshError(null);
+    try {
+      const result = await refreshFirm(numericId, "all");
+      if (result.status !== "skipped" && result.run_id !== null) {
+        const runId = result.run_id;
+        const deadline = Date.now() + 180_000;
+        const TERMINAL = new Set([
+          "completed",
+          "completed_with_errors",
+          "failed",
+        ]);
+        while (Date.now() < deadline) {
+          try {
+            const detail = await getPipelineRunStatus(runId);
+            if (TERMINAL.has(detail.status)) break;
+          } catch {
+            /* transient poll error — keep waiting */
+          }
+          await new Promise<void>((resolve) => setTimeout(resolve, 2000));
+        }
+      }
+      await reloadProfile();
+    } catch (err) {
+      setRefreshError(err instanceof Error ? err.message : "Refresh failed.");
+    } finally {
+      setIsRefreshing(false);
+    }
+  }, [brokerDealerId, reloadProfile]);
+
+  // Fetch /profile immediately on mount — pure DB read, no paid work.
+  // The page renders directly from this; refresh-all only runs behind a
+  // deliberate click of the Refresh button (see runManualRefresh above).
   useEffect(() => {
     let active = true;
     async function loadProfile() {
@@ -586,22 +527,6 @@ export function BrokerDealerDetailClient({ brokerDealerId }: { brokerDealerId: s
       active = false;
     };
   }, [brokerDealerId]);
-
-  // When refresh-on-visit transitions from in-flight (queuing/polling)
-  // to ready, re-fetch /profile so the visible page picks up any new
-  // values the orchestrator wrote. The ref ensures we only re-fetch on
-  // the transition, not on initial mount where phase may already be
-  // "ready" via the "skipped" short-circuit.
-  const prevRefreshPhaseRef = useRef(refreshState.phase);
-  useEffect(() => {
-    const prev = prevRefreshPhaseRef.current;
-    prevRefreshPhaseRef.current = refreshState.phase;
-    if (refreshState.phase === "ready" && prev !== "ready") {
-      void reloadProfile().catch(() => {
-        /* re-fetch is best-effort; the stale view is still useful */
-      });
-    }
-  }, [refreshState.phase, reloadProfile]);
 
   // Hydrate the inline "Discovered Emails" section. Two sources, in
   // precedence order:
@@ -739,10 +664,6 @@ export function BrokerDealerDetailClient({ brokerDealerId }: { brokerDealerId: s
       }));
   }, [profile]);
 
-  // Refresh-on-visit is non-blocking — the RefreshingIndicator pill in
-  // the topbar communicates progress while /profile renders with
-  // whatever the DB has now. See refreshState useEffect above.
-
   if (error) {
     return (
       <div className="px-7 pb-12 pt-7 lg:px-9">
@@ -879,18 +800,8 @@ export function BrokerDealerDetailClient({ brokerDealerId }: { brokerDealerId: s
               variant="detail"
               initialFavorited={profile.is_favorited}
             />
-            {refreshState.phase !== "ready" ? (
-              <RefreshingIndicator
-                label={
-                  refreshState.phase === "polling" && refreshState.pipelinesRunning.length > 0
-                    ? `Refreshing ${joinPipelineLabels(refreshState.pipelinesRunning)}…`
-                    : "Refreshing data…"
-                }
-              />
-            ) : null}
           </div>
           <FirmWebsiteLink
-            firmId={bd.id}
             firmName={bd.name}
             website={bd.website}
             fallbackDomain={headerFallbackDomain}
@@ -930,8 +841,22 @@ export function BrokerDealerDetailClient({ brokerDealerId }: { brokerDealerId: s
           <Button
             variant="outline"
             type="button"
+            onClick={() => void runManualRefresh()}
+            disabled={isRefreshing || isHealthChecking}
+            title="Re-run the per-firm enrichment pipelines for any missing fields"
+          >
+            {isRefreshing ? (
+              <Loader2 className="h-4 w-4 animate-spin" strokeWidth={2.5} />
+            ) : (
+              <RefreshCw className="h-4 w-4" strokeWidth={2} />
+            )}
+            {isRefreshing ? "Refreshing…" : "Refresh"}
+          </Button>
+          <Button
+            variant="outline"
+            type="button"
             onClick={() => void runHealthCheck()}
-            disabled={isHealthChecking}
+            disabled={isHealthChecking || isRefreshing}
           >
             {isHealthChecking ? (
               <Loader2 className="h-4 w-4 animate-spin" strokeWidth={2.5} />
@@ -942,6 +867,12 @@ export function BrokerDealerDetailClient({ brokerDealerId }: { brokerDealerId: s
           </Button>
         </div>
       </div>
+
+      {refreshError ? (
+        <div className="mb-3 rounded-2xl border border-[rgba(239,68,68,0.25)] bg-[rgba(239,68,68,0.08)] px-4 py-2.5 text-[13px] text-[var(--pill-red-text,#b91c1c)]">
+          {refreshError}
+        </div>
+      ) : null}
 
       {/* ── Status pills row + health-check inline message ── */}
       <div className="mb-5 flex flex-wrap items-center gap-2">
