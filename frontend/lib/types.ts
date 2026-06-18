@@ -86,11 +86,7 @@ export type BrokerDealerListItem = {
   types_of_business_total: number | null;
   types_of_business_other: string | null;
   dba_names: string[] | null;
-  // ISO timestamp of when the firm was first added to the platform (DB
-  // created_at), distinct from the historical SEC `registration_date`. The
-  // dashboard "New BDs" surface sorts/filters on this. Nullable to match the
-  // BE response contract; formatDate() renders null as "Not available".
-  created_at: string | null;
+  created_at: string;
   // Clearing-agency / SRO membership labels. `member_agencies` is the set of
   // agency codes (OCC/DTC/NSCC/FICC-GOV/FICC-MBS) the firm actively belongs
   // to. `clearing_membership_checked_at` is the sentinel: null ⇒ never
