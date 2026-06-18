@@ -265,7 +265,7 @@ export function DashboardHomeClient() {
               value={newBds}
               tone="purple"
               icon={KpiIconPulse}
-              helper="Recently added to the platform"
+              helper="Recent registrations from filing activity"
               onClick={() => setShowNewBdsModal(true)}
             />
           </div>
