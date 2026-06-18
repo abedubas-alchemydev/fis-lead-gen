@@ -1,6 +1,9 @@
 .env
 .env.local
 .env.*.local
+# Env-file backups (e.g. .env.bak.<date>, .env.local.bak.<date>) — may hold
+# live secrets; never commit. The plain .env rules above don't match .bak.
+.env*.bak*
 .venv/
 node_modules/
 frontend/.next/
