@@ -238,6 +238,46 @@ async def test_all_four_filters_combine(
 
 
 @pytest.mark.asyncio
+async def test_created_after_alone_emits_gte_predicate_on_created_at(
+    repository: BrokerDealerRepository,
+) -> None:
+    """The dashboard "New BDs" filter keys on ``created_at`` (when WE ingested
+    the firm), NOT ``registration_date``. ``created_after`` alone must produce
+    ``created_at >= :param`` and leave the registration-date column untouched."""
+    session = _StagedSession()
+
+    await repository.list_broker_dealers(
+        session, **_default_kwargs(), created_after=date(2026, 5, 19)
+    )
+
+    where = _captured_where_sql(session)
+    assert "broker_dealers.created_at >= '2026-05-19'" in where
+    # Additive: it must not piggy-back on the historical registration_date.
+    assert "broker_dealers.registration_date" not in where
+
+
+@pytest.mark.asyncio
+async def test_created_after_combines_with_registered_after(
+    repository: BrokerDealerRepository,
+) -> None:
+    """``created_after`` is independent of ``registered_after`` — both can be
+    supplied and both predicates AND-join (proves the new filter didn't
+    replace or alias the existing one)."""
+    session = _StagedSession()
+
+    await repository.list_broker_dealers(
+        session,
+        **_default_kwargs(),
+        registered_after=date(2015, 6, 1),
+        created_after=date(2026, 5, 19),
+    )
+
+    where = _captured_where_sql(session)
+    assert "broker_dealers.registration_date >= '2015-06-01'" in where
+    assert "broker_dealers.created_at >= '2026-05-19'" in where
+
+
+@pytest.mark.asyncio
 async def test_no_range_filters_leaves_existing_query_unchanged(
     repository: BrokerDealerRepository,
 ) -> None:
@@ -251,6 +291,28 @@ async def test_no_range_filters_leaves_existing_query_unchanged(
     where = _captured_where_sql(session)
     assert "broker_dealers.latest_net_capital" not in where
     assert "broker_dealers.registration_date" not in where
+    assert "broker_dealers.created_at" not in where
+
+
+@pytest.mark.asyncio
+async def test_sort_by_created_at_orders_on_created_at_column(
+    repository: BrokerDealerRepository,
+) -> None:
+    """``sort_by=created_at`` must resolve through ALLOWED_SORT_FIELDS to the
+    ``created_at`` column in the data_stmt ORDER BY — not silently fall back to
+    the default ``name`` sort. Asserts both directions land on the column."""
+    for direction in ("asc", "desc"):
+        session = _StagedSession()
+        await repository.list_broker_dealers(
+            session,
+            **{**_default_kwargs(), "sort_by": "created_at", "sort_dir": direction},
+        )
+        data_sql = _compile_sql(session.executed_statements[1])
+        assert "order by" in data_sql
+        order_by = data_sql.split("order by", 1)[1]
+        assert "broker_dealers.created_at" in order_by, (
+            f"sort_dir={direction} did not order on created_at; got {order_by!r}"
+        )
 
 
 @pytest.mark.asyncio
@@ -466,6 +528,36 @@ async def test_endpoint_passes_none_for_omitted_range_params(stubbed_endpoint) -
     assert kwargs["max_net_capital"] is None
     assert kwargs["registered_after"] is None
     assert kwargs["registered_before"] is None
+    assert kwargs["created_after"] is None
+
+
+async def test_endpoint_parses_and_forwards_created_after(stubbed_endpoint) -> None:
+    """The ``created_after`` ISO date (dashboard "New BDs" filter, keyed on
+    ingestion ``created_at``) parses to a ``date`` and reaches the repository
+    by keyword. Frontend contract: param name is exactly ``created_after``."""
+    async with _client() as client:
+        response = await client.get(
+            "/api/v1/broker-dealers", params={"created_after": "2026-05-19"}
+        )
+    assert response.status_code == 200, response.text
+    kwargs = stubbed_endpoint.await_args.kwargs
+    assert kwargs["created_after"] == date(2026, 5, 19)
+    # Independent of registration_date — the historical param stays None.
+    assert kwargs["registered_after"] is None
+
+
+async def test_endpoint_accepts_created_at_sort(stubbed_endpoint) -> None:
+    """``sort_by=created_at`` is whitelisted (asc + desc) so the FE can order
+    the list "newest ingested first". Forwarded verbatim to the repository."""
+    async with _client() as client:
+        response = await client.get(
+            "/api/v1/broker-dealers",
+            params={"sort_by": "created_at", "sort_dir": "desc"},
+        )
+    assert response.status_code == 200, response.text
+    kwargs = stubbed_endpoint.await_args.kwargs
+    assert kwargs["sort_by"] == "created_at"
+    assert kwargs["sort_dir"] == "desc"
 
 
 async def test_endpoint_rejects_inverted_net_capital_bounds(stubbed_endpoint) -> None:

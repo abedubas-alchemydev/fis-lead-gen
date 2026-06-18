@@ -246,6 +246,12 @@ async def list_broker_dealers(
     max_net_capital: float | None = Query(default=None, ge=0),
     registered_after: date | None = Query(default=None),
     registered_before: date | None = Query(default=None),
+    # "New BDs" = firms WE ingested recently, keyed on ``broker_dealers.created_at``
+    # (when the row landed in our DB), NOT ``registration_date`` (the firm's
+    # historical SEC date — decades-old / NULL, matches almost nothing). Additive:
+    # ``registered_after`` above is untouched (export + other callers still use
+    # it). Filters to ``created_at >= created_after``.
+    created_after: date | None = Query(default=None),
     # Named-segment preset. Resolves to an OR-predicate the per-field filters
     # can't express (net-capital band OR a business type) — see
     # ``high_value_participant_filter``. Strict pattern: unknown segments 422
@@ -297,6 +303,7 @@ async def list_broker_dealers(
         max_net_capital=max_net_capital,
         registered_after=registered_after,
         registered_before=registered_before,
+        created_after=created_after,
         segment=segment,
         ids=_parse_ids(ids),
         list_mode=list_mode,

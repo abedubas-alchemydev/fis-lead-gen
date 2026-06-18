@@ -42,7 +42,11 @@ async def get_dashboard_stats(
     total_active_bds = await repository.count_all(db)
     thirty_days_ago = date.today() - timedelta(days=30)
 
-    new_bds_stmt = select(func.count(BrokerDealer.id)).where(BrokerDealer.registration_date >= thirty_days_ago)
+    # "New BDs" counts firms WE ingested in the last 30 days, keyed on
+    # ``created_at`` (when the row landed in our DB). The firm's historical SEC
+    # ``registration_date`` is decades-old / NULL for nearly every firm, so the
+    # old predicate matched ~0; ``created_at`` reflects actual ingestion recency.
+    new_bds_stmt = select(func.count(BrokerDealer.id)).where(BrokerDealer.created_at >= thirty_days_ago)
     new_bds_30_days = int((await db.execute(new_bds_stmt)).scalar_one())
     deficiency_alerts = await alert_repository.count_deficiency_firms(db)
     high_value_participants = await repository.count_high_value_participants(db)

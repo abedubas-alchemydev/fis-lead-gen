@@ -37,7 +37,7 @@ export function NewBdsModal({ onClose }: NewBdsModalProps) {
 
     const since = isoDateNDaysAgo(30);
     apiRequest<BrokerDealerListResponse>(
-      `/api/v1/broker-dealers?registered_after=${since}&list=all&sort_by=registration_date&sort_dir=desc&limit=100`
+      `/api/v1/broker-dealers?created_after=${since}&list=all&sort_by=created_at&sort_dir=desc&limit=100`
     )
       .then((resp) => {
         if (!active) return;
@@ -78,10 +78,10 @@ export function NewBdsModal({ onClose }: NewBdsModalProps) {
               id="new-bds-modal-title"
               className="mt-1 text-lg font-semibold tracking-tight text-[var(--text,#0f172a)]"
             >
-              Recent registrations
+              Recently added
             </h2>
             <p className="mt-1 text-xs text-[var(--text-muted,#94a3b8)]">
-              Broker-dealers registered on or after {formatDate(isoDateNDaysAgo(30))}.
+              Broker-dealers added on or after {formatDate(isoDateNDaysAgo(30))}.
             </p>
           </div>
           <button
@@ -118,7 +118,7 @@ export function NewBdsModal({ onClose }: NewBdsModalProps) {
             </div>
           ) : items.length === 0 ? (
             <div className="rounded-xl border border-dashed border-[var(--border,rgba(30,64,175,0.1))] bg-[var(--surface-2,#f1f6fd)] px-4 py-8 text-center text-sm text-[var(--text-muted,#94a3b8)]">
-              No new broker-dealers registered in the last 30 days.
+              No broker-dealers added in the last 30 days.
             </div>
           ) : (
             <ul className="space-y-2">
@@ -147,9 +147,9 @@ export function NewBdsModal({ onClose }: NewBdsModalProps) {
                     </div>
                     <div className="text-right text-[11px] text-[var(--text-muted,#94a3b8)]">
                       <div className="font-medium text-[var(--text-dim,#475569)]">
-                        {formatDate(item.registration_date)}
+                        {formatDate(item.created_at)}
                       </div>
-                      <div className="mt-0.5">Registered</div>
+                      <div className="mt-0.5">Added</div>
                     </div>
                   </Link>
                 </li>
