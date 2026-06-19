@@ -359,6 +359,36 @@ jobs:
             --set-secrets=DATABASE_URL=DATABASE_URL_BACKEND_STAGING:latest,GEMINI_API_KEY=GEMINI_API_KEY:latest \
             --labels=commit-sha=${{ env.SHORT_SHA }},environment=staging,kind=batch-job
 
+      # Cloud Run Job that runs scripts/refresh_registration_dates.py against the
+      # staging Neon DB. Re-fetches each firm's FINRA Form BD and UPDATEs
+      # registration_date/formation_date in place (UPDATE-only, never INSERTs) so
+      # existing firms newly flipped to SEC-Approved surface as "New BDs" — the
+      # gap the INSERT-only extract-new-bds job can't catch (a firm gets its CRD
+      # at application, then gets approved months later with that same ≤-max CRD
+      # already in our DB). A Cloud Scheduler cron (nightly, America/New_York)
+      # invokes it with a rolling --limit; the registration_checked_at cursor
+      # (migration 20260619_0001) drives which firms it picks — NULL-date first,
+      # then least-recently-checked. FINRA-only (free public BrokerCheck API):
+      # no GEMINI_API_KEY, it never touches the embed/enrich path. Reuses the
+      # backend image (same SHA); only the CMD differs. Staging-only by design.
+      - name: Deploy refresh-registrations Cloud Run Job (staging)
+        if: env.ENV == 'staging'
+        run: |
+          gcloud run jobs deploy fis-refresh-registrations-staging \
+            --image=${{ vars.GCP_REGISTRY }}/backend:${{ env.SHORT_SHA }} \
+            --region=${{ vars.GCP_REGION }} \
+            --project=${{ vars.GCP_PROJECT_ID }} \
+            --command=python \
+            --args=scripts/refresh_registration_dates.py,--apply,--limit,250 \
+            --task-timeout=3600 \
+            --memory=1Gi \
+            --cpu=1 \
+            --max-retries=0 \
+            --parallelism=1 \
+            --tasks=1 \
+            --set-secrets=DATABASE_URL=DATABASE_URL_BACKEND_STAGING:latest \
+            --labels=commit-sha=${{ env.SHORT_SHA }},environment=staging,kind=batch-job
+
       - name: Deploy frontend to Cloud Run
         run: |
           # Re-establish SMTP env on every staging deploy so an accidental clear can't silently break better-auth emails.
