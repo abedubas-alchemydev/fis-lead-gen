@@ -152,7 +152,7 @@ export type BrokerDealerListResponse = {
 
 export type DashboardStats = {
   total_active_bds: number;
-  new_bds_30_days: number;
+  new_bds_90_days: number;
   deficiency_alerts: number;
   // BE boundary field — mirrors FastAPI response shape. Counts firms in the
   // "High Value Participant" segment: latest_net_capital in the [$5M, $100M]

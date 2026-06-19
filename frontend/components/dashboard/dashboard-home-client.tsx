@@ -113,7 +113,7 @@ export function DashboardHomeClient() {
       .then((stats) => {
         if (!active) return;
         setTotalBds(stats.total_active_bds.toLocaleString());
-        setNewBds(stats.new_bds_30_days.toLocaleString());
+        setNewBds(stats.new_bds_90_days.toLocaleString());
         setDeficiencyAlerts(stats.deficiency_alerts.toLocaleString());
         setHighValueParticipants(stats.high_value_participants.toLocaleString());
       })
@@ -261,7 +261,7 @@ export function DashboardHomeClient() {
           </div>
           <div className="animate-fade-in delay-75">
             <KpiCard
-              title="New BDs · 30 days"
+              title="New BDs · 90 days"
               value={newBds}
               tone="purple"
               icon={KpiIconPulse}
