@@ -106,4 +106,13 @@ class BrokerDealer(Base):
     clearing_membership_checked_at: Mapped[datetime | None] = mapped_column(
         DateTime(timezone=True), nullable=True, index=True
     )
+    # Rolling-cursor stamp for the FINRA registration-date refresh
+    # (scripts/refresh_registration_dates.py). Set to now() on every firm
+    # the refresh touches — even on a parse miss — so the nightly batch
+    # advances instead of re-probing stuck firms. NULL means "never
+    # refreshed", which is the highest-priority bucket (NULLS FIRST), so
+    # the one-time backfill drains NULL-date / never-checked firms first.
+    registration_checked_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True, index=True
+    )
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now(), nullable=False)
