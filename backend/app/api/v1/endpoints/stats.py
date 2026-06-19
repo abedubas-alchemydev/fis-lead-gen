@@ -40,16 +40,22 @@ async def get_dashboard_stats(
     db: AsyncSession = Depends(get_db_session),
 ) -> DashboardStatsResponse:
     total_active_bds = await repository.count_all(db)
-    thirty_days_ago = date.today() - timedelta(days=30)
+    # New-BD recency window. Keyed on registration_date (the firm's SEC
+    # registration date), over 90 days rather than 30: net-new BD registrations
+    # are sparse (~1/week of the firms we track), so a 30-day window reads ~0
+    # most of the time even when the data is current. 90 days surfaces the
+    # genuinely-recent registrations without claiming firms we merely ingested
+    # recently (that would be created_at, which is not "new BD").
+    ninety_days_ago = date.today() - timedelta(days=90)
 
-    new_bds_stmt = select(func.count(BrokerDealer.id)).where(BrokerDealer.registration_date >= thirty_days_ago)
-    new_bds_30_days = int((await db.execute(new_bds_stmt)).scalar_one())
+    new_bds_stmt = select(func.count(BrokerDealer.id)).where(BrokerDealer.registration_date >= ninety_days_ago)
+    new_bds_90_days = int((await db.execute(new_bds_stmt)).scalar_one())
     deficiency_alerts = await alert_repository.count_deficiency_firms(db)
     high_value_participants = await repository.count_high_value_participants(db)
 
     return DashboardStatsResponse(
         total_active_bds=total_active_bds,
-        new_bds_30_days=new_bds_30_days,
+        new_bds_90_days=new_bds_90_days,
         deficiency_alerts=deficiency_alerts,
         high_value_participants=high_value_participants,
     )

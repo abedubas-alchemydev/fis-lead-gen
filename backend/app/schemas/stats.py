@@ -11,7 +11,7 @@ class TotalBrokerDealersResponse(BaseModel):
 
 class DashboardStatsResponse(BaseModel):
     total_active_bds: int
-    new_bds_30_days: int
+    new_bds_90_days: int
     deficiency_alerts: int
     high_value_participants: int
 
