@@ -27,6 +27,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.config import settings
 from app.models.discovered_email import DiscoveredEmail
+from app.services.contact_discovery._shared import apollo_phone_reveal_configured
 from app.services.email_extractor.enrichment.apollo import ApolloEnrichProvider
 from app.services.email_extractor.enrichment.base import (
     MERGE_FIELDS,
@@ -176,3 +177,16 @@ def _apply(
         row.enrichment_status = "error"
 
     row.enriched_at = datetime.now(UTC)
+
+    # Stamp when the async Apollo phone-reveal was actually requested so
+    # phone_reveal_pending can bound the "finding phone…" spinner with a TTL.
+    # The reveal goes out exactly when Apollo matched a person (id stamped),
+    # the reveal flow is wired, and no phone landed inline -- the same gate the
+    # property reads. Skip it if a phone arrived synchronously (nothing pending)
+    # or reveal isn't configured (no callback will ever come).
+    if (
+        row.apollo_person_id is not None
+        and row.enriched_phone is None
+        and apollo_phone_reveal_configured()
+    ):
+        row.phone_reveal_requested_at = datetime.now(UTC)
