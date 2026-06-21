@@ -85,7 +85,13 @@ const RESULTS_PAGE_SIZE = 20;
 // number to land (Apollo calls our webhook seconds-to-minutes later). Bounded
 // so we stop when a reveal never resolves rather than polling forever.
 const PHONE_REVEAL_POLL_MS = 3000;
-const PHONE_REVEAL_TIMEOUT_MS = 90_000;
+// The backend self-clears `phone_reveal_pending` via a ~15-min TTL, so the poll
+// also terminates when the flag flips (see the stop predicate in
+// startPhoneRevealPoll). This hard cap is a safety net for an active viewer:
+// raised from 90s to 4 min so a reveal that lands a couple minutes out still
+// resolves in-place without a manual reload, while still bounding how long each
+// open tab keeps refetching the whole scan on a cadence.
+const PHONE_REVEAL_TIMEOUT_MS = 240_000;
 
 // ── Helpers ──────────────────────────────────────────────────────────────
 
@@ -939,6 +945,24 @@ export function ScanDetailView({
     },
     [startPhoneRevealPoll]
   );
+
+  // Resume phone-reveal polls on load/refetch — not just after a click.
+  // `phone_reveal_pending` is a server-computed flag, so a freshly loaded scan
+  // (e.g. a page reload, or landing on /master-list/{id}?scanId=…) can already
+  // contain rows mid-reveal whose "finding phone…" spinner would otherwise sit
+  // static with no poll driving it. Start a poll for every pending row, skipping
+  // ids already polling (a manual Enrich, or a prior run of this effect) so we
+  // never stack duplicate intervals on one id. Each poll self-terminates via its
+  // own stop predicate when the number lands or the backend TTL clears the flag;
+  // the unmount and scanId-change effects clear any still-running polls.
+  useEffect(() => {
+    if (!scan) return;
+    for (const row of scan.discovered_emails) {
+      if (row.phone_reveal_pending && !enrichPollsRef.current.has(row.id)) {
+        startPhoneRevealPoll(row.id);
+      }
+    }
+  }, [scan, startPhoneRevealPoll]);
 
   // Loading skeleton: pulse cards sized to roughly match the panels they
   // replace, so the layout doesn't jump when scan data lands.

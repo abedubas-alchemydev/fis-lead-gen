@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from datetime import datetime
+from datetime import datetime, timedelta, timezone
 from enum import StrEnum
 from typing import TYPE_CHECKING
 
@@ -12,6 +12,15 @@ from app.db.base import Base
 if TYPE_CHECKING:
     from app.models.email_verification import EmailVerification
     from app.models.extraction_run import ExtractionRun
+
+
+# How long the "finding phone…" spinner may stay up after a reveal is
+# requested. Apollo's async phone-reveal callback normally lands in seconds;
+# this generous ceiling bounds the wait so a row stops spinning when the
+# callback never arrives (ephemeral person id, no mobile on file, dropped
+# webhook). Module-level for now -- could move to settings if it needs to be
+# tunable per-environment.
+PHONE_REVEAL_TTL = timedelta(minutes=15)
 
 
 class DiscoverySource(StrEnum):
@@ -58,6 +67,11 @@ class DiscoveredEmail(Base):
     # async phone-reveal webhook can correlate a revealed number back to this
     # row (mirrors the contact tables; see endpoints/webhooks_apollo.py).
     apollo_person_id: Mapped[str | None] = mapped_column(String(64), nullable=True, index=True)
+    # When the async Apollo phone-reveal was requested (person matched, reveal
+    # configured, no inline phone). Stamped by the enrichment orchestrator and
+    # read by ``phone_reveal_pending`` to bound the spinner with a TTL. NULL =
+    # no reveal in flight (or a legacy row from before this column existed).
+    phone_reveal_requested_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now(), nullable=False)
 
     run: Mapped[ExtractionRun] = relationship(back_populates="discovered_emails")
@@ -70,17 +84,36 @@ class DiscoveredEmail(Base):
         """True while an async Apollo phone-reveal callback is still expected.
 
         The row enriched and captured an ``apollo_person_id`` but has no phone
-        yet, and the reveal flow is configured (so a webhook will arrive). Lets
-        the UI poll for the number without polling forever when reveal isn't
-        wired -- then no callback ever comes and this stays False.
+        yet, the reveal flow is configured (so a webhook will arrive), AND the
+        reveal was requested within the last :data:`PHONE_REVEAL_TTL`. Lets the
+        UI show "finding phone…" while a number may still land, then stop once
+        the window lapses instead of spinning forever when Apollo never calls
+        back (ephemeral person id, no mobile on file, dropped webhook).
+
+        A row with ``phone_reveal_requested_at IS NULL`` is never pending. That
+        is what clears every currently-stuck row the instant this code deploys:
+        legacy pending rows predate the timestamp column, so they have no
+        request time and immediately read as resolved. Late webhooks still
+        write the phone -- the TTL governs only the spinner, not the data.
         """
         from app.services.contact_discovery._shared import (
             apollo_phone_reveal_configured,
         )
 
-        return (
+        if not (
             self.enrichment_status == "enriched"
             and self.enriched_phone is None
             and self.apollo_person_id is not None
             and apollo_phone_reveal_configured()
-        )
+        ):
+            return False
+
+        requested_at = self.phone_reveal_requested_at
+        if requested_at is None:
+            return False
+        # Stored as tz-aware (DateTime(timezone=True)), but tolerate a tz-naive
+        # value (some drivers/backends hand one back) by reading it as UTC so a
+        # naive/aware subtraction can't raise.
+        if requested_at.tzinfo is None:
+            requested_at = requested_at.replace(tzinfo=timezone.utc)
+        return datetime.now(timezone.utc) - requested_at < PHONE_REVEAL_TTL
