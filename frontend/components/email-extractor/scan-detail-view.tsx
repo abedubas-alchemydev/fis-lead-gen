@@ -35,6 +35,7 @@ import {
   type ScanResponse,
   type VerifyResultItem,
 } from "@/lib/email-extractor";
+import type { EmailHit } from "@/lib/types";
 
 // Run-status pill mapping mirrors /email-extractor (hub) so hub, standalone
 // scan page, and inline master-list section visually agree on the four states.
@@ -285,15 +286,22 @@ function EnrichmentCell({
   onEnrich: (emailId: number) => void;
 }): React.ReactElement {
   if (row.enrichment_status === "enriched") {
-    // The discovered address keyed the lookup, so only surface a revealed
-    // email when it's actually a different (e.g. personal) address. We do NOT
-    // feed the discovered `row.email` into the Email channel — it already lives
-    // in the EMAIL column — so that icon greys out unless enrichment found a
-    // genuinely different (personal/alternate) address.
-    const revealedEmail =
-      row.enriched_email && row.enriched_email !== row.email
-        ? row.enriched_email
-        : null;
+    // Surface ALL emails on the Email channel: always the discovered address
+    // (work), plus the enriched one (personal) when it's a genuinely different
+    // address. Passing the array — not the lone alternate — keeps the Email
+    // icon active on every enriched row (there's always the discovered email)
+    // and lets the popover list both, with the personal one getting its chip.
+    const emails: EmailHit[] = [
+      { value: row.email, type: "work", confidence: null, source: "" },
+    ];
+    if (row.enriched_email && row.enriched_email !== row.email) {
+      emails.push({
+        value: row.enriched_email,
+        type: "personal",
+        confidence: null,
+        source: "",
+      });
+    }
     // The three channels render via the shared ChannelIconCell so this column
     // matches the BD/investor detail pages pixel-for-pixel (LinkedIn / Email /
     // Phone slots, accent + clickable when present, greyed when absent).
@@ -319,7 +327,11 @@ function EnrichmentCell({
           contact={{
             id: row.id,
             linkedin_url: row.enriched_linkedin_url,
-            email: revealedEmail,
+            // `emails` carries the full set (discovered + any alternate) and
+            // wins in ChannelIconCell when non-empty; the scalar `email` is
+            // kept only to satisfy the required field on its contact shape.
+            email: row.email,
+            emails,
             phone: row.enriched_phone,
           }}
         />
