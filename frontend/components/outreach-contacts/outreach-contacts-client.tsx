@@ -275,7 +275,7 @@ export function OutreachContactsClient(): React.ReactElement {
       {/* Firms list */}
       <SectionPanel
         eyebrow="Firms"
-        title={`Firms with contacts on file${total ? ` (${total.toLocaleString()})` : ""}`}
+        title={`Firms with contacts or extracted emails${total ? ` (${total.toLocaleString()})` : ""}`}
         headerAction={
           <button
             type="button"
@@ -316,7 +316,7 @@ export function OutreachContactsClient(): React.ReactElement {
             />
             {debouncedQuery
               ? `No firms match "${debouncedQuery}".`
-              : "No firms with contacts on file yet."}
+              : "No firms with contacts or extracted emails yet."}
           </div>
         ) : (
           <div>

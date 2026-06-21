@@ -13,9 +13,12 @@ import clsx from "clsx";
 
 import { buttonBase, buttonSizes } from "@/components/ui/button";
 import { ContactPersonRow } from "@/components/outreach-contacts/contact-person-row";
+import { DiscoveredEmailRow } from "@/components/outreach-contacts/discovered-email-row";
 import { Pill } from "@/components/ui/pill";
 import {
+  listOutreachContactsFirmDiscoveredEmails,
   listOutreachContactsFirmPersons,
+  type DiscoveredContactRow,
   type OutreachContactPerson,
   type OutreachContactsFirmRow,
 } from "@/lib/outreach-contacts";
@@ -67,6 +70,17 @@ export function FirmRow({
   const [personsLoading, setPersonsLoading] = useState(false);
   const [personsError, setPersonsError] = useState<string | null>(null);
 
+  // Discovered (Email-Extractor) emails -- lazy-loaded on expand, same
+  // loading/error affordance as the typed-contacts list. Only fetched when the
+  // firm actually has any (discovered_email_count > 0).
+  const [discovered, setDiscovered] = useState<DiscoveredContactRow[] | null>(
+    null,
+  );
+  const [discoveredLoading, setDiscoveredLoading] = useState(false);
+  const [discoveredError, setDiscoveredError] = useState<string | null>(null);
+
+  const hasDiscovered = firm.discovered_email_count > 0;
+
   const loadPersons = useCallback(async () => {
     setPersonsLoading(true);
     setPersonsError(null);
@@ -85,15 +99,48 @@ export function FirmRow({
     }
   }, [firm.entity_kind, firm.entity_id]);
 
+  const loadDiscovered = useCallback(async () => {
+    setDiscoveredLoading(true);
+    setDiscoveredError(null);
+    try {
+      // Reuse the firm row's entity_kind -- the discovered-emails endpoint
+      // keys off the same value the persons endpoint does.
+      const response = await listOutreachContactsFirmDiscoveredEmails(
+        firm.entity_kind,
+        firm.entity_id,
+      );
+      setDiscovered(response);
+    } catch (err) {
+      setDiscoveredError(
+        err instanceof Error ? err.message : "Could not load extracted emails",
+      );
+    } finally {
+      setDiscoveredLoading(false);
+    }
+  }, [firm.entity_kind, firm.entity_id]);
+
   const handleToggle = useCallback(() => {
     setExpanded((prev) => {
       const next = !prev;
-      if (next && persons === null && !personsLoading) {
-        void loadPersons();
+      if (next) {
+        if (persons === null && !personsLoading) {
+          void loadPersons();
+        }
+        if (hasDiscovered && discovered === null && !discoveredLoading) {
+          void loadDiscovered();
+        }
       }
       return next;
     });
-  }, [persons, personsLoading, loadPersons]);
+  }, [
+    persons,
+    personsLoading,
+    loadPersons,
+    hasDiscovered,
+    discovered,
+    discoveredLoading,
+    loadDiscovered,
+  ]);
 
   // DEMO: cooldown gating removed (see top-of-file note) -- only the live
   // in-flight / enriching states still disable the button.
@@ -140,6 +187,17 @@ export function FirmRow({
             {" · "}
             <span className="tabular-nums">{firm.with_phone_count.toLocaleString()}</span>{" "}
             with phone
+            {hasDiscovered ? (
+              <>
+                {" · "}
+                <span className="font-medium text-[#4338ca]">
+                  <span className="tabular-nums">
+                    {firm.discovered_email_count.toLocaleString()}
+                  </span>{" "}
+                  extracted
+                </span>
+              </>
+            ) : null}
           </p>
         </div>
         <button
@@ -174,31 +232,68 @@ export function FirmRow({
       ) : null}
 
       {expanded ? (
-        <div className="ml-10 mt-3">
-          {personsLoading ? (
-            <div className="flex items-center gap-2 py-2 text-[12px] text-[var(--text-muted,#94a3b8)]">
-              <Loader2 className="h-3.5 w-3.5 animate-spin" strokeWidth={2} />
-              Loading contacts…
+        <div className="ml-10 mt-3 space-y-4">
+          <div>
+            {personsLoading ? (
+              <div className="flex items-center gap-2 py-2 text-[12px] text-[var(--text-muted,#94a3b8)]">
+                <Loader2 className="h-3.5 w-3.5 animate-spin" strokeWidth={2} />
+                Loading contacts…
+              </div>
+            ) : personsError ? (
+              <p className="rounded-md border border-red-200 bg-red-50 px-3 py-2 text-[12px] text-red-700">
+                {personsError}
+              </p>
+            ) : persons === null ? null : persons.length === 0 ? (
+              // Suppress the empty-state for extracted-only firms -- the
+              // "Extracted emails" section below carries the row instead.
+              hasDiscovered ? null : (
+                <p className="py-2 text-[12px] text-[var(--text-muted,#94a3b8)]">
+                  No contacts on file.
+                </p>
+              )
+            ) : (
+              <ul className="space-y-2">
+                {persons.map((person) => (
+                  <ContactPersonRow
+                    key={person.contact_id}
+                    person={person}
+                    firm={firm}
+                  />
+                ))}
+              </ul>
+            )}
+          </div>
+
+          {hasDiscovered ? (
+            <div>
+              <p className="mb-2 text-[11px] font-semibold uppercase tracking-[0.08em] text-[var(--text-muted,#94a3b8)]">
+                Extracted emails ({firm.discovered_email_count.toLocaleString()})
+              </p>
+              {discoveredLoading ? (
+                <div className="flex items-center gap-2 py-2 text-[12px] text-[var(--text-muted,#94a3b8)]">
+                  <Loader2
+                    className="h-3.5 w-3.5 animate-spin"
+                    strokeWidth={2}
+                  />
+                  Loading extracted emails…
+                </div>
+              ) : discoveredError ? (
+                <p className="rounded-md border border-red-200 bg-red-50 px-3 py-2 text-[12px] text-red-700">
+                  {discoveredError}
+                </p>
+              ) : discovered === null ? null : discovered.length === 0 ? (
+                <p className="py-2 text-[12px] text-[var(--text-muted,#94a3b8)]">
+                  No extracted emails on file.
+                </p>
+              ) : (
+                <ul className="space-y-2">
+                  {discovered.map((row) => (
+                    <DiscoveredEmailRow key={row.id} row={row} />
+                  ))}
+                </ul>
+              )}
             </div>
-          ) : personsError ? (
-            <p className="rounded-md border border-red-200 bg-red-50 px-3 py-2 text-[12px] text-red-700">
-              {personsError}
-            </p>
-          ) : persons === null ? null : persons.length === 0 ? (
-            <p className="py-2 text-[12px] text-[var(--text-muted,#94a3b8)]">
-              No contacts on file.
-            </p>
-          ) : (
-            <ul className="space-y-2">
-              {persons.map((person) => (
-                <ContactPersonRow
-                  key={person.contact_id}
-                  person={person}
-                  firm={firm}
-                />
-              ))}
-            </ul>
-          )}
+          ) : null}
         </div>
       ) : null}
     </div>

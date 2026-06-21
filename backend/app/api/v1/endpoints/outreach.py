@@ -27,6 +27,7 @@ from app.db.session import get_db_session
 from app.models.advisor_contact import AdvisorContact
 from app.models.auth import Account, AuthUser
 from app.models.broker_dealer import BrokerDealer
+from app.models.discovered_email import DiscoveredEmail
 from app.models.executive_contact import ExecutiveContact
 from app.models.institutional_investor import InstitutionalInvestor
 from app.models.investment_advisor import InvestmentAdvisor
@@ -44,6 +45,7 @@ from app.schemas.outreach_contacts import (
     OutreachContactsFirmDetailResponse,
     OutreachContactsFirmRow,
     OutreachContactsFirmsResponse,
+    OutreachDiscoveredEmailRow,
 )
 from app.schemas.vault import (
     FavoriteFirmsResponse,
@@ -2176,6 +2178,15 @@ async def list_outreach_contacts_firms(
         .correlate(BrokerDealer)
         .scalar_subquery()
     )
+    # Parallel Email-Extractor source: count discovered_email rows linked
+    # to this BD. Kept separate from the typed bd_*_count above so the
+    # typed triad stays typed-only (decision C-c1).
+    bd_discovered_count = (
+        select(func.count(DiscoveredEmail.id))
+        .where(DiscoveredEmail.bd_id == BrokerDealer.id)
+        .correlate(BrokerDealer)
+        .scalar_subquery()
+    )
 
     advisor_contact_count = (
         select(func.count(AdvisorContact.id))
@@ -2200,6 +2211,12 @@ async def list_outreach_contacts_firms(
     advisor_last_enriched = (
         select(func.max(AdvisorContact.enriched_at))
         .where(AdvisorContact.advisor_id == InvestmentAdvisor.id)
+        .correlate(InvestmentAdvisor)
+        .scalar_subquery()
+    )
+    advisor_discovered_count = (
+        select(func.count(DiscoveredEmail.id))
+        .where(DiscoveredEmail.advisor_id == InvestmentAdvisor.id)
         .correlate(InvestmentAdvisor)
         .scalar_subquery()
     )
@@ -2230,6 +2247,17 @@ async def list_outreach_contacts_firms(
         .correlate(InstitutionalInvestor)
         .scalar_subquery()
     )
+    # discovered_email has no investor_id; an investor can only surface
+    # extracted emails through its IAPD-overlap advisor link. The join is
+    # on the investor's resolved advisor_id, so a pure-13F investor
+    # (advisor_id IS NULL) yields 0 -- SQL ``NULL = advisor_id`` never
+    # matches, which is exactly the wanted behavior.
+    investor_discovered_count = (
+        select(func.count(DiscoveredEmail.id))
+        .where(DiscoveredEmail.advisor_id == InstitutionalInvestor.advisor_id)
+        .correlate(InstitutionalInvestor)
+        .scalar_subquery()
+    )
 
     rows: list[OutreachContactsFirmRow] = []
 
@@ -2241,10 +2269,13 @@ async def list_outreach_contacts_firms(
                 bd_contact_count.label("contact_count"),
                 bd_email_count.label("with_email_count"),
                 bd_phone_count.label("with_phone_count"),
+                bd_discovered_count.label("discovered_email_count"),
                 bd_last_enriched.label("last_enriched_at"),
                 BrokerDealer.last_gap_fill_attempt_at,
             )
-            .where(bd_contact_count > 0)
+            # B-b2: include a firm with ONLY discovered emails (no typed
+            # contacts), so the OR. Typed counts stay typed-only (C-c1).
+            .where(or_(bd_contact_count > 0, bd_discovered_count > 0))
             .order_by(BrokerDealer.name.asc())
         )
         if needle:
@@ -2258,6 +2289,7 @@ async def list_outreach_contacts_firms(
                     contact_count=int(r.contact_count or 0),
                     with_email_count=int(r.with_email_count or 0),
                     with_phone_count=int(r.with_phone_count or 0),
+                    discovered_email_count=int(r.discovered_email_count or 0),
                     last_enriched_at=r.last_enriched_at,
                     last_gap_fill_attempt_at=r.last_gap_fill_attempt_at,
                     gap_fill_in_progress=False,
@@ -2272,10 +2304,11 @@ async def list_outreach_contacts_firms(
                 advisor_contact_count.label("contact_count"),
                 advisor_email_count.label("with_email_count"),
                 advisor_phone_count.label("with_phone_count"),
+                advisor_discovered_count.label("discovered_email_count"),
                 advisor_last_enriched.label("last_enriched_at"),
                 InvestmentAdvisor.last_gap_fill_attempt_at,
             )
-            .where(advisor_contact_count > 0)
+            .where(or_(advisor_contact_count > 0, advisor_discovered_count > 0))
             .order_by(InvestmentAdvisor.name.asc())
         )
         if needle:
@@ -2291,6 +2324,7 @@ async def list_outreach_contacts_firms(
                     contact_count=int(r.contact_count or 0),
                     with_email_count=int(r.with_email_count or 0),
                     with_phone_count=int(r.with_phone_count or 0),
+                    discovered_email_count=int(r.discovered_email_count or 0),
                     last_enriched_at=r.last_enriched_at,
                     last_gap_fill_attempt_at=r.last_gap_fill_attempt_at,
                     gap_fill_in_progress=False,
@@ -2305,10 +2339,13 @@ async def list_outreach_contacts_firms(
                 investor_contact_count.label("contact_count"),
                 investor_email_count.label("with_email_count"),
                 investor_phone_count.label("with_phone_count"),
+                investor_discovered_count.label("discovered_email_count"),
                 investor_last_enriched.label("last_enriched_at"),
                 InstitutionalInvestor.last_gap_fill_attempt_at,
             )
-            .where(investor_contact_count > 0)
+            .where(
+                or_(investor_contact_count > 0, investor_discovered_count > 0)
+            )
             .order_by(InstitutionalInvestor.name.asc())
         )
         if needle:
@@ -2324,6 +2361,7 @@ async def list_outreach_contacts_firms(
                     contact_count=int(r.contact_count or 0),
                     with_email_count=int(r.with_email_count or 0),
                     with_phone_count=int(r.with_phone_count or 0),
+                    discovered_email_count=int(r.discovered_email_count or 0),
                     last_enriched_at=r.last_enriched_at,
                     last_gap_fill_attempt_at=r.last_gap_fill_attempt_at,
                     gap_fill_in_progress=False,
@@ -2437,6 +2475,71 @@ async def list_outreach_contacts_firm_persons(
         entity_name=firm.name or "",
         items=items,
     )
+
+
+@router.get(
+    "/contacts/firms/{entity_kind}/{entity_id}/discovered-emails",
+    response_model=list[OutreachDiscoveredEmailRow],
+)
+async def list_outreach_contacts_firm_discovered_emails(
+    entity_kind: Literal[
+        "broker_dealer", "advisor", "institutional_investor"
+    ],
+    entity_id: int,
+    _: AuthenticatedUser = Depends(_require_outreach_contacts),
+    db: AsyncSession = Depends(get_db_session),
+) -> list[OutreachDiscoveredEmailRow]:
+    """Email-Extractor ``discovered_email`` rows linked to a single firm.
+
+    A PARALLEL source from ``/persons`` (the typed contact tables) -- the
+    Email Extractor never writes to those, so these rows can exist for a
+    firm that has zero typed contacts. ``discovered_email`` links to a
+    firm directly via ``bd_id`` / ``advisor_id`` (no ``investor_id``);
+    an institutional investor can only surface extracted emails through
+    its IAPD-overlap ``advisor_id``, so a pure-13F investor
+    (``advisor_id IS NULL``) returns ``[]``.
+
+    Ordered by ``created_at`` then ``id`` for a stable result order.
+    """
+    if entity_kind == "broker_dealer":
+        email_stmt = select(DiscoveredEmail).where(
+            DiscoveredEmail.bd_id == entity_id
+        )
+    elif entity_kind == "advisor":
+        email_stmt = select(DiscoveredEmail).where(
+            DiscoveredEmail.advisor_id == entity_id
+        )
+    else:
+        # discovered_email carries no investor_id -- resolve the
+        # investor's advisor link first; a pure-13F investor has none.
+        investor = await db.get(InstitutionalInvestor, entity_id)
+        if investor is None or investor.advisor_id is None:
+            return []
+        email_stmt = select(DiscoveredEmail).where(
+            DiscoveredEmail.advisor_id == investor.advisor_id
+        )
+
+    email_stmt = email_stmt.order_by(
+        DiscoveredEmail.created_at.asc(), DiscoveredEmail.id.asc()
+    )
+
+    rows: list[OutreachDiscoveredEmailRow] = []
+    for row in (await db.execute(email_stmt)).scalars().all():
+        rows.append(
+            OutreachDiscoveredEmailRow(
+                id=row.id,
+                email=row.email,
+                enriched_name=row.enriched_name,
+                enriched_title=row.enriched_title,
+                enriched_phone=row.enriched_phone,
+                enriched_linkedin_url=row.enriched_linkedin_url,
+                enrichment_status=row.enrichment_status,
+                source=row.source,
+                confidence=row.confidence,
+                created_at=row.created_at,
+            )
+        )
+    return rows
 
 
 @router.post(
