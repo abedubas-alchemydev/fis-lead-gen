@@ -4,7 +4,7 @@ The email-extractor "Enrich" button enriches a discovered email address with
 the person behind it -- name, title, company, LinkedIn, an alternate email,
 and a phone. This used to be Apollo-only; it now walks a configurable provider
 chain (``settings.email_enrichment_chain``, default
-``apollo,pdl,hunter,snov,name_lookup,web_scraper``) and *gap-fills*: the first provider that
+``apollo,hunter,snov,name_lookup,web_scraper``) and *gap-fills*: the first provider that
 returns a field wins it, and later providers fill only the fields still empty.
 See ``orchestrator.py`` for the walk + merge.
 

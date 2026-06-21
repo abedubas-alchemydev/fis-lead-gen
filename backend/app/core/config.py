@@ -232,21 +232,28 @@ class Settings(BaseSettings):
     # contact-discovery fan-out, this runs IN ORDER and gap-fills: the first
     # provider to return a field wins it, later providers fill only the fields
     # still empty (so Apollo's name/title/LinkedIn + a phone + personal email
-    # from PDL combine on one row). Unconfigured providers (missing key/flag)
-    # are skipped. Registered names: apollo, pdl, hunter, snov, name_lookup,
-    # web_scraper. ``pdl`` sits right after Apollo because it's the one paid API
-    # that returns person phones + personal emails (Apollo's sync phone is empty
-    # on our plan, Snov returns neither) -- the two fields the button most often
-    # still misses. ``name_lookup`` is the coverage net: where every other link
-    # is a reverse-EMAIL lookup, it derives the name from the local-part and runs
-    # the brokers' NAME+domain match (a different index path), so it hits people
-    # not indexed by that address and fills the channel left empty on partial
-    # rows. It runs after the reverse-email links so the ``needed`` gating spends
-    # a second broker call only on real gaps. Reorder or trim via env with no
-    # code change (e.g. drop ``web_scraper`` to disable the site-crawl fallback).
-    # ``web_scraper`` additionally requires ``web_fallback_enabled``; ``pdl`` and
-    # ``name_lookup`` require ``pdl_api_key`` / a name+domain broker key.
-    email_enrichment_chain: str = "apollo,pdl,hunter,snov,name_lookup,web_scraper"
+    # from a later link combine on one row). Unconfigured providers (missing
+    # key/flag) are skipped. Registered names: apollo, pdl, hunter, snov,
+    # name_lookup, web_scraper. ``name_lookup`` is the coverage net: where every
+    # other link is a reverse-EMAIL lookup, it derives the name from the
+    # local-part and runs the brokers' NAME+domain match (a different index
+    # path), so it hits people not indexed by that address and fills the channel
+    # left empty on partial rows. It runs after the reverse-email links so the
+    # ``needed`` gating spends a second broker call only on real gaps. Reorder or
+    # trim via env with no code change (e.g. drop ``web_scraper`` to disable the
+    # site-crawl fallback). ``web_scraper`` additionally requires
+    # ``web_fallback_enabled``; ``name_lookup`` requires a name+domain broker key.
+    #
+    # Dropped from the default but still registered in
+    # ``orchestrator._PROVIDERS`` -- re-add to ``EMAIL_ENRICHMENT_CHAIN`` (env)
+    # AND set ``PDL_API_KEY`` to re-enable with no code change:
+    #   * ``pdl`` -- People Data Labs went near-dead on our cohort (no net new
+    #     contacts at audit) despite being billed per call, so it's dropped from
+    #     the default. Note ``name_lookup`` ALSO calls PDL as a sub-provider when
+    #     ``pdl_api_key`` is set, so fully silencing PDL means leaving the key
+    #     unbound (its default ``None`` skips every PDL path), not just removing
+    #     ``pdl`` from this string.
+    email_enrichment_chain: str = "apollo,hunter,snov,name_lookup,web_scraper"
     gemini_api_key: str | None = None
     gemini_api_base: str = "https://generativelanguage.googleapis.com/v1beta"
     # Production default for the structured-PDF extraction path
