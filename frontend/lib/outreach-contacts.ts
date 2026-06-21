@@ -15,6 +15,12 @@ export interface OutreachContactsFirmRow {
   contact_count: number;
   with_email_count: number;
   with_phone_count: number;
+  // Count of Email-Extractor discovered_email rows linked to this firm. A
+  // parallel source to the typed contact triad above (kept separate, never
+  // folded in) -- powers the "N extracted" summary pill and the lazy-loaded
+  // "Extracted emails" sub-section on expand. Firms now appear in the list
+  // when contact_count > 0 OR discovered_email_count > 0.
+  discovered_email_count: number;
   last_enriched_at: string | null;
   last_gap_fill_attempt_at: string | null;
   gap_fill_in_progress: boolean;
@@ -40,6 +46,23 @@ export interface OutreachContactsFirmDetailResponse {
   entity_id: number;
   entity_name: string;
   items: OutreachContactPerson[];
+}
+
+// An Email-Extractor discovered_email row scoped to a firm. Surfaced beneath
+// the typed contacts in a separate "Extracted emails" sub-section. The
+// /discovered-emails endpoint returns a bare array (no envelope), unlike the
+// /persons response above.
+export interface DiscoveredContactRow {
+  id: number;
+  email: string;
+  enriched_name: string | null;
+  enriched_title: string | null;
+  enriched_phone: string | null;
+  enriched_linkedin_url: string | null;
+  enrichment_status: string;
+  source: string | null;
+  confidence: number | null;
+  created_at: string;
 }
 
 export interface GapFillFirmResponse {
@@ -78,6 +101,17 @@ export async function listOutreachContactsFirmPersons(
 ): Promise<OutreachContactsFirmDetailResponse> {
   return apiRequest<OutreachContactsFirmDetailResponse>(
     `/api/v1/outreach/contacts/firms/${kind}/${id}/persons`,
+  );
+}
+
+// Pass the SAME `kind` the firm row carries (the persons wrapper above uses
+// it too). Returns a bare array of discovered emails for the firm.
+export async function listOutreachContactsFirmDiscoveredEmails(
+  kind: OutreachEntityKind,
+  id: number,
+): Promise<DiscoveredContactRow[]> {
+  return apiRequest<DiscoveredContactRow[]>(
+    `/api/v1/outreach/contacts/firms/${kind}/${id}/discovered-emails`,
   );
 }
 

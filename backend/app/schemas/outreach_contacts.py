@@ -28,6 +28,14 @@ class OutreachContactsFirmRow(BaseModel):
     contact_count: int
     with_email_count: int
     with_phone_count: int
+    # Count of Email-Extractor ``discovered_email`` rows linked to this
+    # firm. A PARALLEL source from the typed contact tables -- the three
+    # counts above stay typed-only; this one is kept separate so the FE
+    # can render a distinct "extracted emails" pill without double-
+    # counting. For institutional investors this counts through the
+    # resolved ``advisor_id`` (0 when the investor has no advisor link,
+    # since ``discovered_email`` carries no ``investor_id``).
+    discovered_email_count: int
     last_enriched_at: datetime | None
     last_gap_fill_attempt_at: datetime | None
     # True when a gap-fill PipelineRun for this firm is currently
@@ -61,6 +69,29 @@ class OutreachContactsFirmDetailResponse(BaseModel):
     entity_id: int
     entity_name: str
     items: list[OutreachContactPerson]
+
+
+class OutreachDiscoveredEmailRow(BaseModel):
+    """One Email-Extractor ``discovered_email`` row surfaced under a firm.
+
+    A parallel source from the typed contact rows in
+    :class:`OutreachContactPerson`: these come straight from the Email
+    Extractor's scans (``discovered_email`` table) and carry no typed
+    ``contact_id`` -- the FE wires outreach off the email address via the
+    adhoc compose path. ``email`` is the discovered address that keyed the
+    scan; the ``enriched_*`` fields are whatever provider enrichment
+    attached afterwards (may be NULL on an unenriched row)."""
+
+    id: int
+    email: str
+    enriched_name: str | None
+    enriched_title: str | None
+    enriched_phone: str | None
+    enriched_linkedin_url: str | None
+    enrichment_status: str
+    source: str | None
+    confidence: float | None
+    created_at: datetime
 
 
 class GapFillFirmResponse(BaseModel):
