@@ -222,6 +222,239 @@ async def test_apollo_person_id_propagates(monkeypatch: pytest.MonkeyPatch) -> N
     assert out.apollo_person_id == "pid123"
 
 
+# ───────────────── Apollo phone-reveal race (early commit) ─────────────────
+
+
+def _wire_reveal_configured(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Turn on the async phone-reveal flow (webhook secret + base URL) so the
+    orchestrator's early-commit branch fires."""
+    monkeypatch.setattr(settings, "apollo_webhook_secret", "sekret", raising=False)
+    monkeypatch.setattr(
+        settings, "public_base_url", "https://app.example.com/api/backend", raising=False
+    )
+
+
+class _SnapshotSession(_FakeSession):
+    """Records a row snapshot on every commit so a test can prove what was
+    persisted at the FIRST (early) commit vs. the final one. ``refresh`` is a
+    no-op (no real DB to re-read from)."""
+
+    def __init__(self, row: DiscoveredEmail) -> None:
+        super().__init__(row)
+        self.snapshots: list[dict[str, Any]] = []
+
+    async def commit(self) -> None:
+        self.commits += 1
+        self.snapshots.append(
+            {
+                "apollo_person_id": self._row.apollo_person_id,
+                "phone_reveal_requested_at": self._row.phone_reveal_requested_at,
+                "enriched_phone": self._row.enriched_phone,
+                "enrichment_status": self._row.enrichment_status,
+            }
+        )
+
+
+class _OrderRecordingProvider(_FakeProvider):
+    """Provider that records the session's commit count at the moment it runs,
+    so a test can assert the early commit happened BEFORE this provider was
+    called."""
+
+    def __init__(self, name: str, session: _FakeSession, **kwargs: Any) -> None:
+        super().__init__(name, **kwargs)
+        self._session = session
+        self.commits_seen_at_call: int | None = None
+
+    async def enrich(self, email: str, needed: set[str] | None = None) -> EnrichmentData | None:
+        self.commits_seen_at_call = self._session.commits
+        return await super().enrich(email, needed)
+
+
+async def test_apollo_person_id_committed_before_downstream_provider(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The correlation key (apollo_person_id + phone_reveal_requested_at) is
+    persisted and committed the instant Apollo yields it -- BEFORE the slow
+    downstream provider runs. This is the race fix: the webhook must be able to
+    find the row while the chain is still walking."""
+    _wire_reveal_configured(monkeypatch)
+    row = _seed_row()
+    session = _SnapshotSession(row)
+    apollo = _FakeProvider("apollo", EnrichmentData(name="Jane", apollo_person_id="pid-6502"))
+    # Downstream provider errors (mirrors the hunter 429 / snov timeout tail
+    # that stretched the real chain past the callback).
+    hunter = _OrderRecordingProvider("hunter", session, error=True)
+    _wire(monkeypatch, {"apollo": apollo, "hunter": hunter}, "apollo,hunter")
+
+    out = await orchestrator.enrich_discovered_email(session, 1)
+
+    # Hunter saw exactly one commit already done when it was called -> the
+    # early commit for apollo_person_id landed before the downstream provider.
+    assert hunter.commits_seen_at_call == 1
+    # The FIRST commit carried the correlation key + request timestamp, and did
+    # so before the row was marked "enriched" (that's a chain-end concern).
+    assert session.snapshots[0]["apollo_person_id"] == "pid-6502"
+    assert session.snapshots[0]["phone_reveal_requested_at"] is not None
+    assert session.snapshots[0]["enrichment_status"] != "enriched"
+    # Two commits total: the early correlation-key commit + the chain-end write.
+    assert session.commits == 2
+    assert out.apollo_person_id == "pid-6502"
+
+
+async def test_early_commit_skipped_when_reveal_not_configured(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """With the reveal flow unconfigured there's no webhook to race, so the
+    orchestrator does NOT take the early commit -- only the single chain-end
+    commit fires (no behavioural change off the reveal path)."""
+    monkeypatch.setattr(settings, "apollo_webhook_secret", None, raising=False)
+    monkeypatch.setattr(settings, "public_base_url", None, raising=False)
+    row = _seed_row()
+    session = _SnapshotSession(row)
+    apollo = _FakeProvider("apollo", EnrichmentData(name="Jane", apollo_person_id="pid-1"))
+    hunter = _FakeProvider("hunter", EnrichmentData(company="Acme"))
+    _wire(monkeypatch, {"apollo": apollo, "hunter": hunter}, "apollo,hunter")
+
+    out = await orchestrator.enrich_discovered_email(session, 1)
+
+    assert session.commits == 1  # chain-end only, no early commit
+    assert out.apollo_person_id == "pid-1"
+    # phone_reveal_requested_at stays NULL when the flow isn't wired.
+    assert out.phone_reveal_requested_at is None
+
+
+async def test_final_commit_does_not_clobber_webhook_written_phone(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """After the early commit, a webhook (separate txn) writes enriched_phone.
+    The chain finishes with no phone of its own (merged.phone is None). The
+    final commit must leave the webhook's phone intact -- never null it back."""
+    _wire_reveal_configured(monkeypatch)
+    row = _seed_row()
+
+    class _WebhookRaceSession(_SnapshotSession):
+        """On ``refresh`` (called by the orchestrator just before the final
+        write), simulate the webhook having committed a phone in its own txn by
+        materialising it onto the row -- exactly what db.refresh() would pull in
+        from the DB after the webhook's UPDATE."""
+
+        async def refresh(self, _row: Any) -> None:
+            self.refreshes = getattr(self, "refreshes", 0) + 1
+            if self._row.enriched_phone is None:
+                self._row.enriched_phone = "+15551230000"  # webhook's value
+
+    session = _WebhookRaceSession(row)
+    apollo = _FakeProvider("apollo", EnrichmentData(name="Jane", apollo_person_id="pid-x"))
+    # Downstream provider contributes a non-phone field; the chain never sources
+    # a phone itself (Apollo's sync phone is null by design).
+    hunter = _FakeProvider("hunter", EnrichmentData(company="Acme"))
+    _wire(monkeypatch, {"apollo": apollo, "hunter": hunter}, "apollo,hunter")
+
+    out = await orchestrator.enrich_discovered_email(session, 1)
+
+    # The webhook-written phone survived the chain-end commit.
+    assert out.enriched_phone == "+15551230000"
+    # And the final committed snapshot reflects the surviving phone.
+    assert session.snapshots[-1]["enriched_phone"] == "+15551230000"
+    assert out.enrichment_status == "enriched"
+
+
+async def test_final_commit_does_not_clobber_phone_written_after_refresh(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Interleaving 2 (sibling of the test above): the webhook commits the phone
+    AFTER ``db.refresh(row)`` returns but BEFORE the chain-end commit -- so the
+    row still reads ``enriched_phone=None`` the whole time ``_apply`` runs.
+
+    The guarantee: because ``merged.phone is None`` on the reveal path, ``_apply``
+    must not assign ``row.enriched_phone`` AT ALL. Leaving the column out of the
+    session's dirty set means the chain-end UPDATE doesn't touch it, so a phone
+    the webhook materialises on the DB cell after refresh survives untouched.
+
+    Modelled with real SQLAlchemy flush semantics: the in-memory attribute and
+    the committed DB cell are tracked separately, and the final commit flushes
+    ``enriched_phone`` to the DB cell ONLY if ``_apply`` actually assigned it
+    since the last refresh. If someone changes ``_apply`` to unconditionally do
+    ``row.enriched_phone = merged.phone``, that assigns None on this path, the
+    column goes dirty, the flush writes None over the webhook's value, and the
+    final assertion fails."""
+    _wire_reveal_configured(monkeypatch)
+
+    class _TrackedRow(DiscoveredEmail):
+        """DiscoveredEmail whose ``enriched_phone`` records whether it was
+        assigned since the last refresh -- the signal SQLAlchemy uses to decide
+        if the column joins the next UPDATE (the dirty set)."""
+
+        def __init__(self) -> None:
+            super().__init__()
+            object.__setattr__(self, "_phone_dirty", False)
+
+        @property
+        def enriched_phone(self) -> Any:
+            return self.__dict__.get("_phone_value")
+
+        @enriched_phone.setter
+        def enriched_phone(self, value: Any) -> None:
+            self.__dict__["_phone_value"] = value
+            object.__setattr__(self, "_phone_dirty", True)
+
+    row = _TrackedRow()
+    row.id = 1
+    row.email = "jane@acme.com"
+
+    class _PostRefreshRaceSession(_SnapshotSession):
+        """Models a DB cell for ``enriched_phone`` distinct from the session's
+        in-memory attribute. ``refresh`` syncs the attribute from the DB cell and
+        clears the dirty flag (mirrors expire+reload). The webhook writes the DB
+        cell only AFTER that refresh, at the start of the final commit. The
+        commit then flushes the attribute back to the DB cell IF and ONLY IF
+        ``_apply`` re-dirtied the column."""
+
+        def __init__(self, tracked: _TrackedRow) -> None:
+            super().__init__(tracked)
+            self._db_phone: Any = None  # committed DB column value
+            self._webhook_fired = False
+
+        async def refresh(self, _row: Any) -> None:
+            self.refreshes = getattr(self, "refreshes", 0) + 1
+            # Pull the canonical DB value in; nothing dirty straight after a load.
+            self._row.__dict__["_phone_value"] = self._db_phone
+            object.__setattr__(self._row, "_phone_dirty", False)
+
+        async def commit(self) -> None:
+            # The early correlation-key commit (commits == 0) carries no phone.
+            # The webhook lands once -- after the post-persist refresh, as the
+            # chain-end commit begins (the interleaving-2 window).
+            if self.commits >= 1 and not self._webhook_fired:
+                self._db_phone = "+15559998888"  # webhook's UPDATE on the DB cell
+                self._webhook_fired = True
+            # Flush our session: a column only joins the UPDATE if it went dirty
+            # since the last refresh. _apply must NOT have touched enriched_phone.
+            if getattr(self._row, "_phone_dirty", False):
+                self._db_phone = self._row.enriched_phone
+            # Re-sync the in-memory attribute from the now-committed DB cell.
+            self._row.__dict__["_phone_value"] = self._db_phone
+            object.__setattr__(self._row, "_phone_dirty", False)
+            await super().commit()
+
+    session = _PostRefreshRaceSession(row)
+    apollo = _FakeProvider("apollo", EnrichmentData(name="Jane", apollo_person_id="pid-y"))
+    # Downstream provider contributes a non-phone field; the chain never sources
+    # a phone itself, so merged.phone stays None on the reveal path.
+    hunter = _FakeProvider("hunter", EnrichmentData(company="Acme"))
+    _wire(monkeypatch, {"apollo": apollo, "hunter": hunter}, "apollo,hunter")
+
+    out = await orchestrator.enrich_discovered_email(session, 1)
+
+    # _apply never assigned enriched_phone (merged.phone is None) -> the column
+    # stayed out of the dirty set -> the chain-end UPDATE didn't carry it -> the
+    # phone the webhook wrote to the DB cell after refresh survived.
+    assert session._db_phone == "+15559998888"
+    assert out.enriched_phone == "+15559998888"
+    assert session.snapshots[-1]["enriched_phone"] == "+15559998888"
+    assert out.enrichment_status == "enriched"
+
+
 def test_any_provider_configured(monkeypatch: pytest.MonkeyPatch) -> None:
     _wire(
         monkeypatch,
