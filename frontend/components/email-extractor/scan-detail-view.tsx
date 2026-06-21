@@ -3,16 +3,14 @@
 import {
   AlertCircle,
   CheckCircle2,
-  Linkedin,
   Loader2,
-  Mail,
   MailPlus,
-  Phone,
   Search,
   XCircle,
 } from "lucide-react";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 
+import { ChannelIconCell } from "@/components/advisor-list/channel-icon-cell";
 import { EmailExtractorErrorCard } from "@/components/email-extractor/email-extractor-error-card";
 import { EmptyScanResultsState } from "@/components/email-extractor/empty-scan-results-state";
 import { EnrichAllButton } from "@/components/email-extractor/enrich-all-button";
@@ -288,13 +286,20 @@ function EnrichmentCell({
 }): React.ReactElement {
   if (row.enrichment_status === "enriched") {
     // The discovered address keyed the lookup, so only surface a revealed
-    // email when it's actually a different (e.g. personal) address.
+    // email when it's actually a different (e.g. personal) address. We do NOT
+    // feed the discovered `row.email` into the Email channel — it already lives
+    // in the EMAIL column — so that icon greys out unless enrichment found a
+    // genuinely different (personal/alternate) address.
     const revealedEmail =
       row.enriched_email && row.enriched_email !== row.email
         ? row.enriched_email
         : null;
+    // The three channels render via the shared ChannelIconCell so this column
+    // matches the BD/investor detail pages pixel-for-pixel (LinkedIn / Email /
+    // Phone slots, accent + clickable when present, greyed when absent).
+    const showPhonePending = !!row.phone_reveal_pending && !row.enriched_phone;
     return (
-      <div className="flex flex-col items-start gap-0.5 text-[12px]">
+      <div className="flex flex-col items-start gap-1 text-[12px]">
         {row.enriched_name ? (
           <span className="font-semibold text-[var(--text,#0f172a)]">
             {row.enriched_name}
@@ -310,39 +315,22 @@ function EnrichmentCell({
             {row.enriched_company}
           </span>
         ) : null}
-        {revealedEmail ? (
-          <a
-            href={`mailto:${revealedEmail}`}
-            className="inline-flex items-center gap-1 text-[var(--text-dim,#475569)] hover:underline"
-          >
-            <Mail className="h-3.5 w-3.5" strokeWidth={2} />
-            {revealedEmail}
-          </a>
-        ) : null}
-        {row.enriched_phone ? (
-          <a
-            href={`tel:${row.enriched_phone}`}
-            className="inline-flex items-center gap-1 text-[var(--text-dim,#475569)] hover:underline"
-          >
-            <Phone className="h-3.5 w-3.5" strokeWidth={2} />
-            {row.enriched_phone}
-          </a>
-        ) : row.phone_reveal_pending ? (
+        <ChannelIconCell
+          contact={{
+            id: row.id,
+            linkedin_url: row.enriched_linkedin_url,
+            email: revealedEmail,
+            phone: row.enriched_phone,
+          }}
+        />
+        {/* ChannelIconCell has no pending state, so the async Apollo phone
+            reveal keeps its own "finding phone…" signal beneath the icon row
+            until the number lands (the row poll clears phone_reveal_pending). */}
+        {showPhonePending ? (
           <span className="inline-flex items-center gap-1 text-[var(--text-muted,#94a3b8)]">
             <Loader2 className="h-3.5 w-3.5 animate-spin" strokeWidth={2} />
             finding phone…
           </span>
-        ) : null}
-        {row.enriched_linkedin_url ? (
-          <a
-            href={row.enriched_linkedin_url}
-            target="_blank"
-            rel="noreferrer"
-            className="inline-flex items-center gap-1 text-[#6366f1] hover:underline"
-          >
-            <Linkedin className="h-3.5 w-3.5" strokeWidth={2} />
-            LinkedIn
-          </a>
         ) : null}
       </div>
     );
