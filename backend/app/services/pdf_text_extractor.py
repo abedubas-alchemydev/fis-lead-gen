@@ -89,7 +89,7 @@ _NET_CAPITAL_SCHEDULE = re.compile(
 
 # Pattern 3: "Excess Net Capital $ 19,860" or "in excess of ... $X"
 _EXCESS_NET_CAPITAL = re.compile(
-    r'(?:Excess\s+(?:Adjusted\s+)?Net\s+Capital|in\s+excess\s+of\s+(?:its\s+)?(?:the\s+)?required\s+(?:adjusted\s+)?net\s+capital\s+(?:of|by)\s+)\$?\s*([\d,]+(?:\.\d+)?)',
+    r'(?:Excess\s+(?:Adjusted\s+)?Net\s+Capital|in\s+excess\s+of\s+(?:its\s+)?(?:the\s+)?required\s+(?:adjusted\s+)?net\s+capital\s+(?:of|by)\s+)\s*\$?\s*([\d,]+(?:\.\d+)?)',
     re.IGNORECASE,
 )
 
