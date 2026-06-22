@@ -666,7 +666,7 @@ export function BrokerDealerDetailClient({ brokerDealerId }: { brokerDealerId: s
 
   if (error) {
     return (
-      <div className="px-7 pb-12 pt-7 lg:px-9">
+      <div className="px-4 sm:px-7 pb-12 pt-7 lg:px-9">
         <div className="rounded-2xl border border-[rgba(239,68,68,0.25)] bg-[rgba(239,68,68,0.08)] px-4 py-3 text-sm text-[var(--pill-red-text,#b91c1c)]">
           {error}
         </div>
@@ -777,7 +777,7 @@ export function BrokerDealerDetailClient({ brokerDealerId }: { brokerDealerId: s
   );
 
   return (
-    <div className="px-7 pb-12 pt-7 animate-fade-in lg:px-9">
+    <div className="px-4 sm:px-7 pb-12 pt-7 animate-fade-in lg:px-9">
       {/* ── Topbar: breadcrumbs + h1 + meta + right rail ── */}
       <div className="mb-6 flex flex-wrap items-start gap-4">
         <div className="min-w-0 flex-1">

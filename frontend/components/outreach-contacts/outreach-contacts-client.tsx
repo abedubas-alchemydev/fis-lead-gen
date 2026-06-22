@@ -175,7 +175,7 @@ export function OutreachContactsClient(): React.ReactElement {
   );
 
   return (
-    <div className="px-7 pb-12 pt-7 lg:px-9">
+    <div className="px-4 sm:px-7 pb-12 pt-7 lg:px-9">
       {/* Topbar */}
       <div className="mb-7 flex flex-wrap items-center gap-4">
         <div className="min-w-0">

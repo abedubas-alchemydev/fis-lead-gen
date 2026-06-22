@@ -358,7 +358,7 @@ export function InvestorsClient() {
     `Last ${state.days} days`;
 
   return (
-    <div className="px-7 pb-12 pt-7 lg:px-9">
+    <div className="px-4 sm:px-7 pb-12 pt-7 lg:px-9">
       {/* ── Topbar ──────────────────────────────────────────────────────── */}
       <div className="mb-6 flex flex-wrap items-start gap-4">
         <div className="min-w-0 flex-1">
