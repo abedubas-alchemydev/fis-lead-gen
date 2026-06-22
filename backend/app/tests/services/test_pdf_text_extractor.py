@@ -13,11 +13,9 @@ Two tiers, all offline and deterministic:
 No HTTP happens in this module, so ``respx`` is intentionally not used;
 ``monkeypatch`` is sufficient.
 
-Every expected value below was confirmed against the real functions. Two
-are pinned as *current-behavior* assertions (annotated inline): the
-``_EXCESS_NET_CAPITAL`` regex does not match the bare "Excess Net Capital
-$N" layout (only the "in excess of ... of $N" narrative form), and the
-amount parser substitutes OCR ``l``/``I`` -> ``1`` mid-string.
+Every expected value below was confirmed against the real functions. One
+is pinned as a *current-behavior* assertion (annotated inline): the amount
+parser substitutes OCR ``l``/``I`` -> ``1`` mid-string.
 """
 
 from __future__ import annotations
@@ -132,15 +130,13 @@ def test_net_capital_excess_narrative_form_matches() -> None:
     assert excess == 19860.0
 
 
-def test_net_capital_bare_excess_label_does_not_match() -> None:
-    # NOTE pins a known limitation: the first alternative of
-    # _EXCESS_NET_CAPITAL lacks whitespace before the amount, so the common
-    # "Excess Net Capital $N" schedule label is NOT captured. Documented in
-    # the lane brief as a latent bug; asserted here as current behavior so a
-    # future fix flips this test deliberately.
+def test_net_capital_bare_excess_label_matches() -> None:
+    # The bare "Excess Net Capital $N" schedule label is captured: the first
+    # alternative of _EXCESS_NET_CAPITAL tolerates the whitespace before the
+    # amount, so the "$N" form is read just like the narrative form.
     text = "Excess Net Capital $19,860"
     _net, excess = _extract_net_capital_from_text(text)
-    assert excess is None
+    assert excess == 19860.0
 
 
 def test_net_capital_absent_returns_none_pair() -> None:
