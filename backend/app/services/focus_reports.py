@@ -7,7 +7,8 @@ from dataclasses import dataclass, field
 from datetime import date, datetime, timezone
 from pathlib import Path
 
-from sqlalchemy import delete, select, tuple_
+from sqlalchemy import delete, func, select
+from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.config import settings
@@ -164,6 +165,78 @@ class FocusReportService:
         )).scalars().all()
         return list(broker_dealers)
 
+    async def _upsert_financial_metrics(
+        self,
+        write_db: AsyncSession,
+        records: list[FinancialMetricRecord],
+    ) -> None:
+        """Race-safe bulk write of FinancialMetric rows keyed on
+        ``(bd_id, report_date)``.
+
+        Replaces the old DELETE-then-``add_all``-then-``flush`` pattern, which
+        tripped ``uq_financial_metrics_bd_report_date`` if another writer (the
+        FOCUS net-capital path or a parallel orchestrator child) inserted the
+        same ``(bd_id, report_date)`` between our narrow DELETE and the flush.
+        A single Postgres ``INSERT ... ON CONFLICT DO UPDATE`` makes the write
+        atomic per row: a concurrent insert that landed first is updated in
+        place instead of crashing the run.
+
+        Conflict resolution preserves this pipeline's "owns the multi-year
+        rollup" authority while never NULL-clobbering a previously-good value:
+
+        * ``net_capital`` and ``extraction_status`` are always populated by the
+          extractor (rows with NULL net_capital are dropped upstream), so the
+          fresh bulk value wins via ``EXCLUDED`` unconditionally — mirrors
+          ``focus_ceo_extraction._persist_net_capital._apply_update``.
+        * The nullable extras (``excess_net_capital``, ``total_assets``,
+          ``required_min_capital``, ``source_filing_url``) use
+          ``COALESCE(EXCLUDED.col, financial_metrics.col)`` so a year the new
+          extraction couldn't read preserves the prior reading rather than
+          erasing it. Again matching ``_apply_update``'s "overwrite only when
+          the new value is non-NULL" rule, keeping the two writers consistent.
+
+        No-op when ``records`` is empty so callers don't have to guard it.
+        """
+        if not records:
+            return
+
+        rows = [
+            {
+                "bd_id": record.bd_id,
+                "report_date": record.report_date,
+                "net_capital": record.net_capital,
+                "excess_net_capital": record.excess_net_capital,
+                "total_assets": record.total_assets,
+                "required_min_capital": record.required_min_capital,
+                "source_filing_url": record.source_filing_url,
+                "extraction_status": record.extraction_status,
+            }
+            for record in records
+        ]
+
+        insert_stmt = pg_insert(FinancialMetric).values(rows)
+        excluded = insert_stmt.excluded
+        upsert_stmt = insert_stmt.on_conflict_do_update(
+            constraint="uq_financial_metrics_bd_report_date",
+            set_={
+                "net_capital": excluded.net_capital,
+                "excess_net_capital": func.coalesce(
+                    excluded.excess_net_capital, FinancialMetric.excess_net_capital
+                ),
+                "total_assets": func.coalesce(
+                    excluded.total_assets, FinancialMetric.total_assets
+                ),
+                "required_min_capital": func.coalesce(
+                    excluded.required_min_capital, FinancialMetric.required_min_capital
+                ),
+                "source_filing_url": func.coalesce(
+                    excluded.source_filing_url, FinancialMetric.source_filing_url
+                ),
+                "extraction_status": excluded.extraction_status,
+            },
+        )
+        await write_db.execute(upsert_stmt)
+
     async def _run_extraction_pipeline(
         self,
         db: AsyncSession,
@@ -217,36 +290,24 @@ class FocusReportService:
             records = extraction.records
 
             async with SessionLocal() as write_db:
-                if narrow_delete:
-                    # Narrow the DELETE to the (bd_id, report_date) pairs the
-                    # current run is about to re-insert. Prevents wiping prior
-                    # fiscal-year history for the same bd once the multi-year
-                    # extractor ships (Phase 2C-code). Matches the grain of the
-                    # uq_financial_metrics_bd_report_date constraint.
-                    target_pairs = sorted({(record.bd_id, record.report_date) for record in records})
-                    if target_pairs:
-                        await write_db.execute(
-                            delete(FinancialMetric).where(
-                                tuple_(FinancialMetric.bd_id, FinancialMetric.report_date).in_(target_pairs)
-                            )
-                        )
-                else:
+                # Replace semantics, two distinct cases:
+                #
+                #   narrow_delete=True  → subset run (batch-limited / backfill /
+                #     single-firm). The (bd_id, report_date) rows the run
+                #     re-extracts are now upserted in place by
+                #     _upsert_financial_metrics, so the old narrow tuple-DELETE
+                #     is gone — it only existed to clear those same pairs ahead
+                #     of a plain INSERT to dodge the unique constraint, and the
+                #     upsert handles the collision atomically (race-safe against
+                #     a concurrent writer of the same pair).
+                #
+                #   narrow_delete=False → full-table refresh (no limit, no CSV).
+                #     The bare DELETE still runs: it evicts rows for firms NOT in
+                #     this run's record set (stale-firm cleanup), which an upsert
+                #     alone can't do. The upsert then writes the current universe.
+                if not narrow_delete:
                     await write_db.execute(delete(FinancialMetric))
-                write_db.add_all(
-                    [
-                        FinancialMetric(
-                            bd_id=record.bd_id,
-                            report_date=record.report_date,
-                            net_capital=record.net_capital,
-                            excess_net_capital=record.excess_net_capital,
-                            total_assets=record.total_assets,
-                            required_min_capital=record.required_min_capital,
-                            source_filing_url=record.source_filing_url,
-                            extraction_status=record.extraction_status,
-                        )
-                        for record in records
-                    ]
-                )
+                await self._upsert_financial_metrics(write_db, records)
                 await write_db.flush()
                 refreshed_broker_dealers = (
                     await write_db.execute(select(BrokerDealer).order_by(BrokerDealer.id.asc()))
@@ -281,11 +342,19 @@ class FocusReportService:
         ``→ failed``) by reusing :meth:`_finalize_pipeline_run` and
         :meth:`_mark_pipeline_run_failed`.
 
-        DELETE narrowing (``tuple_(bd_id, report_date) IN target_pairs``)
-        keeps OTHER firms' fiscal-year history untouched. The bare
-        ``DELETE FROM financial_metrics`` fallback used by the batch
-        path when ``limit`` is unset is intentionally not reachable here
-        — this method is single-firm only.
+        Writes via the shared race-safe upsert
+        (:meth:`_upsert_financial_metrics`): each ``(bd_id, report_date)``
+        row is ``INSERT ... ON CONFLICT DO UPDATE``-d, so a concurrent
+        writer of the same pair (the FOCUS net-capital path, or this same
+        endpoint fired twice) is updated in place instead of tripping
+        ``uq_financial_metrics_bd_report_date``. This is the hottest race
+        surface in practice — the refresh-all orchestrator's
+        ``refresh-financials`` child and the FOCUS net-capital persist can
+        target one firm at the same instant. OTHER firms' fiscal-year
+        history is untouched because the upsert only writes the pairs this
+        run extracted; the bare ``DELETE FROM financial_metrics`` full-table
+        path is intentionally not reachable here — this method is
+        single-firm only.
 
         Returns the count of FinancialMetric rows persisted.
         """
@@ -320,28 +389,7 @@ class FocusReportService:
             records = extraction.records
 
             async with SessionLocal() as write_db:
-                target_pairs = sorted({(record.bd_id, record.report_date) for record in records})
-                if target_pairs:
-                    await write_db.execute(
-                        delete(FinancialMetric).where(
-                            tuple_(FinancialMetric.bd_id, FinancialMetric.report_date).in_(target_pairs)
-                        )
-                    )
-                write_db.add_all(
-                    [
-                        FinancialMetric(
-                            bd_id=record.bd_id,
-                            report_date=record.report_date,
-                            net_capital=record.net_capital,
-                            excess_net_capital=record.excess_net_capital,
-                            total_assets=record.total_assets,
-                            required_min_capital=record.required_min_capital,
-                            source_filing_url=record.source_filing_url,
-                            extraction_status=record.extraction_status,
-                        )
-                        for record in records
-                    ]
-                )
+                await self._upsert_financial_metrics(write_db, records)
                 await write_db.flush()
                 # Reload the BD inside this session so the rollup
                 # mutations track on a managed instance and commit
