@@ -317,7 +317,7 @@ jobs:
             --region=${{ vars.GCP_REGION }} \
             --project=${{ vars.GCP_PROJECT_ID }} \
             --command=python \
-            --args=scripts/backfill_all.py,--apply,--bd-limit,250,--ia-limit,250,--phone-limit,50,--reveal-cap,50 \
+            --args=scripts/backfill_all.py,--apply \
             --task-timeout=86400 \
             --memory=2Gi \
             --cpu=2 \
