@@ -13,6 +13,12 @@ and ``_refresh_bd_rollup``:
   3. Idempotency. Calling the helper twice for the same ``(bd_id, report_date)``
      pair updates the existing row in place rather than inserting a duplicate
      (would otherwise trip ``uq_financial_metrics_bd_report_date``).
+  3b. Concurrent-upsert race. The pre-insert SELECT sees no row, but a parallel
+     writer (the bulk financial pipeline / another orchestrator child) inserts
+     the same ``(bd_id, report_date)`` before our flush, so the flush raises
+     ``IntegrityError``. The helper must roll back its savepoint, re-SELECT the
+     winner's row, and apply the UPDATE path instead of propagating the crash
+     that killed the unified backfill job.
   4. Missing data. None ``net_capital`` skips persistence entirely; a missing
      ``report_date`` with no BD fallback also skips, since both columns are
      NOT NULL on ``financial_metrics``.
@@ -38,6 +44,7 @@ from typing import Any
 from unittest.mock import AsyncMock
 
 import pytest
+from sqlalchemy.exc import IntegrityError
 
 from app.core.config import settings
 from app.models.broker_dealer import BrokerDealer
@@ -73,16 +80,54 @@ class _FakeResult:
         return iter(self._rows)
 
 
+class _SavepointError(Exception):
+    """Marker so the fake savepoint's ``__aexit__`` can distinguish the
+    simulated IntegrityError from an unrelated failure."""
+
+
+class _FakeSavepoint:
+    """Async-context-manager stand-in for ``AsyncSession.begin_nested()``.
+
+    On ``__exit__`` it records whether the body raised so the test can assert
+    the savepoint rolled back; it never suppresses the exception (mirrors the
+    real savepoint, which re-raises so the caller's ``except IntegrityError``
+    sees it)."""
+
+    def __init__(self, session: "_FakeSession") -> None:
+        self._session = session
+
+    async def __aenter__(self) -> "_FakeSavepoint":
+        self._session.begin_nested_count += 1
+        return self
+
+    async def __aexit__(self, exc_type: Any, exc: Any, tb: Any) -> bool:
+        if exc_type is not None:
+            self._session.savepoint_rolled_back = True
+        return False  # propagate — never swallow
+
+
 class _FakeSession:
     """Tiny AsyncSession stand-in. ``execute()`` returns staged results in
     order; ``add()`` records the entity for later assertion; ``flush()`` is a
-    no-op so the rollup step can read the BD attributes the helper set inline."""
+    no-op so the rollup step can read the BD attributes the helper set inline.
 
-    def __init__(self, staged_results: list[list[Any]] | None = None) -> None:
+    ``raise_integrity_on_flush`` makes the *next* ``flush()`` raise
+    ``IntegrityError`` exactly once — used to exercise the concurrent-upsert
+    race-recovery branch in ``_persist_net_capital``."""
+
+    def __init__(
+        self,
+        staged_results: list[list[Any]] | None = None,
+        *,
+        raise_integrity_on_flush: bool = False,
+    ) -> None:
         self._staged = list(staged_results or [])
         self.added: list[Any] = []
         self.execute_count = 0
         self.flush_count = 0
+        self.begin_nested_count = 0
+        self.savepoint_rolled_back = False
+        self._raise_integrity_on_flush = raise_integrity_on_flush
 
     async def execute(self, _stmt: Any) -> _FakeResult:
         if not self._staged:
@@ -95,8 +140,16 @@ class _FakeSession:
     def add(self, item: Any) -> None:
         self.added.append(item)
 
+    def begin_nested(self) -> _FakeSavepoint:
+        return _FakeSavepoint(self)
+
     async def flush(self) -> None:
         self.flush_count += 1
+        if self._raise_integrity_on_flush:
+            # One-shot: the simulated concurrent winner only collides on the
+            # first (insert) flush, not the recovery (update) flush.
+            self._raise_integrity_on_flush = False
+            raise IntegrityError("INSERT ...", params=None, orig=_SavepointError("duplicate key"))
 
 
 def _make_broker_dealer(
@@ -271,6 +324,100 @@ async def test_idempotent_update_replaces_existing_metric_row(
     assert existing.extraction_status == STATUS_PARSED
     assert existing.source_filing_url == "https://www.sec.gov/Archives/refresh.pdf"
     assert broker_dealer.latest_net_capital == 3_000_000.0
+
+
+# ─────────────── 3b. Concurrent-upsert race recovery ───────────────
+
+
+@pytest.mark.asyncio
+async def test_concurrent_insert_race_recovers_and_updates_existing_row(
+    service: FocusCeoExtractionService,
+) -> None:
+    """The pre-insert SELECT finds nothing, but a parallel writer inserts the
+    same (bd_id, report_date) before our flush. The insert flush raises
+    IntegrityError; the helper must roll back the savepoint, re-SELECT the
+    winner's row, and apply the UPDATE path — instead of propagating the
+    error that crashed ``fis-backfill-all-staging`` at
+    focus_ceo_extraction.py:_persist_net_capital.
+
+    Staged execute() results, in order:
+      1. pre-insert lookup -> [] (no row yet; we take the insert branch)
+      2. post-IntegrityError re-SELECT -> [winner] (the concurrent row)
+      3. rollup SELECT -> [winner]
+    """
+    broker_dealer = _make_broker_dealer(latest_net_capital=500_000.0)
+
+    # The row the concurrent writer committed under us, with a stale value
+    # the recovery UPDATE must overwrite.
+    winner = _make_metric(net_capital=1_000_000.0, extraction_status=STATUS_PARSED)
+
+    session = _FakeSession(
+        staged_results=[[], [winner], [winner]],
+        raise_integrity_on_flush=True,
+    )
+
+    await service._persist_net_capital(
+        session,  # type: ignore[arg-type]
+        broker_dealer=broker_dealer,
+        net_capital=2_500_000.0,
+        excess_net_capital=None,
+        total_assets=None,
+        required_min_capital=None,
+        extracted_report_date=date(2025, 12, 31),
+        confidence_score=0.92,
+        source_filing_url="https://www.sec.gov/Archives/race.pdf",
+    )
+
+    # The insert was attempted inside a savepoint that rolled back on conflict.
+    assert session.begin_nested_count == 1
+    assert session.savepoint_rolled_back is True
+
+    # Recovery updated the winner row in place rather than re-raising.
+    assert winner.net_capital == 2_500_000.0
+    assert winner.extraction_status == STATUS_PARSED
+    assert winner.source_filing_url == "https://www.sec.gov/Archives/race.pdf"
+
+    # Rollup still ran off the recovered (parsed) row.
+    assert broker_dealer.latest_net_capital == 2_500_000.0
+
+
+@pytest.mark.asyncio
+async def test_concurrent_insert_race_reraises_when_winner_vanishes(
+    service: FocusCeoExtractionService,
+) -> None:
+    """Edge case of the race branch: the insert collides (IntegrityError), but
+    by the time we re-SELECT, the conflicting row is gone (e.g. the bulk
+    pipeline's narrow DELETE removed it). There is nothing safe to update, so
+    the helper re-raises rather than silently dropping the metric.
+
+    Staged execute() results, in order:
+      1. pre-insert lookup -> [] (take the insert branch)
+      2. post-IntegrityError re-SELECT -> [] (winner vanished)
+    """
+    broker_dealer = _make_broker_dealer()
+
+    session = _FakeSession(
+        staged_results=[[], []],
+        raise_integrity_on_flush=True,
+    )
+
+    with pytest.raises(IntegrityError):
+        await service._persist_net_capital(
+            session,  # type: ignore[arg-type]
+            broker_dealer=broker_dealer,
+            net_capital=2_500_000.0,
+            excess_net_capital=None,
+            total_assets=None,
+            required_min_capital=None,
+            extracted_report_date=date(2025, 12, 31),
+            confidence_score=0.92,
+            source_filing_url=None,
+        )
+
+    assert session.begin_nested_count == 1
+    assert session.savepoint_rolled_back is True
+    # Both SELECTs consulted, no rollup attempted past the re-raise.
+    assert session.execute_count == 2
 
 
 # ─────────────── 4. Missing data: net_capital + no report_date ───────────────
