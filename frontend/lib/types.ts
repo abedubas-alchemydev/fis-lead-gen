@@ -1010,13 +1010,14 @@ export type AdminUserActivityEventType =
   | "nav_click"
   | "link_open"
   | "search_query"
-  | "input_used";
+  | "input_used"
+  | "doxie";
 
 // Query-string ``?type=`` value when calling
 // /api/v1/users/{id}/activities. Granular event_type rows are
 // collapsed into family chips on the FE — login+logout → "login",
 // nav_*+link_open → "nav", search_query → "search", input_used →
-// "input".
+// "input". Doxie chat rows map 1:1 to the "doxie" chip.
 export type AdminUserActivityFilter =
   | "login"
   | "view"
@@ -1024,7 +1025,8 @@ export type AdminUserActivityFilter =
   | "outreach"
   | "nav"
   | "search"
-  | "input";
+  | "input"
+  | "doxie";
 
 export type AdminUserActivityTargetType =
   | "broker_dealer"

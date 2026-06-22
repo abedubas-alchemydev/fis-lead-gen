@@ -42,6 +42,8 @@ from app.db.session import get_db_session
 from app.models.audit_log import AuditLog
 from app.models.auth import AuthUser
 from app.models.broker_dealer import BrokerDealer
+from app.models.chatbot_conversation import ChatbotConversation
+from app.models.chatbot_message import ChatbotMessage
 from app.models.favorite_list import FavoriteList, FavoriteListItem
 from app.models.institutional_investor import InstitutionalInvestor
 from app.models.investment_advisor import InvestmentAdvisor
@@ -210,7 +212,9 @@ async def list_user_saved_firms(
     )
 
 
-ActivityType = Literal["login", "view", "save", "outreach", "nav", "search", "input"]
+ActivityType = Literal[
+    "login", "view", "save", "outreach", "nav", "search", "input", "doxie"
+]
 
 
 # Collapse the granular ``user_activity.action`` enum into the FE filter
@@ -271,6 +275,18 @@ def _row_details(
             return parsed if isinstance(parsed, dict) else None
         except (TypeError, ValueError):
             return None
+    if event_type == "doxie":
+        # The chatbot branch JSON-encodes the page context the user was on
+        # when they asked Doxie (path + title) plus a short message preview
+        # into ``audit_details`` so it round-trips into the row tooltip the
+        # same way the user_activity branch does.
+        if not audit_details:
+            return None
+        try:
+            parsed = json.loads(audit_details)
+            return parsed if isinstance(parsed, dict) else None
+        except (TypeError, ValueError):
+            return None
     return None
 
 
@@ -288,7 +304,7 @@ async def list_user_activities(
 ) -> AdminUserActivitiesResponse:
     """Admin-only unified user-activity feed.
 
-    UNION-ALLs four sources into one timestamp-ordered stream:
+    UNION-ALLs several sources into one timestamp-ordered stream:
 
     * ``audit_log`` filtered to ``action IN ('login', 'logout')`` — the
       Better Auth ``session.create.after`` / ``session.delete.after``
@@ -299,6 +315,10 @@ async def list_user_activities(
       ``ck_favorite_list_item_exactly_one_target``.
     * ``outreach_sends`` — outreach attempts across the same three firm
       types, polymorphic XOR via ``ck_outreach_sends_exactly_one_firm``.
+    * ``user_activity`` — navigation / search / form-input instrumentation.
+    * ``chatbot_message`` — one row per user message to the Doxie chatbot
+      (assistant turns excluded), joined to ``chatbot_conversation`` to
+      scope by user.
 
     The optional ``type`` filter prunes whole branches so a "Only saves"
     view doesn't pay for the other selects.
@@ -540,6 +560,51 @@ async def list_user_activities(
             )
         )
 
+    if type is None or type == "doxie":
+        # One row per *user* message ("the user asked Doxie X"); assistant
+        # turns are excluded. ``page_context_path`` rides in ``target_name``
+        # so the row shows the route the question fired on (mirrors the
+        # user_activity branch). A small JSON payload (path + title + a
+        # short message preview) is built in SQL and cast to Text so the
+        # UNION stays type-consistent with the audit_log branch, and
+        # _row_details parses it back into a dict for the FE tooltip.
+        # Archived conversations are INCLUDED so the full chat history shows
+        # (archived only means "not the active chat").
+        branches.append(
+            select(
+                literal("doxie", String).label("event_type"),
+                ChatbotMessage.created_at.label("ts"),
+                null_target_type,
+                null_target_id,
+                ChatbotMessage.page_context_path.label("target_name"),
+                null_list_name,
+                null_visit_count,
+                null_send_status,
+                null_send_error,
+                null_send_subject,
+                cast(
+                    func.json_build_object(
+                        "path",
+                        ChatbotMessage.page_context_path,
+                        "title",
+                        ChatbotMessage.page_context_title,
+                        "preview",
+                        func.left(ChatbotMessage.content, 280),
+                    ),
+                    Text,
+                ).label("audit_details"),
+            )
+            .select_from(ChatbotMessage)
+            .join(
+                ChatbotConversation,
+                ChatbotConversation.id == ChatbotMessage.conversation_id,
+            )
+            .where(
+                ChatbotConversation.user_id == user_id,
+                ChatbotMessage.role == "user",
+            )
+        )
+
     if not branches:
         # ``type`` was set but matched no branch — shouldn't be reachable
         # given the Literal validation, but keep the safety net.
@@ -583,6 +648,7 @@ async def list_user_activities(
             "link_open",
             "search_query",
             "input_used",
+            "doxie",
         ]
         if action in (
             "login",
@@ -595,6 +661,7 @@ async def list_user_activities(
             "link_open",
             "search_query",
             "input_used",
+            "doxie",
         ):
             event_type = action  # type: ignore[assignment]
         else:

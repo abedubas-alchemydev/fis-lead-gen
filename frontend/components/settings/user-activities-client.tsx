@@ -7,6 +7,7 @@ import {
   AlertCircle,
   ArrowLeft,
   Bookmark,
+  Bot,
   Clock,
   Compass,
   Edit3,
@@ -54,6 +55,7 @@ const FILTERS: ReadonlyArray<{ value: Filter; label: string }> = [
   { value: "nav", label: "Navigation" },
   { value: "search", label: "Search" },
   { value: "input", label: "Input" },
+  { value: "doxie", label: "Doxie" },
 ];
 
 function targetHref(row: AdminUserActivityRow): Route | null {
@@ -105,6 +107,8 @@ function eventGlyph(eventType: AdminUserActivityEventType): JSX.Element {
       return <Search className="h-4 w-4" aria-hidden />;
     case "input_used":
       return <Edit3 className="h-4 w-4" aria-hidden />;
+    case "doxie":
+      return <Bot className="h-4 w-4" aria-hidden />;
   }
 }
 
@@ -130,6 +134,8 @@ function eventLabel(eventType: AdminUserActivityEventType): string {
       return "Searched";
     case "input_used":
       return "Filled field";
+    case "doxie":
+      return "Asked Doxie";
   }
 }
 
@@ -195,6 +201,13 @@ function summarizeDetails(row: AdminUserActivityRow): string {
     const populated = d.field_populated === true;
     const sizePart = len !== null ? `${len} chars` : populated ? "filled" : "empty";
     return name ? `${name} (${sizePart})` : sizePart;
+  }
+  if (row.event_type === "doxie") {
+    const preview = typeof d.preview === "string" ? d.preview.trim() : null;
+    const title = typeof d.title === "string" ? d.title.trim() : null;
+    if (preview) return preview;
+    if (title) return title;
+    return "";
   }
   return "";
 }
