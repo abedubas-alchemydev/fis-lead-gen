@@ -288,7 +288,7 @@ jobs:
             --region=${{ vars.GCP_REGION }} \
             --project=${{ vars.GCP_PROJECT_ID }} \
             --command=python \
-            --args=scripts/gap_fill_investment_advisors.py,--apply \
+            --args=scripts/gap_fill_investment_advisors.py,--apply,--limit,250 \
             --task-timeout=86400 \
             --memory=2Gi \
             --cpu=2 \
