@@ -39,7 +39,7 @@ export function GlobalBackButton(): React.ReactElement | null {
   if (!canGoBack) return null;
 
   return (
-    <div className="px-7 pt-6 lg:px-9">
+    <div className="px-4 sm:px-7 pt-6 lg:px-9">
       <Button
         type="button"
         variant="outline"

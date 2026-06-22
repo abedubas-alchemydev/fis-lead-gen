@@ -12,7 +12,7 @@
  */
 export function DetailPageSkeleton() {
   return (
-    <div className="px-7 pb-12 pt-7 lg:px-9">
+    <div className="px-4 sm:px-7 pb-12 pt-7 lg:px-9">
       <div
         className="rounded-2xl border border-[var(--border,rgba(30,64,175,0.1))] bg-[var(--surface,#ffffff)] p-8"
         style={{

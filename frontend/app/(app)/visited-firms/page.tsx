@@ -3,7 +3,7 @@ import { VisitedFirmsClient } from "@/components/visited-firms/visited-firms-cli
 
 export default function VisitedFirmsPage() {
   return (
-    <div className="px-7 pb-12 pt-7 lg:px-9">
+    <div className="px-4 sm:px-7 pb-12 pt-7 lg:px-9">
       <div className="mb-7 flex flex-wrap items-center gap-4">
         <div className="min-w-0">
           <p className="text-[12px] uppercase tracking-[0.06em] text-[var(--text-muted,#94a3b8)]">

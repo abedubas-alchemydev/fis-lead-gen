@@ -93,14 +93,14 @@ export function ClearingDistributionChart({
           {Array.from({ length: 5 }).map((_, idx) => (
             <div
               key={`distribution-skel-${idx}`}
-              className="grid w-full grid-cols-[10px_minmax(0,40%)_minmax(80px,1fr)_56px] items-center gap-3.5 border-t border-[var(--border,rgba(30,64,175,0.1))] py-2.5 first:border-t-0"
+              className="grid w-full grid-cols-[10px_minmax(0,1fr)_auto] sm:grid-cols-[10px_minmax(0,40%)_minmax(80px,1fr)_56px] items-center gap-3.5 border-t border-[var(--border,rgba(30,64,175,0.1))] py-2.5 first:border-t-0"
             >
               <span className="h-2.5 w-2.5 animate-pulse rounded-[3px] bg-[var(--surface-2,#f1f6fd)]" />
               <div className="flex min-w-0 items-center gap-2">
                 <span className="h-3 w-32 animate-pulse rounded bg-[var(--surface-2,#f1f6fd)]" />
                 <span className="h-3 w-12 animate-pulse rounded bg-[var(--surface-2,#f1f6fd)]" />
               </div>
-              <div className="h-1.5 w-full animate-pulse rounded-full bg-[var(--surface-2,#f1f6fd)]" />
+              <div className="hidden h-1.5 w-full animate-pulse rounded-full bg-[var(--surface-2,#f1f6fd)] sm:block" />
               <span className="h-3 w-10 animate-pulse rounded bg-[var(--surface-2,#f1f6fd)] justify-self-end" />
             </div>
           ))}
@@ -195,7 +195,9 @@ export function ClearingDistributionChart({
               // across rows regardless of provider-name length:
               //   [swatch] [label cluster, capped at 40%] [bar, flexes]
               //   [percent, fixed 56px right-aligned]
-              className="grid w-full grid-cols-[10px_minmax(0,40%)_minmax(80px,1fr)_56px] items-center gap-3.5 border-t border-[var(--border,rgba(30,64,175,0.1))] py-2.5 text-left transition first:border-t-0 hover:bg-[var(--surface-2,#f1f6fd)]"
+              // Below sm the bar track is dropped (label flexes to 1fr,
+              // percent auto-sizes) so the row fits a ~320px viewport.
+              className="grid w-full grid-cols-[10px_minmax(0,1fr)_auto] sm:grid-cols-[10px_minmax(0,40%)_minmax(80px,1fr)_56px] items-center gap-3.5 border-t border-[var(--border,rgba(30,64,175,0.1))] py-2.5 text-left transition first:border-t-0 hover:bg-[var(--surface-2,#f1f6fd)]"
             >
               <span
                 className="h-2.5 w-2.5 rounded-[3px]"
@@ -209,7 +211,7 @@ export function ClearingDistributionChart({
                   · {firmsLabel}
                 </span>
               </div>
-              <div className="relative h-1.5 overflow-hidden rounded-full bg-[var(--surface-2,#f1f6fd)]">
+              <div className="relative hidden h-1.5 overflow-hidden rounded-full bg-[var(--surface-2,#f1f6fd)] sm:block">
                 <div
                   className="h-full rounded-full"
                   style={{

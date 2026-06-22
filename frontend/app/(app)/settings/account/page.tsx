@@ -26,7 +26,7 @@ export default async function AccountSettingsPage() {
       : "your identity provider";
 
   return (
-    <div className="px-7 pb-12 pt-7 lg:px-9">
+    <div className="px-4 sm:px-7 pb-12 pt-7 lg:px-9">
       <header className="mb-7 max-w-2xl">
         <p className="text-[11px] font-semibold uppercase tracking-[0.1em] text-[var(--text-muted,#94a3b8)]">
           My account

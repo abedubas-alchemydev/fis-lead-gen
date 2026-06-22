@@ -202,7 +202,7 @@ export function DashboardHomeClient() {
     // the sidebar (which lives outside this wrapper) also inherits Inter
     // + 14px + 1.5 line-height + antialiased.
     // Mockup uses 28px top / 36px horizontal / 48px bottom padding.
-    <div className="px-7 pb-12 pt-7 lg:px-9">
+    <div className="px-4 sm:px-7 pb-12 pt-7 lg:px-9">
       {/* Topbar — crumbs + title LEFT, TopActions RIGHT on the same row.
           Mockup .topbar: display:flex; align-items:center; gap:16px; margin-bottom:28px. */}
       <div className="mb-7 flex flex-wrap items-center gap-4">
