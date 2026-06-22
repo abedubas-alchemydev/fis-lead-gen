@@ -73,11 +73,12 @@ class AdminUserActivityRow(BaseModel):
     tooltip. ``target_type`` / ``target_id`` / ``target_name`` are set
     when the activity is bound to a firm (view, save, outreach) and are
     ``None`` for login / logout. For broad-surface instrumentation rows
-    (nav/search/input) ``target_name`` carries the normalized route
-    path. ``details`` carries event-specific extras (login → IP +
-    user_agent; save → list name; view → visit count; outreach → send
-    status + error code; nav/search/input → FE-scrubbed metadata) — the
-    FE renders a tooltip from it.
+    (nav/search/input) and Doxie chat rows (doxie) ``target_name`` carries
+    the normalized route path the event fired on. ``details`` carries
+    event-specific extras (login → IP + user_agent; save → list name; view
+    → visit count; outreach → send status + error code; nav/search/input →
+    FE-scrubbed metadata; doxie → page path + title + message preview) —
+    the FE renders a tooltip from it.
     """
 
     event_type: Literal[
@@ -91,6 +92,7 @@ class AdminUserActivityRow(BaseModel):
         "link_open",
         "search_query",
         "input_used",
+        "doxie",
     ]
     timestamp: datetime
     target_type: Literal["broker_dealer", "advisor", "institutional_investor"] | None = None
