@@ -58,9 +58,12 @@ function SparklinePanel({
   data: SparkData;
 }) {
   const gradientId = `${uid}-fill`;
+  // Up-trend chip text darkened from emerald-500 (#10b981, 2.26:1 on the pale
+  // emerald-500/12 pill — fails AA) to emerald-700 (#047857, ~4.9:1, passes)
+  // while keeping the positive-green read. Pill bg unchanged.
   const trendClass =
     trend.direction === "up"
-      ? "bg-emerald-500/12 text-emerald-500"
+      ? "bg-emerald-500/12 text-emerald-700"
       : "bg-red-500/12 text-red-500";
 
   return (
