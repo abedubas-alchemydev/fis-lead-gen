@@ -152,7 +152,7 @@ export type BrokerDealerListResponse = {
 
 export type DashboardStats = {
   total_active_bds: number;
-  new_bds_30_days: number;
+  new_bds_90_days: number;
   deficiency_alerts: number;
   // BE boundary field — mirrors FastAPI response shape. Counts firms in the
   // "High Value Participant" segment: latest_net_capital in the [$5M, $100M]
@@ -1010,13 +1010,14 @@ export type AdminUserActivityEventType =
   | "nav_click"
   | "link_open"
   | "search_query"
-  | "input_used";
+  | "input_used"
+  | "doxie";
 
 // Query-string ``?type=`` value when calling
 // /api/v1/users/{id}/activities. Granular event_type rows are
 // collapsed into family chips on the FE — login+logout → "login",
 // nav_*+link_open → "nav", search_query → "search", input_used →
-// "input".
+// "input". Doxie chat rows map 1:1 to the "doxie" chip.
 export type AdminUserActivityFilter =
   | "login"
   | "view"
@@ -1024,7 +1025,8 @@ export type AdminUserActivityFilter =
   | "outreach"
   | "nav"
   | "search"
-  | "input";
+  | "input"
+  | "doxie";
 
 export type AdminUserActivityTargetType =
   | "broker_dealer"
@@ -1322,4 +1324,19 @@ export type OutreachInvestorSendRequest = OutreachInvestorDraftRequest & {
   body: string;
   provider?: EmailProviderId;
   sender_account_id?: string | null;
+};
+
+// Doxie's private per-user memory — facts/preferences the model saved via the
+// remember_fact tool. Listed + deletable on /settings/doxie-memory. Strictly
+// scoped to the caller; never cross-user.
+export type DoxieMemoryItem = {
+  id: number;
+  content: string;
+  kind: string | null;
+  created_at: string;
+};
+
+export type DoxieMemoryListResponse = {
+  items: DoxieMemoryItem[];
+  total: number;
 };

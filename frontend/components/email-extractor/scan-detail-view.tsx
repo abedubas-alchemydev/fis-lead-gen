@@ -3,16 +3,14 @@
 import {
   AlertCircle,
   CheckCircle2,
-  Linkedin,
   Loader2,
-  Mail,
   MailPlus,
-  Phone,
   Search,
   XCircle,
 } from "lucide-react";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 
+import { ChannelIconCell } from "@/components/advisor-list/channel-icon-cell";
 import { EmailExtractorErrorCard } from "@/components/email-extractor/email-extractor-error-card";
 import { EmptyScanResultsState } from "@/components/email-extractor/empty-scan-results-state";
 import { EnrichAllButton } from "@/components/email-extractor/enrich-all-button";
@@ -85,7 +83,13 @@ const RESULTS_PAGE_SIZE = 20;
 // number to land (Apollo calls our webhook seconds-to-minutes later). Bounded
 // so we stop when a reveal never resolves rather than polling forever.
 const PHONE_REVEAL_POLL_MS = 3000;
-const PHONE_REVEAL_TIMEOUT_MS = 90_000;
+// The backend self-clears `phone_reveal_pending` via a ~15-min TTL, so the poll
+// also terminates when the flag flips (see the stop predicate in
+// startPhoneRevealPoll). This hard cap is a safety net for an active viewer:
+// raised from 90s to 4 min so a reveal that lands a couple minutes out still
+// resolves in-place without a manual reload, while still bounding how long each
+// open tab keeps refetching the whole scan on a cadence.
+const PHONE_REVEAL_TIMEOUT_MS = 240_000;
 
 // ── Helpers ──────────────────────────────────────────────────────────────
 
@@ -282,13 +286,20 @@ function EnrichmentCell({
 }): React.ReactElement {
   if (row.enrichment_status === "enriched") {
     // The discovered address keyed the lookup, so only surface a revealed
-    // email when it's actually a different (e.g. personal) address.
+    // email when it's actually a different (e.g. personal) address. We do NOT
+    // feed the discovered `row.email` into the Email channel — it already lives
+    // in the EMAIL column — so that icon greys out unless enrichment found a
+    // genuinely different (personal/alternate) address.
     const revealedEmail =
       row.enriched_email && row.enriched_email !== row.email
         ? row.enriched_email
         : null;
+    // The three channels render via the shared ChannelIconCell so this column
+    // matches the BD/investor detail pages pixel-for-pixel (LinkedIn / Email /
+    // Phone slots, accent + clickable when present, greyed when absent).
+    const showPhonePending = !!row.phone_reveal_pending && !row.enriched_phone;
     return (
-      <div className="flex flex-col items-start gap-0.5 text-[12px]">
+      <div className="flex flex-col items-start gap-1 text-[12px]">
         {row.enriched_name ? (
           <span className="font-semibold text-[var(--text,#0f172a)]">
             {row.enriched_name}
@@ -304,39 +315,22 @@ function EnrichmentCell({
             {row.enriched_company}
           </span>
         ) : null}
-        {revealedEmail ? (
-          <a
-            href={`mailto:${revealedEmail}`}
-            className="inline-flex items-center gap-1 text-[var(--text-dim,#475569)] hover:underline"
-          >
-            <Mail className="h-3.5 w-3.5" strokeWidth={2} />
-            {revealedEmail}
-          </a>
-        ) : null}
-        {row.enriched_phone ? (
-          <a
-            href={`tel:${row.enriched_phone}`}
-            className="inline-flex items-center gap-1 text-[var(--text-dim,#475569)] hover:underline"
-          >
-            <Phone className="h-3.5 w-3.5" strokeWidth={2} />
-            {row.enriched_phone}
-          </a>
-        ) : row.phone_reveal_pending ? (
+        <ChannelIconCell
+          contact={{
+            id: row.id,
+            linkedin_url: row.enriched_linkedin_url,
+            email: revealedEmail,
+            phone: row.enriched_phone,
+          }}
+        />
+        {/* ChannelIconCell has no pending state, so the async Apollo phone
+            reveal keeps its own "finding phone…" signal beneath the icon row
+            until the number lands (the row poll clears phone_reveal_pending). */}
+        {showPhonePending ? (
           <span className="inline-flex items-center gap-1 text-[var(--text-muted,#94a3b8)]">
             <Loader2 className="h-3.5 w-3.5 animate-spin" strokeWidth={2} />
             finding phone…
           </span>
-        ) : null}
-        {row.enriched_linkedin_url ? (
-          <a
-            href={row.enriched_linkedin_url}
-            target="_blank"
-            rel="noreferrer"
-            className="inline-flex items-center gap-1 text-[#6366f1] hover:underline"
-          >
-            <Linkedin className="h-3.5 w-3.5" strokeWidth={2} />
-            LinkedIn
-          </a>
         ) : null}
       </div>
     );
@@ -939,6 +933,24 @@ export function ScanDetailView({
     },
     [startPhoneRevealPoll]
   );
+
+  // Resume phone-reveal polls on load/refetch — not just after a click.
+  // `phone_reveal_pending` is a server-computed flag, so a freshly loaded scan
+  // (e.g. a page reload, or landing on /master-list/{id}?scanId=…) can already
+  // contain rows mid-reveal whose "finding phone…" spinner would otherwise sit
+  // static with no poll driving it. Start a poll for every pending row, skipping
+  // ids already polling (a manual Enrich, or a prior run of this effect) so we
+  // never stack duplicate intervals on one id. Each poll self-terminates via its
+  // own stop predicate when the number lands or the backend TTL clears the flag;
+  // the unmount and scanId-change effects clear any still-running polls.
+  useEffect(() => {
+    if (!scan) return;
+    for (const row of scan.discovered_emails) {
+      if (row.phone_reveal_pending && !enrichPollsRef.current.has(row.id)) {
+        startPhoneRevealPoll(row.id);
+      }
+    }
+  }, [scan, startPhoneRevealPoll]);
 
   // Loading skeleton: pulse cards sized to roughly match the panels they
   // replace, so the layout doesn't jump when scan data lands.

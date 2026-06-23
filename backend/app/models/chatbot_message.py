@@ -4,6 +4,12 @@ Ordered by ``created_at, id`` so two turns in the same wall-clock
 microsecond replay deterministically. Page-context path + title are
 captured per user message so an audit replay can reconstruct what the
 user was looking at when they asked.
+
+Assistant turns additionally carry the Gemini ``usageMetadata`` token
+counts plus the turn's tool-call count and wall-clock latency (all
+nullable — NULL means "not captured", which covers every user turn,
+every pre-migration row, and any assistant turn where Gemini omitted
+``usageMetadata``). These power the admin Doxie Usage / cost dashboard.
 """
 
 from __future__ import annotations
@@ -15,6 +21,7 @@ from sqlalchemy import (
     DateTime,
     ForeignKey,
     Index,
+    Integer,
     String,
     Text,
     func,
@@ -57,6 +64,16 @@ class ChatbotMessage(Base):
     page_context_title: Mapped[str | None] = mapped_column(
         String(256), nullable=True
     )
+    # Gemini usage + turn telemetry, set on assistant turns only. All
+    # nullable: NULL = "not captured" (user turns, legacy rows, or a
+    # streamed turn where Gemini omitted usageMetadata on the final
+    # chunk), distinct from a real 0. Aggregated by the admin Doxie Usage
+    # dashboard via COALESCE(col, 0).
+    prompt_tokens: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    completion_tokens: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    total_tokens: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    tool_call_count: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    latency_ms: Mapped[int | None] = mapped_column(Integer, nullable=True)
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True),
         nullable=False,

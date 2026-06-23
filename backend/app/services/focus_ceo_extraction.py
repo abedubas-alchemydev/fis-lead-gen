@@ -27,6 +27,7 @@ from datetime import date, datetime, timezone
 from pathlib import Path
 
 from sqlalchemy import delete, select
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.config import settings
@@ -790,6 +791,21 @@ class FocusCeoExtractionService:
             ),
         )
 
+        def _apply_update(metric: FinancialMetric) -> None:
+            """Update an existing row in place. New non-NULL extras overwrite;
+            a missing extra (the re-extract omitted it) preserves the prior
+            value rather than clobbering it with NULL."""
+            metric.net_capital = net_capital
+            if excess_net_capital is not None:
+                metric.excess_net_capital = excess_net_capital
+            if total_assets is not None:
+                metric.total_assets = total_assets
+            if required_min_capital is not None:
+                metric.required_min_capital = required_min_capital
+            if source_filing_url is not None:
+                metric.source_filing_url = source_filing_url
+            metric.extraction_status = extraction_status
+
         existing = (
             await db.execute(
                 select(FinancialMetric).where(
@@ -799,32 +815,56 @@ class FocusCeoExtractionService:
             )
         ).scalar_one_or_none()
 
-        if existing is None:
-            db.add(
-                FinancialMetric(
-                    bd_id=broker_dealer.id,
-                    report_date=report_date,
-                    net_capital=net_capital,
-                    excess_net_capital=excess_net_capital,
-                    total_assets=total_assets,
-                    required_min_capital=required_min_capital,
-                    source_filing_url=source_filing_url,
-                    extraction_status=extraction_status,
-                )
-            )
+        if existing is not None:
+            _apply_update(existing)
+            await db.flush()
         else:
-            existing.net_capital = net_capital
-            if excess_net_capital is not None:
-                existing.excess_net_capital = excess_net_capital
-            if total_assets is not None:
-                existing.total_assets = total_assets
-            if required_min_capital is not None:
-                existing.required_min_capital = required_min_capital
-            if source_filing_url is not None:
-                existing.source_filing_url = source_filing_url
-            existing.extraction_status = extraction_status
-
-        await db.flush()
+            # Select-then-insert is not atomic: the bulk financial pipeline and
+            # parallel orchestrator children can write the same
+            # (bd_id, report_date) between our SELECT above and the INSERT below,
+            # tripping ``uq_financial_metrics_bd_report_date`` at flush. Wrap the
+            # insert in a SAVEPOINT so a lost race rolls back only this insert
+            # (not the caller's whole transaction); then re-SELECT the row the
+            # winner just committed and fall through to the UPDATE path. Result
+            # is idempotent and race-safe.
+            try:
+                async with db.begin_nested():
+                    db.add(
+                        FinancialMetric(
+                            bd_id=broker_dealer.id,
+                            report_date=report_date,
+                            net_capital=net_capital,
+                            excess_net_capital=excess_net_capital,
+                            total_assets=total_assets,
+                            required_min_capital=required_min_capital,
+                            source_filing_url=source_filing_url,
+                            extraction_status=extraction_status,
+                        )
+                    )
+                    await db.flush()
+            except IntegrityError:
+                logger.info(
+                    "Concurrent insert won the race for financial_metrics "
+                    "(bd_id=%d, report_date=%s); updating the existing row instead.",
+                    broker_dealer.id,
+                    report_date,
+                )
+                winner = (
+                    await db.execute(
+                        select(FinancialMetric).where(
+                            FinancialMetric.bd_id == broker_dealer.id,
+                            FinancialMetric.report_date == report_date,
+                        )
+                    )
+                ).scalar_one_or_none()
+                if winner is None:
+                    # The conflicting row vanished between the failed insert and
+                    # this re-SELECT (e.g. the bulk pipeline's narrow DELETE).
+                    # Nothing safe to update; re-raise so the run surfaces it
+                    # rather than silently dropping the metric.
+                    raise
+                _apply_update(winner)
+                await db.flush()
 
         if extraction_status == STATUS_PARSED:
             await self._refresh_bd_rollup(db, broker_dealer)

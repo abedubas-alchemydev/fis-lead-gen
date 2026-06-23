@@ -159,6 +159,17 @@ function ExtractionAnalyticsIcon(props: IconProps) {
   );
 }
 
+// Coin-stack glyph for the admin Doxie usage / cost dashboard.
+function DoxieUsageIcon(props: IconProps) {
+  return (
+    <IconBase {...props}>
+      <ellipse cx="12" cy="6" rx="7" ry="3" />
+      <path d="M5 6v6c0 1.7 3.1 3 7 3s7-1.3 7-3V6" />
+      <path d="M5 12v6c0 1.7 3.1 3 7 3s7-1.3 7-3v-6" />
+    </IconBase>
+  );
+}
+
 // Address-book glyph for the persons-by-firm browse / per-firm enrich page.
 function OutreachContactsIcon(props: IconProps) {
   return (
@@ -212,6 +223,17 @@ function KeyIcon(props: IconProps) {
       <path d="M10.85 12.15L21 2" />
       <path d="M18 5l3 3" />
       <path d="M15 8l3 3" />
+    </IconBase>
+  );
+}
+
+// Brain-bookmark glyph for the Doxie Memory page (what the assistant has
+// remembered about the user).
+function DoxieMemoryIcon(props: IconProps) {
+  return (
+    <IconBase {...props}>
+      <path d="M9.5 4a3 3 0 0 0-3 3 3 3 0 0 0-1.5 5.6A3 3 0 0 0 6.5 18a3 3 0 0 0 3 2 2.5 2.5 0 0 0 2.5-2.5V6.5A2.5 2.5 0 0 0 9.5 4Z" />
+      <path d="M14.5 4a3 3 0 0 1 3 3 3 3 0 0 1 1.5 5.6A3 3 0 0 1 17.5 18a3 3 0 0 1-3 2 2.5 2.5 0 0 1-2.5-2.5" />
     </IconBase>
   );
 }
@@ -304,9 +326,11 @@ const navSections: ReadonlyArray<NavSection> = [
     items: [
       { href: "/settings", label: "Settings", icon: SettingsIcon, badgeKey: null, permissionKey: "settings" },
       { href: "/settings/account" as Route, label: "My Account", icon: KeyIcon, badgeKey: null },
+      { href: "/settings/doxie-memory" as Route, label: "Doxie Memory", icon: DoxieMemoryIcon, badgeKey: null },
       { href: "/settings/email-accounts" as Route, label: "Email Accounts", icon: MailAtIcon, badgeKey: null },
       { href: "/settings/users" as Route, label: "Users", icon: UsersIcon, badgeKey: null, adminOnly: true, permissionKey: "users" },
-      { href: "/settings/extractions" as Route, label: "Extraction Analytics", icon: ExtractionAnalyticsIcon, badgeKey: null, adminOnly: true }
+      { href: "/settings/extractions" as Route, label: "Extraction Analytics", icon: ExtractionAnalyticsIcon, badgeKey: null, adminOnly: true },
+      { href: "/settings/doxie-usage" as Route, label: "Doxie Usage", icon: DoxieUsageIcon, badgeKey: null, adminOnly: true }
       // Memberships nav item intentionally hidden (2026-05-30) — route/page kept:
       // { href: "/settings/clearing-memberships" as Route, label: "Memberships", icon: ShieldCheckIcon, badgeKey: null, adminOnly: true }
     ]

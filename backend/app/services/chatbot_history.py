@@ -25,7 +25,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.models.chatbot_conversation import ChatbotConversation
 from app.models.chatbot_message import ChatbotMessage
-from app.schemas.chatbot import ChatbotPageContext
+from app.schemas.chatbot import ChatbotPageContext, ChatTurnUsage
 
 logger = logging.getLogger(__name__)
 
@@ -89,13 +89,21 @@ class ChatbotHistoryService:
         role: str,
         content: str,
         page_context: ChatbotPageContext | None = None,
+        usage: ChatTurnUsage | None = None,
     ) -> ChatbotMessage:
+        # ``usage`` is set only for assistant turns (the chat service returns
+        # it); user-turn callers leave it None and the columns stay NULL.
         message = ChatbotMessage(
             conversation_id=conversation_id,
             role=role,
             content=content,
             page_context_path=page_context.path if page_context else None,
             page_context_title=page_context.title if page_context else None,
+            prompt_tokens=usage.prompt_tokens if usage else None,
+            completion_tokens=usage.completion_tokens if usage else None,
+            total_tokens=usage.total_tokens if usage else None,
+            tool_call_count=usage.tool_call_count if usage else None,
+            latency_ms=usage.latency_ms if usage else None,
         )
         db.add(message)
         # Bump the conversation's updated_at so a future "most recent first"

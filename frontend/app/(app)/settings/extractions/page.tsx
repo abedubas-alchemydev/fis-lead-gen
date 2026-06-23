@@ -10,7 +10,7 @@ export default async function SettingsExtractionsPage() {
 
   if (session.user.role !== "admin") {
     return (
-      <div className="px-7 pb-12 pt-7 lg:px-9">
+      <div className="px-4 sm:px-7 pb-12 pt-7 lg:px-9">
         <section className="rounded-2xl border border-amber-500/25 bg-amber-500/12 p-8 shadow-[var(--shadow-card,0_1px_2px_rgba(15,23,42,0.04),0_4px_14px_rgba(15,23,42,0.05))]">
           <div className="flex items-start gap-4">
             <div className="grid h-10 w-10 shrink-0 place-items-center rounded-xl bg-[var(--surface,#ffffff)] text-amber-600">

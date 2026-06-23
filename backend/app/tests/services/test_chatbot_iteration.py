@@ -163,7 +163,7 @@ async def test_zero_tool_path_matches_phase1(
 
     route = respx.post(_GEMINI_CHAT_URL).mock(side_effect=capture)
 
-    reply = await ChatbotService().chat(
+    reply, _usage = await ChatbotService().chat(
         messages=[ChatbotMessage(role="user", content="Hello")],
         user=user,
         db=db_stub,
@@ -200,7 +200,7 @@ async def test_one_tool_round_trip_echoes_parts_and_appends_function_response(
     respx.post(_GEMINI_CHAT_URL).mock(side_effect=capture)
 
     tool = _make_tool_stub("lookup", result={"name": "Acme"})
-    reply = await ChatbotService().chat(
+    reply, _usage = await ChatbotService().chat(
         messages=[ChatbotMessage(role="user", content="Tell me about firm 7")],
         user=user,
         db=db_stub,
@@ -249,7 +249,7 @@ async def test_two_sequential_tool_calls_make_three_posts(
         "search": _make_tool_stub("search", result={"items": [{"id": 1, "name": "Acme"}]}),
         "profile": _make_tool_stub("profile", result={"id": 1, "net_capital": 1500000}),
     }
-    reply = await ChatbotService().chat(
+    reply, _usage = await ChatbotService().chat(
         messages=[ChatbotMessage(role="user", content="Find Acme and tell me its net capital.")],
         user=user,
         db=db_stub,
@@ -289,7 +289,7 @@ async def test_parallel_function_calls_one_user_turn_two_responses(
         "lookup_a": _make_tool_stub("lookup_a", result={"a": 1}),
         "lookup_b": _make_tool_stub("lookup_b", result={"b": 2}),
     }
-    reply = await ChatbotService().chat(
+    reply, _usage = await ChatbotService().chat(
         messages=[ChatbotMessage(role="user", content="Look up both.")],
         user=user,
         db=db_stub,
@@ -332,7 +332,7 @@ async def test_mixed_text_and_function_call_continues_loop(
         ]
     )
     tool = _make_tool_stub("lookup", result={"name": "Acme"})
-    reply = await ChatbotService().chat(
+    reply, _usage = await ChatbotService().chat(
         messages=[ChatbotMessage(role="user", content="What is firm 1?")],
         user=user,
         db=db_stub,
@@ -363,7 +363,7 @@ async def test_max_iterations_returns_fallback_without_raising(
     respx.post(_GEMINI_CHAT_URL).mock(side_effect=responses)
 
     tool = _make_tool_stub("lookup", result={"ok": True})
-    reply = await ChatbotService().chat(
+    reply, _usage = await ChatbotService().chat(
         messages=[ChatbotMessage(role="user", content="Loop forever")],
         user=user,
         db=db_stub,
@@ -397,7 +397,7 @@ async def test_tool_error_dict_is_forwarded_to_gemini(
     respx.post(_GEMINI_CHAT_URL).mock(side_effect=capture)
 
     tool = _make_tool_stub("lookup", result={"error": "no_access", "message": "denied"})
-    reply = await ChatbotService().chat(
+    reply, _usage = await ChatbotService().chat(
         messages=[ChatbotMessage(role="user", content="Try anyway")],
         user=user,
         db=db_stub,
@@ -438,7 +438,7 @@ async def test_tool_timeout_surfaces_timeout_error_to_gemini(
 
     # Tool blocks forever; wait_for must cancel it after the timeout.
     slow_tool = _make_tool_stub("slow", block_forever=True)
-    reply = await ChatbotService().chat(
+    reply, _usage = await ChatbotService().chat(
         messages=[ChatbotMessage(role="user", content="hi")],
         user=user,
         db=db_stub,
@@ -474,7 +474,7 @@ async def test_tool_that_raises_returns_tool_error_to_gemini(
     respx.post(_GEMINI_CHAT_URL).mock(side_effect=capture)
 
     bad_tool = _make_tool_stub("boom", raises=RuntimeError("kaboom"))
-    reply = await ChatbotService().chat(
+    reply, _usage = await ChatbotService().chat(
         messages=[ChatbotMessage(role="user", content="hi")],
         user=user,
         db=db_stub,
@@ -509,7 +509,7 @@ async def test_unknown_tool_returns_unknown_tool_error(
 
     respx.post(_GEMINI_CHAT_URL).mock(side_effect=capture)
 
-    reply = await ChatbotService().chat(
+    reply, _usage = await ChatbotService().chat(
         messages=[ChatbotMessage(role="user", content="hi")],
         user=user,
         db=db_stub,
@@ -684,7 +684,7 @@ async def test_same_args_and_user_dedupes_repeated_tool_call(
     )
     tool, calls = _make_counting_tool("lookup", result={"name": "Acme"})
 
-    reply = await ChatbotService().chat(
+    reply, _usage = await ChatbotService().chat(
         messages=[ChatbotMessage(role="user", content="Tell me about firm 1")],
         user=user,
         db=db_stub,

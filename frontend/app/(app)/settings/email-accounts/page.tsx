@@ -7,7 +7,7 @@ export default async function EmailAccountsPage() {
   await getRequiredSession();
 
   return (
-    <div className="px-7 pb-12 pt-7 lg:px-9">
+    <div className="px-4 sm:px-7 pb-12 pt-7 lg:px-9">
       <EmailAccountsClient />
     </div>
   );

@@ -113,7 +113,7 @@ export function DashboardHomeClient() {
       .then((stats) => {
         if (!active) return;
         setTotalBds(stats.total_active_bds.toLocaleString());
-        setNewBds(stats.new_bds_30_days.toLocaleString());
+        setNewBds(stats.new_bds_90_days.toLocaleString());
         setDeficiencyAlerts(stats.deficiency_alerts.toLocaleString());
         setHighValueParticipants(stats.high_value_participants.toLocaleString());
       })
@@ -202,7 +202,7 @@ export function DashboardHomeClient() {
     // the sidebar (which lives outside this wrapper) also inherits Inter
     // + 14px + 1.5 line-height + antialiased.
     // Mockup uses 28px top / 36px horizontal / 48px bottom padding.
-    <div className="px-7 pb-12 pt-7 lg:px-9">
+    <div className="px-4 sm:px-7 pb-12 pt-7 lg:px-9">
       {/* Topbar — crumbs + title LEFT, TopActions RIGHT on the same row.
           Mockup .topbar: display:flex; align-items:center; gap:16px; margin-bottom:28px. */}
       <div className="mb-7 flex flex-wrap items-center gap-4">
@@ -261,7 +261,7 @@ export function DashboardHomeClient() {
           </div>
           <div className="animate-fade-in delay-75">
             <KpiCard
-              title="New BDs · 30 days"
+              title="New BDs · 90 days"
               value={newBds}
               tone="purple"
               icon={KpiIconPulse}

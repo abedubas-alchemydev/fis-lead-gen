@@ -288,20 +288,22 @@ jobs:
             --region=${{ vars.GCP_REGION }} \
             --project=${{ vars.GCP_PROJECT_ID }} \
             --command=python \
-            --args=scripts/gap_fill_investment_advisors.py,--apply \
+            --args=scripts/gap_fill_investment_advisors.py,--apply,--limit,250 \
             --task-timeout=86400 \
             --memory=2Gi \
             --cpu=2 \
             --max-retries=0 \
             --parallelism=1 \
             --tasks=1 \
-            --set-secrets=DATABASE_URL=DATABASE_URL_BACKEND_STAGING:latest,GEMINI_API_KEY=GEMINI_API_KEY:latest,APOLLO_API_KEY=APOLLO_API_KEY:latest,SERPAPI_API_KEY=SERPAPI_API_KEY:latest,HUNTER_API_KEY=HUNTER_API_KEY:latest,SNOV_CLIENT_ID=SNOV_CLIENT_ID:latest,SNOV_CLIENT_SECRET=SNOV_CLIENT_SECRET:latest,PDL_API_KEY=PDL_API_KEY:latest \
+            --set-secrets=DATABASE_URL=DATABASE_URL_BACKEND_STAGING:latest,GEMINI_API_KEY=GEMINI_API_KEY:latest,APOLLO_API_KEY=APOLLO_API_KEY:latest,SERPAPI_API_KEY=SERPAPI_API_KEY:latest,HUNTER_API_KEY=HUNTER_API_KEY:latest,SNOV_CLIENT_ID=SNOV_CLIENT_ID:latest,SNOV_CLIENT_SECRET=SNOV_CLIENT_SECRET:latest \
             --labels=commit-sha=${{ env.SHORT_SHA }},environment=staging,kind=batch-job
 
       # Unified backfill driver (scripts/backfill_all.py) — sequences every
       # phase (P1 BD refresh-all incl. FOCUS financials+clearing, P2 FINRA
       # clearing reconcile, P3 IA refresh-all incl. Form ADV client_counts,
-      # P5 metered Apollo/PDL phones) so BD + 13F-IA profiles are pre-filled.
+      # P5 metered Apollo phones) so BD + 13F-IA profiles are pre-filled.
+      # (PDL dropped globally — PDL_API_KEY is no longer bound, so the P5 PDL
+      # path is inert; re-add PDL_API_KEY here + EMAIL_ENRICHMENT_CHAIN to revive.)
       # Triggered manually (`gcloud run jobs execute fis-backfill-all-staging`)
       # or by a Cloud Scheduler cron (America/Chicago, see the backfill plan).
       # Adds APOLLO_WEBHOOK_SECRET + PUBLIC_BASE_URL vs the gap-fill job so the
@@ -323,7 +325,7 @@ jobs:
             --parallelism=1 \
             --tasks=1 \
             --set-env-vars=PUBLIC_BASE_URL=https://staging-dox.alchemydev.io/api/backend \
-            --set-secrets=DATABASE_URL=DATABASE_URL_BACKEND_STAGING:latest,GEMINI_API_KEY=GEMINI_API_KEY:latest,APOLLO_API_KEY=APOLLO_API_KEY:latest,APOLLO_WEBHOOK_SECRET=APOLLO_WEBHOOK_SECRET:latest,SERPAPI_API_KEY=SERPAPI_API_KEY:latest,HUNTER_API_KEY=HUNTER_API_KEY:latest,SNOV_CLIENT_ID=SNOV_CLIENT_ID:latest,SNOV_CLIENT_SECRET=SNOV_CLIENT_SECRET:latest,PDL_API_KEY=PDL_API_KEY:latest \
+            --set-secrets=DATABASE_URL=DATABASE_URL_BACKEND_STAGING:latest,GEMINI_API_KEY=GEMINI_API_KEY:latest,APOLLO_API_KEY=APOLLO_API_KEY:latest,APOLLO_WEBHOOK_SECRET=APOLLO_WEBHOOK_SECRET:latest,SERPAPI_API_KEY=SERPAPI_API_KEY:latest,HUNTER_API_KEY=HUNTER_API_KEY:latest,SNOV_CLIENT_ID=SNOV_CLIENT_ID:latest,SNOV_CLIENT_SECRET=SNOV_CLIENT_SECRET:latest \
             --labels=commit-sha=${{ env.SHORT_SHA }},environment=staging,kind=batch-job
 
       # Cloud Run Job that runs scripts/standalone_extract_new_bds.py against
@@ -359,6 +361,36 @@ jobs:
             --set-secrets=DATABASE_URL=DATABASE_URL_BACKEND_STAGING:latest,GEMINI_API_KEY=GEMINI_API_KEY:latest \
             --labels=commit-sha=${{ env.SHORT_SHA }},environment=staging,kind=batch-job
 
+      # Cloud Run Job that runs scripts/refresh_registration_dates.py against the
+      # staging Neon DB. Re-fetches each firm's FINRA Form BD and UPDATEs
+      # registration_date/formation_date in place (UPDATE-only, never INSERTs) so
+      # existing firms newly flipped to SEC-Approved surface as "New BDs" — the
+      # gap the INSERT-only extract-new-bds job can't catch (a firm gets its CRD
+      # at application, then gets approved months later with that same ≤-max CRD
+      # already in our DB). A Cloud Scheduler cron (nightly, America/New_York)
+      # invokes it with a rolling --limit; the registration_checked_at cursor
+      # (migration 20260619_0001) drives which firms it picks — NULL-date first,
+      # then least-recently-checked. FINRA-only (free public BrokerCheck API):
+      # no GEMINI_API_KEY, it never touches the embed/enrich path. Reuses the
+      # backend image (same SHA); only the CMD differs. Staging-only by design.
+      - name: Deploy refresh-registrations Cloud Run Job (staging)
+        if: env.ENV == 'staging'
+        run: |
+          gcloud run jobs deploy fis-refresh-registrations-staging \
+            --image=${{ vars.GCP_REGISTRY }}/backend:${{ env.SHORT_SHA }} \
+            --region=${{ vars.GCP_REGION }} \
+            --project=${{ vars.GCP_PROJECT_ID }} \
+            --command=python \
+            --args=scripts/refresh_registration_dates.py,--apply,--limit,250 \
+            --task-timeout=3600 \
+            --memory=1Gi \
+            --cpu=1 \
+            --max-retries=0 \
+            --parallelism=1 \
+            --tasks=1 \
+            --set-secrets=DATABASE_URL=DATABASE_URL_BACKEND_STAGING:latest \
+            --labels=commit-sha=${{ env.SHORT_SHA }},environment=staging,kind=batch-job
+
       - name: Deploy frontend to Cloud Run
         run: |
           # Re-establish SMTP env on every staging deploy so an accidental clear can't silently break better-auth emails.
@@ -378,3 +410,103 @@ jobs:
             --timeout=3600 \
             --labels=commit-sha=${{ env.SHORT_SHA }},environment=${{ env.ENV }} \
             $EXTRA
+
+  # Post-deploy smoke: verify the just-deployed frontend actually boots and
+  # serves, instead of trusting "gcloud run deploy exited 0". Catches the
+  # "deploy succeeded but the app is broken" class (bad build that still
+  # produced an image, a runtime crash-loop, or a broken auth gate). Runs
+  # only after a real deploy (push), against the same env the deploy job
+  # targeted. Hits PUBLIC routes only — no cookie, no secret needed. A
+  # failure here is informative (red run): the deploy already happened, so
+  # this surfaces the breakage rather than preventing it; roll back per the
+  # deploy runbook if it goes red.
+  smoke:
+    name: Smoke (${{ github.ref == 'refs/heads/main' && 'production' || 'staging' }})
+    needs: [deploy]
+    if: github.event_name == 'push'
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Select base URL by branch
+        run: |
+          # Mirror the deploy job's staging-vs-prod selection so the smoke
+          # always targets whatever the deploy job just shipped.
+          if [[ "${{ github.ref }}" == "refs/heads/main" ]]; then
+            echo "BASE_URL=https://fis.alchemydev.io" >> $GITHUB_ENV
+          else
+            echo "BASE_URL=https://staging-dox.alchemydev.io" >> $GITHUB_ENV
+          fi
+
+      - name: Smoke-check deployed app
+        run: |
+          set -uo pipefail
+          BASE="$BASE_URL"
+          FAILURES=0
+
+          echo "Smoke-checking $BASE"
+          echo
+
+          # GET a path and print only the final HTTP status code.
+          # --max-time bounds a hung request; -o /dev/null discards the body.
+          # No -L: we assert the redirect status of gated routes directly, and
+          # for /login/ we want the page's own 200, which it returns without a hop.
+          get_code() {
+            curl -s -o /dev/null -w "%{http_code}" --max-time 30 "$1"
+          }
+
+          # 5xx on ANY checked route is an automatic fail — it's the exact
+          # "image deployed but the app crashed" signal we're guarding against.
+          is_5xx() { [[ "$1" =~ ^5[0-9][0-9]$ ]]; }
+
+          # --- /login must be 200, with propagation retries ---
+          # A fresh Cloud Run revision can take a few seconds to start taking
+          # traffic; retry up to 6x with 10s backoff before declaring failure.
+          LOGIN_OK=0
+          LOGIN_CODE=""
+          for attempt in 1 2 3 4 5 6; do
+            LOGIN_CODE="$(get_code "$BASE/login")"
+            if [[ "$LOGIN_CODE" == "200" ]]; then
+              LOGIN_OK=1
+              echo " PASS  /login -> 200 (attempt $attempt)"
+              break
+            fi
+            echo " ....  /login -> $LOGIN_CODE (attempt $attempt/6, retrying in 10s)"
+            sleep 10
+          done
+          if [[ "$LOGIN_OK" != "1" ]]; then
+            echo " FAIL  /login -> $LOGIN_CODE after 6 attempts, expected 200"
+            FAILURES=$((FAILURES + 1))
+          fi
+
+          # --- / (public landing): accept 200 or 307, never 5xx ---
+          ROOT_CODE="$(get_code "$BASE/")"
+          if [[ "$ROOT_CODE" == "200" || "$ROOT_CODE" == "307" ]]; then
+            echo " PASS  / -> $ROOT_CODE"
+          else
+            echo " FAIL  / -> $ROOT_CODE, expected 200 or 307"
+            FAILURES=$((FAILURES + 1))
+          fi
+
+          # --- Gated routes must 307 (auth gate redirects anon to /login) ---
+          # Proves middleware + the (app) layout session check are live. A 200
+          # here would mean an unauthenticated caller reached a protected page.
+          for route in /dashboard /master-list; do
+            CODE="$(get_code "$BASE$route")"
+            if [[ "$CODE" == "307" ]]; then
+              echo " PASS  $route -> 307 (auth gate redirects to /login)"
+            elif is_5xx "$CODE"; then
+              echo " FAIL  $route -> $CODE (5xx — app error)"
+              FAILURES=$((FAILURES + 1))
+            else
+              echo " FAIL  $route -> $CODE, expected 307 (auth gate)"
+              FAILURES=$((FAILURES + 1))
+            fi
+          done
+
+          echo
+          if [[ "$FAILURES" -eq 0 ]]; then
+            echo "Smoke OK — $BASE is up and the auth gate is enforcing."
+          else
+            echo "Smoke FAILED — $FAILURES route(s) wrong. Deploy is already live; investigate / roll back."
+            exit 1
+          fi

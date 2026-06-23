@@ -27,6 +27,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.config import settings
 from app.models.discovered_email import DiscoveredEmail
+from app.services.contact_discovery._shared import apollo_phone_reveal_configured
 from app.services.email_extractor.enrichment.apollo import ApolloEnrichProvider
 from app.services.email_extractor.enrichment.base import (
     MERGE_FIELDS,
@@ -96,6 +97,14 @@ async def enrich_discovered_email(db: AsyncSession, discovered_email_id: int) ->
     merged = EnrichmentData()
     ran_ok = 0
     errored = 0
+    # The async Apollo phone-reveal webhook correlates a revealed number back to
+    # this row by ``apollo_person_id``. Apollo dispatches that reveal the moment
+    # it matches (first provider in the chain), but the callback can land in
+    # 1-13s -- well before a slow downstream provider (hunter 429-backoff, snov
+    # timeout) lets the chain finish. So the moment a provider yields a person id
+    # we persist+commit the correlation key IMMEDIATELY, ahead of the slow tail,
+    # so the webhook always finds the row. Once-only: guarded by this flag.
+    apollo_id_persisted = False
     for provider in providers:
         # The fields still empty -- lets a provider skip expensive sub-steps
         # whose output would just be discarded (see web_scraper).
@@ -124,12 +133,39 @@ async def enrich_discovered_email(db: AsyncSession, discovered_email_id: int) ->
         ran_ok += 1
         if data is not None:
             _merge(merged, data)
+            # Close the phone-reveal race: stamp + commit apollo_person_id the
+            # instant we have it, before continuing to slower providers, so the
+            # webhook (separate request/txn, arrives in seconds) can correlate.
+            # phone_reveal_requested_at starts the spinner TTL at the true
+            # request time. Only when no inline phone landed and reveal is wired
+            # -- the same gate _apply and phone_reveal_pending read.
+            if (
+                not apollo_id_persisted
+                and merged.apollo_person_id is not None
+                and row.enriched_phone is None
+                and apollo_phone_reveal_configured()
+            ):
+                row.apollo_person_id = merged.apollo_person_id
+                row.phone_reveal_requested_at = datetime.now(UTC)
+                await db.commit()
+                apollo_id_persisted = True
             if merged.is_complete():
                 break
 
+    # The webhook may have written ``enriched_phone`` between the early commit
+    # and here (separate txn). With expire_on_commit=False our session still
+    # holds the row with the stale ``enriched_phone=None`` it loaded, so refresh
+    # to pull in any webhook-written phone before the final write -- otherwise
+    # the chain-end commit would flush NULL back over it. Only needed when the
+    # early commit fired (a reveal is genuinely in flight).
+    if apollo_id_persisted:
+        # Pull a webhook-written phone in BEFORE our final write (set-if-null in
+        # _apply then can't clobber it).
+        await db.refresh(row)
+
     _apply(row, merged, ran_ok=ran_ok, errored=errored)
     await db.commit()
-    await db.refresh(row)
+    await db.refresh(row)  # return the canonical row after our own commit
     return row
 
 
@@ -163,7 +199,13 @@ def _apply(
             row.enriched_linkedin_url = merged.linkedin_url
         if merged.email is not None:
             row.enriched_email = merged.email
-        if merged.phone is not None:
+        # Set-if-NULL, not set-if-present: the async phone-reveal webhook (a
+        # separate txn) may have written enriched_phone after the early commit
+        # for apollo_person_id. Guard against clobbering it here in case the
+        # webhook lands in the micro-window between db.refresh(row) above and
+        # this final commit. (Apollo's sync phone is null by design, so merged
+        # rarely carries one anyway -- this only ever fills a still-empty cell.)
+        if merged.phone is not None and row.enriched_phone is None:
             row.enriched_phone = merged.phone
         if merged.apollo_person_id is not None:
             row.apollo_person_id = merged.apollo_person_id
@@ -176,3 +218,23 @@ def _apply(
         row.enrichment_status = "error"
 
     row.enriched_at = datetime.now(UTC)
+
+    # Stamp when the async Apollo phone-reveal was actually requested so
+    # phone_reveal_pending can bound the "finding phone…" spinner with a TTL.
+    # The reveal goes out exactly when Apollo matched a person (id stamped),
+    # the reveal flow is wired, and no phone landed inline -- the same gate the
+    # property reads. Skip it if a phone arrived synchronously (nothing pending)
+    # or reveal isn't configured (no callback will ever come).
+    #
+    # Set-if-NULL: the orchestrator stamps this the moment the id is first seen
+    # (the early-commit branch in enrich_discovered_email), which is the TRUE
+    # request time. Don't overwrite that earlier, more-correct timestamp with a
+    # chain-end one -- only stamp here for the (rare) path that reaches _apply
+    # without having taken the early commit.
+    if (
+        row.apollo_person_id is not None
+        and row.enriched_phone is None
+        and row.phone_reveal_requested_at is None
+        and apollo_phone_reveal_configured()
+    ):
+        row.phone_reveal_requested_at = datetime.now(UTC)

@@ -88,6 +88,10 @@ from app.services.chatbot_learned_terms import (
     normalize_term,
     upsert_learned_term,
 )
+from app.services.chatbot_user_memory import (
+    MAX_MEMORY_CONTENT_CHARS,
+    create_memory,
+)
 from app.services.chatbot_semantic import (
     ChatbotSemanticService,
     ENTITY_TYPE_BROKER_DEALER,
@@ -178,6 +182,10 @@ WEB_RESEARCH_LIMIT_MAX = 6
 # one ~2s retry; give the tool headroom above the 5s TOOL_EXECUTION_TIMEOUT_S
 # default so a fallback search isn't chopped mid-call.
 WEB_RESEARCH_TOOL_TIMEOUT_S = 15.0
+# remember_fact (Doxie's private per-user memory). The model is told to keep
+# facts short; this advertises the same hard length the service enforces so
+# the schema description and the storage cap stay in sync.
+MEMORY_CONTENT_MAX_CHARS = MAX_MEMORY_CONTENT_CHARS
 # Outreach-copilot tools. Subject cap mirrors the outreach_drafts column
 # (RFC 5322 line limit); body cap mirrors the composer textarea ceiling.
 FIRM_CONTACTS_LIMIT = 25
@@ -2799,6 +2807,61 @@ async def _execute_research_term(
     )
 
 
+async def _execute_remember_fact(
+    user: AuthenticatedUser,
+    db: AsyncSession,
+    args: Mapping[str, Any],
+) -> dict[str, Any]:
+    """Persist a durable fact/preference about the calling user.
+
+    No feature-permission gate — like ``research_term`` / ``get_app_help``,
+    any authenticated user can have Doxie remember something about them. The
+    memory is **private**: stored against ``user.id`` and only ever folded
+    back into that same user's future chats, never surfaced cross-user.
+
+    Validates and trims ``content`` (empty → structured ``invalid_args``),
+    then writes a per-user row via the memory service, which enforces the
+    length + per-user row caps and de-dupes near-identical content. Never
+    raises — a storage failure returns an ``unavailable`` error dict so the
+    model can apologize gracefully instead of the chat 502'ing.
+    """
+    content = _opt_str(args, "content")
+    if not content:
+        return {
+            "error": "invalid_args",
+            "message": (
+                "Argument 'content' is required — pass the durable fact or "
+                "preference to remember, phrased in your own words."
+            ),
+        }
+    content = content[:MEMORY_CONTENT_MAX_CHARS]
+    kind = _opt_str(args, "kind")
+
+    try:
+        memory = await create_memory(
+            db,
+            user_id=user.id,
+            content=content,
+            kind=kind,
+        )
+    except Exception:
+        logger.exception("remember_fact write failed")
+        return {
+            "error": "unavailable",
+            "message": (
+                "Couldn't save that to memory right now. Acknowledge the "
+                "user's note without claiming it was remembered."
+            ),
+        }
+
+    if memory is None:
+        return {
+            "error": "invalid_args",
+            "message": "Nothing to remember — the fact was empty.",
+        }
+    return {"status": "remembered", "content": memory.content}
+
+
 def _project_dual_firm(firm: Any) -> dict[str, Any]:
     """Project a dual-registered firm with deep-links to both records."""
     out = {
@@ -3366,6 +3429,31 @@ _RESEARCH_TERM_PARAMETERS_SCHEMA: dict[str, Any] = {
         },
     },
     "required": ["query"],
+}
+
+
+_REMEMBER_FACT_PARAMETERS_SCHEMA: dict[str, Any] = {
+    "type": "object",
+    "properties": {
+        "content": {
+            "type": "string",
+            "description": (
+                "The durable fact or preference to remember about THIS user, "
+                "phrased in your own words as a short standalone statement — "
+                "e.g. 'Focuses on self-clearing broker-dealers in Texas', "
+                "'Our standard fee is 25bps', 'Prefers formal outreach "
+                "drafts'. Keep it concise; do not store transient one-off "
+                "queries or anything not specific to this user."
+            ),
+        },
+        "kind": {
+            "type": "string",
+            "description": (
+                "Optional classifier: 'fact' or 'preference'. Omit if unsure."
+            ),
+        },
+    },
+    "required": ["content"],
 }
 
 
@@ -5700,6 +5788,30 @@ TOOL_REGISTRY: dict[str, Tool] = {
         timeout_s=WEB_RESEARCH_TOOL_TIMEOUT_S,
         # cacheable defaults True — the 60s LRU dedups a term re-asked within
         # one chat, sparing the provider and the DB.
+    ),
+    "remember_fact": Tool(
+        name="remember_fact",
+        description=(
+            "Save a durable fact or preference the user states about "
+            "themselves so it carries into every future chat. Call this when "
+            "the user shares standing context — 'I focus on self-clearing "
+            "firms in Texas', 'our fee is 25bps', 'always draft formally' — "
+            "or explicitly asks you to remember something. The memory is "
+            "PRIVATE to this user. Do NOT call it for transient one-off "
+            "queries, for general knowledge, or for facts about a firm "
+            "(the database tools own firm data). After saving, confirm "
+            "briefly, e.g. 'Got it — I'll remember that.'"
+        ),
+        parameters_schema=_REMEMBER_FACT_PARAMETERS_SCHEMA,
+        # ``feature_key`` is informational only — the execute function never
+        # gates on permissions (it omits _check_feature, like research_term),
+        # so every authenticated user can have Doxie remember a fact.
+        feature_key="dashboard",
+        execute=_execute_remember_fact,
+        # Each capture is a real write — never serve a repeat from the LRU
+        # (which is keyed on (tool, args, user) and would otherwise swallow
+        # the second "remember X" in a single chat).
+        cacheable=False,
     ),
     "find_dual_registered_firms": Tool(
         name="find_dual_registered_firms",

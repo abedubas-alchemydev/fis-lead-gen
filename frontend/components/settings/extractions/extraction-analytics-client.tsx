@@ -176,7 +176,7 @@ export function ExtractionAnalyticsClient(): React.ReactElement {
   const totalPages = Math.max(1, Math.ceil(total / 50));
 
   return (
-    <div className="px-7 pb-12 pt-7 lg:px-9">
+    <div className="px-4 sm:px-7 pb-12 pt-7 lg:px-9">
       {/* Topbar */}
       <div className="mb-7">
         <p className="text-[12px] uppercase tracking-[0.06em] text-[var(--text-muted,#94a3b8)]">

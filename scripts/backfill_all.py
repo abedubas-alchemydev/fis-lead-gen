@@ -12,7 +12,7 @@ Phases (see plans/backfill-all-bd-ia-2026-05-29.md):
   P1  BD refresh-all     scripts.gap_fill_broker_dealers       FOCUS financials + FOCUS clearing + FINRA health + website + contacts + filings
   P2  FINRA reconcile    scripts.backfill_finra_clearing       authoritative clearing partner (--skip-verified to advance)
   P3  IA refresh-all     scripts.gap_fill_investment_advisors  Form ADV: officers/owners/client_types/client_counts + website + filings + contacts
-  P5  Phones (metered)   scripts.gap_fill_phones               Apollo per-reveal + PDL phones; ≤50 firms/run + reveal cap
+  P5  Phones (metered)   scripts.gap_fill_phones               Apollo per-reveal phones; ≤50 firms/run + reveal cap
   P4  IA roster (opt-in) scripts.backfill_advisor_roster_contacts   one-time catch-up; only with --include-roster
 
 A zombie-run reaper (services/pipeline_reaper) is a SEPARATE concern — this
@@ -37,7 +37,7 @@ _MODULES = {
     "p2": ("scripts.backfill_finra_clearing", "P2 FINRA clearing reconcile (authoritative partner)"),
     "p3": ("scripts.gap_fill_investment_advisors", "P3 IA refresh-all (Form ADV incl client_counts, website, filings, contacts)"),
     "p4": ("scripts.backfill_advisor_roster_contacts", "P4 IA roster contacts (one-time catch-up)"),
-    "p5": ("scripts.gap_fill_phones", "P5 Phones (metered Apollo reveal + PDL)"),
+    "p5": ("scripts.gap_fill_phones", "P5 Phones (metered Apollo reveal)"),
 }
 
 

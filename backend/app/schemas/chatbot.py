@@ -1,11 +1,35 @@
 from __future__ import annotations
 
+from dataclasses import dataclass
 from datetime import datetime
 from typing import Literal
 
 from pydantic import BaseModel, ConfigDict, Field
 
 ChatbotRole = Literal["user", "assistant"]
+
+
+@dataclass(frozen=True)
+class ChatTurnUsage:
+    """Per-assistant-turn Gemini usage + telemetry.
+
+    A plain frozen dataclass (not a Pydantic model) because it never
+    crosses the API boundary — it flows from the chat service into the
+    history layer, which copies the fields onto the ``chatbot_message``
+    row. ``ChatbotResponse`` deliberately stays ``{reply}`` only.
+
+    Token counts are ``int | None``: ``None`` means Gemini didn't report
+    them (it omits ``usageMetadata`` on the terminal streaming chunk
+    sometimes), persisted as a NULL column distinct from a real ``0``.
+    ``tool_call_count`` and ``latency_ms`` are always known locally, so
+    they're plain ``int``.
+    """
+
+    prompt_tokens: int | None
+    completion_tokens: int | None
+    total_tokens: int | None
+    tool_call_count: int
+    latency_ms: int
 
 
 class ChatbotMessage(BaseModel):
@@ -101,6 +125,24 @@ class ChatbotConversationListResponse(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     conversations: list[ChatbotConversationSummary]
+
+
+class DoxieMemoryItem(BaseModel):
+    """One row Doxie has remembered about the calling user."""
+    model_config = ConfigDict(from_attributes=True)
+
+    id: int
+    content: str
+    kind: str | None
+    created_at: datetime
+
+
+class DoxieMemoryListResponse(BaseModel):
+    """The caller's own remembered facts, newest first."""
+    model_config = ConfigDict(extra="forbid")
+
+    items: list[DoxieMemoryItem]
+    total: int
 
 
 class ChatbotEmbeddingBackfillEntityCounts(BaseModel):

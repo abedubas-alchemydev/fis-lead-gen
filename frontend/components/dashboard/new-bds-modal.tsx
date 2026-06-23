@@ -35,7 +35,7 @@ export function NewBdsModal({ onClose }: NewBdsModalProps) {
     setLoading(true);
     setError(null);
 
-    const since = isoDateNDaysAgo(30);
+    const since = isoDateNDaysAgo(90);
     apiRequest<BrokerDealerListResponse>(
       `/api/v1/broker-dealers?registered_after=${since}&list=all&sort_by=registration_date&sort_dir=desc&limit=100`
     )
@@ -72,7 +72,7 @@ export function NewBdsModal({ onClose }: NewBdsModalProps) {
         <div className="flex items-start justify-between gap-4 border-b border-[var(--border,rgba(30,64,175,0.1))] px-6 py-5">
           <div>
             <p className="text-[11px] uppercase tracking-[0.18em] text-[var(--text-muted,#94a3b8)]">
-              New BDs · 30 days
+              New BDs · 90 days
             </p>
             <h2
               id="new-bds-modal-title"
@@ -81,7 +81,7 @@ export function NewBdsModal({ onClose }: NewBdsModalProps) {
               Recent registrations
             </h2>
             <p className="mt-1 text-xs text-[var(--text-muted,#94a3b8)]">
-              Broker-dealers registered on or after {formatDate(isoDateNDaysAgo(30))}.
+              Broker-dealers registered on or after {formatDate(isoDateNDaysAgo(90))}.
             </p>
           </div>
           <button
@@ -118,7 +118,7 @@ export function NewBdsModal({ onClose }: NewBdsModalProps) {
             </div>
           ) : items.length === 0 ? (
             <div className="rounded-xl border border-dashed border-[var(--border,rgba(30,64,175,0.1))] bg-[var(--surface-2,#f1f6fd)] px-4 py-8 text-center text-sm text-[var(--text-muted,#94a3b8)]">
-              No new broker-dealers registered in the last 30 days.
+              No new broker-dealers registered in the last 90 days.
             </div>
           ) : (
             <ul className="space-y-2">

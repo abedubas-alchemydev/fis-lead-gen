@@ -19,7 +19,7 @@ export default function ScanDetailPage(): React.ReactElement {
   const [scan, setScan] = useState<ScanResponse | null>(null);
 
   return (
-    <div className="px-7 pb-12 pt-7 lg:px-9">
+    <div className="px-4 sm:px-7 pb-12 pt-7 lg:px-9">
       <div className="mb-6">
         <div className="min-w-0">
           <p className="text-[12px] uppercase tracking-[0.06em] text-[var(--text-muted,#94a3b8)]">
