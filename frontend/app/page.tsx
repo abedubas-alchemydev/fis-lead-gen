@@ -25,8 +25,19 @@ export default async function HomePage() {
   const session = await getOptionalSession();
   if (session) redirect("/dashboard");
 
+  // The landing is a fixed dark → light → dark marketing design whose mid
+  // sections render their copy with the shared --text/--surface tokens on a
+  // light canvas. Those tokens flip to the dark palette under the app-wide
+  // theme switch (layout.tsx stamps <html data-theme="dark"> from the user's
+  // saved `prospectEngineTheme`), which would turn the light sections' text
+  // near-white-on-light — invisible. Pin the whole public landing to its
+  // designed LIGHT theme so it reads correctly regardless of the saved app
+  // theme; the [data-theme="light"] scope (globals.css) re-asserts the light
+  // palette, and the opaque --bg fill guarantees no dark canvas bleeds through
+  // the translucent section backgrounds. The dark hero + dark CTA paint their
+  // own hardcoded navy/gradient fills, so they stay dark as designed.
   return (
-    <div className="min-h-screen overflow-x-hidden">
+    <div data-theme="light" className="min-h-screen overflow-x-hidden bg-[var(--bg,#eaf3ff)]">
       <RedoHeader />
       <main>
         <RedoHero />

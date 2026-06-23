@@ -451,6 +451,51 @@ body {
   --row-hover: rgba(99, 102, 241, 0.08);
 }
 
+/* Explicit LIGHT scope — re-asserts the full light palette so a subtree can
+   opt back INTO light even when an ancestor (e.g. <html data-theme="dark">)
+   is dark. CSS custom properties inherit, so the nearest [data-theme] wins;
+   the public landing wraps itself in [data-theme="light"] (app/page.tsx) to
+   stay on its designed light canvas regardless of the user's saved app theme.
+   Values are kept verbatim in sync with the :root light block above — every
+   token the dark block overrides is restored here. */
+[data-theme="light"] {
+  --bg: #eaf3ff;
+  --bg-2: #ffffff;
+  --surface: #ffffff;
+  --surface-2: #f1f6fd;
+  --surface-3: #dbeafe;
+  --border: rgba(30, 64, 175, 0.1);
+  --border-2: rgba(30, 64, 175, 0.16);
+  --text: #0f172a;
+  --text-dim: #475569;
+  --text-muted: #94a3b8;
+  --grid: rgba(15, 23, 42, 0.06);
+  --sidebar-a: #ffffff;
+  --sidebar-b: #ffffff;
+  --body-glow-a: transparent;
+  --body-glow-b: transparent;
+  --kpi-tint-opacity: 0;
+  --nav-active-bg: rgba(37, 99, 235, 0.12);
+  --nav-hover: rgba(15, 23, 42, 0.04);
+  --nav-active-text: #312e81;
+  --doxie: #6366f1;
+  --doxie-2: #8b5cf6;
+  --trend-a: #4f46e5;
+  --trend-b: #dc2626;
+  --pill-red-text: #b91c1c;
+  --pill-amber-text: #b45309;
+  --pill-blue-text: #1d4ed8;
+  --pill-green-text: #047857;
+  --pill-purple-text: #6d28d9;
+  --pill-teal-text: #0f766e;
+  --score-red: #dc2626;
+  --score-amber: #d97706;
+  --score-indigo: #4f46e5;
+  --score-green: #059669;
+  --shadow-card: 0 1px 2px rgba(15, 23, 42, 0.04), 0 4px 14px rgba(15, 23, 42, 0.05);
+  --row-hover: rgba(99, 102, 241, 0.04);
+}
+
 /* Canvas sits behind the authenticated shell. The radial glow is
    invisible in light mode (body-glow-* are transparent) and blooms
    in dark mode. Available everywhere .canvas-surface is used. */
