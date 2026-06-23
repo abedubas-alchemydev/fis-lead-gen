@@ -23,7 +23,7 @@ import pytest
 from app.api.v1.endpoints import chatbot as endpoint_module
 from app.main import app
 from app.schemas.auth import AuthenticatedUser
-from app.schemas.chatbot import ChatbotMessage, ChatbotPageContext
+from app.schemas.chatbot import ChatbotMessage, ChatbotPageContext, ChatTurnUsage
 from app.services.auth import get_current_user
 from app.services.chatbot_history import ConversationListing
 from app.services.gemini_responses import (
@@ -89,7 +89,7 @@ class _StubChatbotService:
         db: Any,
         page_context: ChatbotPageContext | None = None,
         tools: Any = None,
-    ) -> str:
+    ) -> tuple[str, ChatTurnUsage]:
         self.calls.append(
             {
                 "messages": list(messages),
@@ -102,7 +102,16 @@ class _StubChatbotService:
         if self.raises is not None:
             raise self.raises
         assert self.reply is not None
-        return self.reply
+        # The real service now returns (reply, usage); the endpoint unpacks
+        # the tuple and forwards usage to the assistant append.
+        usage = ChatTurnUsage(
+            prompt_tokens=11,
+            completion_tokens=22,
+            total_tokens=33,
+            tool_call_count=0,
+            latency_ms=44,
+        )
+        return self.reply, usage
 
     async def chat_stream(
         self,
@@ -195,6 +204,7 @@ class _StubHistoryService:
         role: str,
         content: str,
         page_context: ChatbotPageContext | None = None,
+        usage: ChatTurnUsage | None = None,
     ) -> _StubMessageRow:
         self.calls.append(
             {
@@ -203,6 +213,7 @@ class _StubHistoryService:
                 "role": role,
                 "content": content,
                 "page_context": page_context,
+                "usage": usage,
             }
         )
         append_count = sum(

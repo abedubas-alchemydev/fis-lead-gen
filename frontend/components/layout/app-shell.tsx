@@ -159,6 +159,17 @@ function ExtractionAnalyticsIcon(props: IconProps) {
   );
 }
 
+// Coin-stack glyph for the admin Doxie usage / cost dashboard.
+function DoxieUsageIcon(props: IconProps) {
+  return (
+    <IconBase {...props}>
+      <ellipse cx="12" cy="6" rx="7" ry="3" />
+      <path d="M5 6v6c0 1.7 3.1 3 7 3s7-1.3 7-3V6" />
+      <path d="M5 12v6c0 1.7 3.1 3 7 3s7-1.3 7-3v-6" />
+    </IconBase>
+  );
+}
+
 // Address-book glyph for the persons-by-firm browse / per-firm enrich page.
 function OutreachContactsIcon(props: IconProps) {
   return (
@@ -306,7 +317,8 @@ const navSections: ReadonlyArray<NavSection> = [
       { href: "/settings/account" as Route, label: "My Account", icon: KeyIcon, badgeKey: null },
       { href: "/settings/email-accounts" as Route, label: "Email Accounts", icon: MailAtIcon, badgeKey: null },
       { href: "/settings/users" as Route, label: "Users", icon: UsersIcon, badgeKey: null, adminOnly: true, permissionKey: "users" },
-      { href: "/settings/extractions" as Route, label: "Extraction Analytics", icon: ExtractionAnalyticsIcon, badgeKey: null, adminOnly: true }
+      { href: "/settings/extractions" as Route, label: "Extraction Analytics", icon: ExtractionAnalyticsIcon, badgeKey: null, adminOnly: true },
+      { href: "/settings/doxie-usage" as Route, label: "Doxie Usage", icon: DoxieUsageIcon, badgeKey: null, adminOnly: true }
       // Memberships nav item intentionally hidden (2026-05-30) — route/page kept:
       // { href: "/settings/clearing-memberships" as Route, label: "Memberships", icon: ShieldCheckIcon, badgeKey: null, adminOnly: true }
     ]

@@ -282,6 +282,17 @@ class Settings(BaseSettings):
     # multi-firm comparisons) were truncating mid-reply at 1024.
     gemini_chat_max_output_tokens: int = 4096
     gemini_chat_temperature: float = 0.7
+    # Per-1M-token USD list price for the Doxie chat model (gemini-2.5-flash:
+    # $0.30 input / $2.50 output as of this writing). Drives the *estimated*
+    # cost on the admin Doxie Usage dashboard — a flat blended rate, not a
+    # billing source of truth. Env-overridable so a price change is a config
+    # flip (no redeploy): ``DOXIE_COST_INPUT_PER_1M`` / ``_OUTPUT_PER_1M``.
+    doxie_cost_input_per_1m_usd: float = Field(
+        default=0.30, alias="DOXIE_COST_INPUT_PER_1M"
+    )
+    doxie_cost_output_per_1m_usd: float = Field(
+        default=2.50, alias="DOXIE_COST_OUTPUT_PER_1M"
+    )
     # When True, the LLM-bound clearing-extraction path uploads PDFs to the
     # provider Files API (Gemini / OpenAI) instead of inline base64. ADR-0001
     # phase 2. Default off so the rollout is reversible by flag flip; the

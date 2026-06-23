@@ -20,6 +20,7 @@ from app.schemas.chatbot import (
     ChatbotNewConversationResponse,
     ChatbotRequest,
     ChatbotResponse,
+    ChatTurnUsage,
 )
 from app.services.auth import get_current_user
 from app.services.chatbot import ChatbotService
@@ -85,7 +86,7 @@ async def post_chatbot_message(
     )
 
     try:
-        reply = await chatbot_service.chat(
+        reply, usage = await chatbot_service.chat(
             messages=payload.messages,
             user=current_user,
             db=db,
@@ -123,6 +124,7 @@ async def post_chatbot_message(
             conversation_id=conversation.id,
             role="assistant",
             content=reply,
+            usage=usage,
         )
     except Exception as exc:
         logger.exception(
@@ -215,6 +217,7 @@ async def post_chatbot_message_stream(
 
     async def _sse_stream() -> AsyncIterator[bytes]:
         final_reply = ""
+        final_usage: ChatTurnUsage | None = None
         try:
             async for event in chatbot_service.chat_stream(
                 messages=payload.messages,
@@ -224,6 +227,16 @@ async def post_chatbot_message_stream(
             ):
                 if event.get("type") == "done":
                     final_reply = event.get("reply", "")
+                    # The terminal done event carries the turn's usage —
+                    # tool/latency always set, tokens NULL when Gemini
+                    # omitted usageMetadata on the final chunk.
+                    final_usage = ChatTurnUsage(
+                        prompt_tokens=event.get("prompt_tokens"),
+                        completion_tokens=event.get("completion_tokens"),
+                        total_tokens=event.get("total_tokens"),
+                        tool_call_count=event.get("tool_call_count", 0),
+                        latency_ms=event.get("latency_ms", 0),
+                    )
                 yield f"data: {json.dumps(event)}\n\n".encode("utf-8")
                 if event.get("type") in ("done", "error"):
                     break
@@ -253,6 +266,7 @@ async def post_chatbot_message_stream(
                     conversation_id=conversation.id,
                     role="assistant",
                     content=final_reply,
+                    usage=final_usage,
                 )
             except Exception:
                 logger.exception(

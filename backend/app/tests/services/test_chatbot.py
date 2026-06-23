@@ -16,10 +16,13 @@ import httpx
 import pytest
 import respx
 
+from typing import Any
+
 from app.core.config import settings
 from app.schemas.auth import AuthenticatedUser
-from app.schemas.chatbot import ChatbotMessage, ChatbotPageContext
+from app.schemas.chatbot import ChatbotMessage, ChatbotPageContext, ChatTurnUsage
 from app.services.chatbot import DOXIE_SYSTEM_PROMPT, ChatbotService
+from app.services.chatbot_tools import Tool
 from app.services.gemini_responses import (
     GeminiConfigurationError,
     GeminiExtractionError,
@@ -83,6 +86,22 @@ def _reply_payload(text: str = "Hello from Doxie!") -> dict[str, object]:
     }
 
 
+def _reply_payload_with_usage(
+    text: str = "Hello from Doxie!",
+    *,
+    prompt: int = 120,
+    completion: int = 45,
+    total: int = 165,
+) -> dict[str, object]:
+    payload = _reply_payload(text)
+    payload["usageMetadata"] = {
+        "promptTokenCount": prompt,
+        "candidatesTokenCount": completion,
+        "totalTokenCount": total,
+    }
+    return payload
+
+
 @respx.mock
 @pytest.mark.asyncio
 async def test_chat_returns_reply_text_and_sends_doxie_system_prompt(
@@ -98,7 +117,7 @@ async def test_chat_returns_reply_text_and_sends_doxie_system_prompt(
 
     route = respx.post(_GEMINI_CHAT_URL).mock(side_effect=capture)
 
-    reply = await ChatbotService().chat(
+    reply, _usage = await ChatbotService().chat(
         messages=[ChatbotMessage(role="user", content="Hello")],
         user=user,
         db=db_stub,
@@ -329,7 +348,7 @@ async def test_chat_entity_context_miss_falls_back_to_path_title(
     captured: dict[str, bytes] = {}
     _capture_route(captured)
 
-    reply = await ChatbotService().chat(
+    reply, _usage = await ChatbotService().chat(
         messages=[ChatbotMessage(role="user", content="What is this firm?")],
         user=user,
         db=db,
@@ -475,7 +494,7 @@ async def test_chat_retries_transient_5xx_then_succeeds(
         ]
     )
 
-    reply = await ChatbotService().chat(
+    reply, _usage = await ChatbotService().chat(
         messages=[ChatbotMessage(role="user", content="hi")],
         user=user,
         db=db_stub,
@@ -547,3 +566,129 @@ def test_no_advertised_tool_emits_empty_properties() -> None:
                 f"{tool.name} declares parameters with empty properties — "
                 "Gemini will 400 the whole chat turn"
             )
+
+
+# ── Usage capture (token + tool counts on the returned ChatTurnUsage) ─────
+
+
+@respx.mock
+@pytest.mark.asyncio
+async def test_chat_returns_usage_from_terminal_response_metadata(
+    patch_gemini: None,
+    user: AuthenticatedUser,
+    db_stub: object,
+) -> None:
+    """A plain (no-tool) turn returns the terminal response's token counts
+    on the ChatTurnUsage, with zero tool calls and a non-negative latency."""
+    respx.post(_GEMINI_CHAT_URL).mock(
+        return_value=httpx.Response(
+            200,
+            json=_reply_payload_with_usage(
+                "Hi!", prompt=120, completion=45, total=165
+            ),
+        )
+    )
+
+    reply, usage = await ChatbotService().chat(
+        messages=[ChatbotMessage(role="user", content="Hello")],
+        user=user,
+        db=db_stub,
+        tools={},
+    )
+
+    assert reply == "Hi!"
+    assert isinstance(usage, ChatTurnUsage)
+    assert usage.prompt_tokens == 120
+    assert usage.completion_tokens == 45
+    assert usage.total_tokens == 165
+    assert usage.tool_call_count == 0
+    assert usage.latency_ms >= 0
+
+
+@respx.mock
+@pytest.mark.asyncio
+async def test_chat_usage_tokens_none_when_metadata_absent(
+    patch_gemini: None,
+    user: AuthenticatedUser,
+    db_stub: object,
+) -> None:
+    """When Gemini omits usageMetadata, token fields stay None while tool
+    count + latency remain valid (NULL-tolerant persistence path)."""
+    respx.post(_GEMINI_CHAT_URL).mock(
+        return_value=httpx.Response(200, json=_reply_payload("No metadata here."))
+    )
+
+    _reply, usage = await ChatbotService().chat(
+        messages=[ChatbotMessage(role="user", content="Hello")],
+        user=user,
+        db=db_stub,
+        tools={},
+    )
+
+    assert usage.prompt_tokens is None
+    assert usage.completion_tokens is None
+    assert usage.total_tokens is None
+    assert usage.tool_call_count == 0
+    assert usage.latency_ms >= 0
+
+
+def _function_call_payload(name: str, args: dict[str, Any]) -> dict[str, object]:
+    return {
+        "candidates": [
+            {
+                "content": {
+                    "role": "model",
+                    "parts": [{"functionCall": {"name": name, "args": args}}],
+                },
+                "finishReason": "STOP",
+            }
+        ]
+    }
+
+
+def _usage_tool_stub(name: str, result: dict[str, Any]) -> Tool:
+    async def execute(_user: Any, _db: Any, _args: dict[str, Any]) -> dict[str, Any]:
+        return result
+
+    return Tool(
+        name=name,
+        description=f"Stub {name}",
+        parameters_schema={"type": "object", "properties": {}, "required": []},
+        feature_key="master_list",
+        execute=execute,
+    )
+
+
+@respx.mock
+@pytest.mark.asyncio
+async def test_chat_usage_counts_one_tool_call(
+    patch_gemini: None,
+    no_backoff_sleep: None,
+    user: AuthenticatedUser,
+    db_stub: object,
+) -> None:
+    """A turn that dispatches one tool before the terminal text reports
+    ``tool_call_count == 1`` and reads tokens off the terminal response."""
+    respx.post(_GEMINI_CHAT_URL).mock(
+        side_effect=[
+            httpx.Response(200, json=_function_call_payload("lookup", {"id": 7})),
+            httpx.Response(
+                200,
+                json=_reply_payload_with_usage(
+                    "Done!", prompt=300, completion=80, total=380
+                ),
+            ),
+        ]
+    )
+
+    reply, usage = await ChatbotService().chat(
+        messages=[ChatbotMessage(role="user", content="Tell me about firm 7")],
+        user=user,
+        db=db_stub,
+        tools={"lookup": _usage_tool_stub("lookup", {"name": "Acme"})},
+    )
+
+    assert reply == "Done!"
+    assert usage.tool_call_count == 1
+    # Tokens come from the terminal (second) response.
+    assert usage.total_tokens == 380
