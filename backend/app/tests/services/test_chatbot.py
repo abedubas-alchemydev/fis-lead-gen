@@ -251,11 +251,17 @@ class _FakeRowResult:
     def first(self) -> tuple[str, str | None] | None:
         return self._row
 
+    def all(self) -> list[tuple[str, str | None]]:
+        return [self._row] if self._row is not None else []
+
 
 class _FakeEntityDb:
     """Stands in for ``AsyncSession`` in entity-context tests: returns the
-    configured ``(name, crd_number)`` row for any SELECT (or raises) and
-    counts calls so tests can assert the lookup was/wasn't attempted."""
+    configured ``(name, crd_number)`` row for the entity SELECT (or raises)
+    and counts those calls so tests can assert the lookup was/wasn't
+    attempted. The per-turn user-memory SELECT (against ``chatbot_user_memory``)
+    is served as an empty result and NOT counted, so it stays orthogonal to
+    the entity-context assertions."""
 
     def __init__(
         self,
@@ -266,7 +272,12 @@ class _FakeEntityDb:
         self.raises = raises
         self.execute_calls = 0
 
-    async def execute(self, _stmt: object) -> _FakeRowResult:
+    async def execute(self, stmt: object) -> _FakeRowResult:
+        # The chat() pre-loop also reads user memory; ignore that query here
+        # (empty result, uncounted) so these tests keep asserting only the
+        # entity lookup count.
+        if "chatbot_user_memory" in str(stmt):
+            return _FakeRowResult(None)
         self.execute_calls += 1
         if self.raises is not None:
             raise self.raises
@@ -568,7 +579,7 @@ def test_no_advertised_tool_emits_empty_properties() -> None:
             )
 
 
-# ── Usage capture (token + tool counts on the returned ChatTurnUsage) ─────
+#── Usage capture (token + tool counts on the returned ChatTurnUsage) ─────
 
 
 @respx.mock
@@ -692,3 +703,45 @@ async def test_chat_usage_counts_one_tool_call(
     assert usage.tool_call_count == 1
     # Tokens come from the terminal (second) response.
     assert usage.total_tokens == 380
+
+
+def test_build_system_text_injects_user_memory_below_prompt() -> None:
+    """Per-user memories appear as a bounded block placed BELOW the
+    authoritative persona prompt (so a user-supplied 'fact' can't override
+    Doxie's rules), and are omitted entirely when no memories are passed."""
+    from app.services.chatbot import ChatbotService
+
+    text = ChatbotService._build_system_text(
+        None,
+        {},
+        None,
+        ["Focuses on self-clearing firms in TX", "Standard fee is 25bps"],
+    )
+    assert "saved preferences/facts" in text
+    assert "Focuses on self-clearing firms in TX" in text
+    assert "Standard fee is 25bps" in text
+    # Memory block sits after the authoritative system prompt.
+    assert text.index(DOXIE_SYSTEM_PROMPT) < text.index("saved preferences/facts")
+
+    # No memories → no block at all.
+    bare = ChatbotService._build_system_text(None, {}, None, None)
+    assert "saved preferences/facts" not in bare
+
+
+def test_build_system_text_caps_memory_count_and_length() -> None:
+    """The injected block is bounded on both axes: at most
+    ``USER_MEMORY_INJECT_LIMIT`` bullets, each clipped to
+    ``USER_MEMORY_LINE_MAX_CHARS`` characters."""
+    from app.services.chatbot import (
+        USER_MEMORY_INJECT_LIMIT,
+        USER_MEMORY_LINE_MAX_CHARS,
+        ChatbotService,
+    )
+
+    block = ChatbotService._format_user_memory(
+        ["x" * (USER_MEMORY_LINE_MAX_CHARS + 400)] * (USER_MEMORY_INJECT_LIMIT + 25)
+    )
+    bullets = [line for line in block.split("\n") if line.startswith("- ")]
+    assert len(bullets) == USER_MEMORY_INJECT_LIMIT
+    # "- " prefix + the clipped content.
+    assert max(len(b) for b in bullets) == USER_MEMORY_LINE_MAX_CHARS + 2

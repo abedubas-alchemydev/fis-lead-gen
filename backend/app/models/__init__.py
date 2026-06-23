@@ -7,6 +7,7 @@ from app.models.chatbot_conversation import ChatbotConversation
 from app.models.chatbot_firm_embedding import ChatbotFirmEmbedding
 from app.models.chatbot_learned_term import ChatbotLearnedTerm
 from app.models.chatbot_message import ChatbotMessage
+from app.models.chatbot_user_memory import ChatbotUserMemory
 from app.models.clearing_agency_membership import ClearingAgencyMembership
 from app.models.clearing_arrangement import ClearingArrangement
 from app.models.clearing_partner_merge_suggestion import ClearingPartnerMergeSuggestion
@@ -50,6 +51,7 @@ __all__ = [
     "ChatbotFirmEmbedding",
     "ChatbotLearnedTerm",
     "ChatbotMessage",
+    "ChatbotUserMemory",
     "ClearingAgencyMembership",
     "ClearingArrangement",
     "ClearingPartnerMergeSuggestion",

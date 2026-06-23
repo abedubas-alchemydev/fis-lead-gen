@@ -106,6 +106,7 @@ import type {
   AdminUserSavedFirmsResponse,
   ClearingMembershipDecisionResponse,
   ClearingMembershipReviewListResponse,
+  DoxieMemoryListResponse,
   LinkedProvidersResponse,
   ContactSearchResponse,
   InstitutionalInvestorListResponse,
@@ -214,6 +215,23 @@ export async function renameFavoriteList(
 
 export async function deleteFavoriteList(listId: number): Promise<void> {
   await apiRequest<void>(`/api/v1/favorite-lists/${listId}`, {
+    method: "DELETE"
+  });
+}
+
+// ── Doxie private per-user memory ─────────────────────────────────────────
+// Facts/preferences Doxie saved about the caller via the remember_fact tool.
+// Listed + deletable on /settings/doxie-memory. Strictly per-user — the BE
+// scopes every query to the session user; DELETE 404s on a non-owned id.
+
+export async function getDoxieMemories(): Promise<DoxieMemoryListResponse> {
+  return apiRequest<DoxieMemoryListResponse>(
+    buildApiPath("/api/v1/doxie/memories", { limit: 200 })
+  );
+}
+
+export async function deleteDoxieMemory(memoryId: number): Promise<void> {
+  await apiRequest<void>(`/api/v1/doxie/memories/${memoryId}`, {
     method: "DELETE"
   });
 }

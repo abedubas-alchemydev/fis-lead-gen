@@ -1751,6 +1751,8 @@ def test_tool_registry_has_expected_names() -> None:
         "get_app_help",
         # Doxie web-research / learned-term glossary tool.
         "research_term",
+        # Doxie private per-user memory tool.
+        "remember_fact",
         # Doxie BD<->IA dual-registration tool.
         "find_dual_registered_firms",
         # Doxie action tools (write-capable).
@@ -3778,6 +3780,90 @@ class TestResearchTerm:
         await tool.execute(bd_user, db_stub, {"query": "x", "limit": 999})
 
         assert captured["limit"] == chatbot_tools.WEB_RESEARCH_LIMIT_MAX
+
+
+class TestRememberFact:
+    """remember_fact is ungated (every user can save a private fact) and
+    writes a per-user row via the memory service. ``create_memory`` is
+    monkeypatched here — no DB. The tool must never raise: a storage failure
+    or empty content returns a structured error dict instead."""
+
+    async def test_missing_content_returns_invalid_args(
+        self, bd_user: AuthenticatedUser, db_stub: object
+    ) -> None:
+        tool = chatbot_tools.TOOL_REGISTRY["remember_fact"]
+        result = await tool.execute(bd_user, db_stub, {})
+        assert result["error"] == "invalid_args"
+
+    async def test_writes_per_user_row(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        bd_user: AuthenticatedUser,
+        db_stub: object,
+    ) -> None:
+        from types import SimpleNamespace
+
+        created = SimpleNamespace(content="Focuses on self-clearing firms in TX")
+        create = AsyncMock(return_value=created)
+        monkeypatch.setattr(chatbot_tools, "create_memory", create)
+
+        tool = chatbot_tools.TOOL_REGISTRY["remember_fact"]
+        result = await tool.execute(
+            bd_user,
+            db_stub,
+            {"content": "Focuses on self-clearing firms in TX", "kind": "fact"},
+        )
+
+        assert result["status"] == "remembered"
+        assert result["content"] == "Focuses on self-clearing firms in TX"
+        create.assert_awaited_once()
+        kwargs = create.await_args.kwargs
+        assert kwargs["user_id"] == bd_user.id
+        assert kwargs["content"] == "Focuses on self-clearing firms in TX"
+        assert kwargs["kind"] == "fact"
+
+    async def test_storage_failure_returns_error_not_raise(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        bd_user: AuthenticatedUser,
+        db_stub: object,
+    ) -> None:
+        monkeypatch.setattr(
+            chatbot_tools,
+            "create_memory",
+            AsyncMock(side_effect=RuntimeError("db down")),
+        )
+
+        tool = chatbot_tools.TOOL_REGISTRY["remember_fact"]
+        result = await tool.execute(bd_user, db_stub, {"content": "x"})
+
+        assert result["error"] == "unavailable"
+
+    async def test_ungated_for_no_access_user(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        no_access_user: AuthenticatedUser,
+        db_stub: object,
+    ) -> None:
+        from types import SimpleNamespace
+
+        monkeypatch.setattr(
+            chatbot_tools,
+            "create_memory",
+            AsyncMock(return_value=SimpleNamespace(content="noted")),
+        )
+        tool = chatbot_tools.TOOL_REGISTRY["remember_fact"]
+        result = await tool.execute(
+            no_access_user, db_stub, {"content": "noted"}
+        )
+        assert result.get("error") != "no_access"
+        assert result["status"] == "remembered"
+
+    def test_remember_fact_is_not_cacheable(self) -> None:
+        # Each capture is a real write — the (tool, args, user) LRU would
+        # otherwise swallow a repeat "remember X" within one chat.
+        tool = chatbot_tools.TOOL_REGISTRY["remember_fact"]
+        assert tool.cacheable is False
 
 
 class TestFindDualRegisteredFirms:
