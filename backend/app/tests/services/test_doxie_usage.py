@@ -97,31 +97,45 @@ async def _seed_conversation_with_messages(user_id: str) -> int:
 
 
 async def test_summary_coalesces_nulls_and_applies_cost_formula() -> None:
+    repo = DoxieUsageRepository()
+
+    # ``summary`` is a GLOBAL rollup across every user, and the shared
+    # integration DB already holds assistant turns seeded by other tests.
+    # Capture a baseline and assert on the DELTA this seed introduces rather
+    # than absolute totals (tests run serially, so nothing else mutates the
+    # table between the two reads).
+    async with SessionLocal() as session:
+        before = await repo.summary(session)
+
     user_id = await _seed_user()
     await _seed_conversation_with_messages(user_id)
 
-    repo = DoxieUsageRepository()
     async with SessionLocal() as session:
-        summary = await repo.summary(session)
+        after = await repo.summary(session)
 
-    # 3 assistant turns total; only 2 carried real token data.
-    assert summary.total_assistant_turns == 3
-    assert summary.assistant_turns_with_tokens == 2
-    # NULL tokens COALESCE to 0: 100+200 / 40+60 / 140+260.
-    assert summary.total_prompt_tokens == 300
-    assert summary.total_completion_tokens == 100
-    assert summary.total_tokens == 400
-    # NULL tool count COALESCEs to 0: 1 + 0.
-    assert summary.total_tool_calls == 1
-
-    expected_cost = round(
-        300 / 1_000_000 * settings.doxie_cost_input_per_1m_usd
-        + 100 / 1_000_000 * settings.doxie_cost_output_per_1m_usd,
-        4,
+    # This seed adds 3 assistant turns; only 2 carried real token data.
+    assert after.total_assistant_turns - before.total_assistant_turns == 3
+    assert (
+        after.assistant_turns_with_tokens - before.assistant_turns_with_tokens
+        == 2
     )
-    assert summary.estimated_cost_usd == expected_cost
-    assert summary.cost_input_per_1m_usd == settings.doxie_cost_input_per_1m_usd
-    assert summary.cost_output_per_1m_usd == settings.doxie_cost_output_per_1m_usd
+    # NULL tokens COALESCE to 0: 100+200 / 40+60 / 140+260.
+    assert after.total_prompt_tokens - before.total_prompt_tokens == 300
+    assert after.total_completion_tokens - before.total_completion_tokens == 100
+    assert after.total_tokens - before.total_tokens == 400
+    # NULL tool count COALESCEs to 0: 1 + 0.
+    assert after.total_tool_calls - before.total_tool_calls == 1
+
+    # The configured cost formula applied to this seed's added tokens.
+    expected_cost_delta = (
+        300 / 1_000_000 * settings.doxie_cost_input_per_1m_usd
+        + 100 / 1_000_000 * settings.doxie_cost_output_per_1m_usd
+    )
+    assert after.estimated_cost_usd - before.estimated_cost_usd == pytest.approx(
+        expected_cost_delta, abs=1e-4
+    )
+    assert after.cost_input_per_1m_usd == settings.doxie_cost_input_per_1m_usd
+    assert after.cost_output_per_1m_usd == settings.doxie_cost_output_per_1m_usd
 
 
 async def test_list_users_aggregates_per_user_with_latency_stats() -> None:
