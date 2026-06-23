@@ -112,6 +112,21 @@ def _gemini_chunk_function_call(name: str, args: dict[str, Any]) -> dict[str, An
     }
 
 
+def _gemini_chunk_usage(
+    prompt: int, completion: int, total: int
+) -> dict[str, Any]:
+    """A trailing chunk carrying usageMetadata and no content parts — Gemini
+    rides the token counts on (typically) the final SSE chunk."""
+    return {
+        "candidates": [{"content": {"role": "model", "parts": []}}],
+        "usageMetadata": {
+            "promptTokenCount": prompt,
+            "candidatesTokenCount": completion,
+            "totalTokenCount": total,
+        },
+    }
+
+
 def _sse_bytes(chunks: list[dict[str, Any]]) -> bytes:
     """Build a Gemini-style SSE body from a list of candidate dicts."""
     out = b""
@@ -165,6 +180,126 @@ async def test_streams_text_deltas_then_done_for_terminal_iteration(
     assert types == ["text_delta", "text_delta", "text_delta", "done"]
     assert [e["text"] for e in events[:3]] == ["Hello", ", ", "Doxie here."]
     assert events[-1]["reply"] == "Hello, Doxie here."
+
+
+# ── done event carries the turn's usage (token + tool + latency) ─────────
+
+
+@respx.mock
+@pytest.mark.asyncio
+async def test_done_event_carries_usage_when_metadata_present(
+    patch_gemini: None,
+    user: AuthenticatedUser,
+    db_stub: object,
+) -> None:
+    """The terminal ``done`` event surfaces the 5 usage fields; tokens come
+    off the trailing usageMetadata chunk, tool/latency are always set."""
+    respx.post(_GEMINI_STREAM_URL).mock(
+        return_value=httpx.Response(
+            200,
+            content=_sse_bytes(
+                [
+                    _gemini_chunk_text("Hi."),
+                    _gemini_chunk_usage(150, 50, 200),
+                ]
+            ),
+        )
+    )
+
+    events = await _collect(
+        ChatbotService().chat_stream(
+            messages=[ChatbotMessage(role="user", content="hi")],
+            user=user,
+            db=db_stub,
+            tools={},
+        )
+    )
+
+    done = events[-1]
+    assert done["type"] == "done"
+    assert done["reply"] == "Hi."
+    assert done["prompt_tokens"] == 150
+    assert done["completion_tokens"] == 50
+    assert done["total_tokens"] == 200
+    assert done["tool_call_count"] == 0
+    assert done["latency_ms"] >= 0
+
+
+@respx.mock
+@pytest.mark.asyncio
+async def test_done_event_tokens_null_when_metadata_absent(
+    patch_gemini: None,
+    user: AuthenticatedUser,
+    db_stub: object,
+) -> None:
+    """Gemini sometimes omits usageMetadata entirely — the done event then
+    carries NULL token fields while latency/tool count stay valid."""
+    respx.post(_GEMINI_STREAM_URL).mock(
+        return_value=httpx.Response(
+            200, content=_sse_bytes([_gemini_chunk_text("No usage block.")])
+        )
+    )
+
+    events = await _collect(
+        ChatbotService().chat_stream(
+            messages=[ChatbotMessage(role="user", content="hi")],
+            user=user,
+            db=db_stub,
+            tools={},
+        )
+    )
+
+    done = events[-1]
+    assert done["type"] == "done"
+    assert done["prompt_tokens"] is None
+    assert done["completion_tokens"] is None
+    assert done["total_tokens"] is None
+    assert done["tool_call_count"] == 0
+    assert done["latency_ms"] >= 0
+
+
+@respx.mock
+@pytest.mark.asyncio
+async def test_done_event_counts_tool_calls_across_iterations(
+    patch_gemini: None,
+    user: AuthenticatedUser,
+    db_stub: object,
+) -> None:
+    """A streamed turn that dispatches one tool reports tool_call_count == 1
+    on the terminal done event."""
+    respx.post(_GEMINI_STREAM_URL).mock(
+        side_effect=[
+            httpx.Response(
+                200,
+                content=_sse_bytes(
+                    [_gemini_chunk_function_call("lookup", {"id": 1})]
+                ),
+            ),
+            httpx.Response(
+                200,
+                content=_sse_bytes(
+                    [
+                        _gemini_chunk_text("Found it."),
+                        _gemini_chunk_usage(90, 20, 110),
+                    ]
+                ),
+            ),
+        ]
+    )
+
+    events = await _collect(
+        ChatbotService().chat_stream(
+            messages=[ChatbotMessage(role="user", content="who is firm 1?")],
+            user=user,
+            db=db_stub,
+            tools={"lookup": _make_tool_stub("lookup", result={"name": "Acme"})},
+        )
+    )
+
+    done = events[-1]
+    assert done["type"] == "done"
+    assert done["tool_call_count"] == 1
+    assert done["total_tokens"] == 110
 
 
 # ── Single-tool-call iteration ──────────────────────────────────────────

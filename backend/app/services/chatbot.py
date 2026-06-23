@@ -44,7 +44,7 @@ from app.core.config import settings
 from app.models.broker_dealer import BrokerDealer
 from app.models.investment_advisor import InvestmentAdvisor
 from app.schemas.auth import AuthenticatedUser
-from app.schemas.chatbot import ChatbotMessage, ChatbotPageContext
+from app.schemas.chatbot import ChatbotMessage, ChatbotPageContext, ChatTurnUsage
 from app.services.chatbot_app_knowledge import FEATURE_LABELS_FOR_PROMPT
 from app.services.chatbot_tools import TOOL_REGISTRY, Tool
 from app.services.gemini_responses import (
@@ -338,7 +338,7 @@ class ChatbotService:
         db: AsyncSession,
         page_context: ChatbotPageContext | None = None,
         tools: Mapping[str, Tool] | None = None,
-    ) -> str:
+    ) -> tuple[str, ChatTurnUsage]:
         if not settings.gemini_api_key:
             raise GeminiConfigurationError("GEMINI_API_KEY is not configured.")
         if not messages:
@@ -354,7 +354,11 @@ class ChatbotService:
         # Resolved once per request (one lightweight SELECT), reused across
         # every loop iteration's system prompt.
         entity_line = await self._resolve_entity_context(db, page_context)
-        deadline = monotonic() + CHAT_WALL_CLOCK_BUDGET_S
+        started_at = monotonic()
+        deadline = started_at + CHAT_WALL_CLOCK_BUDGET_S
+        # Accumulated across iterations; the terminal response's token
+        # counts plus this tool tally + elapsed ms become the turn's usage.
+        tool_calls_total = 0
 
         for iteration in range(MAX_TOOL_ITERATIONS + 1):
             if monotonic() > deadline:
@@ -382,26 +386,35 @@ class ChatbotService:
             # Terminal: no tool calls. Either we got our final text or we hit
             # the iteration cap and surface whatever the model said last.
             if not function_calls:
-                return self._extract_text(response_payload)
+                reply = self._extract_text(response_payload)
+                usage = self._build_turn_usage(
+                    response_payload, tool_calls_total, started_at
+                )
+                return reply, usage
             if iteration == MAX_TOOL_ITERATIONS:
                 logger.warning(
                     "doxie chat max tool iterations hit user_id=%s",
                     user.id,
                 )
+                usage = self._build_turn_usage(
+                    response_payload, tool_calls_total, started_at
+                )
                 # Try to surface any final text; fall back to a friendly
                 # message rather than raising into a 502.
                 try:
-                    return self._extract_text(response_payload)
+                    return self._extract_text(response_payload), usage
                 except GeminiExtractionError:
                     return (
                         "I wasn't able to finalize that lookup. "
-                        "Could you rephrase the question?"
+                        "Could you rephrase the question?",
+                        usage,
                     )
 
             # Echo the model's turn verbatim — Gemini requires the original
             # functionCall parts in the conversation, not reconstructed ones.
             contents.append({"role": "model", "parts": model_parts})
 
+            tool_calls_total += len(function_calls)
             response_parts: list[dict[str, Any]] = []
             for call in function_calls:
                 logger.info(
@@ -701,7 +714,11 @@ class ChatbotService:
         # Resolved once per request (one lightweight SELECT), reused across
         # every loop iteration's system prompt.
         entity_line = await self._resolve_entity_context(db, page_context)
-        deadline = monotonic() + CHAT_WALL_CLOCK_BUDGET_S
+        started_at = monotonic()
+        deadline = started_at + CHAT_WALL_CLOCK_BUDGET_S
+        # Accumulated across iterations; folded into the terminal ``done``
+        # event so the endpoint can persist the turn's usage.
+        tool_calls_total = 0
 
         for iteration in range(MAX_TOOL_ITERATIONS + 1):
             if monotonic() > deadline:
@@ -728,9 +745,13 @@ class ChatbotService:
             accumulated_parts: list[dict[str, Any]] = []
             function_calls: list[_FunctionCall] = []
             iteration_text = ""
+            # usageMetadata rides only the final SSE chunk and Gemini
+            # sometimes omits it entirely; keep the last one we saw.
+            last_chunk: dict[str, Any] = {}
 
             try:
                 async for chunk in self._stream_gemini_chunks(payload):
+                    last_chunk = chunk
                     candidates = chunk.get("candidates", [])
                     if not isinstance(candidates, list) or not candidates:
                         continue
@@ -768,7 +789,9 @@ class ChatbotService:
             # the final reply. iteration_text was already streamed as
             # deltas to the FE — we just close with done.
             if not function_calls:
-                yield {"type": "done", "reply": iteration_text}
+                yield self._done_event(
+                    iteration_text, last_chunk, tool_calls_total, started_at
+                )
                 return
 
             # Iteration cap. Surface whatever text we have or a fallback,
@@ -784,11 +807,14 @@ class ChatbotService:
                 )
                 if not iteration_text:
                     yield {"type": "text_delta", "text": fallback}
-                yield {"type": "done", "reply": fallback}
+                yield self._done_event(
+                    fallback, last_chunk, tool_calls_total, started_at
+                )
                 return
 
             # Non-terminal: dispatch tools, emit progress events, continue.
             contents.append({"role": "model", "parts": accumulated_parts})
+            tool_calls_total += len(function_calls)
             response_parts: list[dict[str, Any]] = []
             for call in function_calls:
                 logger.info(
@@ -831,6 +857,33 @@ class ChatbotService:
             "type": "error",
             "code": "extraction",
             "message": "Tool iteration loop exited unexpectedly.",
+        }
+
+    @classmethod
+    def _done_event(
+        cls,
+        reply: str,
+        last_chunk: Mapping[str, Any],
+        tool_calls_total: int,
+        started_at: float,
+    ) -> dict[str, Any]:
+        """Build the terminal ``done`` SSE event carrying the turn's usage.
+
+        Token counts come off the final SSE chunk's ``usageMetadata`` (NULL
+        when Gemini omitted it); ``tool_call_count`` and ``latency_ms`` are
+        always set. The five usage fields ride alongside ``reply`` so the
+        endpoint persists them without changing the FE chat contract — the
+        chat client reads ``reply`` and ignores the rest.
+        """
+        usage = cls._build_turn_usage(last_chunk, tool_calls_total, started_at)
+        return {
+            "type": "done",
+            "reply": reply,
+            "prompt_tokens": usage.prompt_tokens,
+            "completion_tokens": usage.completion_tokens,
+            "total_tokens": usage.total_tokens,
+            "tool_call_count": usage.tool_call_count,
+            "latency_ms": usage.latency_ms,
         }
 
     async def _stream_gemini_chunks(
@@ -991,4 +1044,59 @@ class ChatbotService:
         # can render a fallback instead of an empty bubble.
         raise GeminiExtractionError(
             f"Gemini chat response was empty (finishReason={finish_reason!r})."
+        )
+
+    @staticmethod
+    def _extract_usage_metadata(
+        payload: Mapping[str, Any],
+    ) -> tuple[int | None, int | None, int | None]:
+        """Pull ``(prompt, completion, total)`` token counts off a response.
+
+        Reads Gemini's ``usageMetadata.{promptTokenCount,
+        candidatesTokenCount, totalTokenCount}``. Any field that's absent
+        or non-integer comes back as ``None`` — so a missing ``usageMetadata``
+        block (which Gemini omits on some streaming responses) yields
+        ``(None, None, None)`` rather than raising. Persisted NULLs are
+        distinct from a real captured ``0``.
+        """
+        usage = payload.get("usageMetadata")
+        if not isinstance(usage, dict):
+            return None, None, None
+
+        def _as_int(key: str) -> int | None:
+            value = usage.get(key)
+            if isinstance(value, bool) or not isinstance(value, int):
+                return None
+            return value
+
+        return (
+            _as_int("promptTokenCount"),
+            _as_int("candidatesTokenCount"),
+            _as_int("totalTokenCount"),
+        )
+
+    @classmethod
+    def _build_turn_usage(
+        cls,
+        payload: Mapping[str, Any],
+        tool_calls_total: int,
+        started_at: float,
+    ) -> ChatTurnUsage:
+        """Assemble the turn's :class:`ChatTurnUsage` from the terminal
+        response's token counts + the accumulated tool tally + elapsed ms.
+
+        v1 token accounting records the *terminal* response's
+        ``usageMetadata`` only; intermediate tool-iteration completions
+        aren't summed (documented convention — tool-heavy turns under-report
+        total tokens). Latency and tool count are always exact.
+        """
+        prompt_tokens, completion_tokens, total_tokens = (
+            cls._extract_usage_metadata(payload)
+        )
+        return ChatTurnUsage(
+            prompt_tokens=prompt_tokens,
+            completion_tokens=completion_tokens,
+            total_tokens=total_tokens,
+            tool_call_count=tool_calls_total,
+            latency_ms=int((monotonic() - started_at) * 1000),
         )
