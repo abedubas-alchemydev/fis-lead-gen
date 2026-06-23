@@ -87,9 +87,13 @@ export function RedoHeader() {
             >
               Sign in
             </Link>
+            {/* Label is full #ffffff. The base fill is deepened one step from
+                accent indigo-500 (#6366f1 → white only 4.47:1, just under AA) to
+                indigo-600 (#4f46e5 → 6.29:1) so the white label clears AA; the
+                violet hover + accent ring/shadow are unchanged. */}
             <Link
               href="/signup"
-              className="rounded-xl bg-[var(--accent,#6366f1)] px-5 py-2.5 text-sm font-medium text-white shadow-[0_6px_20px_-6px_rgba(99,102,241,0.6)] outline-none transition-all duration-200 hover:-translate-y-0.5 hover:bg-[var(--accent-2,#8b5cf6)] hover:shadow-[0_10px_28px_-8px_rgba(139,92,246,0.7)] focus-visible:ring-2 focus-visible:ring-[var(--accent,#6366f1)]/40"
+              className="rounded-xl bg-indigo-600 px-5 py-2.5 text-sm font-medium text-white shadow-[0_6px_20px_-6px_rgba(99,102,241,0.6)] outline-none transition-all duration-200 hover:-translate-y-0.5 hover:bg-[var(--accent-2,#8b5cf6)] hover:shadow-[0_10px_28px_-8px_rgba(139,92,246,0.7)] focus-visible:ring-2 focus-visible:ring-[var(--accent,#6366f1)]/40"
             >
               Get started
             </Link>

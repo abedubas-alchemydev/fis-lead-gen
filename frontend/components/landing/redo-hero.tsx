@@ -64,12 +64,14 @@ function KpiTile({ kpi, index, start }: { kpi: Kpi; index: number; start: boolea
   const value = useCountUp(kpi.value, COUNT_DURATION_MS, index * COUNT_STAGGER_MS, start);
   return (
     <div className="rounded-2xl border border-white/10 bg-white/5 p-3.5 backdrop-blur">
-      <p className="text-[10px] font-medium uppercase tracking-[0.18em] text-white/45">
+      {/* Info-bearing label lifted from white/45 (~3.8:1 on the navy panel —
+          fails AA for this 10px text) to white/65 (~7.5:1, comfortably AA). */}
+      <p className="text-[10px] font-medium uppercase tracking-[0.18em] text-white/65">
         {kpi.label}
       </p>
       <p className="mt-2 text-2xl font-bold tabular-nums tracking-tight text-white">
         {value}
-        {kpi.suffix ? <span className="text-base text-white/55">{kpi.suffix}</span> : null}
+        {kpi.suffix ? <span className="text-base text-white/65">{kpi.suffix}</span> : null}
       </p>
     </div>
   );
@@ -81,11 +83,13 @@ function FilingRowItem({ row }: { row: FilingRow }) {
       <Pill variant={row.variant}>{row.form}</Pill>
       <div className="min-w-0 flex-1">
         <p className="truncate text-[13px] font-semibold text-white/90">{row.firm}</p>
-        <p className="truncate text-[11px] text-white/45">{row.label}</p>
+        {/* Info label lifted white/45 → white/65 (~3.8:1 → ~7.5:1 on the panel). */}
+        <p className="truncate text-[11px] text-white/65">{row.label}</p>
       </div>
       <div className="shrink-0 text-right">
-        <p className="font-mono text-[10px] uppercase tracking-[0.06em] text-white/50">{row.crd}</p>
-        <p className="font-mono text-[10px] text-white/35">{row.ago} ago</p>
+        {/* CRD code white/50 → white/65; timestamp white/35 (~3:1) → white/65. */}
+        <p className="font-mono text-[10px] uppercase tracking-[0.06em] text-white/65">{row.crd}</p>
+        <p className="font-mono text-[10px] text-white/65">{row.ago} ago</p>
       </div>
     </div>
   );
@@ -141,9 +145,11 @@ function FilingTerminal() {
               <span className="font-mono text-[11px] font-semibold uppercase tracking-[0.22em] text-success">
                 Live
               </span>
-              <span className="text-[11px] text-white/40">· SEC / FINRA wire</span>
+              {/* Wire-source caption + clock lifted to white/65 so they read as
+                  intentional metadata rather than near-invisible chrome. */}
+              <span className="text-[11px] text-white/65">· SEC / FINRA wire</span>
             </div>
-            <p className="font-mono text-[11px] text-white/50">
+            <p className="font-mono text-[11px] text-white/65">
               {clock}
               <span className="animate-blink ml-0.5 text-[var(--accent,#6366f1)]">_</span>
             </p>
@@ -159,10 +165,10 @@ function FilingTerminal() {
           {/* Streaming filing wire */}
           <div className="mt-4">
             <div className="mb-2 flex items-center justify-between px-1">
-              <p className="text-[10px] font-medium uppercase tracking-[0.2em] text-white/40">
+              <p className="text-[10px] font-medium uppercase tracking-[0.2em] text-white/65">
                 Incoming filings
               </p>
-              <span className="inline-flex items-center gap-1 text-[10px] text-white/35">
+              <span className="inline-flex items-center gap-1 text-[10px] text-white/55">
                 <Radio className="h-3 w-3" />
                 streaming
               </span>
@@ -243,9 +249,13 @@ export function RedoHero() {
           </p>
 
           <div className="animate-fade-in delay-400 mt-10 flex flex-wrap gap-4">
+            {/* Label is full #ffffff; base fill deepened from accent indigo-500
+                (#6366f1 → 4.47:1, just under AA) to indigo-600 (#4f46e5 →
+                6.29:1) so the white label clears AA at rest. The hover gradient
+                overlay + accent shadow/ring are unchanged. */}
             <Link
               href="/signup"
-              className="group relative inline-flex items-center gap-2 overflow-hidden rounded-2xl bg-[var(--accent,#6366f1)] px-7 py-4 text-sm font-semibold text-white shadow-lg shadow-[var(--accent,#6366f1)]/30 transition duration-300 hover:-translate-y-0.5 hover:shadow-xl hover:shadow-[var(--accent,#6366f1)]/40 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--accent,#6366f1)]/50 focus-visible:ring-offset-2 focus-visible:ring-offset-navy"
+              className="group relative inline-flex items-center gap-2 overflow-hidden rounded-2xl bg-indigo-600 px-7 py-4 text-sm font-semibold text-white shadow-lg shadow-[var(--accent,#6366f1)]/30 transition duration-300 hover:-translate-y-0.5 hover:shadow-xl hover:shadow-[var(--accent,#6366f1)]/40 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--accent,#6366f1)]/50 focus-visible:ring-offset-2 focus-visible:ring-offset-navy"
             >
               <span className="relative z-10">See live prospects</span>
               <ArrowRight className="relative z-10 h-4 w-4 transition-transform duration-300 group-hover:translate-x-0.5" />

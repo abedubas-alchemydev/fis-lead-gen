@@ -213,7 +213,12 @@ export function RedoFilingWire() {
       {/* (B) Heading block + vertical live feed. */}
       <div className="mx-auto mt-12 grid max-w-7xl items-center gap-10 lg:grid-cols-2">
         <div>
-          <span className="inline-flex items-center gap-2 rounded-full border border-success/20 bg-success/5 px-4 py-1.5 text-xs font-semibold uppercase tracking-[0.2em] text-success">
+          {/* Label darkened from text-success (#27AE60, 2.44:1 on this near-
+              white band — fails AA) to emerald-700 #047857 (~4.9:1, passes AA)
+              while staying a "live/positive" green. The small live dot keeps
+              the brighter success green — a 1.5px decorative glyph isn't held
+              to text contrast. */}
+          <span className="inline-flex items-center gap-2 rounded-full border border-success/20 bg-success/5 px-4 py-1.5 text-xs font-semibold uppercase tracking-[0.2em] text-[#047857]">
             <span className="h-1.5 w-1.5 animate-pulse rounded-full bg-success" />
             Live feed
           </span>
