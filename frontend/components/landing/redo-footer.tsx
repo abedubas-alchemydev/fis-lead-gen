@@ -35,7 +35,7 @@ export function RedoFooter() {
             <Link
               key={link.label}
               href={link.href}
-              className="group relative text-xs font-medium text-[var(--text-muted,#94a3b8)] transition-colors duration-200 hover:text-[var(--text,#0f172a)] focus-visible:text-[var(--text,#0f172a)] focus-visible:outline-none"
+              className="group relative text-xs font-medium text-[var(--text-dim,#475569)] transition-colors duration-200 hover:text-[var(--text,#0f172a)] focus-visible:text-[var(--text,#0f172a)] focus-visible:outline-none"
             >
               {link.label}
               <span
@@ -56,7 +56,7 @@ export function RedoFooter() {
               DOX — Institutional Finance Intelligence
             </span>
           </div>
-          <p className="text-xs text-[var(--text-muted,#94a3b8)]">
+          <p className="text-xs text-[var(--text-dim,#475569)]">
             &copy; {new Date().getFullYear()} Alchemy Dev. All rights reserved. Confidential.
           </p>
         </div>

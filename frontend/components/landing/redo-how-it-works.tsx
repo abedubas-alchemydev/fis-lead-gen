@@ -141,7 +141,7 @@ export function RedoHowItWorks() {
                     <h3 className="relative mt-5 text-lg font-semibold text-[var(--text,#0f172a)]">
                       {step.title}
                     </h3>
-                    <p className="relative mt-2 text-sm leading-relaxed text-[var(--text-muted,#94a3b8)]">
+                    <p className="relative mt-2 text-sm leading-relaxed text-[var(--text-dim,#475569)]">
                       {step.desc}
                     </p>
                   </div>

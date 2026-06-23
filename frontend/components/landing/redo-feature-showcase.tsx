@@ -65,7 +65,7 @@ function SparklinePanel({
 
   return (
     <article className="rounded-2xl border border-[var(--border,rgba(30,64,175,0.1))] bg-[var(--surface,#fff)] p-5 shadow-[var(--shadow-card,0_1px_2px_rgba(15,23,42,0.04),0_4px_14px_rgba(15,23,42,0.05))]">
-      <div className="text-[11px] font-semibold uppercase tracking-[0.1em] text-[var(--text-muted,#94a3b8)]">
+      <div className="text-[11px] font-semibold uppercase tracking-[0.1em] text-[var(--text-dim,#475569)]">
         {title}
       </div>
       <div className="mb-1.5 mt-2 flex items-baseline gap-2.5 text-[34px] font-bold tracking-[-0.02em] tabular-nums text-[var(--text,#0f172a)]">
@@ -91,7 +91,7 @@ function SparklinePanel({
           {trend.label}
         </span>
       </div>
-      <p className="text-[12px] text-[var(--text-muted,#94a3b8)]">{helper}</p>
+      <p className="text-[12px] text-[var(--text-dim,#475569)]">{helper}</p>
       <svg
         className="mt-3 inline h-9 w-full align-baseline"
         viewBox="0 0 200 40"
@@ -151,7 +151,7 @@ function DistributionPanel({
         <h3 className="text-[15px] font-semibold tracking-[-0.01em] text-[var(--text,#0f172a)]">
           {title}
         </h3>
-        <p className="mt-0.5 text-[12px] text-[var(--text-muted,#94a3b8)]">{helper}</p>
+        <p className="mt-0.5 text-[12px] text-[var(--text-dim,#475569)]">{helper}</p>
       </div>
       <div className="flex-1">
         {rows.map((row, index) => {
@@ -169,7 +169,7 @@ function DistributionPanel({
                 <span className="truncate text-[13px] font-medium text-[var(--text,#0f172a)]">
                   {row.label}
                 </span>
-                <span className="shrink-0 whitespace-nowrap text-[11px] text-[var(--text-muted,#94a3b8)]">
+                <span className="shrink-0 whitespace-nowrap text-[11px] text-[var(--text-dim,#475569)]">
                   {row.meta}
                 </span>
               </div>
@@ -223,7 +223,7 @@ function ProspectPanel({
         <h3 className="text-[15px] font-semibold tracking-[-0.01em] text-[var(--text,#0f172a)]">
           {title}
         </h3>
-        <p className="mt-0.5 text-[12px] text-[var(--text-muted,#94a3b8)]">{helper}</p>
+        <p className="mt-0.5 text-[12px] text-[var(--text-dim,#475569)]">{helper}</p>
       </div>
       <div>
         {rows.map((row) => {
@@ -251,7 +251,7 @@ function ProspectPanel({
                 <div className="truncate text-[13.5px] font-semibold text-[var(--text,#0f172a)]">
                   {row.name}
                 </div>
-                <div className="mt-0.5 truncate text-[11px] text-[var(--text-muted,#94a3b8)]">
+                <div className="mt-0.5 truncate text-[11px] text-[var(--text-dim,#475569)]">
                   {row.meta}
                 </div>
               </div>
@@ -490,7 +490,7 @@ export function RedoFeatureShowcase() {
           >
             Every signal, one workspace
           </h2>
-          <p className="mx-auto mt-4 max-w-xl text-base leading-relaxed text-[var(--text-muted,#94a3b8)]">
+          <p className="mx-auto mt-4 max-w-xl text-base leading-relaxed text-[var(--text-dim,#475569)]">
             From new BD registrations to clearing-partner changes, DOX watches SEC and
             FINRA in real time and delivers ranked, qualified prospects inside one system.
           </p>
@@ -537,7 +537,7 @@ export function RedoFeatureShowcase() {
                     <span className="block text-[15px] font-semibold text-[var(--text,#0f172a)]">
                       {feature.title}
                     </span>
-                    <span className="mt-1 hidden text-[13px] leading-relaxed text-[var(--text-muted,#94a3b8)] lg:block">
+                    <span className="mt-1 hidden text-[13px] leading-relaxed text-[var(--text-dim,#475569)] lg:block">
                       {feature.desc}
                     </span>
                   </span>

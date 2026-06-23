@@ -20,10 +20,17 @@ type Pillar = {
   suffix?: string;
   display?: string;
   caption: string;
-  // The "money metric" — tinted with the institutional gold accent. At most
-  // one per band (spec §1: gold is the sparing "money" highlight).
+  // The "money metric" — the single emphasized headline in the row. Tinted
+  // with a deep institutional gold that clears WCAG AA on the light canvas
+  // (#b45309 ≈ 5:1 on white), so it reads as the STRONGEST element, not the
+  // faintest. (The old `var(--gold)` it used is undefined at :root and fell
+  // back to a washed-out amber at ~1.9:1.) At most one per band.
   gold?: boolean;
 };
+
+// Deep amber accent for the emphasized "money metric" — AA-legible on the
+// near-white landing canvas, unlike the undefined --gold token.
+const MONEY_ACCENT = "#b45309";
 
 const PILLARS: Pillar[] = [
   {
@@ -97,7 +104,7 @@ export function RedoMetricsBand() {
       <div className="mx-auto max-w-7xl">
         {/* Eyebrow chrome — the recurring kicker that ties the redo sections
             together (spec §2). */}
-        <p className="flex items-center justify-center gap-2 text-center text-xs font-semibold uppercase tracking-[0.22em] text-[var(--text-muted,#94a3b8)]">
+        <p className="flex items-center justify-center gap-2 text-center text-xs font-semibold uppercase tracking-[0.22em] text-[var(--text-dim,#475569)]">
           <span className="relative inline-flex h-1.5 w-1.5">
             <span className="absolute inline-flex h-full w-full animate-ping rounded-full bg-[var(--green,#10b981)]/70" />
             <span className="relative inline-flex h-1.5 w-1.5 rounded-full bg-[var(--green,#10b981)]" />
@@ -111,26 +118,29 @@ export function RedoMetricsBand() {
         >
           {PILLARS.map((pillar) => {
             const Icon = pillar.icon;
-            const accentVar = pillar.gold ? "--gold,#e8a838" : "--accent,#6366f1";
+            // Emphasized pillar gets the deep amber; the rest use indigo accent.
+            const iconColor = pillar.gold ? MONEY_ACCENT : "var(--accent,#6366f1)";
             return (
               <div
                 key={pillar.caption}
                 className="group flex flex-col gap-2.5 md:border-r md:border-[var(--border,rgba(30,64,175,0.1))] md:pr-6 md:last:border-r-0"
               >
                 <span
-                  className="inline-flex h-9 w-9 items-center justify-center rounded-xl border border-[var(--border,rgba(30,64,175,0.1))] bg-[var(--surface-2,#f1f6fd)] text-[var(--accent,#6366f1)] shadow-sm transition-transform duration-300 group-hover:-translate-y-0.5"
-                  style={{ color: `var(${accentVar})` }}
+                  className="inline-flex h-9 w-9 items-center justify-center rounded-xl border border-[var(--border,rgba(30,64,175,0.1))] bg-[var(--surface-2,#f1f6fd)] shadow-sm transition-transform duration-300 group-hover:-translate-y-0.5"
+                  style={{ color: iconColor }}
                   aria-hidden
                 >
                   <Icon className="h-[18px] w-[18px]" strokeWidth={2} />
                 </span>
                 <p
                   className="text-2xl font-bold tracking-tight tabular-nums text-[var(--text,#0f172a)] sm:text-3xl"
-                  style={pillar.gold ? { color: `var(${accentVar})` } : undefined}
+                  style={pillar.gold ? { color: MONEY_ACCENT } : undefined}
                 >
                   <StatHeadline pillar={pillar} start={inView} />
                 </p>
-                <p className="text-xs leading-snug text-[var(--text-muted,#94a3b8)]">
+                {/* Body caption — darker secondary so it clears AA on the light
+                    canvas (the global --text-muted is tuned for dark surfaces). */}
+                <p className="text-xs leading-snug text-[var(--text-dim,#475569)]">
                   {pillar.caption}
                 </p>
               </div>
