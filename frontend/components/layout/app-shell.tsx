@@ -227,6 +227,17 @@ function KeyIcon(props: IconProps) {
   );
 }
 
+// Brain-bookmark glyph for the Doxie Memory page (what the assistant has
+// remembered about the user).
+function DoxieMemoryIcon(props: IconProps) {
+  return (
+    <IconBase {...props}>
+      <path d="M9.5 4a3 3 0 0 0-3 3 3 3 0 0 0-1.5 5.6A3 3 0 0 0 6.5 18a3 3 0 0 0 3 2 2.5 2.5 0 0 0 2.5-2.5V6.5A2.5 2.5 0 0 0 9.5 4Z" />
+      <path d="M14.5 4a3 3 0 0 1 3 3 3 3 0 0 1 1.5 5.6A3 3 0 0 1 17.5 18a3 3 0 0 1-3 2 2.5 2.5 0 0 1-2.5-2.5" />
+    </IconBase>
+  );
+}
+
 // Double-chevron used by the sidebar collapse toggle. Rotated 180° when
 // the sidebar is collapsed so a single icon serves both states.
 function ChevronsLeftIcon(props: IconProps) {
@@ -315,6 +326,7 @@ const navSections: ReadonlyArray<NavSection> = [
     items: [
       { href: "/settings", label: "Settings", icon: SettingsIcon, badgeKey: null, permissionKey: "settings" },
       { href: "/settings/account" as Route, label: "My Account", icon: KeyIcon, badgeKey: null },
+      { href: "/settings/doxie-memory" as Route, label: "Doxie Memory", icon: DoxieMemoryIcon, badgeKey: null },
       { href: "/settings/email-accounts" as Route, label: "Email Accounts", icon: MailAtIcon, badgeKey: null },
       { href: "/settings/users" as Route, label: "Users", icon: UsersIcon, badgeKey: null, adminOnly: true, permissionKey: "users" },
       { href: "/settings/extractions" as Route, label: "Extraction Analytics", icon: ExtractionAnalyticsIcon, badgeKey: null, adminOnly: true },

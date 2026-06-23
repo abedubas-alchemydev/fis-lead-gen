@@ -127,6 +127,24 @@ class ChatbotConversationListResponse(BaseModel):
     conversations: list[ChatbotConversationSummary]
 
 
+class DoxieMemoryItem(BaseModel):
+    """One row Doxie has remembered about the calling user."""
+    model_config = ConfigDict(from_attributes=True)
+
+    id: int
+    content: str
+    kind: str | None
+    created_at: datetime
+
+
+class DoxieMemoryListResponse(BaseModel):
+    """The caller's own remembered facts, newest first."""
+    model_config = ConfigDict(extra="forbid")
+
+    items: list[DoxieMemoryItem]
+    total: int
+
+
 class ChatbotEmbeddingBackfillEntityCounts(BaseModel):
     """Per-entity-type slice of a backfill run."""
     model_config = ConfigDict(extra="forbid")

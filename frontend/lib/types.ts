@@ -1325,3 +1325,18 @@ export type OutreachInvestorSendRequest = OutreachInvestorDraftRequest & {
   provider?: EmailProviderId;
   sender_account_id?: string | null;
 };
+
+// Doxie's private per-user memory — facts/preferences the model saved via the
+// remember_fact tool. Listed + deletable on /settings/doxie-memory. Strictly
+// scoped to the caller; never cross-user.
+export type DoxieMemoryItem = {
+  id: number;
+  content: string;
+  kind: string | null;
+  created_at: string;
+};
+
+export type DoxieMemoryListResponse = {
+  items: DoxieMemoryItem[];
+  total: number;
+};
