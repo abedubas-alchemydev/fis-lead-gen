@@ -84,8 +84,10 @@ function ProofChip({ point, index }: { point: ProofPoint; index: number }) {
   const isGold = point.accent === "gold";
 
   // Success-tinted by default; the coverage stat gets the single gold tint.
+  // The icon glyph uses a deep amber (#b45309, AA on white) rather than the
+  // faded `gold` token so the lone "money" accent actually reads as emphasis.
   const iconWrap = isGold
-    ? "bg-gold/10 text-gold ring-1 ring-gold/20"
+    ? "bg-gold/10 text-[#b45309] ring-1 ring-gold/20"
     : "bg-success/10 text-success ring-1 ring-success/15";
 
   return (
@@ -163,7 +165,7 @@ export function RedoCredibility() {
             aria-label="Trusted data sources"
             className="group relative mt-16 overflow-hidden rounded-2xl border border-[var(--border,rgba(30,64,175,0.1))] bg-[var(--surface,#ffffff)]/50 py-6 backdrop-blur"
           >
-            <p className="mb-5 text-center text-[11px] font-semibold uppercase tracking-[0.25em] text-[var(--text-muted,#94a3b8)]">
+            <p className="mb-5 text-center text-[11px] font-semibold uppercase tracking-[0.25em] text-[var(--text-dim,#475569)]">
               Sourced direct from the regulators &amp; clearing network
             </p>
             <div
@@ -184,7 +186,7 @@ export function RedoCredibility() {
                       key={(isDuplicate ? "d-" : "") + word}
                       className="flex items-center"
                     >
-                      <span className="select-none whitespace-nowrap px-7 font-mono text-sm font-medium uppercase tracking-[0.18em] text-[var(--text-muted,#94a3b8)] transition-colors duration-300 group-hover:text-[var(--text-dim,#475569)] hover:!text-[var(--text,#0f172a)]">
+                      <span className="select-none whitespace-nowrap px-7 font-mono text-sm font-medium uppercase tracking-[0.18em] text-[var(--text-dim,#475569)] transition-colors duration-300 group-hover:text-[var(--text,#0f172a)] hover:!text-[var(--text,#0f172a)]">
                         {word}
                       </span>
                       {/* Hairline separator between word-marks. */}

@@ -15,8 +15,11 @@ import { BrandMark } from "@/components/brand/brand-mark";
 // The hero below is a dark "command" zone, so at rest the nav floats over navy.
 // To keep it legible there we (a) thicken the backdrop blur and (b) bloom a
 // faint accent glow behind the brand mark — colored light reads as intentional
-// over the dark hero. The logo *text* stays the dark ink token so it survives
-// the descent into the white working surfaces below the fold.
+// over the dark hero. The text colors are SCROLL-STATE-AWARE: at rest over the
+// navy hero the wordmark + nav links go light (white / white-tinted, ≥4.5:1 on
+// navy); once condensed onto the white working surfaces below the fold they
+// flip to the dark ink token (≥4.5:1 on white). A single fixed color can't
+// satisfy both backdrops, so we hook the color into the existing condense flag.
 export function RedoHeader() {
   const [condensed, setCondensed] = useState(false);
 
@@ -63,12 +66,24 @@ export function RedoHeader() {
               />
               <BrandMark size={36} className="relative transition-transform duration-300 group-hover:scale-105" />
             </span>
-            <span className="text-sm font-semibold tracking-tight text-[var(--text,#0f172a)]">DOX</span>
+            {/* Wordmark — the one element that must always be crisp. Light over
+             * the navy hero, dark ink once condensed onto the white surfaces. */}
+            <span
+              className={`text-sm font-semibold tracking-tight transition-colors duration-300 ${
+                condensed ? "text-[var(--text,#0f172a)]" : "text-white"
+              }`}
+            >
+              DOX
+            </span>
           </Link>
           <div className="flex items-center gap-3">
             <Link
               href="/login"
-              className="rounded-xl px-4 py-2.5 text-sm font-medium text-[var(--text,#0f172a)] outline-none transition hover:bg-[var(--surface-2,#f1f6fd)] focus-visible:ring-2 focus-visible:ring-[var(--accent,#6366f1)]/40"
+              className={`rounded-xl px-4 py-2.5 text-sm font-medium outline-none transition focus-visible:ring-2 focus-visible:ring-[var(--accent,#6366f1)]/40 ${
+                condensed
+                  ? "text-[var(--text,#0f172a)] hover:bg-[var(--surface-2,#f1f6fd)]"
+                  : "text-white/90 hover:bg-white/10"
+              }`}
             >
               Sign in
             </Link>

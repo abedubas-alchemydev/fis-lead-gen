@@ -142,9 +142,9 @@ function FeedRow({ event, fresh, ago }: { event: FeedEvent; fresh: boolean; ago:
           <Pill variant={event.variant}>{event.tag}</Pill>
           <span className="truncate text-[13px] font-semibold text-[var(--text,#0f172a)]">{event.firm}</span>
         </div>
-        <p className="mt-0.5 truncate text-[12px] text-[var(--text-muted,#94a3b8)]">{event.detail}</p>
+        <p className="mt-0.5 truncate text-[12px] text-[var(--text-dim,#475569)]">{event.detail}</p>
       </div>
-      <span className="shrink-0 font-mono text-[11px] tabular-nums text-[var(--text-muted,#94a3b8)]">{ago}</span>
+      <span className="shrink-0 font-mono text-[11px] tabular-nums text-[var(--text-dim,#475569)]">{ago}</span>
     </li>
   );
 }
@@ -222,7 +222,7 @@ export function RedoFilingWire() {
             <br />
             Neither do we.
           </h2>
-          <p className="mt-4 max-w-md text-base leading-relaxed text-[var(--text-muted,#94a3b8)]">
+          <p className="mt-4 max-w-md text-base leading-relaxed text-[var(--text-dim,#475569)]">
             Form BD registrations, 17a-11 net-capital deficiencies, FOCUS health
             swings, and clearing-partner changes — captured from SEC and FINRA the
             moment they land, and scored by who is worth your next call.
