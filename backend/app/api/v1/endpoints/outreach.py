@@ -20,7 +20,7 @@ from datetime import datetime, timezone
 from typing import Literal
 
 from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, Query, Response, status
-from sqlalchemy import func, or_, select
+from sqlalchemy import exists, func, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.db.session import get_db_session
@@ -2279,7 +2279,24 @@ async def list_outreach_contacts_firms(
             .order_by(BrokerDealer.name.asc())
         )
         if needle:
-            bd_stmt = bd_stmt.where(func.lower(BrokerDealer.name).like(needle))
+            # Match on firm name OR a linked discovered email (Email-Extractor
+            # output): its address or enriched person name. EXISTS mirrors the
+            # bd_discovered_count join key (DiscoveredEmail.bd_id ==
+            # BrokerDealer.id) so a firm with only extracted emails is still
+            # searchable. lower(NULL enriched_name) LIKE ... is NULL/false,
+            # which the inner or_ tolerates.
+            bd_stmt = bd_stmt.where(
+                or_(
+                    func.lower(BrokerDealer.name).like(needle),
+                    exists().where(
+                        DiscoveredEmail.bd_id == BrokerDealer.id,
+                        or_(
+                            func.lower(DiscoveredEmail.email).like(needle),
+                            func.lower(DiscoveredEmail.enriched_name).like(needle),
+                        ),
+                    ),
+                )
+            )
         for r in (await db.execute(bd_stmt)).all():
             rows.append(
                 OutreachContactsFirmRow(
@@ -2312,8 +2329,19 @@ async def list_outreach_contacts_firms(
             .order_by(InvestmentAdvisor.name.asc())
         )
         if needle:
+            # Mirrors advisor_discovered_count's join key
+            # (DiscoveredEmail.advisor_id == InvestmentAdvisor.id).
             advisor_stmt = advisor_stmt.where(
-                func.lower(InvestmentAdvisor.name).like(needle)
+                or_(
+                    func.lower(InvestmentAdvisor.name).like(needle),
+                    exists().where(
+                        DiscoveredEmail.advisor_id == InvestmentAdvisor.id,
+                        or_(
+                            func.lower(DiscoveredEmail.email).like(needle),
+                            func.lower(DiscoveredEmail.enriched_name).like(needle),
+                        ),
+                    ),
+                )
             )
         for r in (await db.execute(advisor_stmt)).all():
             rows.append(
@@ -2349,8 +2377,22 @@ async def list_outreach_contacts_firms(
             .order_by(InstitutionalInvestor.name.asc())
         )
         if needle:
+            # Mirrors investor_discovered_count's overlap join key
+            # (DiscoveredEmail.advisor_id == InstitutionalInvestor.advisor_id).
+            # A pure-13F investor (advisor_id IS NULL) can't match a discovered
+            # email -- SQL NULL = advisor_id never holds -- so it stays
+            # name-only searchable, exactly like its count subquery yields 0.
             investor_stmt = investor_stmt.where(
-                func.lower(InstitutionalInvestor.name).like(needle)
+                or_(
+                    func.lower(InstitutionalInvestor.name).like(needle),
+                    exists().where(
+                        DiscoveredEmail.advisor_id == InstitutionalInvestor.advisor_id,
+                        or_(
+                            func.lower(DiscoveredEmail.email).like(needle),
+                            func.lower(DiscoveredEmail.enriched_name).like(needle),
+                        ),
+                    ),
+                )
             )
         for r in (await db.execute(investor_stmt)).all():
             rows.append(

@@ -231,7 +231,7 @@ export function OutreachContactsClient(): React.ReactElement {
                 htmlFor="outreach-contacts-search"
                 className="mb-1.5 block text-[11px] font-semibold uppercase tracking-[0.08em] text-[var(--text-muted,#94a3b8)]"
               >
-                Search firm name
+                Search
               </label>
               <div className="relative">
                 <Search
@@ -245,7 +245,7 @@ export function OutreachContactsClient(): React.ReactElement {
                   onChange={(event: ChangeEvent<HTMLInputElement>) =>
                     setQuery(event.target.value)
                   }
-                  placeholder="Search by firm name…"
+                  placeholder="Search firm, email, or contact name…"
                   className="h-[38px] w-full rounded-[10px] border border-[var(--border,rgba(30,64,175,0.1))] bg-[var(--surface,#ffffff)] pl-9 pr-3 text-[13px] text-[var(--text,#0f172a)] outline-none transition focus:border-[var(--accent,#6366f1)] focus:shadow-[0_0_0_3px_rgba(99,102,241,0.15)]"
                 />
               </div>
