@@ -767,3 +767,240 @@ async def test_firms_list_search_no_discovered_match_excludes_firm() -> None:
     finally:
         app.dependency_overrides.clear()
         await _cleanup([user_id], [bd_id], [], [], [run_id])
+
+
+# --- firms list: search needle matches typed contact name / email -------
+#
+# Third disjunct (this change): the search needle now also hits the typed
+# contact tables ExecutiveContact / AdvisorContact / InvestorContact -- the
+# "Generate More Details" enrich output. Each test uses a needle token that
+# appears ONLY on the typed contact (not in the firm name and with no
+# discovered_email present), so a match can only come from the new disjunct.
+
+
+async def test_firms_list_search_matches_executive_contact_name() -> None:
+    """Typing an enriched ExecutiveContact's name into the search box returns
+    the BD that owns it, even when the needle is NOT a substring of the firm
+    name and the firm has no discovered emails -- proving the needle now hits
+    ExecutiveContact.name."""
+    user_id = await _seed_user()
+    # Disjoint tokens: firm name carries ``name_token``; the contact name
+    # carries ``person_token``, which appears nowhere else.
+    name_token = secrets.token_hex(4)
+    person_token = secrets.token_hex(4)
+    async with SessionLocal() as session:
+        bd = BrokerDealer(
+            name=f"BD {name_token} LLP",
+            matched_source="edgar",
+            is_deficient=False,
+            status="active",
+        )
+        session.add(bd)
+        await session.commit()
+        await session.refresh(bd)
+
+        session.add(
+            ExecutiveContact(
+                bd_id=bd.id,
+                name=f"Jordan {person_token}",
+                title="CEO",
+                email=f"jordan@{name_token}.com",
+            )
+        )
+        await session.commit()
+        bd_id = bd.id
+
+    app.dependency_overrides[get_current_user] = lambda: _override_user(user_id)
+    try:
+        async with _client() as client:
+            response = await client.get(
+                "/api/v1/outreach/contacts/firms", params={"q": person_token}
+            )
+        assert response.status_code == 200, response.text
+        body = response.json()
+        assert body["total"] == 1
+        item = body["items"][0]
+        assert item["entity_kind"] == "broker_dealer"
+        assert item["entity_id"] == bd_id
+        # Surfaced via the typed contact, which the typed triad counts.
+        assert item["contact_count"] == 1
+        assert item["discovered_email_count"] == 0
+    finally:
+        app.dependency_overrides.clear()
+        await _cleanup([user_id], [bd_id], [], [], [])
+
+
+async def test_firms_list_search_matches_executive_contact_email() -> None:
+    """Searching by an enriched ExecutiveContact's email returns the BD --
+    the second searchable typed column (ExecutiveContact.email) is wired up."""
+    user_id = await _seed_user()
+    name_token = secrets.token_hex(4)
+    email_token = secrets.token_hex(4)
+    async with SessionLocal() as session:
+        bd = BrokerDealer(
+            name=f"BD {name_token} LLP",
+            matched_source="edgar",
+            is_deficient=False,
+            status="active",
+        )
+        session.add(bd)
+        await session.commit()
+        await session.refresh(bd)
+
+        session.add(
+            ExecutiveContact(
+                bd_id=bd.id,
+                # Name carries no needle; the email's local part carries the
+                # disjoint token, so a match here proves email is searched.
+                name="Pat Director",
+                title="CFO",
+                email=f"pat.director@{email_token}.com",
+            )
+        )
+        await session.commit()
+        bd_id = bd.id
+
+    app.dependency_overrides[get_current_user] = lambda: _override_user(user_id)
+    try:
+        async with _client() as client:
+            response = await client.get(
+                "/api/v1/outreach/contacts/firms", params={"q": email_token}
+            )
+        assert response.status_code == 200, response.text
+        body = response.json()
+        assert body["total"] == 1
+        item = body["items"][0]
+        assert item["entity_kind"] == "broker_dealer"
+        assert item["entity_id"] == bd_id
+        assert item["contact_count"] == 1
+        assert item["with_email_count"] == 1
+        assert item["discovered_email_count"] == 0
+    finally:
+        app.dependency_overrides.clear()
+        await _cleanup([user_id], [bd_id], [], [], [])
+
+
+async def test_firms_list_search_matches_advisor_contact_name() -> None:
+    """An AdvisorContact's name is searchable on the advisor branch, mirroring
+    the advisor_contact_count join key (AdvisorContact.advisor_id ==
+    InvestmentAdvisor.id)."""
+    user_id = await _seed_user()
+    name_token = secrets.token_hex(4)
+    person_token = secrets.token_hex(4)
+    async with SessionLocal() as session:
+        advisor = InvestmentAdvisor(name=f"Advisor {name_token} Group", status="active")
+        session.add(advisor)
+        await session.commit()
+        await session.refresh(advisor)
+
+        session.add(
+            AdvisorContact(
+                advisor_id=advisor.id,
+                name=f"Morgan {person_token}",
+                title="Portfolio Manager",
+                email=f"morgan@{name_token}.com",
+            )
+        )
+        await session.commit()
+        advisor_id = advisor.id
+
+    app.dependency_overrides[get_current_user] = lambda: _override_user(user_id)
+    try:
+        async with _client() as client:
+            response = await client.get(
+                "/api/v1/outreach/contacts/firms", params={"q": person_token}
+            )
+        assert response.status_code == 200, response.text
+        body = response.json()
+        assert body["total"] == 1
+        item = body["items"][0]
+        assert item["entity_kind"] == "advisor"
+        assert item["entity_id"] == advisor_id
+        assert item["contact_count"] == 1
+        assert item["discovered_email_count"] == 0
+    finally:
+        app.dependency_overrides.clear()
+        await _cleanup([user_id], [], [advisor_id], [], [])
+
+
+async def test_firms_list_search_matches_advisor_contact_email() -> None:
+    """An AdvisorContact's email is searchable on the advisor branch."""
+    user_id = await _seed_user()
+    name_token = secrets.token_hex(4)
+    email_token = secrets.token_hex(4)
+    async with SessionLocal() as session:
+        advisor = InvestmentAdvisor(name=f"Advisor {name_token} Group", status="active")
+        session.add(advisor)
+        await session.commit()
+        await session.refresh(advisor)
+
+        session.add(
+            AdvisorContact(
+                advisor_id=advisor.id,
+                name="Casey Analyst",
+                title="Research",
+                email=f"casey.analyst@{email_token}.com",
+            )
+        )
+        await session.commit()
+        advisor_id = advisor.id
+
+    app.dependency_overrides[get_current_user] = lambda: _override_user(user_id)
+    try:
+        async with _client() as client:
+            response = await client.get(
+                "/api/v1/outreach/contacts/firms", params={"q": email_token}
+            )
+        assert response.status_code == 200, response.text
+        body = response.json()
+        assert body["total"] == 1
+        item = body["items"][0]
+        assert item["entity_kind"] == "advisor"
+        assert item["entity_id"] == advisor_id
+        assert item["with_email_count"] == 1
+        assert item["discovered_email_count"] == 0
+    finally:
+        app.dependency_overrides.clear()
+        await _cleanup([user_id], [], [advisor_id], [], [])
+
+
+async def test_firms_list_search_no_typed_contact_match_excludes_firm() -> None:
+    """A firm whose typed contact's name/email does not contain the needle is
+    excluded -- the new disjunct doesn't over-match."""
+    user_id = await _seed_user()
+    name_token = secrets.token_hex(4)
+    async with SessionLocal() as session:
+        bd = BrokerDealer(
+            name=f"BD {name_token} LLP",
+            matched_source="edgar",
+            is_deficient=False,
+            status="active",
+        )
+        session.add(bd)
+        await session.commit()
+        await session.refresh(bd)
+
+        session.add(
+            ExecutiveContact(
+                bd_id=bd.id,
+                name="Sam Officer",
+                title="CEO",
+                email=f"sam@{name_token}.com",
+            )
+        )
+        await session.commit()
+        bd_id = bd.id
+
+    app.dependency_overrides[get_current_user] = lambda: _override_user(user_id)
+    try:
+        async with _client() as client:
+            response = await client.get(
+                "/api/v1/outreach/contacts/firms",
+                params={"q": f"nomatch-{secrets.token_hex(4)}"},
+            )
+        assert response.status_code == 200, response.text
+        body = response.json()
+        assert all(i["entity_id"] != bd_id for i in body["items"])
+    finally:
+        app.dependency_overrides.clear()
+        await _cleanup([user_id], [bd_id], [], [], [])

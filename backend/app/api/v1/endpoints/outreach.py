@@ -2285,6 +2285,13 @@ async def list_outreach_contacts_firms(
             # BrokerDealer.id) so a firm with only extracted emails is still
             # searchable. lower(NULL enriched_name) LIKE ... is NULL/false,
             # which the inner or_ tolerates.
+            #
+            # Third disjunct: a typed ExecutiveContact ("Generate More Details"
+            # enrich output) by its name or email. Mirrors the bd_contact_count
+            # join key (ExecutiveContact.bd_id == BrokerDealer.id) so an
+            # enriched person is searchable even when the firm name doesn't
+            # match and no discovered_email exists. lower(NULL email) is
+            # NULL/false, tolerated by the inner or_.
             bd_stmt = bd_stmt.where(
                 or_(
                     func.lower(BrokerDealer.name).like(needle),
@@ -2293,6 +2300,13 @@ async def list_outreach_contacts_firms(
                         or_(
                             func.lower(DiscoveredEmail.email).like(needle),
                             func.lower(DiscoveredEmail.enriched_name).like(needle),
+                        ),
+                    ),
+                    exists().where(
+                        ExecutiveContact.bd_id == BrokerDealer.id,
+                        or_(
+                            func.lower(ExecutiveContact.name).like(needle),
+                            func.lower(ExecutiveContact.email).like(needle),
                         ),
                     ),
                 )
@@ -2331,6 +2345,11 @@ async def list_outreach_contacts_firms(
         if needle:
             # Mirrors advisor_discovered_count's join key
             # (DiscoveredEmail.advisor_id == InvestmentAdvisor.id).
+            #
+            # Third disjunct: a typed AdvisorContact ("Generate More Details"
+            # enrich output) by its name or email, mirroring the
+            # advisor_contact_count join key (AdvisorContact.advisor_id ==
+            # InvestmentAdvisor.id).
             advisor_stmt = advisor_stmt.where(
                 or_(
                     func.lower(InvestmentAdvisor.name).like(needle),
@@ -2339,6 +2358,13 @@ async def list_outreach_contacts_firms(
                         or_(
                             func.lower(DiscoveredEmail.email).like(needle),
                             func.lower(DiscoveredEmail.enriched_name).like(needle),
+                        ),
+                    ),
+                    exists().where(
+                        AdvisorContact.advisor_id == InvestmentAdvisor.id,
+                        or_(
+                            func.lower(AdvisorContact.name).like(needle),
+                            func.lower(AdvisorContact.email).like(needle),
                         ),
                     ),
                 )
@@ -2382,6 +2408,13 @@ async def list_outreach_contacts_firms(
             # A pure-13F investor (advisor_id IS NULL) can't match a discovered
             # email -- SQL NULL = advisor_id never holds -- so it stays
             # name-only searchable, exactly like its count subquery yields 0.
+            #
+            # Third disjunct: a typed InvestorContact ("Generate More Details"
+            # enrich output) by its name or email, mirroring the
+            # investor_contact_count join key (InvestorContact.investor_id ==
+            # InstitutionalInvestor.id). Unlike the discovered_email join, this
+            # uses the investor's own id, so even a pure-13F investor with
+            # enriched contacts is searchable by contact name/email.
             investor_stmt = investor_stmt.where(
                 or_(
                     func.lower(InstitutionalInvestor.name).like(needle),
@@ -2390,6 +2423,13 @@ async def list_outreach_contacts_firms(
                         or_(
                             func.lower(DiscoveredEmail.email).like(needle),
                             func.lower(DiscoveredEmail.enriched_name).like(needle),
+                        ),
+                    ),
+                    exists().where(
+                        InvestorContact.investor_id == InstitutionalInvestor.id,
+                        or_(
+                            func.lower(InvestorContact.name).like(needle),
+                            func.lower(InvestorContact.email).like(needle),
                         ),
                     ),
                 )
