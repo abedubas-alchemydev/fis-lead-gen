@@ -12,6 +12,7 @@ import {
 import clsx from "clsx";
 
 import { buttonBase, buttonSizes } from "@/components/ui/button";
+import { EmailResultRow } from "@/components/outreach-contacts/email-result-row";
 import { FirmRow } from "@/components/outreach-contacts/firm-row";
 import { TopActions } from "@/components/layout/top-actions";
 import { SectionPanel } from "@/components/ui/section-panel";
@@ -20,6 +21,8 @@ import { getPipelineRunStatus } from "@/lib/api";
 import {
   gapFillFirmContacts,
   listOutreachContactsFirms,
+  searchOutreachContactsByEmail,
+  type EmailSearchResult,
   type OutreachContactsFirmRow,
   type OutreachEntityKind,
 } from "@/lib/outreach-contacts";
@@ -33,8 +36,23 @@ const KIND_FILTER_ITEMS: { value: EntityKindFilter; label: string }[] = [
   { value: "institutional_investor", label: "Investors" },
 ];
 
+// Page size shared by both modes' page-level list (firm cards + email rows).
+const PAGE_SIZE = 50;
+
+// "Email mode": when the user's (trimmed) search term looks like an email
+// address -- i.e. it contains "@" and has more than one character -- the
+// page swaps the firm cards for a flat list of matching email rows. Any
+// other (or empty) query keeps the firm-card behavior unchanged.
+function isEmailModeQuery(query: string): boolean {
+  return query.length > 1 && query.includes("@");
+}
+
 function firmKey(firm: { entity_kind: string; entity_id: number }): string {
   return `${firm.entity_kind}:${firm.entity_id}`;
+}
+
+function emailResultKey(row: EmailSearchResult): string {
+  return `${row.source}:${row.entity_kind}:${row.entity_id}:${row.email}`;
 }
 
 export function OutreachContactsClient(): React.ReactElement {
@@ -46,6 +64,15 @@ export function OutreachContactsClient(): React.ReactElement {
   const [debouncedQuery, setDebouncedQuery] = useState("");
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
+
+  // Email-mode state -- parallel to the firm-card state above so neither
+  // path clobbers the other's data on a mode flip. Populated only when the
+  // debounced query is an email address (see emailMode below).
+  const [emailResults, setEmailResults] = useState<EmailSearchResult[]>([]);
+  const [emailTotal, setEmailTotal] = useState(0);
+  const [emailHasMore, setEmailHasMore] = useState(false);
+
+  const emailMode = isEmailModeQuery(debouncedQuery);
 
   // Per-firm enrich state. Keyed by `${entity_kind}:${entity_id}`.
   const [enrichingKey, setEnrichingKey] = useState<string | null>(null);
@@ -67,20 +94,40 @@ export function OutreachContactsClient(): React.ReactElement {
     setLoading(true);
     setError(null);
     try {
-      const response = await listOutreachContactsFirms({
-        entity_kind: kindFilter === "all" ? undefined : kindFilter,
-        q: debouncedQuery || undefined,
-        page,
-        limit: 50,
-      });
-      setFirms(response.items);
-      setTotal(response.total);
+      if (emailMode) {
+        // Email mode: fetch the flat email rows. The kind filter doesn't
+        // apply here (the endpoint has no entity_kind param) -- the user is
+        // searching for a specific address, not browsing by firm type.
+        const response = await searchOutreachContactsByEmail({
+          q: debouncedQuery,
+          page,
+          limit: PAGE_SIZE,
+        });
+        setEmailResults(response.results);
+        setEmailTotal(response.total);
+        setEmailHasMore(response.has_more);
+      } else {
+        const response = await listOutreachContactsFirms({
+          entity_kind: kindFilter === "all" ? undefined : kindFilter,
+          q: debouncedQuery || undefined,
+          page,
+          limit: PAGE_SIZE,
+        });
+        setFirms(response.items);
+        setTotal(response.total);
+      }
     } catch (err) {
-      setError(err instanceof Error ? err.message : "Could not load firms");
+      setError(
+        err instanceof Error
+          ? err.message
+          : emailMode
+            ? "Could not search emails"
+            : "Could not load firms",
+      );
     } finally {
       setLoading(false);
     }
-  }, [kindFilter, debouncedQuery, page]);
+  }, [emailMode, kindFilter, debouncedQuery, page]);
 
   useEffect(() => {
     void loadFirms();
@@ -95,7 +142,15 @@ export function OutreachContactsClient(): React.ReactElement {
     [firms],
   );
 
-  const totalPages = Math.max(1, Math.ceil(total / 50));
+  const totalPages = Math.max(1, Math.ceil(total / PAGE_SIZE));
+  // Email mode paginates off has_more (the BE returns it directly) rather
+  // than a precomputed page count.
+  const emailTotalPages = Math.max(1, Math.ceil(emailTotal / PAGE_SIZE));
+  const showPager = emailMode
+    ? page > 1 || emailHasMore
+    : totalPages > 1;
+  const canPrev = page > 1;
+  const canNext = emailMode ? emailHasMore : page < totalPages;
 
   // POST gap-fill, then poll the run until terminal (180s deadline -- matches
   // the advisor detail page's pattern). On terminal, set a notice from
@@ -199,9 +254,11 @@ export function OutreachContactsClient(): React.ReactElement {
             <span className="absolute inset-0 animate-ping rounded-full bg-[var(--green,#10b981)] opacity-60" />
             <span className="relative h-2 w-2 rounded-full bg-[var(--green,#10b981)]" />
           </span>
-          {total.toLocaleString()} firm{total === 1 ? "" : "s"}
+          {emailMode
+            ? `${emailTotal.toLocaleString()} email${emailTotal === 1 ? "" : "s"}`
+            : `${total.toLocaleString()} firm${total === 1 ? "" : "s"}`}
         </span>
-        {totalPersons > 0 ? (
+        {!emailMode && totalPersons > 0 ? (
           <span className="inline-flex items-center gap-1.5 rounded-full border border-[rgba(99,102,241,0.25)] bg-[rgba(99,102,241,0.08)] px-2.5 py-[3px] text-[11px] font-semibold text-[#4338ca]">
             {totalPersons.toLocaleString()} contact{totalPersons === 1 ? "" : "s"} on page
           </span>
@@ -231,7 +288,7 @@ export function OutreachContactsClient(): React.ReactElement {
                 htmlFor="outreach-contacts-search"
                 className="mb-1.5 block text-[11px] font-semibold uppercase tracking-[0.08em] text-[var(--text-muted,#94a3b8)]"
               >
-                Search firm name
+                Search
               </label>
               <div className="relative">
                 <Search
@@ -245,7 +302,7 @@ export function OutreachContactsClient(): React.ReactElement {
                   onChange={(event: ChangeEvent<HTMLInputElement>) =>
                     setQuery(event.target.value)
                   }
-                  placeholder="Search by firm name…"
+                  placeholder="Search firm, email, or contact name…"
                   className="h-[38px] w-full rounded-[10px] border border-[var(--border,rgba(30,64,175,0.1))] bg-[var(--surface,#ffffff)] pl-9 pr-3 text-[13px] text-[var(--text,#0f172a)] outline-none transition focus:border-[var(--accent,#6366f1)] focus:shadow-[0_0_0_3px_rgba(99,102,241,0.15)]"
                 />
               </div>
@@ -274,8 +331,12 @@ export function OutreachContactsClient(): React.ReactElement {
 
       {/* Firms list */}
       <SectionPanel
-        eyebrow="Firms"
-        title={`Firms with contacts or extracted emails${total ? ` (${total.toLocaleString()})` : ""}`}
+        eyebrow={emailMode ? "Emails" : "Firms"}
+        title={
+          emailMode
+            ? `Emails matching “${debouncedQuery}”${emailTotal ? ` (${emailTotal.toLocaleString()})` : ""}`
+            : `Firms with contacts or extracted emails${total ? ` (${total.toLocaleString()})` : ""}`
+        }
         headerAction={
           <button
             type="button"
@@ -295,11 +356,12 @@ export function OutreachContactsClient(): React.ReactElement {
           </button>
         }
       >
-        {loading && firms.length === 0 ? (
+        {loading &&
+        (emailMode ? emailResults.length === 0 : firms.length === 0) ? (
           <div>
             {Array.from({ length: 6 }).map((_, index) => (
               <div
-                key={`firm-skeleton-${index}`}
+                key={`row-skeleton-${index}`}
                 className="border-t border-[var(--border,rgba(30,64,175,0.1))] py-4 first:border-t-0"
               >
                 <div className="h-3 w-32 animate-pulse rounded bg-[var(--surface-2,#f1f6fd)]" />
@@ -308,6 +370,22 @@ export function OutreachContactsClient(): React.ReactElement {
               </div>
             ))}
           </div>
+        ) : emailMode ? (
+          emailResults.length === 0 ? (
+            <div className="py-8 text-center text-[13px] text-[var(--text-muted,#94a3b8)]">
+              <Loader2
+                className={`mx-auto mb-2 h-5 w-5 ${loading ? "animate-spin" : "opacity-0"}`}
+                strokeWidth={2}
+              />
+              {`No emails match "${debouncedQuery}".`}
+            </div>
+          ) : (
+            <ul className="flex flex-col gap-2">
+              {emailResults.map((row) => (
+                <EmailResultRow key={emailResultKey(row)} row={row} />
+              ))}
+            </ul>
+          )
         ) : firms.length === 0 ? (
           <div className="py-8 text-center text-[13px] text-[var(--text-muted,#94a3b8)]">
             <Loader2
@@ -336,24 +414,26 @@ export function OutreachContactsClient(): React.ReactElement {
           </div>
         )}
 
-        {totalPages > 1 ? (
+        {showPager ? (
           <div className="mt-4 flex items-center justify-between border-t border-[var(--border,rgba(30,64,175,0.1))] pt-4 text-[12px]">
             <span className="text-[var(--text-muted,#94a3b8)]">
-              Page {page} of {totalPages}
+              {emailMode
+                ? `Page ${page}${emailTotal ? ` of ${emailTotalPages}` : ""}`
+                : `Page ${page} of ${totalPages}`}
             </span>
             <div className="flex gap-2">
               <button
                 type="button"
                 onClick={() => setPage((p) => Math.max(1, p - 1))}
-                disabled={page <= 1 || loading}
+                disabled={!canPrev || loading}
                 className="inline-flex items-center rounded-md border border-[var(--border,rgba(30,64,175,0.1))] bg-transparent px-3 py-1 text-[12px] font-semibold text-[var(--text-dim,#475569)] transition hover:bg-[var(--surface-2,#f1f6fd)] disabled:cursor-not-allowed disabled:opacity-45"
               >
                 Previous
               </button>
               <button
                 type="button"
-                onClick={() => setPage((p) => Math.min(totalPages, p + 1))}
-                disabled={page >= totalPages || loading}
+                onClick={() => setPage((p) => p + 1)}
+                disabled={!canNext || loading}
                 className="inline-flex items-center rounded-md border border-[var(--border,rgba(30,64,175,0.1))] bg-transparent px-3 py-1 text-[12px] font-semibold text-[var(--text-dim,#475569)] transition hover:bg-[var(--surface-2,#f1f6fd)] disabled:cursor-not-allowed disabled:opacity-45"
               >
                 Next

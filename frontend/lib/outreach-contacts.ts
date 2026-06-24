@@ -73,6 +73,43 @@ export interface GapFillFirmResponse {
   reason?: string | null;
 }
 
+// Discriminates the origin of an email-search row: a typed contact row
+// (ExecutiveContact / AdvisorContact / InvestorContact) vs. an
+// Email-Extractor discovered_email row. Mirrors the backend EmailSource.
+export type OutreachEmailSource = "contact" | "extracted";
+
+// One flat email row returned by the contacts page "email mode" search
+// (GET /outreach/contacts/email-search). Mirrors
+// backend/app/schemas/outreach_contacts.py::EmailSearchResult. Unlike the
+// firm-card path, this is a per-email row attributed to its owning firm via
+// entity_kind + entity_id + firm_name. `phone` is only set on a typed
+// contact (source="contact"); `contact_id` is set on the same.
+export interface EmailSearchResult {
+  entity_kind: OutreachEntityKind;
+  entity_id: number;
+  firm_name: string;
+  owner_name: string | null;
+  title: string | null;
+  email: string;
+  phone: string | null;
+  source: OutreachEmailSource;
+  contact_id: number | null;
+}
+
+export interface EmailSearchResponse {
+  results: EmailSearchResult[];
+  total: number;
+  page: number;
+  limit: number;
+  has_more: boolean;
+}
+
+export interface SearchOutreachContactsByEmailParams {
+  q: string;
+  page?: number;
+  limit?: number;
+}
+
 export interface ListOutreachContactsFirmsParams {
   entity_kind?: OutreachEntityKind;
   q?: string;
@@ -122,5 +159,22 @@ export async function gapFillFirmContacts(
   return apiRequest<GapFillFirmResponse>(
     `/api/v1/outreach/contacts/firms/${kind}/${id}/gap-fill`,
     { method: "POST" },
+  );
+}
+
+// "Email mode" search for the contacts page: when the user's query is an
+// email address, return the matching EMAIL rows directly instead of firm
+// cards. Same fetch wrapper / credentials / error handling as the sibling
+// fns above. A blank/whitespace q short-circuits to an empty page on the BE
+// (no 422), but callers should only invoke this in email mode anyway.
+export async function searchOutreachContactsByEmail(
+  params: SearchOutreachContactsByEmailParams,
+): Promise<EmailSearchResponse> {
+  const search = new URLSearchParams();
+  search.set("q", params.q);
+  if (params.page) search.set("page", String(params.page));
+  if (params.limit) search.set("limit", String(params.limit));
+  return apiRequest<EmailSearchResponse>(
+    `/api/v1/outreach/contacts/email-search?${search.toString()}`,
   );
 }

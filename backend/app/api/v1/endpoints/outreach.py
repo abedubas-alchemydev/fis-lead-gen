@@ -20,7 +20,7 @@ from datetime import datetime, timezone
 from typing import Literal
 
 from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, Query, Response, status
-from sqlalchemy import func, or_, select
+from sqlalchemy import exists, func, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.db.session import get_db_session
@@ -40,6 +40,8 @@ from app.models.vault_folder import VaultFolder
 from app.schemas.auth import AuthenticatedUser
 from app.models.favorite_list import FavoriteList, FavoriteListItem
 from app.schemas.outreach_contacts import (
+    EmailSearchResponse,
+    EmailSearchResult,
     GapFillFirmResponse,
     OutreachContactPerson,
     OutreachContactsFirmDetailResponse,
@@ -2279,7 +2281,38 @@ async def list_outreach_contacts_firms(
             .order_by(BrokerDealer.name.asc())
         )
         if needle:
-            bd_stmt = bd_stmt.where(func.lower(BrokerDealer.name).like(needle))
+            # Match on firm name OR a linked discovered email (Email-Extractor
+            # output): its address or enriched person name. EXISTS mirrors the
+            # bd_discovered_count join key (DiscoveredEmail.bd_id ==
+            # BrokerDealer.id) so a firm with only extracted emails is still
+            # searchable. lower(NULL enriched_name) LIKE ... is NULL/false,
+            # which the inner or_ tolerates.
+            #
+            # Third disjunct: a typed ExecutiveContact ("Generate More Details"
+            # enrich output) by its name or email. Mirrors the bd_contact_count
+            # join key (ExecutiveContact.bd_id == BrokerDealer.id) so an
+            # enriched person is searchable even when the firm name doesn't
+            # match and no discovered_email exists. lower(NULL email) is
+            # NULL/false, tolerated by the inner or_.
+            bd_stmt = bd_stmt.where(
+                or_(
+                    func.lower(BrokerDealer.name).like(needle),
+                    exists().where(
+                        DiscoveredEmail.bd_id == BrokerDealer.id,
+                        or_(
+                            func.lower(DiscoveredEmail.email).like(needle),
+                            func.lower(DiscoveredEmail.enriched_name).like(needle),
+                        ),
+                    ),
+                    exists().where(
+                        ExecutiveContact.bd_id == BrokerDealer.id,
+                        or_(
+                            func.lower(ExecutiveContact.name).like(needle),
+                            func.lower(ExecutiveContact.email).like(needle),
+                        ),
+                    ),
+                )
+            )
         for r in (await db.execute(bd_stmt)).all():
             rows.append(
                 OutreachContactsFirmRow(
@@ -2312,8 +2345,31 @@ async def list_outreach_contacts_firms(
             .order_by(InvestmentAdvisor.name.asc())
         )
         if needle:
+            # Mirrors advisor_discovered_count's join key
+            # (DiscoveredEmail.advisor_id == InvestmentAdvisor.id).
+            #
+            # Third disjunct: a typed AdvisorContact ("Generate More Details"
+            # enrich output) by its name or email, mirroring the
+            # advisor_contact_count join key (AdvisorContact.advisor_id ==
+            # InvestmentAdvisor.id).
             advisor_stmt = advisor_stmt.where(
-                func.lower(InvestmentAdvisor.name).like(needle)
+                or_(
+                    func.lower(InvestmentAdvisor.name).like(needle),
+                    exists().where(
+                        DiscoveredEmail.advisor_id == InvestmentAdvisor.id,
+                        or_(
+                            func.lower(DiscoveredEmail.email).like(needle),
+                            func.lower(DiscoveredEmail.enriched_name).like(needle),
+                        ),
+                    ),
+                    exists().where(
+                        AdvisorContact.advisor_id == InvestmentAdvisor.id,
+                        or_(
+                            func.lower(AdvisorContact.name).like(needle),
+                            func.lower(AdvisorContact.email).like(needle),
+                        ),
+                    ),
+                )
             )
         for r in (await db.execute(advisor_stmt)).all():
             rows.append(
@@ -2349,8 +2405,36 @@ async def list_outreach_contacts_firms(
             .order_by(InstitutionalInvestor.name.asc())
         )
         if needle:
+            # Mirrors investor_discovered_count's overlap join key
+            # (DiscoveredEmail.advisor_id == InstitutionalInvestor.advisor_id).
+            # A pure-13F investor (advisor_id IS NULL) can't match a discovered
+            # email -- SQL NULL = advisor_id never holds -- so it stays
+            # name-only searchable, exactly like its count subquery yields 0.
+            #
+            # Third disjunct: a typed InvestorContact ("Generate More Details"
+            # enrich output) by its name or email, mirroring the
+            # investor_contact_count join key (InvestorContact.investor_id ==
+            # InstitutionalInvestor.id). Unlike the discovered_email join, this
+            # uses the investor's own id, so even a pure-13F investor with
+            # enriched contacts is searchable by contact name/email.
             investor_stmt = investor_stmt.where(
-                func.lower(InstitutionalInvestor.name).like(needle)
+                or_(
+                    func.lower(InstitutionalInvestor.name).like(needle),
+                    exists().where(
+                        DiscoveredEmail.advisor_id == InstitutionalInvestor.advisor_id,
+                        or_(
+                            func.lower(DiscoveredEmail.email).like(needle),
+                            func.lower(DiscoveredEmail.enriched_name).like(needle),
+                        ),
+                    ),
+                    exists().where(
+                        InvestorContact.investor_id == InstitutionalInvestor.id,
+                        or_(
+                            func.lower(InvestorContact.name).like(needle),
+                            func.lower(InvestorContact.email).like(needle),
+                        ),
+                    ),
+                )
             )
         for r in (await db.execute(investor_stmt)).all():
             rows.append(
@@ -2381,6 +2465,222 @@ async def list_outreach_contacts_firms(
                 r.gap_fill_in_progress = True
 
     return OutreachContactsFirmsResponse(items=paged, total=total)
+
+
+@router.get(
+    "/contacts/email-search",
+    response_model=EmailSearchResponse,
+)
+async def search_outreach_contacts_by_email(
+    q: str = Query(..., max_length=255),
+    page: int = Query(1, ge=1),
+    limit: int = Query(50, ge=1, le=100),
+    _: AuthenticatedUser = Depends(_require_outreach_contacts),
+    db: AsyncSession = Depends(get_db_session),
+) -> EmailSearchResponse:
+    """Flat, paginated list of email rows matching ``lower(email) LIKE %q%``.
+
+    Powers the "email mode" of the ``/outreach/contacts`` search: when the
+    user types an email address (rather than a firm or person name), this
+    returns the matching EMAIL rows directly instead of firm rows. Each row
+    is one address attributed to its owning firm, drawn from BOTH sources:
+
+    1. Typed contacts -- ``ExecutiveContact`` (BD), ``AdvisorContact``
+       (advisor), ``InvestorContact`` (investor), each joined to its firm.
+       ``source="contact"``, carries ``contact_id`` + any typed ``phone``.
+    2. ``discovered_email`` (Email-Extractor output) -- joined to its firm
+       via ``bd_id`` / ``advisor_id``; an institutional investor surfaces
+       these only through its IAPD-overlap ``advisor_id`` (a pure-13F
+       investor with ``advisor_id IS NULL`` never matches, exactly like the
+       firms-list investor branch). ``source="extracted"``, no
+       ``contact_id``, ``phone`` is always None.
+
+    Dedup: when the same ``(entity_id, lower(email))`` appears as both a
+    typed contact and a discovered email, the typed contact wins (it
+    carries the richer ``contact_id`` + ``phone``). Keyed on entity, so the
+    same address at two different firms yields two rows.
+
+    Mirrors the firms-list auth + pagination contract (per-user feature
+    gate, ``page``/``limit`` with a 100 cap). A blank/whitespace ``q``
+    short-circuits to an empty page rather than erroring -- the FE clears
+    the box without a 422.
+
+    Six small queries (three typed + three discovered) merged in Python.
+    The volume is bounded by the selective ``LIKE`` on an indexed ``email``
+    column, then deduped + sorted + paged after the merge.
+    """
+    cleaned = q.strip().lower()
+    if not cleaned:
+        return EmailSearchResponse(
+            results=[], total=0, page=page, limit=limit, has_more=False
+        )
+    needle = f"%{cleaned}%"
+
+    # --- Typed contacts: one SELECT per kind, joined to the owning firm.
+    exec_stmt = (
+        select(
+            ExecutiveContact.id.label("contact_id"),
+            ExecutiveContact.name.label("owner_name"),
+            ExecutiveContact.title.label("title"),
+            ExecutiveContact.email.label("email"),
+            ExecutiveContact.phone.label("phone"),
+            BrokerDealer.id.label("entity_id"),
+            BrokerDealer.name.label("firm_name"),
+        )
+        .join(BrokerDealer, BrokerDealer.id == ExecutiveContact.bd_id)
+        .where(ExecutiveContact.email.isnot(None))
+        .where(func.lower(ExecutiveContact.email).like(needle))
+    )
+    advisor_contact_stmt = (
+        select(
+            AdvisorContact.id.label("contact_id"),
+            AdvisorContact.name.label("owner_name"),
+            AdvisorContact.title.label("title"),
+            AdvisorContact.email.label("email"),
+            AdvisorContact.phone.label("phone"),
+            InvestmentAdvisor.id.label("entity_id"),
+            InvestmentAdvisor.name.label("firm_name"),
+        )
+        .join(InvestmentAdvisor, InvestmentAdvisor.id == AdvisorContact.advisor_id)
+        .where(AdvisorContact.email.isnot(None))
+        .where(func.lower(AdvisorContact.email).like(needle))
+    )
+    investor_contact_stmt = (
+        select(
+            InvestorContact.id.label("contact_id"),
+            InvestorContact.name.label("owner_name"),
+            InvestorContact.title.label("title"),
+            InvestorContact.email.label("email"),
+            InvestorContact.phone.label("phone"),
+            InstitutionalInvestor.id.label("entity_id"),
+            InstitutionalInvestor.name.label("firm_name"),
+        )
+        .join(
+            InstitutionalInvestor,
+            InstitutionalInvestor.id == InvestorContact.investor_id,
+        )
+        .where(InvestorContact.email.isnot(None))
+        .where(func.lower(InvestorContact.email).like(needle))
+    )
+
+    # --- Discovered emails: BD + advisor link directly; investor surfaces
+    # only through its IAPD-overlap advisor_id (NULL never matches).
+    bd_discovered_stmt = (
+        select(
+            DiscoveredEmail.email.label("email"),
+            DiscoveredEmail.enriched_name.label("owner_name"),
+            DiscoveredEmail.enriched_title.label("title"),
+            BrokerDealer.id.label("entity_id"),
+            BrokerDealer.name.label("firm_name"),
+        )
+        .join(BrokerDealer, BrokerDealer.id == DiscoveredEmail.bd_id)
+        .where(func.lower(DiscoveredEmail.email).like(needle))
+    )
+    advisor_discovered_stmt = (
+        select(
+            DiscoveredEmail.email.label("email"),
+            DiscoveredEmail.enriched_name.label("owner_name"),
+            DiscoveredEmail.enriched_title.label("title"),
+            InvestmentAdvisor.id.label("entity_id"),
+            InvestmentAdvisor.name.label("firm_name"),
+        )
+        .join(
+            InvestmentAdvisor, InvestmentAdvisor.id == DiscoveredEmail.advisor_id
+        )
+        .where(func.lower(DiscoveredEmail.email).like(needle))
+    )
+    investor_discovered_stmt = (
+        select(
+            DiscoveredEmail.email.label("email"),
+            DiscoveredEmail.enriched_name.label("owner_name"),
+            DiscoveredEmail.enriched_title.label("title"),
+            InstitutionalInvestor.id.label("entity_id"),
+            InstitutionalInvestor.name.label("firm_name"),
+        )
+        .join(
+            InstitutionalInvestor,
+            InstitutionalInvestor.advisor_id == DiscoveredEmail.advisor_id,
+        )
+        .where(func.lower(DiscoveredEmail.email).like(needle))
+    )
+
+    # Merge. Typed contacts first so they win the dedup (richer row), then
+    # discovered emails fill in addresses no typed contact covers. The dedup
+    # key is (entity_kind, entity_id, lower(email)) -- the same address at a
+    # different firm is a distinct, kept row.
+    results: list[EmailSearchResult] = []
+    seen: set[tuple[str, int, str]] = set()
+
+    typed_sources: list[tuple[str, object]] = [
+        ("broker_dealer", exec_stmt),
+        ("advisor", advisor_contact_stmt),
+        ("institutional_investor", investor_contact_stmt),
+    ]
+    for kind, stmt in typed_sources:
+        for r in (await db.execute(stmt)).all():
+            if r.email is None:
+                continue
+            key = (kind, r.entity_id, r.email.lower())
+            if key in seen:
+                continue
+            seen.add(key)
+            results.append(
+                EmailSearchResult(
+                    entity_kind=kind,  # type: ignore[arg-type]
+                    entity_id=r.entity_id,
+                    firm_name=r.firm_name or "",
+                    owner_name=r.owner_name,
+                    title=r.title,
+                    email=r.email,
+                    phone=r.phone,
+                    source="contact",
+                    contact_id=r.contact_id,
+                )
+            )
+
+    discovered_sources: list[tuple[str, object]] = [
+        ("broker_dealer", bd_discovered_stmt),
+        ("advisor", advisor_discovered_stmt),
+        ("institutional_investor", investor_discovered_stmt),
+    ]
+    for kind, stmt in discovered_sources:
+        for r in (await db.execute(stmt)).all():
+            if r.email is None:
+                continue
+            key = (kind, r.entity_id, r.email.lower())
+            if key in seen:
+                continue
+            seen.add(key)
+            results.append(
+                EmailSearchResult(
+                    entity_kind=kind,  # type: ignore[arg-type]
+                    entity_id=r.entity_id,
+                    firm_name=r.firm_name or "",
+                    owner_name=r.owner_name,
+                    title=r.title,
+                    email=r.email,
+                    phone=None,
+                    source="extracted",
+                    contact_id=None,
+                )
+            )
+
+    # Stable order: firm name, then email (both lowered for case-insensitive
+    # ordering), then entity_kind to fully disambiguate same-named firms of
+    # different kinds.
+    results.sort(
+        key=lambda r: (r.firm_name.lower(), r.email.lower(), r.entity_kind)
+    )
+    total = len(results)
+    start = (page - 1) * limit
+    paged = results[start : start + limit]
+    return EmailSearchResponse(
+        results=paged,
+        total=total,
+        page=page,
+        limit=limit,
+        has_more=start + limit < total,
+    )
 
 
 @router.get(
