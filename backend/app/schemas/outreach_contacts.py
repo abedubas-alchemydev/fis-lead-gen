@@ -102,3 +102,52 @@ class GapFillFirmResponse(BaseModel):
     entity_kind: EntityKind
     entity_id: int
     reason: str | None = None
+
+
+# Distinct ``source`` discriminator for an email row in the email-search
+# results: a typed contact row (ExecutiveContact / AdvisorContact /
+# InvestorContact -- "Generate More Details" enrich output) vs. an
+# Email-Extractor ``discovered_email`` row.
+EmailSource = Literal["contact", "extracted"]
+
+
+class EmailSearchResult(BaseModel):
+    """One email/contact row returned by ``/outreach/contacts/email-search``.
+
+    A FLAT, per-email row (not a firm row) that the FE renders when the
+    user searches the contacts page by an email address. Unifies the two
+    sources behind one shape: a typed contact (``source="contact"``,
+    carries ``contact_id`` + any typed ``phone``) and an Email-Extractor
+    ``discovered_email`` (``source="extracted"``, no ``contact_id``;
+    ``phone`` is always None since the discovered shape is keyed off the
+    address, not a typed channel record).
+
+    ``entity_kind`` + ``entity_id`` + ``firm_name`` identify the owning
+    firm so the FE can link the row back to its firm. ``owner_name`` /
+    ``title`` come from the contact (``name`` / ``title``) or the
+    discovered row (``enriched_name`` / ``enriched_title``)."""
+
+    entity_kind: EntityKind
+    entity_id: int
+    firm_name: str
+    owner_name: str | None
+    title: str | None
+    email: str
+    phone: str | None
+    source: EmailSource
+    contact_id: int | None
+
+
+class EmailSearchResponse(BaseModel):
+    """Paginated wrapper for the email-search results.
+
+    Mirrors the firms-list pagination contract: ``total`` is the full
+    match count across both sources (after dedup), ``page`` / ``limit``
+    echo the request, and ``has_more`` tells the FE whether another page
+    exists without it recomputing from ``total``."""
+
+    results: list[EmailSearchResult]
+    total: int
+    page: int
+    limit: int
+    has_more: bool
