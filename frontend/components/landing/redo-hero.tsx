@@ -207,7 +207,7 @@ function FilingTerminal() {
 
 export function RedoHero() {
   return (
-    <section className="relative overflow-hidden bg-navy px-6 pb-28 pt-44 text-white lg:pt-48">
+    <section className="relative overflow-hidden bg-navy px-6 pb-28 pt-28 text-white lg:pt-32">
       {/* ── Decorative backdrop: terminal grid + drifting aurora orbs + a slow
           mesh wash, plus the bottom-edge gradient that begins the dark → light
           descent into the next section. All aria-hidden / non-interactive. ── */}
@@ -227,7 +227,7 @@ export function RedoHero() {
         <div className="absolute inset-x-0 bottom-0 h-40 bg-gradient-to-b from-transparent to-[#0b0f1a]" />
       </div>
 
-      <div className="mx-auto grid max-w-7xl items-center gap-12 lg:grid-cols-[1.05fr_1fr] lg:gap-16">
+      <div className="mx-auto grid max-w-7xl items-center gap-12 lg:grid-cols-[1.05fr_1fr] lg:items-start lg:gap-16">
         {/* ── Left: copy + CTAs ── */}
         <div>
           {/* Brand lockup — the same square dox wordmark the login page paints
