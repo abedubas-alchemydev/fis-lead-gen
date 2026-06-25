@@ -1,6 +1,7 @@
 "use client";
 
 import { useEffect, useState } from "react";
+import Image from "next/image";
 import Link from "next/link";
 import { Activity, ArrowRight, Lock, Radio, Shield, Zap } from "lucide-react";
 
@@ -229,6 +230,20 @@ export function RedoHero() {
       <div className="mx-auto grid max-w-7xl items-center gap-12 lg:grid-cols-[1.05fr_1fr] lg:gap-16">
         {/* ── Left: copy + CTAs ── */}
         <div>
+          {/* Brand lockup — the same square dox wordmark the login page paints
+              on its dark left panel. The asset is a navy-bg square that shines
+              on dark surfaces, so it sits naturally on this navy hero. Sizable
+              (echoing the login lockup), with object-contain so the swoosh +
+              tagline never distort, and it scales down on small screens. */}
+          <Image
+            src="/dox-logo.png"
+            alt="DOX — Institutional Finance Intelligence"
+            width={384}
+            height={384}
+            priority
+            className="animate-fade-in mb-6 h-32 w-32 object-contain sm:h-40 sm:w-40 lg:mb-8 lg:h-44 lg:w-44"
+          />
+
           <span className="animate-fade-in inline-flex items-center gap-2 rounded-full border border-white/15 bg-white/5 px-4 py-1.5 text-xs font-semibold uppercase tracking-[0.2em] text-white/80 backdrop-blur">
             <Zap className="h-3.5 w-3.5 text-[var(--accent,#6366f1)]" />
             Real-time regulatory intelligence
