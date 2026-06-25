@@ -233,16 +233,18 @@ export function RedoHero() {
           {/* Brand lockup — the same square dox wordmark the login page paints
               on its dark left panel. The asset is a navy-bg square that shines
               on dark surfaces, so it sits naturally on this navy hero. Scaled up
-              to a prominent hero centerpiece (~1.6× the prior size), with
-              object-contain so the swoosh + tagline never distort, stepping down
-              on sm/mobile so it doesn't crowd the headline/CTAs or overflow. */}
+              to a large hero centerpiece, with object-contain so the swoosh +
+              tagline never distort, stepping down on sm/mobile so it doesn't
+              crowd the headline/CTAs, and one notch larger again at xl where the
+              column has the room. Native asset is 2000px square, so it stays
+              crisp at every step. */}
           <Image
             src="/dox-logo.png"
             alt="DOX — Institutional Finance Intelligence"
-            width={384}
-            height={384}
+            width={512}
+            height={512}
             priority
-            className="animate-fade-in mb-6 h-40 w-40 object-contain sm:h-52 sm:w-52 lg:mb-8 lg:h-72 lg:w-72"
+            className="animate-fade-in mb-6 h-48 w-48 object-contain sm:h-64 sm:w-64 lg:mb-10 lg:h-96 lg:w-96 xl:h-[28rem] xl:w-[28rem]"
           />
 
           <span className="animate-fade-in inline-flex items-center gap-2 rounded-full border border-white/15 bg-white/5 px-4 py-1.5 text-xs font-semibold uppercase tracking-[0.2em] text-white/80 backdrop-blur">
