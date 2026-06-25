@@ -3,8 +3,6 @@
 import Link from "next/link";
 import { useEffect, useState } from "react";
 
-import { BrandMark } from "@/components/brand/brand-mark";
-
 // Sticky glass nav — the page chrome — that condenses on scroll. Copies the
 // scroll-condense mechanism from site-header.tsx verbatim: a 1px sentinel is
 // parked at the very top of the page; an IntersectionObserver watches it, and
@@ -13,13 +11,13 @@ import { BrandMark } from "@/components/brand/brand-mark";
 // observer instead of a scroll listener keeps this off the scroll thread.
 //
 // The hero below is a dark "command" zone, so at rest the nav floats over navy.
-// To keep it legible there we (a) thicken the backdrop blur and (b) bloom a
-// faint accent glow behind the brand mark — colored light reads as intentional
-// over the dark hero. The text colors are SCROLL-STATE-AWARE: at rest over the
-// navy hero the wordmark + nav links go light (white / white-tinted, ≥4.5:1 on
-// navy); once condensed onto the white working surfaces below the fold they
-// flip to the dark ink token (≥4.5:1 on white). A single fixed color can't
-// satisfy both backdrops, so we hook the color into the existing condense flag.
+// The brand now lives in the hero itself, so the nav carries no mark — just the
+// right-aligned actions. To keep them legible the nav text colors stay
+// SCROLL-STATE-AWARE: at rest over the navy hero the links go light (white /
+// white-tinted, ≥4.5:1 on navy); once condensed onto the white working surfaces
+// below the fold they flip to the dark ink token (≥4.5:1 on white). A single
+// fixed color can't satisfy both backdrops, so we hook the color into the
+// existing condense flag.
 export function RedoHeader() {
   const [condensed, setCondensed] = useState(false);
 
@@ -47,35 +45,10 @@ export function RedoHeader() {
         }`}
       >
         <div
-          className={`mx-auto flex max-w-7xl items-center justify-between px-6 transition-all duration-300 ${
+          className={`mx-auto flex max-w-7xl items-center justify-end px-6 transition-all duration-300 ${
             condensed ? "py-3" : "py-4"
           }`}
         >
-          <Link
-            href="/"
-            className="group flex items-center gap-3 rounded-xl outline-none focus-visible:ring-2 focus-visible:ring-[var(--accent,#6366f1)]/40"
-          >
-            {/* Faint accent halo so the mark reads over the dark hero; it
-             * settles down once the nav condenses onto a white surface. */}
-            <span className="relative inline-flex">
-              <span
-                aria-hidden
-                className={`redo-header__glow pointer-events-none absolute -inset-1 rounded-[14px] transition-opacity duration-300 ${
-                  condensed ? "opacity-0" : "opacity-100"
-                }`}
-              />
-              <BrandMark size={36} className="relative transition-transform duration-300 group-hover:scale-105" />
-            </span>
-            {/* Wordmark — the one element that must always be crisp. Light over
-             * the navy hero, dark ink once condensed onto the white surfaces. */}
-            <span
-              className={`text-sm font-semibold tracking-tight transition-colors duration-300 ${
-                condensed ? "text-[var(--text,#0f172a)]" : "text-white"
-              }`}
-            >
-              DOX
-            </span>
-          </Link>
           <div className="flex items-center gap-3">
             <Link
               href="/login"
@@ -100,35 +73,6 @@ export function RedoHeader() {
           </div>
         </div>
       </header>
-
-      <style jsx>{`
-        .redo-header__glow {
-          background: radial-gradient(
-            circle at 50% 50%,
-            rgba(99, 102, 241, 0.55) 0%,
-            rgba(139, 92, 246, 0.3) 45%,
-            transparent 72%
-          );
-          filter: blur(9px);
-          animation: redo-header-glow 4.5s ease-in-out infinite;
-        }
-        @keyframes redo-header-glow {
-          0%,
-          100% {
-            opacity: 1;
-            transform: scale(1);
-          }
-          50% {
-            opacity: 0.7;
-            transform: scale(1.08);
-          }
-        }
-        @media (prefers-reduced-motion: reduce) {
-          .redo-header__glow {
-            animation: none;
-          }
-        }
-      `}</style>
     </>
   );
 }
