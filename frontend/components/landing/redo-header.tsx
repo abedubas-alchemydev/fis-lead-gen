@@ -1,5 +1,6 @@
 "use client";
 
+import Image from "next/image";
 import Link from "next/link";
 import { useEffect, useState } from "react";
 
@@ -53,27 +54,72 @@ export function RedoHeader() {
         >
           <Link
             href="/"
-            className="group flex items-center gap-3 rounded-xl outline-none focus-visible:ring-2 focus-visible:ring-[var(--accent,#6366f1)]/40"
+            aria-label="DOX — home"
+            className="group flex items-center rounded-xl outline-none focus-visible:ring-2 focus-visible:ring-[var(--accent,#6366f1)]/40"
           >
-            {/* Faint accent halo so the mark reads over the dark hero; it
-             * settles down once the nav condenses onto a white surface. */}
-            <span className="relative inline-flex">
+            {/* Brand is SCROLL-STATE-AWARE, two distinct treatments cross-faded:
+             *
+             *  • Over the dark hero (not condensed) → the real dox logo. The
+             *    asset is a navy-bg SQUARE lockup whose tagline would look tiny
+             *    in nav chrome, so we drop it into a fixed-height window and use
+             *    object-cover + object-position to show just the "dox" wordmark
+             *    band and crop the tagline out. Its navy ground melts into the
+             *    navy hero, so it reads as a clean header logo, not a box.
+             *
+             *  • Condensed onto the white surfaces below → the navy-bg PNG would
+             *    show as a navy box on white, so we DON'T use it there. We keep
+             *    the existing dark-ink "d" tile + "DOX" wordmark instead.
+             *
+             * Both live stacked in one grid cell and we toggle opacity on the
+             * condense flag, so the swap rides the same 300ms as the rest of the
+             * header chrome. The hidden layer is also aria-hidden + click-blocked
+             * so only the visible brand is in the a11y/hit tree at any moment. */}
+            <span className="relative grid">
+              {/* Over-hero: cropped dox logo */}
               <span
-                aria-hidden
-                className={`redo-header__glow pointer-events-none absolute -inset-1 rounded-[14px] transition-opacity duration-300 ${
-                  condensed ? "opacity-0" : "opacity-100"
+                aria-hidden={condensed}
+                className={`col-start-1 row-start-1 inline-flex items-center transition-opacity duration-300 ${
+                  condensed ? "pointer-events-none opacity-0" : "opacity-100"
                 }`}
-              />
-              <BrandMark size={36} className="relative transition-transform duration-300 group-hover:scale-105" />
-            </span>
-            {/* Wordmark — the one element that must always be crisp. Light over
-             * the navy hero, dark ink once condensed onto the white surfaces. */}
-            <span
-              className={`text-sm font-semibold tracking-tight transition-colors duration-300 ${
-                condensed ? "text-[var(--text,#0f172a)]" : "text-white"
-              }`}
-            >
-              DOX
+              >
+                {/* Faint accent halo behind the lockup so it reads over navy. */}
+                <span className="relative inline-flex">
+                  <span
+                    aria-hidden
+                    className="redo-header__glow pointer-events-none absolute -inset-1 rounded-[14px]"
+                  />
+                  {/* Fixed-height window cropped to the wordmark band. The square
+                   * source is object-cover'd into this short-and-wide strip: the
+                   * box is ~3.4:1, so only the middle ~30% vertical band shows,
+                   * and objectPosition pulls that band onto the "dox" wordmark so
+                   * the tagline below is clipped off. No extra transform — cover
+                   * already does the crop; an added scale over-magnified it. */}
+                  <span className="relative block h-9 w-[124px] overflow-hidden rounded-[10px]">
+                    <Image
+                      src="/dox-logo.png"
+                      alt="DOX"
+                      fill
+                      priority
+                      sizes="124px"
+                      className="object-cover transition-transform duration-300 group-hover:scale-105"
+                      style={{ objectPosition: "center 46%" }}
+                    />
+                  </span>
+                </span>
+              </span>
+
+              {/* Condensed: dark-ink tile + wordmark (no navy box on white) */}
+              <span
+                aria-hidden={!condensed}
+                className={`col-start-1 row-start-1 inline-flex items-center gap-3 transition-opacity duration-300 ${
+                  condensed ? "opacity-100" : "pointer-events-none opacity-0"
+                }`}
+              >
+                <BrandMark size={36} className="transition-transform duration-300 group-hover:scale-105" />
+                <span className="text-sm font-semibold tracking-tight text-[var(--text,#0f172a)]">
+                  DOX
+                </span>
+              </span>
             </span>
           </Link>
           <div className="flex items-center gap-3">
