@@ -232,16 +232,17 @@ export function RedoHero() {
         <div>
           {/* Brand lockup — the same square dox wordmark the login page paints
               on its dark left panel. The asset is a navy-bg square that shines
-              on dark surfaces, so it sits naturally on this navy hero. Sizable
-              (echoing the login lockup), with object-contain so the swoosh +
-              tagline never distort, and it scales down on small screens. */}
+              on dark surfaces, so it sits naturally on this navy hero. Scaled up
+              to a prominent hero centerpiece (~1.6× the prior size), with
+              object-contain so the swoosh + tagline never distort, stepping down
+              on sm/mobile so it doesn't crowd the headline/CTAs or overflow. */}
           <Image
             src="/dox-logo.png"
             alt="DOX — Institutional Finance Intelligence"
             width={384}
             height={384}
             priority
-            className="animate-fade-in mb-6 h-32 w-32 object-contain sm:h-40 sm:w-40 lg:mb-8 lg:h-44 lg:w-44"
+            className="animate-fade-in mb-6 h-40 w-40 object-contain sm:h-52 sm:w-52 lg:mb-8 lg:h-72 lg:w-72"
           />
 
           <span className="animate-fade-in inline-flex items-center gap-2 rounded-full border border-white/15 bg-white/5 px-4 py-1.5 text-xs font-semibold uppercase tracking-[0.2em] text-white/80 backdrop-blur">
