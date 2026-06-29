@@ -63,7 +63,7 @@ async def post_chatbot_message(
     total_chars = sum(len(m.content) for m in payload.messages)
     if total_chars > _MAX_TOTAL_CHARS:
         raise HTTPException(
-            status_code=status.HTTP_413_REQUEST_ENTITY_TOO_LARGE,
+            status_code=status.HTTP_413_CONTENT_TOO_LARGE,
             detail=(
                 f"Conversation exceeds maximum size "
                 f"({total_chars} > {_MAX_TOTAL_CHARS} characters)."
@@ -174,7 +174,7 @@ def _shared_validate(payload: ChatbotRequest) -> None:
     total_chars = sum(len(m.content) for m in payload.messages)
     if total_chars > _MAX_TOTAL_CHARS:
         raise HTTPException(
-            status_code=status.HTTP_413_REQUEST_ENTITY_TOO_LARGE,
+            status_code=status.HTTP_413_CONTENT_TOO_LARGE,
             detail=(
                 f"Conversation exceeds maximum size "
                 f"({total_chars} > {_MAX_TOTAL_CHARS} characters)."
