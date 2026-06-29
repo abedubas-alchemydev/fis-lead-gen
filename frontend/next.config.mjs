@@ -3,9 +3,7 @@ const nextConfig = {
   // Standalone output for Docker — bundles everything into a self-contained folder
   output: "standalone",
   allowedDevOrigins: ["127.0.0.1:3000", "localhost:3000"],
-  experimental: {
-    typedRoutes: true,
-  },
+  typedRoutes: true,
   // Defense-in-depth security headers. CSP is intentionally limited to
   // frame-ancestors today — adding script-src/style-src here would break
   // Next's inline runtime without nonce wiring (deferred to a follow-up).

@@ -116,7 +116,7 @@ async def list_investment_advisors(
         and min_regulatory_aum > max_regulatory_aum
     ):
         raise HTTPException(
-            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
             detail="min_regulatory_aum must be less than or equal to max_regulatory_aum.",
         )
     if (
@@ -125,7 +125,7 @@ async def list_investment_advisors(
         and registered_after > registered_before
     ):
         raise HTTPException(
-            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
             detail="registered_after must be on or before registered_before.",
         )
 

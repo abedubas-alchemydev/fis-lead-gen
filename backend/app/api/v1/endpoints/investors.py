@@ -162,7 +162,7 @@ async def list_investors(
     )
     if effective_max_value is not None and effective_min_value > effective_max_value:
         raise HTTPException(
-            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
             detail="min_value must be less than or equal to max_value.",
         )
 
