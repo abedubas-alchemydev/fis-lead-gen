@@ -15,7 +15,9 @@ subscriber's first ``await get()`` and expecting delivery.
 from __future__ import annotations
 
 import asyncio
+import logging
 
+import psycopg
 import pytest
 
 from app.services.alert_events import (
@@ -139,3 +141,47 @@ def test_make_alert_inserted_payload_shape() -> None:
     assert payload["type"] == "alert.inserted"
     assert payload["alert_ids"] == [7, 8, 9]
     assert "ts" in payload
+
+
+@pytest.mark.asyncio
+async def test_listener_drop_logs_quietly_then_escalates(monkeypatch, caplog) -> None:
+    """A dropped LISTEN connection (Neon blip) must reconnect *quietly*:
+    logged at INFO without a traceback for the first few attempts, escalating
+    to WARNING only once reconnects keep failing. This keeps routine,
+    self-healing drops out of the Cloud Run ERROR stream while still surfacing
+    a sustained outage."""
+
+    bus = AlertEventBus()
+    calls = {"n": 0}
+
+    async def _always_drop() -> None:
+        calls["n"] += 1
+        if calls["n"] > 5:
+            raise asyncio.CancelledError()  # break the otherwise-infinite loop
+        raise psycopg.OperationalError("server closed the connection unexpectedly")
+
+    async def _no_sleep(_delay: float) -> None:
+        return None
+
+    monkeypatch.setattr(bus, "_listen_once", _always_drop)
+    monkeypatch.setattr(asyncio, "sleep", _no_sleep)
+
+    with caplog.at_level(logging.INFO, logger="app.services.alert_events"):
+        with pytest.raises(asyncio.CancelledError):
+            await bus.run_listener()
+
+    info_drops = [
+        r
+        for r in caplog.records
+        if r.levelno == logging.INFO and "reconnecting" in r.getMessage()
+    ]
+    warn_escalations = [
+        r
+        for r in caplog.records
+        if r.levelno == logging.WARNING and "still down" in r.getMessage()
+    ]
+    # First few drops are quiet INFO with no traceback...
+    assert info_drops, "transient drops should log at INFO"
+    assert all(r.exc_info is None for r in info_drops), "INFO drops must carry no traceback"
+    # ...and only sustained reconnect failure escalates to WARNING.
+    assert warn_escalations, "sustained reconnect failures should escalate to WARNING"

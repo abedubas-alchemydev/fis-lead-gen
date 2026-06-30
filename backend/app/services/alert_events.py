@@ -17,6 +17,10 @@ logger = logging.getLogger(__name__)
 NOTIFY_CHANNEL = "filing_alerts_new"
 _SUBSCRIBER_QUEUE_MAXSIZE = 64
 _RECONNECT_BACKOFF_SECONDS = (1.0, 2.0, 5.0, 10.0, 30.0)
+# A single dropped LISTEN connection is routine (Neon idle-suspend / brief
+# platform blip); only escalate the reconnect log from INFO to WARNING once
+# this many consecutive reconnects have failed, which points to a real outage.
+_RECONNECT_QUIET_ATTEMPTS = 3
 
 # Neon (and intermediate network paths) close idle PG sessions after ~5 min.
 # Two-layer defense keeps the LISTEN session alive:
@@ -158,6 +162,31 @@ class AlertEventBus:
                 attempt = 0  # clean exit means EOF on the connection — retry immediately
             except asyncio.CancelledError:
                 raise
+            except psycopg.OperationalError as exc:
+                # A dropped LISTEN socket is routine for a long-lived Neon
+                # connection (idle suspend, a brief platform blip, a server
+                # restart). The loop just reconnects, so a single drop is
+                # self-healing, not an incident — log it concisely WITHOUT a
+                # traceback so it doesn't surface as an ERROR in Cloud Run.
+                # Escalate to a full WARNING only if reconnects keep failing,
+                # which signals a real outage rather than a transient blip.
+                delay = _RECONNECT_BACKOFF_SECONDS[min(attempt, len(_RECONNECT_BACKOFF_SECONDS) - 1)]
+                attempt += 1
+                if attempt <= _RECONNECT_QUIET_ATTEMPTS:
+                    logger.info(
+                        "alert_events listener connection dropped (%s); reconnecting in %.1fs",
+                        type(exc).__name__,
+                        delay,
+                    )
+                else:
+                    logger.warning(
+                        "alert_events listener still down after %d attempts (%s); retrying in %.1fs",
+                        attempt,
+                        type(exc).__name__,
+                        delay,
+                        exc_info=True,
+                    )
+                await asyncio.sleep(delay)
             except Exception:
                 delay = _RECONNECT_BACKOFF_SECONDS[min(attempt, len(_RECONNECT_BACKOFF_SECONDS) - 1)]
                 logger.warning(
