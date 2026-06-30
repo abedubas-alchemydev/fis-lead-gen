@@ -110,8 +110,11 @@ logging.getLogger("pdfminer").setLevel(logging.ERROR)
 
 
 # ---------------------------------------------------------------------------
-# Constants -- mirror the in-tree parser semantics
-# (copied verbatim from scripts/standalone_extract_new_bds.py)
+# Constants -- mirror the in-tree parser semantics. The FINRA-fetch/PDF
+# helpers below were originally shared with
+# scripts/standalone_extract_new_bds.py; that extractor has since moved to the
+# app.services.finra enumerate-and-diff path, so these helpers now live only
+# here. The regexes remain verbatim from backend/app/services/brokercheck_pdf.py.
 # ---------------------------------------------------------------------------
 
 FINRA_SEARCH_URL = (
@@ -216,7 +219,8 @@ def _extract_dates_from_pdf(pdf_bytes: bytes) -> tuple[Optional[date], Optional[
 
 
 # ---------------------------------------------------------------------------
-# FINRA fetchers (copied verbatim from standalone_extract_new_bds.py)
+# FINRA fetchers (self-contained; formerly shared with
+# standalone_extract_new_bds.py, which now enumerates via app.services.finra)
 # ---------------------------------------------------------------------------
 
 async def _fetch_firm_json(client: httpx.AsyncClient, crd: int) -> Optional[dict]:
