@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import logging
 
+from dataclasses import dataclass
 from difflib import SequenceMatcher
 
 from app.services.apollo import ApolloClient, ApolloError
@@ -33,6 +34,30 @@ _FUZZY_MATCH_THRESHOLD = 0.88
 
 # Only firms with these statuses survive into the output.
 _ACTIVE_STATUSES = frozenset({"active"})
+
+
+@dataclass(slots=True)
+class EdgarIndex:
+    """The reusable EDGAR lookup index built once by
+    :meth:`BrokerDealerMergeService.build_edgar_index`.
+
+    Holds everything the FINRA matching loop needs to resolve a firm without
+    rescanning the EDGAR dataset:
+
+    * ``by_sec`` — normalized SEC file number → EDGAR record (primary key).
+    * ``by_name`` — normalized entity name → EDGAR record (fuzzy fallback).
+    * ``name_block_index`` — first/second-token blocking index that keeps the
+      fuzzy match near O(N) instead of O(N*M).
+
+    The streaming initial-load path builds this once over the (comparatively
+    cheap, EDGAR-only) dataset and then reuses it across every FINRA chunk, so
+    the heavy per-firm FINRA enrichment is the only thing that ever needs to
+    be sliced for memory.
+    """
+
+    by_sec: dict[str, EdgarBrokerDealerRecord]
+    by_name: dict[str, EdgarBrokerDealerRecord]
+    name_block_index: dict[str, list[tuple[str, EdgarBrokerDealerRecord]]]
 
 
 class BrokerDealerMergeService:
@@ -73,35 +98,77 @@ class BrokerDealerMergeService:
         """Merge EDGAR and FINRA datasets.
 
         Returns a tuple of ``(merged_records, qa_report)``.
+
+        Thin wrapper that composes the three reusable pieces over the ENTIRE
+        FINRA set in one pass: :meth:`build_edgar_index` (once) →
+        :meth:`merge_chunk` (the whole list as a single chunk) →
+        :meth:`finalize` (once). ``scripts.initial_load`` and the existing
+        service-contract tests keep calling this and get the identical
+        ``(list, MergeQAReport)`` shape. The OOM-hardened initial-load
+        background task calls the same three pieces directly but streams FINRA
+        in small chunks, so the heavy per-firm enrichment is never resident in
+        memory all at once.
         """
         report = MergeQAReport(
             edgar_input_count=len(edgar_records),
             finra_input_count=len(finra_records),
         )
+        edgar_index = self.build_edgar_index(edgar_records, report)
 
-        # ── Step 1: Index EDGAR records by normalized SEC file number ──
+        seen_sec_numbers: set[str] = set()
+        matched_edgar_secs: set[str] = set()
+        merged = self.merge_chunk(
+            finra_records,
+            edgar_index,
+            seen_sec_numbers=seen_sec_numbers,
+            matched_edgar_secs=matched_edgar_secs,
+            report=report,
+        )
+
+        self.finalize(edgar_index, matched_edgar_secs, report)
+        return merged, report
+
+    def build_edgar_index(
+        self,
+        edgar_records: list[EdgarBrokerDealerRecord],
+        report: MergeQAReport | None = None,
+    ) -> EdgarIndex:
+        """Index the EDGAR dataset once, up front, for reuse across chunks.
+
+        Builds the SEC-file-number lookup (the primary match key), the
+        normalized-name lookup (fuzzy fallback), and the first/second-token
+        blocking index that keeps fuzzy matching near O(N). When a ``report``
+        is supplied, bad / duplicate EDGAR rows are recorded on it so the
+        single-pass :meth:`merge` and the chunked initial-load path produce
+        byte-identical QA numbers. Pulling this out of the FINRA loop is what
+        lets the streaming path build the (cheap, EDGAR-only) index a single
+        time and then stream FINRA past it chunk by chunk.
+        """
+        # ── Index EDGAR records by normalized SEC file number ──
         edgar_by_sec: dict[str, EdgarBrokerDealerRecord] = {}
         edgar_by_name: dict[str, EdgarBrokerDealerRecord] = {}
         for record in edgar_records:
             normalized_sec = normalize_sec_file_number(record.sec_file_number)
             if normalized_sec is None:
-                report.bad_sec_number_count += 1
-                report.bad_source_rows.append(BadSourceRow(
-                    source="edgar",
-                    identifier=record.cik,
-                    name=record.name,
-                    reason=f"SEC file number could not be normalized: {record.sec_file_number!r}",
-                ))
+                if report is not None:
+                    report.bad_sec_number_count += 1
+                    report.bad_source_rows.append(BadSourceRow(
+                        source="edgar",
+                        identifier=record.cik,
+                        name=record.name,
+                        reason=f"SEC file number could not be normalized: {record.sec_file_number!r}",
+                    ))
                 continue
             if normalized_sec in edgar_by_sec:
                 # Duplicate CIK in EDGAR — keep the first occurrence.
-                report.duplicate_suppressed_count += 1
-                report.bad_source_rows.append(BadSourceRow(
-                    source="edgar",
-                    identifier=record.cik,
-                    name=record.name,
-                    reason=f"Duplicate SEC file number {normalized_sec} (first: CIK {edgar_by_sec[normalized_sec].cik})",
-                ))
+                if report is not None:
+                    report.duplicate_suppressed_count += 1
+                    report.bad_source_rows.append(BadSourceRow(
+                        source="edgar",
+                        identifier=record.cik,
+                        name=record.name,
+                        reason=f"Duplicate SEC file number {normalized_sec} (first: CIK {edgar_by_sec[normalized_sec].cik})",
+                    ))
                 continue
             edgar_by_sec[normalized_sec] = record
             # Also index by normalized name for fuzzy fallback.
@@ -109,15 +176,45 @@ class BrokerDealerMergeService:
             if normalized_name and normalized_name not in edgar_by_name:
                 edgar_by_name[normalized_name] = record
 
-        # ── Step 1b: Build blocking index for fast fuzzy matching ──
+        # ── Build blocking index for fast fuzzy matching ──
         name_block_index = self._build_name_block_index(edgar_by_name)
+        return EdgarIndex(
+            by_sec=edgar_by_sec,
+            by_name=edgar_by_name,
+            name_block_index=name_block_index,
+        )
 
-        # ── Step 2: Walk FINRA records and try to match to EDGAR ──
+    def merge_chunk(
+        self,
+        finra_chunk: list[FinraBrokerDealerRecord],
+        edgar_index: EdgarIndex,
+        *,
+        seen_sec_numbers: set[str],
+        matched_edgar_secs: set[str],
+        report: MergeQAReport,
+    ) -> list[MergedBrokerDealerRecord]:
+        """Match one chunk of FINRA records against the pre-built EDGAR index.
+
+        Returns the merged rows for THIS chunk only. Cross-chunk state is
+        threaded in by the caller so a sequence of ``merge_chunk`` calls is
+        indistinguishable from a single ``merge`` over the concatenation:
+
+        * ``seen_sec_numbers`` — FINRA SEC file numbers already emitted; a
+          duplicate firm surfacing in a later chunk is suppressed exactly as
+          it would be within a single pass.
+        * ``matched_edgar_secs`` — EDGAR SEC numbers already claimed by a
+          FINRA match, so :meth:`finalize` can report the genuinely
+          unresolved EDGAR rows once, after the last chunk.
+        * ``report`` — the shared QA report; per-row counters accumulate
+          across chunks.
+        """
+        edgar_by_sec = edgar_index.by_sec
+        edgar_by_name = edgar_index.by_name
+        name_block_index = edgar_index.name_block_index
+
         merged: list[MergedBrokerDealerRecord] = []
-        seen_sec_numbers: set[str] = set()
-        matched_edgar_secs: set[str] = set()
 
-        for finra_record in finra_records:
+        for finra_record in finra_chunk:
             # ── Filter: inactive ──
             if finra_record.registration_status.lower() not in _ACTIVE_STATUSES:
                 report.inactive_suppressed_count += 1
@@ -209,8 +306,28 @@ class BrokerDealerMergeService:
                 ))
                 report.finra_only_count += 1
 
-        # ── Step 3: Count unresolved EDGAR rows (dropped, not emitted) ──
-        for sec_number, edgar_record in edgar_by_sec.items():
+        return merged
+
+    def finalize(
+        self,
+        edgar_index: EdgarIndex,
+        matched_edgar_secs: set[str],
+        report: MergeQAReport,
+    ) -> None:
+        """Close out a merge: account for unmatched EDGAR rows and stamp the
+        final output count.
+
+        Runs EXACTLY ONCE, after every FINRA chunk has been merged — never per
+        chunk. EDGAR-only rows (no FINRA match anywhere across the whole run)
+        are dropped, but each is counted and logged so the QA report stays
+        honest. Driving this off the shared ``matched_edgar_secs`` accumulator
+        is what makes ``edgar_unresolved_count`` match the single-pass
+        ``merge`` exactly: calling it once means an unmatched EDGAR row is
+        reported a single time, not re-counted for every chunk that failed to
+        claim it.
+        """
+        # ── Count unresolved EDGAR rows (dropped, not emitted) ──
+        for sec_number, edgar_record in edgar_index.by_sec.items():
             if sec_number not in matched_edgar_secs:
                 report.edgar_unresolved_count += 1
                 report.bad_source_rows.append(BadSourceRow(
@@ -220,8 +337,10 @@ class BrokerDealerMergeService:
                     reason="No matching FINRA record found — dropped (EDGAR-only not emitted)",
                 ))
 
-        report.output_count = len(merged)
-        return merged, report
+        # Streaming-friendly equivalent of ``len(merged)`` in the old one-shot
+        # merge: every emitted row incremented exactly one of these two
+        # counters, so their sum is the total output row count across chunks.
+        report.output_count = report.matched_both_count + report.finra_only_count
 
     async def apply_apollo_website_fallback(
         self,

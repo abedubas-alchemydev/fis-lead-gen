@@ -43,7 +43,6 @@ from app.services.service_models import (
     EdgarBrokerDealerRecord,
     FinraBrokerDealerRecord,
     MergedBrokerDealerRecord,
-    MergeQAReport,
 )
 
 
@@ -506,6 +505,13 @@ async def test_initial_load_background_inserts_and_completes(
     tuple the missing unpack produced. The ``filing_monitor_service.run`` stub
     returns the real ``(run, ids)`` tuple, so assertion (a) catches bug #2 and
     assertion (b) catches bug #1.
+
+    NOTE (perf/initial-load-streaming): the harvest no longer calls ``merge()``
+    — it builds the EDGAR index once and streams FINRA through ``merge_chunk``
+    per slice, upserting + committing each chunk, then ``finalize`` once. Both
+    guarantees above still hold and are still asserted here: ``merge_chunk``
+    hands ``upsert_many`` a real list per chunk (b), and the
+    ``filing_run, _ = await ...`` unpack is preserved untouched (a).
     """
     log: list[str] = []
     run_row = PipelineRun(
@@ -547,15 +553,35 @@ async def test_initial_load_background_inserts_and_completes(
             return [_fake_edgar_record()]
 
     class _FakeMergeService:
-        def merge(self, edgar_records: Any, finra_records: Any) -> Any:
-            # Returns the real ``(records, report)`` tuple shape. The call site
-            # MUST unpack it; the bug assigned the whole tuple to ``merged``.
-            return [merged_record], MergeQAReport(
-                edgar_input_count=1,
-                finra_input_count=1,
-                matched_both_count=1,
-                output_count=1,
-            )
+        """Mirrors the three-piece streaming contract the rewritten
+        ``_run_initial_load_background`` drives: ``build_edgar_index`` once,
+        ``merge_chunk`` per FINRA slice, ``finalize`` once. Each chunk yields
+        the canned merged record so the upsert spy can assert it received a
+        real ``list[MergedBrokerDealerRecord]`` — never the un-unpacked
+        ``(list, report)`` tuple the original bug produced."""
+
+        def build_edgar_index(self, edgar_records: Any, report: Any = None) -> Any:
+            return {"edgar": list(edgar_records)}
+
+        def merge_chunk(
+            self,
+            finra_chunk: Any,
+            edgar_index: Any,
+            *,
+            seen_sec_numbers: set[str],
+            matched_edgar_secs: set[str],
+            report: Any,
+        ) -> list[MergedBrokerDealerRecord]:
+            out: list[MergedBrokerDealerRecord] = []
+            for _ in finra_chunk:
+                report.matched_both_count += 1
+                out.append(merged_record)
+            return out
+
+        def finalize(
+            self, edgar_index: Any, matched_edgar_secs: set[str], report: Any
+        ) -> None:
+            report.output_count = report.matched_both_count + report.finra_only_count
 
     monkeypatch.setattr("app.services.finra.FinraService", _FakeFinraService)
     monkeypatch.setattr("app.services.edgar.EdgarService", _FakeEdgarService)

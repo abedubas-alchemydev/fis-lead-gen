@@ -72,6 +72,14 @@ registration_watcher_service = RegistrationWatcherService()
 deficiency_watcher_service = DeficiencyWatcherService()
 form4_watcher_service = Form4WatcherService()
 
+# FINRA firms processed per chunk in the OOM-hardened initial-load harvest.
+# The full ~3.2k-firm set was previously enriched (heavy Form BD fields:
+# executive_officers / direct_owners / firm_operations_text) + merged +
+# upserted all at once, peaking ~2.1 GiB and OOM-killing prod at the old
+# 2 GiB ceiling. Streaming in slices of this size — enrich -> merge_chunk ->
+# upsert + commit -> drop — caps peak memory at roughly one chunk's worth.
+_INITIAL_LOAD_CHUNK_SIZE = 250
+
 
 def _ensure_admin(current_user: AuthenticatedUser) -> None:
     if current_user.role != "admin":
@@ -211,25 +219,78 @@ async def _run_initial_load_background(run_id: int, trigger_source: str) -> None
         from app.services.data_merge import BrokerDealerMergeService
         from app.services.edgar import EdgarService
         from app.services.finra import FinraService
+        from app.services.service_models import MergeQAReport
 
         finra_service = FinraService()
         edgar_service = EdgarService()
         merge_service = BrokerDealerMergeService()
 
+        # ── Light harvest ── fetch the CHEAP pre-enrich FINRA list (search
+        # pages only, no Form BD PDF detail) plus the full EDGAR set, once.
+        # enrich_with_detail is what balloons each record with the heavy Form
+        # BD fields, so it is deferred into the per-chunk loop below and never
+        # held for the whole ~3.2k-firm set at once.
         finra_records = await finra_service.fetch_broker_dealers(
             limit=app_settings.initial_load_limit
         )
-        finra_records = await finra_service.enrich_with_detail(finra_records)
         sec_file_numbers = [r.sec_file_number for r in finra_records if r.sec_file_number]
         edgar_records = await edgar_service.fetch_records_for_sec_numbers(sec_file_numbers)
-        merged, report = merge_service.merge(edgar_records, finra_records)
 
-        async with SessionLocal() as db:
-            await repository.upsert_many(db, merged)
-            await db.commit()
+        # ── Build the EDGAR index ONCE, then stream FINRA past it in chunks ──
+        # report / seen_sec_numbers / matched_edgar_secs are the cross-chunk
+        # accumulators that make N merge_chunk() calls identical to a single
+        # merge() over the whole set. build_edgar_index records EDGAR-side
+        # bad/duplicate rows into the SAME report so the QA counts match a
+        # one-shot merge(); finalize() runs once at the very end so
+        # EDGAR-unresolved rows are reported a single time, not per chunk.
+        total_finra = len(finra_records)
+        report = MergeQAReport(
+            edgar_input_count=len(edgar_records),
+            finra_input_count=total_finra,
+        )
+        edgar_index = merge_service.build_edgar_index(edgar_records, report)
+        seen_sec_numbers: set[str] = set()
+        matched_edgar_secs: set[str] = set()
+
+        # Drain finra_records from the front so each processed (now heavily
+        # enriched) slice becomes collectable as soon as its chunk is
+        # committed — the parent list never pins the whole enriched set, which
+        # is precisely what blew past the 2 GiB ceiling before.
+        while finra_records:
+            finra_chunk = finra_records[:_INITIAL_LOAD_CHUNK_SIZE]
+            del finra_records[:_INITIAL_LOAD_CHUNK_SIZE]
+
+            # enrich_with_detail mutates the slice in place with the heavy Form
+            # BD fields; scope those allocations to this iteration.
+            await finra_service.enrich_with_detail(finra_chunk)
+            chunk_merged = merge_service.merge_chunk(
+                finra_chunk,
+                edgar_index,
+                seen_sec_numbers=seen_sec_numbers,
+                matched_edgar_secs=matched_edgar_secs,
+                report=report,
+            )
+
+            # Commit per chunk: upsert_many already batches at 500 internally,
+            # and the commit is REQUIRED so the no-CIK select-then-write path
+            # sees earlier chunks' rows when matching later chunks.
+            # replace_dataset is deliberately NOT used here — it DELETEs the
+            # whole table first, which would wipe prior chunks.
+            async with SessionLocal() as db:
+                await repository.upsert_many(db, chunk_merged)
+                await db.commit()
+
+            # Release this window's heavy records before the next slice.
+            del finra_chunk, chunk_merged
+
+        # ── EDGAR-unresolved accounting + output_count, exactly once ──
+        merge_service.finalize(edgar_index, matched_edgar_secs, report)
 
         notes_parts.append(
-            f"finra={len(finra_records)} edgar={len(edgar_records)} merged={len(merged)}"
+            f"finra={report.finra_input_count} edgar={report.edgar_input_count} "
+            f"merged={report.output_count} both={report.matched_both_count} "
+            f"finra_only={report.finra_only_count} "
+            f"edgar_unresolved={report.edgar_unresolved_count}"
         )
 
         async with SessionLocal() as db:
