@@ -336,13 +336,14 @@ jobs:
       # docs/runbooks/extract-new-bds.md. The script needs DATABASE_URL, plus
       # GEMINI_API_KEY so its post-apply Doxie embed hook can index the new
       # BDs (without the key the hook logs a skip and the semantic index
-      # drifts). It probes FINRA's public
-      # BrokerCheck endpoints from MAX(crd_number)+1 and self-terminates after
-      # --max-misses consecutive non-BD CRDs, so one run/night catches up the
-      # gap. Lighter than the gap-fill/backfill jobs (1Gi/1cpu, 1h timeout) —
-      # it's a sequential CRD probe, not a full per-firm enrichment. Reuses the
-      # backend image (same SHA); only the CMD differs. Staging-only by design:
-      # no parallel prod job resource, so a push to main can't run it on prod.
+      # drifts). Mechanism: it enumerates ALL active broker-dealers from FINRA
+      # BrokerCheck (keyword + A-Z/0-9 Solr queries) and diffs against the DB,
+      # so a net-new BD is found wherever its CRD sits — not the old sequential
+      # CRD probe that stalled on the IA-only firms just above MAX(crd_number).
+      # Per-firm Form BD + EDGAR enrichment runs only for the net-new set, so
+      # one run/night catches up the gap. Lighter than the gap-fill/backfill
+      # jobs (1Gi/1cpu, 1h timeout). Reuses the backend image (same SHA); only
+      # the CMD differs. The production sibling (next step) targets the prod DB.
       - name: Deploy extract-new-bds Cloud Run Job (staging)
         if: env.ENV == 'staging'
         run: |
@@ -360,6 +361,32 @@ jobs:
             --tasks=1 \
             --set-secrets=DATABASE_URL=DATABASE_URL_BACKEND_STAGING:latest,GEMINI_API_KEY=GEMINI_API_KEY:latest \
             --labels=commit-sha=${{ env.SHORT_SHA }},environment=staging,kind=batch-job
+
+      # Production sibling of the staging extract-new-bds job above. Identical
+      # shape (enumerate-and-diff, --apply, 1Gi/1cpu/1h, GEMINI_API_KEY for the
+      # Doxie embed hook); the only differences are the job name
+      # (fis-extract-new-bds-prod), the prod DATABASE_URL secret
+      # (DATABASE_URL_BACKEND vs the staging DATABASE_URL_BACKEND_STAGING), and
+      # the env label. Gated to push-to-main (env.ENV == 'production'). A
+      # separate one-time prod Cloud Scheduler cron (0 4 * * *, America/New_York)
+      # invokes it by name — see docs/runbooks/extract-new-bds.md.
+      - name: Deploy extract-new-bds Cloud Run Job (production)
+        if: env.ENV == 'production'
+        run: |
+          gcloud run jobs deploy fis-extract-new-bds-prod \
+            --image=${{ vars.GCP_REGISTRY }}/backend:${{ env.SHORT_SHA }} \
+            --region=${{ vars.GCP_REGION }} \
+            --project=${{ vars.GCP_PROJECT_ID }} \
+            --command=python \
+            --args=scripts/standalone_extract_new_bds.py,--apply \
+            --task-timeout=3600 \
+            --memory=1Gi \
+            --cpu=1 \
+            --max-retries=0 \
+            --parallelism=1 \
+            --tasks=1 \
+            --set-secrets=DATABASE_URL=DATABASE_URL_BACKEND:latest,GEMINI_API_KEY=GEMINI_API_KEY:latest \
+            --labels=commit-sha=${{ env.SHORT_SHA }},environment=production,kind=batch-job
 
       # Cloud Run Job that runs scripts/refresh_registration_dates.py against the
       # staging Neon DB. Re-fetches each firm's FINRA Form BD and UPDATEs

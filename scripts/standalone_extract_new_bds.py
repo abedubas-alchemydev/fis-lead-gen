@@ -1,157 +1,111 @@
-"""Standalone extractor: discover and ingest NEW broker-dealers above the
-current MAX(crd_number) in our master list.
+"""Discover and ingest NEW broker-dealers that FINRA has registered since our
+last full load, using an **enumerate-and-diff** strategy.
 
 Why this exists. The ``broker_dealers`` table is populated in bulk by
-``scripts/initial_load.py``. Between initial_load runs, FINRA assigns
-fresh CRDs to newly-registered firms but our DB doesn't pick them up.
-This script catches up the gap without re-running the full initial_load:
-it probes FINRA's per-CRD search endpoint starting just above
-``MAX(crd_number)``, and INSERTs each new BD it finds.
+``scripts/initial_load.py``. Between initial_load runs, FINRA registers fresh
+broker-dealers but our DB doesn't pick them up. This script catches up that gap
+without re-running the full initial_load.
 
-Standalone -- the extraction itself imports nothing from ``app.*``,
-``brokercheck_extractor/``, or any other project module -- so the file
-can be removed after the catchup without breaking anything else. The one
-exception is the post-apply Doxie freshness hook
-(``_embed_backfill_after_apply``): after new BDs are committed it lazily
-imports ``app.services.chatbot_semantic`` to embed them into the
-``chatbot_firm_embedding`` semantic-search index. That import is
-best-effort and failure-isolated -- when ``app.*`` or GEMINI_API_KEY is
-unavailable it logs and moves on, never touching the extractor's exit
-code or its committed rows.
+Why enumerate-and-diff (and not a CRD probe). FINRA assigns CRDs to *every*
+registrant — broker-dealers, investment advisers, and individuals — from one
+sequential pool, and there is **no FINRA "recently-registered" endpoint** to
+date-query. The old version of this script probed CRDs sequentially upward from
+``MAX(crd_number)`` and stopped after N consecutive "misses". In production it
+found nothing: the CRDs just above our watermark are almost always IA-only
+firms or individuals (which count as misses), so the probe quit ~50 CRDs up and
+never reached a genuinely new broker-dealer whose CRD sits hundreds or
+thousands higher. Enumerate-and-diff sidesteps the watermark entirely: it lists
+*all* active broker-dealers and diffs against the DB, so a net-new BD is found
+no matter where its CRD lands.
 
-Discovery strategy. FINRA assigns CRDs sequentially. Start at
-``MAX(crd_number) + 1`` and probe upward. Stop when we see
-``--max-misses`` consecutive empty/non-BD responses (default 50) or
-hit ``--probe-limit`` (default 500). Sequential CRDs aren't always
-populated -- FINRA leaves gaps where firms are IA-only, terminated,
-or were never approved -- hence the gap tolerance.
+Mechanism:
+  1. Enumerate every active broker-dealer from FINRA BrokerCheck via
+     ``FinraService().fetch_broker_dealers()`` — the same keyword + A-Z/0-9 Solr
+     enumeration (paginated, deduped by CRD, ``active=true``, with 429 /
+     Retry-After backoff) that ``scripts/initial_load.py`` uses. Cheap: one
+     search payload per page, no per-firm detail.
+  2. Load existing CRDs: ``SELECT crd_number FROM broker_dealers`` into a set.
+  3. Diff (pure, unit-tested :func:`select_new_bds`): keep enumerated records
+     whose ``crd_number`` is truthy and not already in the DB, deduped by CRD.
+  4. For the net-new set ONLY (so the expensive per-firm work stays bounded):
+       a. ``FinraService().enrich_with_detail(new)`` — Form BD PDF detail
+          (types_of_business, officers, registration/formation dates, ...).
+       b. ``EdgarService().fetch_records_for_sec_numbers(...)`` for their SEC
+          file numbers.
+       c. ``BrokerDealerMergeService().merge(edgar_records, new)`` — EDGAR
+          first, unpack ``(merged, report)``; the same arg-order contract the
+          initial-load pipeline uses.
+       d. ``BrokerDealerRepository().upsert_many(db, merged)`` — idempotent
+          upsert (re-running is safe; existing rows update in place).
 
-Per-CRD flow:
-  1. GET ``https://api.brokercheck.finra.org/search/firm/{crd}?wt=json``
-  2. Parse JSON; if no hit OR ``bcScope`` is missing -> miss
-     (firm doesn't exist or is not a broker-dealer; could be IA-only).
-  3. Else extract: ``firmName``, ``bcScope``, ``bdSECNumber``,
-     ``firmAddressDetails.officeAddress.city/state``.
-  4. Fetch Form BD PDF from ``files.brokercheck.finra.org``.
-  5. Regex out SEC ``registration_date`` and ``formation_date`` using
-     the same patterns as the in-tree parser at
-     ``backend/app/services/brokercheck_pdf.py:549-570`` so the parsed
-     semantics match every other row already in those columns.
-  6. Buffer a row; INSERT on ``--apply`` (dry-run by default).
+Dry-run is the default and is cheap: it enumerates, diffs, and logs exactly
+which firms WOULD be ingested (no Form BD PDF fetches, no EDGAR, no writes).
+``--apply`` runs the full enrich → EDGAR → merge → upsert path.
 
-Inserted row scope. Minimal viable -- the columns the Master List and
-"New BDs / 30 days" KPI need to display the firm:
-  crd_number, name, sec_file_number, city, state, status,
-  matched_source ("finra_only"), registration_date, formation_date.
-Everything else (branch_count, business_type, owners, officers, website,
-clearing fields, lead_score, ...) stays at column defaults and gets
-filled by the per-firm refresh-all path later.
+Post-apply Doxie hook. After new BDs are committed, ``--apply`` chains
+``_embed_backfill_after_apply``: it lazily imports ``app.services`` to embed the
+new firms into the ``chatbot_firm_embedding`` semantic-search index. That hook
+is best-effort and failure-isolated — when ``GEMINI_API_KEY`` is unavailable it
+logs and moves on, never touching the extractor's exit code or its committed
+rows.
 
 Usage::
 
-    # dry-run probe starting at MAX(crd_number)+1
+    # dry-run: enumerate + diff + report what WOULD be ingested (no writes)
     python scripts/standalone_extract_new_bds.py
 
-    # actually insert
+    # actually enrich + merge + upsert the net-new firms
     python scripts/standalone_extract_new_bds.py --apply
 
-    # smoke-test a single CRD
-    python scripts/standalone_extract_new_bds.py --crd-start 339697 --probe-limit 1
-
-    # override DB URL
+    # override DB URL (defaults to the DATABASE_URL env var)
     python scripts/standalone_extract_new_bds.py --db-url <URL>
 
-Dependencies (already in project requirements): httpx, pdfplumber,
-pypdf, sqlalchemy[asyncio], psycopg (v3).
+Runs as a Cloud Run Job (backend image) via
+``--args=scripts/standalone_extract_new_bds.py,--apply``; see
+``docs/runbooks/extract-new-bds.md``.
 """
 
 from __future__ import annotations
 
 import argparse
 import asyncio
-import io
-import json
 import logging
 import os
-import re
 import sys
-from dataclasses import dataclass
-from datetime import date, datetime
-from typing import Optional
+from pathlib import Path
+from typing import TYPE_CHECKING
 
-import httpx
-import pdfplumber
-import pypdf
 from sqlalchemy import text
-from sqlalchemy.ext.asyncio import create_async_engine
+from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
+
+if TYPE_CHECKING:  # import only for type hints — keeps the module import cheap
+    from app.services.service_models import FinraBrokerDealerRecord
+
+
+# Local checkouts run this script from the repo root without the backend
+# package on the path; the backend lives at <repo>/backend (same bootstrap as
+# scripts/initial_load.py and the embed hook below). In the backend image the
+# dir doesn't exist (backend/ is copied to /app) and PYTHONPATH=/app already
+# makes ``app.*`` importable, so this is a no-op there.
+_BACKEND_ROOT = Path(__file__).resolve().parents[1] / "backend"
+if _BACKEND_ROOT.is_dir() and str(_BACKEND_ROOT) not in sys.path:
+    sys.path.insert(0, str(_BACKEND_ROOT))
 
 
 if sys.platform == "win32" and sys.version_info < (3, 14):
     asyncio.set_event_loop_policy(asyncio.WindowsSelectorEventLoopPolicy())
 
-sys.stdout.reconfigure(line_buffering=True)  # type: ignore[attr-defined]
-sys.stderr.reconfigure(line_buffering=True)  # type: ignore[attr-defined]
+# Line-buffer stdout/stderr so Cloud Run streams logs promptly. Guarded so
+# importing this module under pytest (which swaps in capture streams that may
+# lack ``reconfigure``) never blows up.
+for _stream in (sys.stdout, sys.stderr):
+    try:
+        _stream.reconfigure(line_buffering=True)  # type: ignore[attr-defined]
+    except (AttributeError, ValueError):
+        pass
 
 logger = logging.getLogger("standalone_extract_new_bds")
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
-
-# pdfplumber's underlying pdfminer emits "Data-loss while decompressing
-# corrupted data" warnings on the slightly-mangled Flate streams FINRA's
-# Cloudflare gateway returns. Extraction still succeeds; silence the noise.
-logging.getLogger("pdfminer").setLevel(logging.ERROR)
-
-
-# ---------------------------------------------------------------------------
-# Constants -- mirror the in-tree parser semantics
-# ---------------------------------------------------------------------------
-
-FINRA_SEARCH_URL = (
-    "https://api.brokercheck.finra.org/search/firm/{crd}"
-    "?hl=true&nrows=12&start=0&r=25&sort=score+desc&wt=json"
-)
-FINRA_PDF_URL = "https://files.brokercheck.finra.org/firm/firm_{crd}.pdf"
-PAGE_HARD_CAP = 80  # matches the in-tree parser at brokercheck_pdf.py:122
-HTTP_TIMEOUT = 30.0
-
-# Verbatim from backend/app/services/brokercheck_pdf.py:549-552 / 567-570
-SEC_REG_DATE_RE = re.compile(
-    r"(?im)^\s*SEC\s+(?:Approved|Active|Registered|Effective)\s+"
-    r"(\d{1,2}/\d{1,2}/\d{4})"
-)
-FORMATION_DATE_RE = re.compile(
-    r"(?im)This\s*firm\s*was\s*formed\s*in\s*[\w\s,&.\-]*?\s*on\s*"
-    r"(\d{1,2}/\d{1,2}/\d{4})"
-)
-
-HTTP_HEADERS_JSON = {
-    "User-Agent": os.environ.get(
-        "SEC_USER_AGENT",
-        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
-        "(KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
-    ),
-    "Accept": "application/json",
-}
-HTTP_HEADERS_PDF = {
-    "User-Agent": HTTP_HEADERS_JSON["User-Agent"],
-    "Accept": "application/pdf",
-    "Accept-Encoding": "identity",
-}
-
-
-# ---------------------------------------------------------------------------
-# Data shape buffered per discovered firm
-# ---------------------------------------------------------------------------
-
-@dataclass(frozen=True)
-class NewBd:
-    crd_number: str
-    name: str
-    sec_file_number: Optional[str]
-    city: Optional[str]
-    state: Optional[str]
-    status: str  # "Active" or "Inactive"
-    registration_date: Optional[date]
-    formation_date: Optional[date]
 
 
 # ---------------------------------------------------------------------------
@@ -164,165 +118,40 @@ def _normalize_db_url(url: str) -> str:
     return url
 
 
-def _parse_us_date(value: str) -> Optional[date]:
-    try:
-        return datetime.strptime(value, "%m/%d/%Y").date()
-    except ValueError:
-        return None
+def select_new_bds(
+    enumerated: list["FinraBrokerDealerRecord"],
+    existing_crds: set[str],
+) -> list["FinraBrokerDealerRecord"]:
+    """Pure diff: return the enumerated FINRA records that are net-new to us.
 
+    A record is net-new when its ``crd_number`` is truthy (non-empty after
+    stripping) AND not already present in ``existing_crds``. The result is
+    deduped by CRD (first occurrence wins) so a firm surfaced under more than
+    one enumeration query is ingested once.
 
-def _slice_first_pages(pdf_bytes: bytes, max_pages: int) -> bytes:
-    reader = pypdf.PdfReader(io.BytesIO(pdf_bytes))
-    if len(reader.pages) <= max_pages:
-        return pdf_bytes
-    writer = pypdf.PdfWriter()
-    for i in range(max_pages):
-        writer.add_page(reader.pages[i])
-    out = io.BytesIO()
-    writer.write(out)
-    return out.getvalue()
-
-
-def _extract_dates_from_pdf(pdf_bytes: bytes) -> tuple[Optional[date], Optional[date]]:
-    """Extract (registration_date, formation_date) from Form BD PDF bytes."""
-    sliced = _slice_first_pages(pdf_bytes, PAGE_HARD_CAP)
-    pages: list[str] = []
-    with pdfplumber.open(io.BytesIO(sliced)) as pdf:
-        for page in pdf.pages:
-            pages.append(page.extract_text() or "")
-    full_text = "\n".join(pages)
-    reg_match = SEC_REG_DATE_RE.search(full_text)
-    formation_match = FORMATION_DATE_RE.search(full_text)
-    reg = _parse_us_date(reg_match.group(1)) if reg_match else None
-    formation = _parse_us_date(formation_match.group(1)) if formation_match else None
-    return reg, formation
-
-
-def _normalize_sec_file_number(raw: Optional[str]) -> Optional[str]:
-    """FINRA's JSON returns the SEC# without the ``8-`` prefix. Existing
-    rows in our DB carry it with the prefix (e.g. ``8-17103``), so add it
-    when missing so the new rows match the prevailing format.
+    No I/O; the only mutation is stripping each selected record's
+    ``crd_number`` in place (so a padded value from the enumeration isn't
+    persisted padded by the downstream enrich → merge → upsert path — the live
+    enumeration already strips, this is belt-and-suspenders). ``existing_crds``
+    is expected to already be a set of stripped CRD strings (see ``main``);
+    CRDs are compared as strings because ``broker_dealers.crd_number`` is
+    ``String(32)``.
     """
-    if not raw:
-        return None
-    raw = raw.strip()
-    if not raw:
-        return None
-    if raw.startswith("8-"):
-        return raw
-    return f"8-{raw}"
-
-
-def _normalize_status(bc_scope: Optional[str]) -> Optional[str]:
-    if not bc_scope:
-        return None
-    bc_scope = bc_scope.strip().upper()
-    if bc_scope == "ACTIVE":
-        return "Active"
-    if bc_scope == "INACTIVE":
-        return "Inactive"
-    return None
-
-
-# ---------------------------------------------------------------------------
-# FINRA fetchers
-# ---------------------------------------------------------------------------
-
-async def _fetch_firm_json(client: httpx.AsyncClient, crd: int) -> Optional[dict]:
-    """Return parsed ``basicInformation`` + ``firmAddressDetails`` for a CRD,
-    or None when FINRA has no firm at that CRD (or returns malformed data).
-    """
-    url = FINRA_SEARCH_URL.format(crd=crd)
-    try:
-        resp = await client.get(url, headers=HTTP_HEADERS_JSON)
-    except httpx.HTTPError as exc:
-        logger.warning("CRD %s: JSON fetch network error: %s", crd, exc)
-        return None
-    if resp.status_code != 200:
-        logger.warning("CRD %s: JSON fetch HTTP %s", crd, resp.status_code)
-        return None
-    try:
-        envelope = resp.json()
-        hits = envelope.get("hits", {}).get("hits", [])
-        if not hits:
-            return None
-        # Outer hit wraps a JSON-string ``content`` field; parse it back.
-        content_raw = hits[0].get("_source", {}).get("content")
-        if not content_raw:
-            return None
-        return json.loads(content_raw)
-    except (json.JSONDecodeError, ValueError, KeyError, TypeError) as exc:
-        logger.warning("CRD %s: JSON parse error: %s", crd, exc)
-        return None
-
-
-async def _fetch_pdf(client: httpx.AsyncClient, crd: int) -> Optional[bytes]:
-    url = FINRA_PDF_URL.format(crd=crd)
-    try:
-        async with client.stream("GET", url, headers=HTTP_HEADERS_PDF) as response:
-            if response.status_code == 404:
-                return None
-            if response.status_code != 200:
-                logger.warning("CRD %s: PDF HTTP %s", crd, response.status_code)
-                return None
-            content_type = response.headers.get("content-type", "").lower()
-            chunks: list[bytes] = []
-            async for chunk in response.aiter_raw():
-                if chunk:
-                    chunks.append(chunk)
-            pdf_bytes = b"".join(chunks)
-    except httpx.HTTPError as exc:
-        logger.warning("CRD %s: PDF network error: %s", crd, exc)
-        return None
-    if "pdf" not in content_type and not pdf_bytes.startswith(b"%PDF"):
-        logger.warning("CRD %s: PDF content-type %r unexpected", crd, content_type)
-        return None
-    return pdf_bytes
-
-
-# ---------------------------------------------------------------------------
-# Per-CRD probe
-# ---------------------------------------------------------------------------
-
-async def _probe_one(client: httpx.AsyncClient, crd: int) -> Optional[NewBd]:
-    """Probe a single CRD. Returns a NewBd on success, None on miss
-    (firm doesn't exist, isn't a broker-dealer, or required fields missing).
-    """
-    firm = await _fetch_firm_json(client, crd)
-    if firm is None:
-        return None
-
-    basic = firm.get("basicInformation", {}) or {}
-    status = _normalize_status(basic.get("bcScope"))
-    if status is None:
-        # IA-only firm or missing bcScope -- not a broker-dealer for our purposes
-        return None
-    name = basic.get("firmName")
-    if not name:
-        return None
-
-    address = (firm.get("firmAddressDetails", {}) or {}).get("officeAddress", {}) or {}
-    sec_file_number = _normalize_sec_file_number(basic.get("bdSECNumber"))
-
-    pdf_bytes = await _fetch_pdf(client, crd)
-    reg_date: Optional[date] = None
-    formation_date: Optional[date] = None
-    if pdf_bytes is not None:
-        try:
-            reg_date, formation_date = await asyncio.to_thread(_extract_dates_from_pdf, pdf_bytes)
-        except Exception as exc:
-            logger.warning("CRD %s: PDF parse error: %s", crd, exc)
-
-    return NewBd(
-        crd_number=str(crd),
-        name=name,
-        sec_file_number=sec_file_number,
-        city=address.get("city"),
-        state=address.get("state"),
-        status=status,
-        registration_date=reg_date,
-        formation_date=formation_date,
-    )
+    new: list["FinraBrokerDealerRecord"] = []
+    seen: set[str] = set()
+    for record in enumerated:
+        crd = (record.crd_number or "").strip()
+        if not crd:
+            continue
+        if crd in existing_crds:
+            continue
+        if crd in seen:
+            continue
+        seen.add(crd)
+        if record.crd_number != crd:
+            record.crd_number = crd  # normalize on store
+        new.append(record)
+    return new
 
 
 # ---------------------------------------------------------------------------
@@ -339,27 +168,15 @@ async def _embed_backfill_after_apply() -> None:
     firms cost a hash lookup, not a Gemini call -- so chaining it here
     keeps ``chatbot_firm_embedding`` fresh for cheap.
 
-    Failure-isolated by contract: lazy ``app.*`` imports (preserving the
-    standalone property of every path that doesn't reach a successful
-    ``--apply`` write), and every exception is caught and logged. This
-    function must never change the extractor's exit code; the inserts it
-    runs after are already committed, so there is nothing to roll back.
-    In the backend image PYTHONPATH=/app makes ``app.*`` importable and
-    the app reads the same DATABASE_URL env var this script defaults to;
-    GEMINI_API_KEY missing (it isn't mounted on the extract job yet)
-    downgrades to a logged skip.
+    Failure-isolated by contract: lazy ``app.*`` imports, and every
+    exception is caught and logged. This function must never change the
+    extractor's exit code; the upserts it runs after are already committed,
+    so there is nothing to roll back. In the backend image PYTHONPATH=/app
+    makes ``app.*`` importable and the app reads the same DATABASE_URL env
+    var this script defaults to; GEMINI_API_KEY missing downgrades to a
+    logged skip.
     """
     try:
-        # Local checkouts run this script without PYTHONPATH set up; the
-        # backend package lives at <repo>/backend (same bootstrap as
-        # scripts/gap_fill_investment_advisors.py). In the image the dir
-        # doesn't exist and PYTHONPATH=/app already covers ``app.*``.
-        from pathlib import Path
-
-        backend_root = Path(__file__).resolve().parents[1] / "backend"
-        if backend_root.is_dir() and str(backend_root) not in sys.path:
-            sys.path.insert(0, str(backend_root))
-
         from app.core.config import settings
         from app.db.session import SessionLocal
         from app.services.chatbot_semantic import ChatbotSemanticService
@@ -399,31 +216,16 @@ async def _embed_backfill_after_apply() -> None:
 
 async def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(
-        description="Standalone CRD-probe extractor for net-new broker-dealers.",
+        description=(
+            "Enumerate-and-diff extractor for net-new broker-dealers: lists all "
+            "active FINRA BDs and ingests the ones not already in the DB."
+        ),
     )
     parser.add_argument("--db-url", default=os.environ.get("DATABASE_URL"))
     parser.add_argument(
         "--apply",
         action="store_true",
-        help="Actually INSERT rows. Without this, the script runs dry.",
-    )
-    parser.add_argument(
-        "--crd-start",
-        type=int,
-        default=None,
-        help="Override the probe start (default: MAX(crd_number) + 1).",
-    )
-    parser.add_argument(
-        "--max-misses",
-        type=int,
-        default=50,
-        help="Stop after N consecutive non-BD/empty CRDs (default 50).",
-    )
-    parser.add_argument(
-        "--probe-limit",
-        type=int,
-        default=500,
-        help="Hard cap on total CRDs probed in one run (default 500).",
+        help="Actually enrich + merge + upsert rows. Without this, the script runs dry.",
     )
     args = parser.parse_args(argv)
 
@@ -431,163 +233,96 @@ async def main(argv: list[str] | None = None) -> int:
         logger.error("no DATABASE_URL env var and no --db-url; aborting")
         return 2
 
+    # Imported lazily (after the sys.path bootstrap) so the module stays cheap
+    # to import for the pure-function unit tests and so a missing app dependency
+    # surfaces only when the script actually runs.
+    from app.services.broker_dealers import BrokerDealerRepository
+    from app.services.data_merge import BrokerDealerMergeService
+    from app.services.edgar import EdgarService
+    from app.services.finra import FinraService
+
     db_url = _normalize_db_url(args.db_url)
     engine = create_async_engine(db_url, pool_pre_ping=True)
+    session_maker = async_sessionmaker(engine, expire_on_commit=False)
+    finra = FinraService()
 
     try:
-        async with engine.connect() as conn:
-            if args.crd_start is not None:
-                start_crd = args.crd_start
-                logger.info("probe start overridden via --crd-start=%d", start_crd)
-            else:
-                # crd_number is String(32) in the model; cast to int where it
-                # looks numeric. ``~ '^[0-9]+$'`` filters out any non-numeric
-                # legacy rows that would otherwise blow up the cast.
-                row = (
-                    await conn.execute(
-                        text(
-                            "SELECT MAX(CAST(crd_number AS INTEGER)) "
-                            "FROM broker_dealers "
-                            "WHERE crd_number ~ '^[0-9]+$'"
-                        )
-                    )
-                ).first()
-                current_max = row[0] if row and row[0] is not None else 0
-                start_crd = current_max + 1
-                logger.info("current MAX(crd_number) = %d; probing from %d", current_max, start_crd)
+        # ── Step 1: Enumerate all active broker-dealers (cheap; no detail) ──
+        logger.info("enumerating active broker-dealers from FINRA BrokerCheck...")
+        enumerated = await finra.fetch_broker_dealers()
+        logger.info("enumerated %d active broker-dealer(s) from FINRA", len(enumerated))
 
-        end_crd = start_crd + args.probe_limit - 1
+        # ── Step 2: Load existing CRDs from the DB ──
+        async with session_maker() as db:
+            rows = (await db.execute(text("SELECT crd_number FROM broker_dealers"))).all()
+        existing_crds = {
+            str(row[0]).strip()
+            for row in rows
+            if row[0] is not None and str(row[0]).strip()
+        }
+        logger.info("loaded %d existing CRD(s) from broker_dealers", len(existing_crds))
+
+        # ── Step 3: Diff (pure) ──
+        new = select_new_bds(enumerated, existing_crds)
         logger.info(
-            "probing CRDs %d..%d (max-misses=%d)",
-            start_crd, end_crd, args.max_misses,
+            "diff: enumerated=%d existing=%d net_new=%d",
+            len(enumerated), len(existing_crds), len(new),
         )
 
-        found: list[NewBd] = []
-        consecutive_misses = 0
-        probed = 0
-
-        async with httpx.AsyncClient(timeout=HTTP_TIMEOUT, follow_redirects=True) as client:
-            for crd in range(start_crd, end_crd + 1):
-                probed += 1
-                bd = await _probe_one(client, crd)
-                if bd is None:
-                    consecutive_misses += 1
-                    if consecutive_misses >= args.max_misses:
-                        logger.info(
-                            "hit %d consecutive misses at CRD %d; stopping",
-                            args.max_misses, crd,
-                        )
-                        break
-                    continue
-                consecutive_misses = 0
-                found.append(bd)
-                logger.info(
-                    "CRD %d HIT: %s | status=%s | reg=%s | formation=%s | %s, %s",
-                    crd,
-                    bd.name,
-                    bd.status,
-                    bd.registration_date.isoformat() if bd.registration_date else "-",
-                    bd.formation_date.isoformat() if bd.formation_date else "-",
-                    bd.city or "-",
-                    bd.state or "-",
-                )
-
-        logger.info(
-            "summary: probed=%d found=%d consecutive_misses_at_stop=%d",
-            probed, len(found), consecutive_misses,
-        )
-
-        if not found:
-            logger.info("no new BDs; nothing to write")
+        if not new:
+            logger.info("no net-new broker-dealers; nothing to do")
             return 0
 
-        # Defensive dedup. The default discovery path starts at
-        # MAX(crd_number)+1 so collisions are impossible, but --crd-start
-        # can bypass that guarantee. crd_number isn't UNIQUE in the
-        # schema, so we can't lean on the DB to reject a duplicate.
-        async with engine.connect() as conn:
-            existing_rows = (
-                await conn.execute(
-                    text(
-                        "SELECT crd_number FROM broker_dealers "
-                        "WHERE crd_number = ANY(:crds)"
-                    ),
-                    {"crds": [bd.crd_number for bd in found]},
-                )
-            ).all()
-        existing_crds = {row[0] for row in existing_rows}
-        skipped = [bd for bd in found if bd.crd_number in existing_crds]
-        to_insert = [bd for bd in found if bd.crd_number not in existing_crds]
-        if skipped:
-            logger.info(
-                "skipping %d CRD(s) already present in broker_dealers: %s",
-                len(skipped),
-                ", ".join(bd.crd_number for bd in skipped),
-            )
-        if not to_insert:
-            logger.info("all found CRDs already exist; nothing to write")
-            return 0
-
+        # ── Dry-run: report exactly what WOULD be ingested, then stop ──
         if not args.apply:
             logger.info(
-                "dry-run: would INSERT %d row(s) (skipping %d duplicate(s)). "
-                "Re-run with --apply to write.",
-                len(to_insert), len(skipped),
+                "dry-run: would ingest %d net-new broker-dealer(s) "
+                "(re-run with --apply to enrich + merge + write):",
+                len(new),
             )
-            for bd in to_insert:
+            for rec in new:
                 logger.info(
-                    "  crd=%s sec=%s name=%r status=%s reg=%s formation=%s city=%r state=%r",
-                    bd.crd_number,
-                    bd.sec_file_number or "-",
-                    bd.name,
-                    bd.status,
-                    bd.registration_date.isoformat() if bd.registration_date else None,
-                    bd.formation_date.isoformat() if bd.formation_date else None,
-                    bd.city,
-                    bd.state,
+                    "  crd=%s sec=%s name=%r status=%s city=%r state=%r",
+                    rec.crd_number,
+                    rec.sec_file_number or "-",
+                    rec.name,
+                    rec.registration_status,
+                    rec.address_city,
+                    rec.address_state,
                 )
             return 0
 
-        # ``matched_source`` is NOT NULL in the schema. ``finra_only`` is the
-        # value the in-tree merge writes for FINRA-discovered rows that
-        # weren't matched to an EDGAR record -- the same provenance these
-        # CRD-probe finds have, since we don't query EDGAR here.
-        # Bool columns (is_deficient, current_clearing_is_competitor,
-        # is_niche_restricted) and ``status`` defaults are intentionally
-        # omitted from the column list so Postgres uses each column's DEFAULT.
-        insert_stmt = text(
-            "INSERT INTO broker_dealers "
-            "(crd_number, name, sec_file_number, city, state, status, "
-            " matched_source, registration_date, formation_date) "
-            "VALUES "
-            "(:crd_number, :name, :sec_file_number, :city, :state, :status, "
-            " 'finra_only', :registration_date, :formation_date) "
-            "RETURNING id"
+        # ── Step 4a: Enrich the net-new set with FINRA Form BD detail ──
+        logger.info("enriching %d net-new firm(s) with FINRA Form BD detail...", len(new))
+        await finra.enrich_with_detail(new)
+
+        # ── Step 4b: Resolve SEC/EDGAR records for the net-new SEC numbers ──
+        sec_numbers = [r.sec_file_number for r in new if r.sec_file_number]
+        logger.info("resolving %d SEC file number(s) against EDGAR...", len(sec_numbers))
+        edgar_records = await EdgarService().fetch_records_for_sec_numbers(sec_numbers)
+        logger.info("EDGAR resolved %d record(s)", len(edgar_records))
+
+        # ── Step 4c: Merge (EDGAR first — same contract as the pipeline) ──
+        merged, report = BrokerDealerMergeService().merge(edgar_records, new)
+        for line in report.summary_lines():
+            logger.info("%s", line)
+
+        if not merged:
+            logger.info("merge produced 0 rows after QA filters; nothing to write")
+            return 0
+
+        # ── Step 4d: Idempotent upsert ──
+        async with session_maker() as db:
+            written = await BrokerDealerRepository().upsert_many(db, merged)
+        logger.info(
+            "summary: enumerated=%d existing=%d net_new=%d inserted=%d",
+            len(enumerated), len(existing_crds), len(new), written,
         )
-        async with engine.begin() as conn:
-            written = 0
-            for bd in to_insert:
-                result = await conn.execute(
-                    insert_stmt,
-                    {
-                        "crd_number": bd.crd_number,
-                        "name": bd.name,
-                        "sec_file_number": bd.sec_file_number,
-                        "city": bd.city,
-                        "state": bd.state,
-                        "status": bd.status,
-                        "registration_date": bd.registration_date,
-                        "formation_date": bd.formation_date,
-                    },
-                )
-                new_id = result.scalar_one()
-                written += 1
-                logger.info("inserted id=%d crd=%s %s", new_id, bd.crd_number, bd.name)
-        logger.info("wrote %d row(s) (skipped %d duplicate(s))", written, len(skipped))
-        # New BDs are committed (engine.begin() above) -- chain the Doxie
-        # embed pass so they become semantically searchable tonight, not
-        # whenever populate-all next runs. Best-effort: the hook swallows
-        # its own errors and never affects this script's exit code.
+
+        # New BDs are committed (upsert_many commits) -- chain the Doxie embed
+        # pass so they become semantically searchable tonight, not whenever
+        # populate-all next runs. Best-effort: the hook swallows its own errors
+        # and never affects this script's exit code.
         await _embed_backfill_after_apply()
         return 0
     finally:
