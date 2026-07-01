@@ -19,9 +19,13 @@ from __future__ import annotations
 
 import asyncio
 import base64
-import io
+import json
 import logging
+import os
 import re
+import subprocess
+import sys
+import tempfile
 from dataclasses import dataclass
 from datetime import date, datetime, timezone
 from pathlib import Path
@@ -203,86 +207,120 @@ def _name_has_embedded_phone(name: str | None) -> bool:
     return sum(1 for ch in name if ch.isdigit()) >= 3
 
 
+# Absolute path to the isolated renderer, invoked as a bare script so the
+# child never needs to resolve as a package. See app/services/_pdf_render_worker.py.
+_RENDER_WORKER = Path(__file__).with_name("_pdf_render_worker.py")
+
+# Hard ceiling on a single PDF's render. Rendering pages 1-8 + last 3 at 150 DPI
+# is a few seconds even on large filings; a corrupt PDF that makes PDFium spin
+# is bounded here so one bad document can't wedge the run. Overridable for ops.
+_RENDER_SUBPROCESS_TIMEOUT_SECONDS = int(
+    os.environ.get("FOCUS_RENDER_TIMEOUT_SECONDS", "60")
+)
+
+
 def _render_pdf_pages_to_images(
     pdf_base64: str,
     local_path: str | None = None,
     dpi: int = 150,
 ) -> list[dict[str, str]]:
-    """Render selected PDF pages to PNG images for vision-model extraction.
+    """Render selected PDF pages to JPEG images for vision-model extraction.
 
-    Selects pages 1-2 (facing page with contact info) + pages 3-8 (financial
-    statements + net capital) + last 3 (supplemental schedules), converts each
-    to a JPEG image, and returns them as base64-encoded dicts for the Gemini
-    vision API.
+    Selects pages 1-8 (facing sheet + financial statements + net capital) and
+    the last 3 (supplemental schedules), converts each to a JPEG, and returns
+    them as base64-encoded dicts for the Gemini vision API. Total payload is
+    kept under 4MB to stay within Gemini limits.
 
-    Handles scanned/image-based PDFs that pdfplumber can't read.
-    Keeps total payload under 4MB to stay within Gemini limits.
+    **Crash isolation.** The actual rendering runs in a throwaway *subprocess*
+    (:mod:`app.services._pdf_render_worker`) rather than in-process. The
+    renderer, ``pypdfium2``, wraps Google's PDFium **C++** library, and a
+    malformed PDF (the "Data-loss while decompressing corrupted data" class)
+    can make it **segfault** — an uncatchable SIGSEGV that would otherwise kill
+    the whole gap-fill / refresh-all worker mid-run. Delegating to a child
+    process means a native crash kills only the child; we detect the abnormal
+    exit and return ``[]`` (a parse-miss), so the caller degrades to Gemini's
+    raw-PDF path instead of the batch dying. A hang is bounded by
+    ``_RENDER_SUBPROCESS_TIMEOUT_SECONDS``.
 
-    Uses pypdfium2 (pip-installable PDF renderer). No system deps needed.
+    Returning ``[]`` is the same contract the in-process version used on any
+    failure, so callers are unchanged: an empty list falls through to the
+    ``pdf_bytes_base64`` Gemini path.
+
+    This is synchronous/blocking by design — callers invoke it via
+    ``asyncio.to_thread`` so the event loop is never blocked on the child.
     """
-    logging.getLogger("pypdf").setLevel(logging.ERROR)
-    logging.getLogger("pypdfium2").setLevel(logging.ERROR)
-
+    tmp_paths: list[Path] = []
     try:
-        import pypdfium2 as pdfium
-
+        # Prefer the file the downloader already streamed to disk; only
+        # materialize the base64 to a tempfile when no local path is available.
         if local_path and Path(local_path).exists():
-            pdf = pdfium.PdfDocument(local_path)
+            pdf_path = Path(local_path)
+        elif pdf_base64:
+            fd, raw = tempfile.mkstemp(suffix=".pdf", prefix="focus_render_")
+            try:
+                os.write(fd, base64.b64decode(pdf_base64))
+            finally:
+                os.close(fd)
+            pdf_path = Path(raw)
+            tmp_paths.append(pdf_path)
         else:
-            pdf_bytes = base64.b64decode(pdf_base64)
-            pdf = pdfium.PdfDocument(pdf_bytes)
+            return []
 
-        total_pages = len(pdf)
+        out_fd, out_raw = tempfile.mkstemp(suffix=".json", prefix="focus_render_out_")
+        os.close(out_fd)
+        out_path = Path(out_raw)
+        tmp_paths.append(out_path)
 
-        # Select relevant pages
-        if total_pages <= 12:
-            page_indices = list(range(total_pages))
-        else:
-            page_indices = list(range(min(8, total_pages)))
-            last_start = max(8, total_pages - 3)
-            page_indices.extend(range(last_start, total_pages))
-            page_indices = sorted(set(page_indices))
+        try:
+            proc = subprocess.run(
+                [sys.executable, str(_RENDER_WORKER), str(pdf_path), str(out_path), str(dpi)],
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+                timeout=_RENDER_SUBPROCESS_TIMEOUT_SECONDS,
+            )
+        except subprocess.TimeoutExpired:
+            # subprocess.run already killed the child on timeout.
+            logger.warning(
+                "PDF render subprocess timed out after %ds; treating as parse-miss.",
+                _RENDER_SUBPROCESS_TIMEOUT_SECONDS,
+            )
+            return []
+        except OSError as exc:
+            # Could not even launch the interpreter — never let the isolation
+            # layer itself take down the caller.
+            logger.warning("PDF render subprocess could not be launched: %s", exc)
+            return []
 
-        images: list[dict[str, str]] = []
-        total_bytes = 0
+        if proc.returncode != 0:
+            # A negative return code == killed by signal: the corrupt-PDF
+            # SIGSEGV (or SIGABRT) we isolate for. Positive non-zero == the
+            # worker's own guarded failure. Either way: contained → parse-miss.
+            logger.warning(
+                "PDF render subprocess exited abnormally (returncode=%s); "
+                "treating as parse-miss (corrupt PDF contained to the child).",
+                proc.returncode,
+            )
+            return []
 
-        for page_idx in page_indices:
-            page = pdf[page_idx]
-            bitmap = page.render(scale=dpi / 72)
-            pil_image = bitmap.to_pil()
+        try:
+            payload = json.loads(out_path.read_text(encoding="utf-8") or "[]")
+        except (OSError, ValueError) as exc:
+            logger.warning("PDF render subprocess produced no readable output: %s", exc)
+            return []
 
-            # Use JPEG instead of PNG — 3-5x smaller for scanned documents
-            buf = io.BytesIO()
-            if pil_image.mode == "RGBA":
-                pil_image = pil_image.convert("RGB")
-            pil_image.save(buf, format="JPEG", quality=80)
-            img_bytes = buf.getvalue()
-
-            # Check if adding this image would exceed the payload limit
-            if total_bytes + len(img_bytes) > _MAX_VISION_PAYLOAD_BYTES and len(images) >= 3:
-                # Already have enough pages — stop adding more
-                logger.debug("Vision payload limit reached at page %d (%dKB total)", page_idx + 1, total_bytes // 1024)
-                break
-
-            img_b64 = base64.b64encode(img_bytes).decode("utf-8")
-            images.append({
-                "mime_type": "image/jpeg",
-                "data": img_b64,
-            })
-            total_bytes += len(img_bytes)
-
-        pdf.close()
-
-        logger.debug(
-            "PDF rendered: %d pages -> %d images (%dKB total)",
-            total_pages, len(images), total_bytes // 1024,
-        )
-
-        return images
+        if not isinstance(payload, list):
+            return []
+        return payload
 
     except Exception as exc:
         logger.warning("PDF-to-image rendering failed: %s", exc)
         return []
+    finally:
+        for path in tmp_paths:
+            try:
+                path.unlink()
+            except OSError:
+                pass
 
 
 class FocusCeoExtractionService:

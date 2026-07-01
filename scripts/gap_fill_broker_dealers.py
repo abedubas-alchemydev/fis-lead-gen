@@ -556,6 +556,25 @@ async def main() -> None:
                     await db.refresh(parent)
                     parent_id = parent.id
 
+                # Stamp the cooldown BEFORE firing the orchestrator, not after.
+                # run_refresh_all drives native PDF parsers (pypdfium2/PDFium is
+                # C++) that can SIGSEGV on a corrupted filing. A segfault is not
+                # a Python exception -- it kills this whole process, so neither
+                # the try/except below nor the post-run stamp would ever run.
+                # If we only stamped afterward, the crashing BD would stay
+                # unstamped and, under --newest-first (last_gap_fill_attempt_at
+                # ASC NULLS FIRST), sort straight back to the front on the next
+                # run -> hit again -> crash again: a poison pill that never lets
+                # the batch advance. Stamping first (its own committed session)
+                # guarantees forward progress: a BD that kills a run is skipped
+                # for the cooldown window on the re-run instead of re-crashing
+                # it. Semantically correct too -- this column records the last
+                # *attempt*, and the attempt starts here. The service-level
+                # subprocess isolation now contains the segfault; this stamp is
+                # the belt to that suspenders so ANY future hard crash (OOM, a
+                # new native dep) still can't wedge the batch.
+                await _safe_stamp_cooldown(bd.id)
+
                 t0 = time.monotonic()
                 try:
                     await run_refresh_all(
