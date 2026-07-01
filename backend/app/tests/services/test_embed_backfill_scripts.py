@@ -375,6 +375,37 @@ async def test_extractor_apply_triggers_embed_hook_exactly_once(
     assert engine.disposed
 
 
+async def test_extractor_apply_commits_each_chunk_but_embeds_once(
+    monkeypatch,
+) -> None:
+    """Durable progress: net-new firms spanning multiple chunks trigger one
+    ``upsert_many`` (commit) per chunk, but the embed hook still fires exactly
+    once — after the loop — so the "apply → embed once" contract holds even as
+    each chunk is committed independently."""
+    monkeypatch.setattr(extractor, "_NEW_BD_CHUNK_SIZE", 2)
+    _engine, enrich_mock, upsert_mock = _patch_pipeline(
+        monkeypatch,
+        enumerated=[
+            _finra_record("900001"),
+            _finra_record("900002"),
+            _finra_record("900003"),
+        ],
+        existing_rows=[],
+        merged=[object()],
+    )
+    hook_spy = AsyncMock()
+    monkeypatch.setattr(extractor, "_embed_backfill_after_apply", hook_spy)
+
+    rc = await extractor.main([*_EXTRACT_ARGS, "--apply"])
+
+    assert rc == 0
+    # 3 firms / chunk size 2 → 2 chunks → a commit + an enrichment per chunk.
+    assert upsert_mock.await_count == 2
+    assert enrich_mock.await_count == 2
+    # ...but the embed hook still fires exactly once, after the loop.
+    assert hook_spy.await_count == 1
+
+
 async def test_extractor_dry_run_does_not_trigger_embed_hook(
     monkeypatch,
 ) -> None:

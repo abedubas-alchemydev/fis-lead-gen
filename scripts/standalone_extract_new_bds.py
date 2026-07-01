@@ -27,22 +27,28 @@ Mechanism:
   2. Load existing CRDs: ``SELECT crd_number FROM broker_dealers`` into a set.
   3. Diff (pure, unit-tested :func:`select_new_bds`): keep enumerated records
      whose ``crd_number`` is truthy and not already in the DB, deduped by CRD.
-  4. For the net-new set ONLY (so the expensive per-firm work stays bounded):
-       a. ``FinraService().enrich_with_detail(new)`` — Form BD PDF detail
+  4. For the net-new set ONLY (so the expensive per-firm work stays bounded),
+     processed in chunks of ``_NEW_BD_CHUNK_SIZE`` so progress is durable —
+     each chunk is committed before the next is fetched:
+       a. ``FinraService().enrich_with_detail(chunk)`` — Form BD PDF detail
           (types_of_business, officers, registration/formation dates, ...).
-       b. ``EdgarService().fetch_records_for_sec_numbers(...)`` for their SEC
-          file numbers.
-       c. ``BrokerDealerMergeService().merge(edgar_records, new)`` — EDGAR
+       b. ``EdgarService().fetch_records_for_sec_numbers(...)`` for that
+          chunk's SEC file numbers.
+       c. ``BrokerDealerMergeService().merge(edgar_chunk, chunk)`` — EDGAR
           first, unpack ``(merged, report)``; the same arg-order contract the
           initial-load pipeline uses.
        d. ``BrokerDealerRepository().upsert_many(db, merged)`` — idempotent
-          upsert (re-running is safe; existing rows update in place).
+          upsert that COMMITS the chunk (re-running is safe; existing rows
+          update in place). A later Cloud Run timeout can only lose the last
+          partial chunk; the next run's diff excludes the already-committed
+          firms and resumes, so the design converges across runs.
 
 Dry-run is the default and is cheap: it enumerates, diffs, and logs exactly
 which firms WOULD be ingested (no Form BD PDF fetches, no EDGAR, no writes).
-``--apply`` runs the full enrich → EDGAR → merge → upsert path.
+``--apply`` runs the full enrich → EDGAR → merge → upsert path, chunk by chunk.
 
-Post-apply Doxie hook. After new BDs are committed, ``--apply`` chains
+Post-apply Doxie hook. After the net-new firms are committed (once, after the
+final chunk), ``--apply`` chains
 ``_embed_backfill_after_apply``: it lazily imports ``app.services`` to embed the
 new firms into the ``chatbot_firm_embedding`` semantic-search index. That hook
 is best-effort and failure-isolated — when ``GEMINI_API_KEY`` is unavailable it
@@ -106,6 +112,20 @@ for _stream in (sys.stdout, sys.stderr):
 
 logger = logging.getLogger("standalone_extract_new_bds")
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
+
+
+# ---------------------------------------------------------------------------
+# Constants
+# ---------------------------------------------------------------------------
+
+# Net-new firms are enriched + merged + upserted in chunks of this size so
+# progress is durable: ``upsert_many`` commits per chunk, so a Cloud Run
+# timeout (3600s task-timeout, maxRetries=0) can only lose the last partial
+# batch — the next run's ``select_new_bds`` excludes the already-committed
+# firms and resumes, so the diff design converges across runs. 25 keeps commits
+# frequent without excessive per-chunk overhead (each chunk re-resolves the
+# EDGAR broker-dealer bulk set).
+_NEW_BD_CHUNK_SIZE = 25
 
 
 # ---------------------------------------------------------------------------
@@ -292,38 +312,68 @@ async def main(argv: list[str] | None = None) -> int:
                 )
             return 0
 
-        # ── Step 4a: Enrich the net-new set with FINRA Form BD detail ──
-        logger.info("enriching %d net-new firm(s) with FINRA Form BD detail...", len(new))
-        await finra.enrich_with_detail(new)
+        # ── Step 4: Enrich → EDGAR → merge → upsert in chunks, committing each
+        #    chunk before the next is fetched. upsert_many commits per chunk, so
+        #    a Cloud Run timeout mid-run can only lose the last partial chunk;
+        #    everything already committed survives, and the next run's
+        #    select_new_bds excludes those firms and resumes the remainder.
+        total = len(new)
+        logger.info(
+            "ingesting %d net-new firm(s) in chunks of %d (committing per chunk)...",
+            total, _NEW_BD_CHUNK_SIZE,
+        )
+        edgar = EdgarService()
+        merge_service = BrokerDealerMergeService()
+        repository = BrokerDealerRepository()
+        inserted_total = 0
 
-        # ── Step 4b: Resolve SEC/EDGAR records for the net-new SEC numbers ──
-        sec_numbers = [r.sec_file_number for r in new if r.sec_file_number]
-        logger.info("resolving %d SEC file number(s) against EDGAR...", len(sec_numbers))
-        edgar_records = await EdgarService().fetch_records_for_sec_numbers(sec_numbers)
-        logger.info("EDGAR resolved %d record(s)", len(edgar_records))
-
-        # ── Step 4c: Merge (EDGAR first — same contract as the pipeline) ──
-        merged, report = BrokerDealerMergeService().merge(edgar_records, new)
-        for line in report.summary_lines():
-            logger.info("%s", line)
-
-        if not merged:
-            logger.info("merge produced 0 rows after QA filters; nothing to write")
-            return 0
-
-        # ── Step 4d: Idempotent upsert ──
         async with session_maker() as db:
-            written = await BrokerDealerRepository().upsert_many(db, merged)
+            for chunk_index, start in enumerate(
+                range(0, total, _NEW_BD_CHUNK_SIZE), start=1
+            ):
+                chunk = new[start : start + _NEW_BD_CHUNK_SIZE]
+
+                # Enrich this chunk's firms with FINRA Form BD detail.
+                await finra.enrich_with_detail(chunk)
+
+                # Resolve SEC/EDGAR records for this chunk's SEC numbers only
+                # (the same EDGAR call the whole-set path used, scoped down).
+                sec_numbers = [r.sec_file_number for r in chunk if r.sec_file_number]
+                edgar_chunk = await edgar.fetch_records_for_sec_numbers(sec_numbers)
+
+                # Merge (EDGAR first — same contract as the pipeline). The
+                # per-chunk QA report is discarded to keep logging to a running
+                # total; the merge invariants are unit-tested elsewhere.
+                merged, _ = merge_service.merge(edgar_chunk, chunk)
+                if not merged:
+                    logger.info(
+                        "chunk %d: 0 rows after QA filters "
+                        "(cumulative %d/%d net-new BDs committed)",
+                        chunk_index, inserted_total, total,
+                    )
+                    continue
+
+                # Idempotent upsert — commits this chunk right here, so the work
+                # already done is durable before we spend time on the next one.
+                inserted = await repository.upsert_many(db, merged)
+                inserted_total += inserted
+                logger.info(
+                    "chunk %d: +%d (cumulative %d/%d net-new BDs committed)",
+                    chunk_index, inserted, inserted_total, total,
+                )
+
         logger.info(
             "summary: enumerated=%d existing=%d net_new=%d inserted=%d",
-            len(enumerated), len(existing_crds), len(new), written,
+            len(enumerated), len(existing_crds), total, inserted_total,
         )
 
-        # New BDs are committed (upsert_many commits) -- chain the Doxie embed
-        # pass so they become semantically searchable tonight, not whenever
-        # populate-all next runs. Best-effort: the hook swallows its own errors
-        # and never affects this script's exit code.
-        await _embed_backfill_after_apply()
+        # Fire the Doxie embed pass ONCE after all chunks (never per chunk), and
+        # only when at least one firm actually landed — preserving the
+        # "apply → embed exactly once; dry-run / no-inserts → skip" contract so
+        # the new firms become semantically searchable tonight. Best-effort: the
+        # hook swallows its own errors and never affects this script's exit code.
+        if inserted_total > 0:
+            await _embed_backfill_after_apply()
         return 0
     finally:
         await engine.dispose()
