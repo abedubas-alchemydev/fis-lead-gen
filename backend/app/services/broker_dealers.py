@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from datetime import date
 from math import ceil
+import logging
 import re
 
 from sqlalchemy import ARRAY, String, cast, delete, func, or_, select, update
@@ -39,6 +40,56 @@ from app.services.unknown_reasons import (
     to_unknown_reason,
     with_trigger_fields,
 )
+
+logger = logging.getLogger(__name__)
+
+
+def _dedupe_by_conflict_key(
+    records: list[MergedBrokerDealerRecord], key: str
+) -> list[MergedBrokerDealerRecord]:
+    """Collapse a batch so no two rows share the same ``key`` value before it
+    reaches an ``ON CONFLICT (<key>)`` statement.
+
+    Postgres rejects an ``INSERT ... ON CONFLICT DO UPDATE`` whose proposed rows
+    carry the same conflict key twice — ``CardinalityViolation: ON CONFLICT DO
+    UPDATE command cannot affect row a second time`` — and aborts the *entire*
+    batch, so one duplicate loses every other row's write too. The table is
+    unique on ``cik`` and on ``sec_file_number``, so a batch can never
+    legitimately persist two rows sharing one of those values; we keep the LAST
+    occurrence (freshest data in this run wins) and drop the earlier ones.
+
+    Every drop is logged at WARNING with the colliding key and the involved
+    ``crd_number``s / names, so a benign quirk (the same firm enumerated twice)
+    stays distinguishable in the logs from two genuinely-distinct firms
+    resolving onto one CIK — which would signal an EDGAR-lookup problem worth a
+    follow-up rather than a silent drop. Records whose ``key`` is ``None`` cannot
+    collide on it and pass through untouched.
+    """
+    kept: dict[object, MergedBrokerDealerRecord] = {}
+    passthrough: list[MergedBrokerDealerRecord] = []
+    collisions: dict[object, list[MergedBrokerDealerRecord]] = {}
+    for record in records:
+        value = getattr(record, key)
+        if value is None:
+            passthrough.append(record)
+            continue
+        if value in kept:
+            collisions.setdefault(value, [kept[value]]).append(record)
+        kept[value] = record
+
+    for value, members in collisions.items():
+        logger.warning(
+            "upsert_many: dropped %d duplicate row(s) sharing %s=%s in one batch "
+            "(kept last); crd_numbers=%s names=%s",
+            len(members) - 1,
+            key,
+            value,
+            [m.crd_number for m in members],
+            [m.name for m in members],
+        )
+
+    return passthrough + list(kept.values())
+
 
 # Minimum adoption threshold for the master-list types-of-business filter.
 # Anything that appears on only one firm is almost always a free-text "other"
@@ -257,7 +308,12 @@ class BrokerDealerRepository:
 
         # ── CIK-based upsert (records that have a CIK) ──
         for start in range(0, len(cik_records), batch_size):
-            batch = cik_records[start : start + batch_size]
+            # Collapse any rows sharing a CIK within this batch: the single
+            # INSERT ... ON CONFLICT (cik) below cannot affect the same target
+            # row twice (CardinalityViolation), which would abort the whole batch.
+            batch = _dedupe_by_conflict_key(
+                cik_records[start : start + batch_size], "cik"
+            )
             values = _to_values(batch)
             stmt = insert(BrokerDealer).values(values)
             upsert_stmt = stmt.on_conflict_do_update(
@@ -272,7 +328,13 @@ class BrokerDealerRepository:
         # We use a simple select-then-insert/update approach since sec_file_number
         # has a non-unique index (not a unique constraint suitable for ON CONFLICT).
         for start in range(0, len(no_cik_records), batch_size):
-            batch = no_cik_records[start : start + batch_size]
+            # Collapse rows sharing a sec_file_number within this batch. The
+            # select-then-insert below reads existing keys ONCE up front, so two
+            # NEW rows with the same sec_file_number would both miss existing_rows
+            # and double-insert; keeping the last collapses them to a single row.
+            batch = _dedupe_by_conflict_key(
+                no_cik_records[start : start + batch_size], "sec_file_number"
+            )
             sec_numbers = [r.sec_file_number for r in batch if r.sec_file_number]
             existing_stmt = select(BrokerDealer.sec_file_number).where(
                 BrokerDealer.sec_file_number.in_(sec_numbers)
