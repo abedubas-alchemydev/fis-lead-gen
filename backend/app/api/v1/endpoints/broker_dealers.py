@@ -265,7 +265,7 @@ async def list_broker_dealers(
         and min_net_capital > max_net_capital
     ):
         raise HTTPException(
-            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
             detail="min_net_capital must be less than or equal to max_net_capital.",
         )
     if (
@@ -274,7 +274,7 @@ async def list_broker_dealers(
         and registered_after > registered_before
     ):
         raise HTTPException(
-            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
             detail="registered_after must be on or before registered_before.",
         )
 
@@ -764,7 +764,7 @@ async def find_phone_for_contact(
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(exc)) from exc
     except NoEmailForLookupError as exc:
         raise HTTPException(
-            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail=str(exc)
+            status_code=status.HTTP_422_UNPROCESSABLE_CONTENT, detail=str(exc)
         ) from exc
     except ContactEnrichmentUnavailableError as exc:
         raise HTTPException(
