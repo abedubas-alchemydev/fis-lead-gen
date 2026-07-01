@@ -355,9 +355,11 @@ async def test_fetch_records_for_sec_numbers_skips_numbers_with_no_edgar_match(
 async def test_fetch_records_for_sec_numbers_skips_number_on_upstream_error(
     monkeypatch,
 ) -> None:
-    """A persistent upstream error for one number is logged and skipped — it
-    must not abort the batch (nor, in the extract-new-bds chunk loop, the whole
-    chunk). The other numbers still resolve."""
+    """The back-compat wrapper returns only the resolved records: a failed
+    number is dropped from its output (the FAILURE itself is surfaced for
+    deferral via ``resolve_sec_numbers`` — see the tests below), and one
+    number's failure must not abort the batch. The other numbers still
+    resolve."""
     monkeypatch.setattr(
         EdgarService, "fetch_all_broker_dealers", AsyncMock(return_value=[]),
     )
@@ -381,3 +383,88 @@ async def test_fetch_records_for_sec_numbers_skips_number_on_upstream_error(
     assert [(r.sec_file_number, r.cik) for r in records] == [
         ("8-60000", "0000060000"),
     ]
+
+
+# ── resolve_sec_numbers — distinguish upstream FAILURE (defer) from no-match ──
+
+
+@respx.mock
+async def test_resolve_sec_numbers_buckets_resolved_nomatch_and_failed(
+    monkeypatch,
+) -> None:
+    """The three outcomes are kept distinct: resolved → records; genuine
+    no-match → neither list (commits finra_only downstream); UPSTREAM FAILURE →
+    surfaced in failed_sec_numbers so the caller defers it (never a silent skip
+    that would commit the firm under-enriched)."""
+    monkeypatch.setattr(
+        EdgarService, "fetch_all_broker_dealers", AsyncMock(return_value=[]),
+    )
+    monkeypatch.setattr(settings, "sec_request_max_retries", 1)  # fail fast
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        filenum = request.url.params.get("filenum")
+        if filenum == "8-10001":  # resolved
+            return httpx.Response(
+                200, text=_company_detail_page("ALPHA LLC", "0000010001"),
+            )
+        if filenum == "8-10002":  # genuine no-match
+            return httpx.Response(200, text=_no_match_page())
+        return httpx.Response(503)  # 8-10003 → persistent 5xx (failure)
+
+    respx.get("https://www.sec.gov/cgi-bin/browse-edgar").mock(side_effect=handler)
+
+    result = await EdgarService().resolve_sec_numbers(
+        ["8-10001", "8-10002", "8-10003"]
+    )
+
+    assert [(r.sec_file_number, r.cik) for r in result.records] == [
+        ("8-10001", "0000010001"),
+    ]
+    # The 5xx firm is a FAILURE → deferred, NOT committed as finra_only.
+    assert result.failed_sec_numbers == ["8-10003"]
+    # The no-match firm is neither resolved nor failed (it merges finra_only).
+    assert "8-10002" not in result.failed_sec_numbers
+
+
+@respx.mock
+async def test_resolve_sec_numbers_treats_429_storm_as_failure_not_skip(
+    monkeypatch,
+) -> None:
+    """A 429 that never clears (the common SEC-from-GCP-egress rate-limit storm)
+    exhausts retries and must surface as a FAILURE → deferral, not a clean skip
+    that would durably commit the firm under-enriched."""
+    monkeypatch.setattr(
+        EdgarService, "fetch_all_broker_dealers", AsyncMock(return_value=[]),
+    )
+    monkeypatch.setattr(settings, "sec_request_max_retries", 1)
+
+    # Retry-After: 0 keeps the test instant while still exhausting the retry.
+    respx.get("https://www.sec.gov/cgi-bin/browse-edgar").mock(
+        return_value=httpx.Response(429, headers={"retry-after": "0"}),
+    )
+
+    result = await EdgarService().resolve_sec_numbers(["8-20002"])
+
+    assert result.records == []
+    assert result.failed_sec_numbers == ["8-20002"]
+
+
+@respx.mock
+async def test_resolve_sec_numbers_treats_network_error_as_failure(
+    monkeypatch,
+) -> None:
+    """A network error on the final attempt is a FAILURE → deferral, not a
+    silent skip."""
+    monkeypatch.setattr(
+        EdgarService, "fetch_all_broker_dealers", AsyncMock(return_value=[]),
+    )
+    monkeypatch.setattr(settings, "sec_request_max_retries", 1)
+
+    respx.get("https://www.sec.gov/cgi-bin/browse-edgar").mock(
+        side_effect=httpx.ConnectError("connection reset"),
+    )
+
+    result = await EdgarService().resolve_sec_numbers(["8-30003"])
+
+    assert result.records == []
+    assert result.failed_sec_numbers == ["8-30003"]

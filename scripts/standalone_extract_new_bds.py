@@ -123,8 +123,8 @@ logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(me
 # timeout (3600s task-timeout, maxRetries=0) can only lose the last partial
 # batch — the next run's ``select_new_bds`` excludes the already-committed
 # firms and resumes, so the diff design converges across runs. 25 keeps commits
-# frequent without excessive per-chunk overhead (each chunk re-resolves the
-# EDGAR broker-dealer bulk set).
+# frequent while bounding per-chunk work (each chunk does a handful of targeted
+# per-SEC-number EDGAR lookups + Form BD enrichment — never the bulk universe).
 _NEW_BD_CHUNK_SIZE = 25
 
 
@@ -260,6 +260,7 @@ async def main(argv: list[str] | None = None) -> int:
     from app.services.data_merge import BrokerDealerMergeService
     from app.services.edgar import EdgarService
     from app.services.finra import FinraService
+    from app.services.service_models import MergeQAReport
 
     db_url = _normalize_db_url(args.db_url)
     engine = create_async_engine(db_url, pool_pre_ping=True)
@@ -312,9 +313,9 @@ async def main(argv: list[str] | None = None) -> int:
                 )
             return 0
 
-        # ── Step 4: Enrich → EDGAR → merge → upsert in chunks, committing each
-        #    chunk before the next is fetched. upsert_many commits per chunk, so
-        #    a Cloud Run timeout mid-run can only lose the last partial chunk;
+        # ── Step 4: Enrich → resolve EDGAR → merge → upsert in chunks, committing
+        #    each chunk before the next is fetched. upsert_many commits per chunk,
+        #    so a Cloud Run timeout mid-run can only lose the last partial chunk;
         #    everything already committed survives, and the next run's
         #    select_new_bds excludes those firms and resumes the remainder.
         total = len(new)
@@ -325,7 +326,19 @@ async def main(argv: list[str] | None = None) -> int:
         edgar = EdgarService()
         merge_service = BrokerDealerMergeService()
         repository = BrokerDealerRepository()
+
+        # Cross-chunk merge accumulators so a sequence of merge_chunk() calls
+        # dedups SEC file numbers exactly like one merge() over the whole set
+        # would — two net-new firms sharing a normalized SEC# across DIFFERENT
+        # chunks won't both be emitted (the later silently overwriting the
+        # earlier on the sec_file_number upsert path). The QA report accumulates
+        # across chunks but isn't printed here.
+        report = MergeQAReport()
+        seen_sec_numbers: set[str] = set()
+        matched_edgar_secs: set[str] = set()
+
         inserted_total = 0
+        deferred_total = 0
 
         async with session_maker() as db:
             for chunk_index, start in enumerate(
@@ -336,16 +349,47 @@ async def main(argv: list[str] | None = None) -> int:
                 # Enrich this chunk's firms with FINRA Form BD detail.
                 await finra.enrich_with_detail(chunk)
 
-                # Resolve SEC/EDGAR records for this chunk's SEC numbers only
-                # (the same EDGAR call the whole-set path used, scoped down).
+                # Resolve EDGAR for this chunk's SEC numbers only (targeted
+                # per-number lookups — never the bulk universe). DEFER firms whose
+                # EDGAR lookup FAILED upstream (429 storm / network / 5xx), as
+                # opposed to a genuine no-match: committing a failed firm now as a
+                # bare finra_only row would leave it under-enriched forever, since
+                # select_new_bds excludes any CRD already in broker_dealers. Held
+                # back, it stays net-new and the next run retries once EDGAR
+                # recovers. Genuine no-matches DO commit (correctly finra_only).
                 sec_numbers = [r.sec_file_number for r in chunk if r.sec_file_number]
-                edgar_chunk = await edgar.fetch_records_for_sec_numbers(sec_numbers)
+                resolution = await edgar.resolve_sec_numbers(sec_numbers)
+                failed = set(resolution.failed_sec_numbers)
+                committable = [
+                    r for r in chunk
+                    if not (r.sec_file_number and r.sec_file_number in failed)
+                ]
+                deferred = len(chunk) - len(committable)
+                deferred_total += deferred
+                logger.info(
+                    "chunk %d: EDGAR resolved %d/%d (%d upstream-failed → deferred)",
+                    chunk_index, len(resolution.records), len(sec_numbers), deferred,
+                )
 
-                # Merge (EDGAR first — same contract as the pipeline). The
-                # per-chunk QA report is discarded to keep logging to a running
-                # total; the merge invariants are unit-tested elsewhere.
-                merged, _ = merge_service.merge(edgar_chunk, chunk)
-                if not merged:
+                if not committable:
+                    logger.info(
+                        "chunk %d: all firms deferred; committing nothing this chunk",
+                        chunk_index,
+                    )
+                    continue
+
+                # Merge this chunk against its EDGAR index, threading the shared
+                # cross-chunk accumulators (EDGAR first — same contract as the
+                # initial-load pipeline's streaming merge).
+                edgar_index = merge_service.build_edgar_index(resolution.records, report)
+                chunk_merged = merge_service.merge_chunk(
+                    committable,
+                    edgar_index,
+                    seen_sec_numbers=seen_sec_numbers,
+                    matched_edgar_secs=matched_edgar_secs,
+                    report=report,
+                )
+                if not chunk_merged:
                     logger.info(
                         "chunk %d: 0 rows after QA filters "
                         "(cumulative %d/%d net-new BDs committed)",
@@ -355,7 +399,7 @@ async def main(argv: list[str] | None = None) -> int:
 
                 # Idempotent upsert — commits this chunk right here, so the work
                 # already done is durable before we spend time on the next one.
-                inserted = await repository.upsert_many(db, merged)
+                inserted = await repository.upsert_many(db, chunk_merged)
                 inserted_total += inserted
                 logger.info(
                     "chunk %d: +%d (cumulative %d/%d net-new BDs committed)",
@@ -363,8 +407,8 @@ async def main(argv: list[str] | None = None) -> int:
                 )
 
         logger.info(
-            "summary: enumerated=%d existing=%d net_new=%d inserted=%d",
-            len(enumerated), len(existing_crds), total, inserted_total,
+            "summary: enumerated=%d existing=%d net_new=%d inserted=%d deferred=%d",
+            len(enumerated), len(existing_crds), total, inserted_total, deferred_total,
         )
 
         # Fire the Doxie embed pass ONCE after all chunks (never per chunk), and
