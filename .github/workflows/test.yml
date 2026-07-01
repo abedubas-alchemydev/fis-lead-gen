@@ -321,6 +321,11 @@ jobs:
       # 'disabled'), and WEB_FALLBACK_* enables the free web-scrape email/phone
       # fallback. PDL is deliberately NOT bound — PDL_API_KEY unset means every PDL
       # path is inert; do not add it here.
+      # --memory=4Gi (bumped from 2Gi on 2026-07): the run_refresh_all fan-out —
+      # FINRA financials/health/clearing/FOCUS-PDF (Gemini) + Apollo website &
+      # contacts + SerpAPI + Hunter/Snov, fired concurrently per firm — OOM-killed
+      # the task at 2Gi. Staging and prod are kept at the same 4Gi so a green
+      # staging run predicts the prod job's memory profile.
       - name: Deploy BD gap-fill Cloud Run Job (staging)
         if: env.ENV == 'staging'
         run: |
@@ -331,7 +336,7 @@ jobs:
             --command=python \
             --args=scripts/gap_fill_broker_dealers.py,--apply,--newest-first,--limit,300 \
             --task-timeout=86400 \
-            --memory=2Gi \
+            --memory=4Gi \
             --cpu=2 \
             --max-retries=0 \
             --parallelism=1 \
@@ -340,10 +345,34 @@ jobs:
             --set-secrets=DATABASE_URL=DATABASE_URL_BACKEND_STAGING:latest,GEMINI_API_KEY=GEMINI_API_KEY:latest,APOLLO_API_KEY=APOLLO_API_KEY:latest,SERPAPI_API_KEY=SERPAPI_API_KEY:latest,HUNTER_API_KEY=HUNTER_API_KEY:latest,SNOV_CLIENT_ID=SNOV_CLIENT_ID:latest,SNOV_CLIENT_SECRET=SNOV_CLIENT_SECRET:latest \
             --labels=commit-sha=${{ env.SHORT_SHA }},environment=staging,kind=batch-job
 
-      # NOTE: a production sibling (fis-bd-gap-fill-prod, gated env.ENV ==
-      # 'production', DATABASE_URL_BACKEND) is DEFERRED to a later prod rollout and
-      # is intentionally NOT wired here yet — staging-only for now. See the
-      # "deferred" note in docs/runbooks/bd-gap-fill.md for how to add it later.
+      # Production sibling of the staging BD gap-fill job above. Identical shape
+      # (--apply --newest-first --limit 300, 4Gi/2cpu, 24h task timeout, the
+      # CONTACT_ENRICHMENT_PROVIDER=apollo + WEB_FALLBACK_* enrichment env, and the
+      # full GEMINI/APOLLO/SERPAPI/HUNTER/SNOV secret set); the only differences
+      # are the job name (fis-bd-gap-fill-prod), the prod DATABASE_URL secret
+      # (DATABASE_URL_BACKEND vs staging's DATABASE_URL_BACKEND_STAGING), and the
+      # env label. Gated to push-to-main (env.ENV == 'production'). This step only
+      # creates/updates the job resource — it stays INERT (spends no paid-API
+      # budget) until its prod Cloud Scheduler cron (0 6 * * *, America/New_York)
+      # is created out-of-band. See docs/runbooks/prod-cutover.md.
+      - name: Deploy BD gap-fill Cloud Run Job (production)
+        if: env.ENV == 'production'
+        run: |
+          gcloud run jobs deploy fis-bd-gap-fill-prod \
+            --image=${{ vars.GCP_REGISTRY }}/backend:${{ env.SHORT_SHA }} \
+            --region=${{ vars.GCP_REGION }} \
+            --project=${{ vars.GCP_PROJECT_ID }} \
+            --command=python \
+            --args=scripts/gap_fill_broker_dealers.py,--apply,--newest-first,--limit,300 \
+            --task-timeout=86400 \
+            --memory=4Gi \
+            --cpu=2 \
+            --max-retries=0 \
+            --parallelism=1 \
+            --tasks=1 \
+            --set-env-vars=CONTACT_ENRICHMENT_PROVIDER=apollo,WEB_FALLBACK_ENABLED=true,WEB_FALLBACK_PHONES_ENABLED=true \
+            --set-secrets=DATABASE_URL=DATABASE_URL_BACKEND:latest,GEMINI_API_KEY=GEMINI_API_KEY:latest,APOLLO_API_KEY=APOLLO_API_KEY:latest,SERPAPI_API_KEY=SERPAPI_API_KEY:latest,HUNTER_API_KEY=HUNTER_API_KEY:latest,SNOV_CLIENT_ID=SNOV_CLIENT_ID:latest,SNOV_CLIENT_SECRET=SNOV_CLIENT_SECRET:latest \
+            --labels=commit-sha=${{ env.SHORT_SHA }},environment=production,kind=batch-job
 
       # Unified backfill driver (scripts/backfill_all.py) — sequences every
       # phase (P1 BD refresh-all incl. FOCUS financials+clearing, P2 FINRA
@@ -464,6 +493,34 @@ jobs:
             --tasks=1 \
             --set-secrets=DATABASE_URL=DATABASE_URL_BACKEND_STAGING:latest \
             --labels=commit-sha=${{ env.SHORT_SHA }},environment=staging,kind=batch-job
+
+      # Production sibling of the staging refresh-registrations job above.
+      # Identical shape (refresh_registration_dates.py --apply --limit 250,
+      # 1Gi/1cpu, 1h task timeout, FINRA-only public BrokerCheck API so NO Gemini
+      # / enrichment secrets — just DATABASE_URL); the only differences are the
+      # job name (fis-refresh-registrations-prod), the prod DATABASE_URL secret
+      # (DATABASE_URL_BACKEND vs staging's DATABASE_URL_BACKEND_STAGING), and the
+      # env label. Gated to push-to-main (env.ENV == 'production'). This step only
+      # creates/updates the job resource — it stays INERT until its prod Cloud
+      # Scheduler cron (0 5 * * *, America/New_York) is created out-of-band. See
+      # docs/runbooks/prod-cutover.md.
+      - name: Deploy refresh-registrations Cloud Run Job (production)
+        if: env.ENV == 'production'
+        run: |
+          gcloud run jobs deploy fis-refresh-registrations-prod \
+            --image=${{ vars.GCP_REGISTRY }}/backend:${{ env.SHORT_SHA }} \
+            --region=${{ vars.GCP_REGION }} \
+            --project=${{ vars.GCP_PROJECT_ID }} \
+            --command=python \
+            --args=scripts/refresh_registration_dates.py,--apply,--limit,250 \
+            --task-timeout=3600 \
+            --memory=1Gi \
+            --cpu=1 \
+            --max-retries=0 \
+            --parallelism=1 \
+            --tasks=1 \
+            --set-secrets=DATABASE_URL=DATABASE_URL_BACKEND:latest \
+            --labels=commit-sha=${{ env.SHORT_SHA }},environment=production,kind=batch-job
 
       - name: Deploy frontend to Cloud Run
         run: |
