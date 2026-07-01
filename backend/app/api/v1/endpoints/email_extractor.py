@@ -245,7 +245,7 @@ async def verify_emails(
 ) -> VerificationRunCreateResponse:
     if len(payload.email_ids) > settings.smtp_verify_max_batch:
         raise HTTPException(
-            status_code=status.HTTP_413_REQUEST_ENTITY_TOO_LARGE,
+            status_code=status.HTTP_413_CONTENT_TOO_LARGE,
             detail=f"batch size {len(payload.email_ids)} exceeds cap {settings.smtp_verify_max_batch}",
         )
 

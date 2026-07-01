@@ -222,7 +222,7 @@ async def _run_initial_load_background(run_id: int, trigger_source: str) -> None
         finra_records = await finra_service.enrich_with_detail(finra_records)
         sec_file_numbers = [r.sec_file_number for r in finra_records if r.sec_file_number]
         edgar_records = await edgar_service.fetch_records_for_sec_numbers(sec_file_numbers)
-        merged = merge_service.merge(finra_records, edgar_records)
+        merged, report = merge_service.merge(edgar_records, finra_records)
 
         async with SessionLocal() as db:
             await repository.upsert_many(db, merged)
@@ -233,7 +233,13 @@ async def _run_initial_load_background(run_id: int, trigger_source: str) -> None
         )
 
         async with SessionLocal() as db:
-            filing_run = await filing_monitor_service.run(
+            # ``run`` returns (run, auto_extract_bd_ids); initial-load drops the
+            # ids. The auto re-extraction hook needs a request's BackgroundTasks
+            # to schedule against, which a background task doesn't have — the
+            # scheduled /filing-monitor trigger owns that hook. Same unpack the
+            # populate-all background does above; without it ``filing_run`` was a
+            # tuple and ``filing_run.id`` raised, marking the run "failed".
+            filing_run, _ = await filing_monitor_service.run(
                 db, trigger_source=f"initial_load:{trigger_source}"
             )
             notes_parts.append(
