@@ -298,6 +298,53 @@ jobs:
             --set-secrets=DATABASE_URL=DATABASE_URL_BACKEND_STAGING:latest,GEMINI_API_KEY=GEMINI_API_KEY:latest,APOLLO_API_KEY=APOLLO_API_KEY:latest,SERPAPI_API_KEY=SERPAPI_API_KEY:latest,HUNTER_API_KEY=HUNTER_API_KEY:latest,SNOV_CLIENT_ID=SNOV_CLIENT_ID:latest,SNOV_CLIENT_SECRET=SNOV_CLIENT_SECRET:latest \
             --labels=commit-sha=${{ env.SHORT_SHA }},environment=staging,kind=batch-job
 
+      # Cloud Run Job that runs scripts/gap_fill_broker_dealers.py — the
+      # broker-dealer analogue of the advisor gap-fill above. Walks BDs whose
+      # profile fields are still NULL and fires the run_refresh_all orchestrator
+      # (FINRA financials/health/clearing/FOCUS + SerpAPI/Apollo website + Apollo
+      # contacts + Hunter/Snov emails), stamping a 30-day cooldown per row. A
+      # Cloud Scheduler cron invokes it nightly at 06:00 America/New_York — AFTER
+      # extract-new-bds (04:00) and refresh-registrations (05:00) — so BDs ingested
+      # overnight are enriched the same morning. One-time scheduler setup + ops
+      # notes in docs/runbooks/bd-gap-fill.md.
+      #
+      # --newest-first is REQUIRED here (unlike the advisor job): freshly-ingested
+      # BDs score 'cold', so under the script's default hot->warm->cold priority
+      # ordering they sink behind the entire backlog and a bounded --limit never
+      # reaches them. --newest-first orders never-gap-filled + most-recently-created
+      # first, so new BDs are processed before the cooldown-expired tail. --limit 300
+      # clears a typical night's new-BD volume plus modest backlog.
+      #
+      # Enrichment env mirrors the BACKEND SERVICE (not the advisor job): the BD
+      # contacts sub-pipeline hard-requires CONTACT_ENRICHMENT_PROVIDER=apollo
+      # (services/contacts.py raises "Enrichment unavailable" on the default
+      # 'disabled'), and WEB_FALLBACK_* enables the free web-scrape email/phone
+      # fallback. PDL is deliberately NOT bound — PDL_API_KEY unset means every PDL
+      # path is inert; do not add it here.
+      - name: Deploy BD gap-fill Cloud Run Job (staging)
+        if: env.ENV == 'staging'
+        run: |
+          gcloud run jobs deploy fis-bd-gap-fill-staging \
+            --image=${{ vars.GCP_REGISTRY }}/backend:${{ env.SHORT_SHA }} \
+            --region=${{ vars.GCP_REGION }} \
+            --project=${{ vars.GCP_PROJECT_ID }} \
+            --command=python \
+            --args=scripts/gap_fill_broker_dealers.py,--apply,--newest-first,--limit,300 \
+            --task-timeout=86400 \
+            --memory=2Gi \
+            --cpu=2 \
+            --max-retries=0 \
+            --parallelism=1 \
+            --tasks=1 \
+            --set-env-vars=CONTACT_ENRICHMENT_PROVIDER=apollo,WEB_FALLBACK_ENABLED=true,WEB_FALLBACK_PHONES_ENABLED=true \
+            --set-secrets=DATABASE_URL=DATABASE_URL_BACKEND_STAGING:latest,GEMINI_API_KEY=GEMINI_API_KEY:latest,APOLLO_API_KEY=APOLLO_API_KEY:latest,SERPAPI_API_KEY=SERPAPI_API_KEY:latest,HUNTER_API_KEY=HUNTER_API_KEY:latest,SNOV_CLIENT_ID=SNOV_CLIENT_ID:latest,SNOV_CLIENT_SECRET=SNOV_CLIENT_SECRET:latest \
+            --labels=commit-sha=${{ env.SHORT_SHA }},environment=staging,kind=batch-job
+
+      # NOTE: a production sibling (fis-bd-gap-fill-prod, gated env.ENV ==
+      # 'production', DATABASE_URL_BACKEND) is DEFERRED to a later prod rollout and
+      # is intentionally NOT wired here yet — staging-only for now. See the
+      # "deferred" note in docs/runbooks/bd-gap-fill.md for how to add it later.
+
       # Unified backfill driver (scripts/backfill_all.py) — sequences every
       # phase (P1 BD refresh-all incl. FOCUS financials+clearing, P2 FINRA
       # clearing reconcile, P3 IA refresh-all incl. Form ADV client_counts,
