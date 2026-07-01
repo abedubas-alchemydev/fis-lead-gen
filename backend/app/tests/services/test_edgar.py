@@ -12,16 +12,25 @@ Four scenarios cover the brief's contract:
 A fifth test pins the state-disambiguation success path so a future
 "simplify the parser" PR cannot silently regress that branch.
 
+A second suite covers ``EdgarService.fetch_records_for_sec_numbers`` — the
+targeted per-filenum resolver the ingestion pipeline + extract-new-bds job use.
+Its key guard: it must NEVER call the whole-universe ``fetch_all_broker_dealers``
+/ bulk-submissions-ZIP path (that download OOM'd the 1 GiB Cloud Run job); it
+resolves each SEC number with one browse-edgar lookup and skips numbers with no
+match or a persistent upstream error.
+
 All HTTP is mocked via ``respx`` — no real SEC calls in CI.
 """
 
 from __future__ import annotations
 
 from types import SimpleNamespace
+from unittest.mock import AsyncMock
 
 import httpx
 import respx
 
+from app.core.config import settings
 from app.services.edgar import EdgarService
 
 
@@ -237,3 +246,138 @@ async def test_lookup_disambiguates_multi_match_by_state() -> None:
 
     assert status == "found"
     assert cik == "0002222222"
+
+
+# ── fetch_records_for_sec_numbers — targeted, never the bulk universe ──────
+
+
+@respx.mock
+async def test_fetch_records_for_sec_numbers_resolves_each_number_targeted(
+    monkeypatch,
+) -> None:
+    """Each requested SEC file number is resolved by ONE targeted
+    ``browse-edgar?filenum=`` lookup, and each returned record carries that
+    number's CIK, name, and file number. The whole-universe paths are spied
+    and asserted untouched."""
+    bulk_spy = AsyncMock(return_value=[])
+    zip_spy = AsyncMock()
+    monkeypatch.setattr(EdgarService, "fetch_all_broker_dealers", bulk_spy)
+    monkeypatch.setattr(EdgarService, "_ensure_bulk_submissions_zip", zip_spy)
+
+    fixtures = {
+        "8-11111": ("ALPHA SECURITIES LLC", "0000011111"),
+        "8-22222": ("BETA CAPITAL LLC", "0000022222"),
+        "8-33333": ("GAMMA MARKETS LLC", "0000033333"),
+    }
+    seen_filenums: list[str] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        filenum = request.url.params.get("filenum")
+        seen_filenums.append(filenum)
+        name, cik = fixtures[filenum]
+        return httpx.Response(200, text=_company_detail_page(name, cik))
+
+    respx.get("https://www.sec.gov/cgi-bin/browse-edgar").mock(side_effect=handler)
+
+    records = await EdgarService().fetch_records_for_sec_numbers(
+        ["8-11111", "8-22222", "8-33333"]
+    )
+
+    # One targeted browse call per requested number, in order.
+    assert seen_filenums == ["8-11111", "8-22222", "8-33333"]
+    # Each number resolved to its record, with the file number carried through.
+    assert {(r.sec_file_number, r.cik, r.name) for r in records} == {
+        ("8-11111", "0000011111", "ALPHA SECURITIES LLC"),
+        ("8-22222", "0000022222", "BETA CAPITAL LLC"),
+        ("8-33333", "0000033333", "GAMMA MARKETS LLC"),
+    }
+    # OOM guard (belt): the 1.4 GB bulk paths were never invoked.
+    assert bulk_spy.await_count == 0
+    assert zip_spy.await_count == 0
+
+
+@respx.mock
+async def test_fetch_records_for_sec_numbers_never_triggers_bulk_download(
+    monkeypatch,
+) -> None:
+    """OOM REGRESSION GUARD. ``fetch_records_for_sec_numbers`` must resolve via
+    targeted browse-edgar lookups and NEVER call the whole-universe paths
+    (``fetch_all_broker_dealers`` / ``_ensure_bulk_submissions_zip``) — those
+    stream the ~1.4 GB submissions ZIP and SIGKILL the 1 GiB Cloud Run job
+    before it inserts anything."""
+    bulk_spy = AsyncMock(return_value=[])
+    zip_spy = AsyncMock()
+    monkeypatch.setattr(EdgarService, "fetch_all_broker_dealers", bulk_spy)
+    monkeypatch.setattr(EdgarService, "_ensure_bulk_submissions_zip", zip_spy)
+
+    respx.get("https://www.sec.gov/cgi-bin/browse-edgar").mock(
+        return_value=httpx.Response(
+            200, text=_company_detail_page("ACME SECURITIES LLC", "0001234567"),
+        ),
+    )
+
+    records = await EdgarService().fetch_records_for_sec_numbers(["8-12345"])
+
+    assert [r.cik for r in records] == ["0001234567"]
+    assert bulk_spy.await_count == 0
+    assert zip_spy.await_count == 0
+
+
+@respx.mock
+async def test_fetch_records_for_sec_numbers_skips_numbers_with_no_edgar_match(
+    monkeypatch,
+) -> None:
+    """A SEC file number EDGAR has no company for is skipped cleanly — it's
+    simply absent from the result (no crash, no placeholder record)."""
+    monkeypatch.setattr(
+        EdgarService, "fetch_all_broker_dealers", AsyncMock(return_value=[]),
+    )
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.params.get("filenum") == "8-00000":
+            return httpx.Response(200, text=_no_match_page())
+        return httpx.Response(
+            200, text=_company_detail_page("REAL SECURITIES LLC", "0000042042"),
+        )
+
+    respx.get("https://www.sec.gov/cgi-bin/browse-edgar").mock(side_effect=handler)
+
+    records = await EdgarService().fetch_records_for_sec_numbers(
+        ["8-00000", "8-42042"]
+    )
+
+    assert [(r.sec_file_number, r.cik) for r in records] == [
+        ("8-42042", "0000042042"),
+    ]
+
+
+@respx.mock
+async def test_fetch_records_for_sec_numbers_skips_number_on_upstream_error(
+    monkeypatch,
+) -> None:
+    """A persistent upstream error for one number is logged and skipped — it
+    must not abort the batch (nor, in the extract-new-bds chunk loop, the whole
+    chunk). The other numbers still resolve."""
+    monkeypatch.setattr(
+        EdgarService, "fetch_all_broker_dealers", AsyncMock(return_value=[]),
+    )
+    # Fail fast — one attempt, no backoff sleeps — so _fetch_browse_record
+    # raises immediately on the 500 and our per-number guard catches it.
+    monkeypatch.setattr(settings, "sec_request_max_retries", 1)
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.params.get("filenum") == "8-50000":
+            return httpx.Response(500)
+        return httpx.Response(
+            200, text=_company_detail_page("GOOD SECURITIES LLC", "0000060000"),
+        )
+
+    respx.get("https://www.sec.gov/cgi-bin/browse-edgar").mock(side_effect=handler)
+
+    records = await EdgarService().fetch_records_for_sec_numbers(
+        ["8-50000", "8-60000"]
+    )
+
+    assert [(r.sec_file_number, r.cik) for r in records] == [
+        ("8-60000", "0000060000"),
+    ]

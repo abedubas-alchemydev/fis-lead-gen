@@ -260,13 +260,32 @@ class EdgarService:
         return records
 
     async def fetch_records_for_sec_numbers(self, sec_file_numbers: list[str]) -> list[EdgarBrokerDealerRecord]:
-        bulk_records = await self.fetch_all_broker_dealers()
-        bulk_by_sec = {
-            normalized_sec: record
-            for record in bulk_records
-            if (normalized_sec := normalize_sec_file_number(record.sec_file_number)) is not None
-        }
+        """Resolve each SEC file number to an ``EdgarBrokerDealerRecord`` with a
+        TARGETED browse-edgar lookup (``getcompany&filenum=<sec>``) — one
+        request per number, via the same per-filenum path
+        :meth:`lookup_cik_for_bd` uses.
 
+        This deliberately does **not** call :meth:`fetch_all_broker_dealers` or
+        the bulk-submissions ZIP path. That whole-universe fetch was pure
+        overhead here — the company-search fast-path never populates
+        ``sec_file_number``, so its records never matched a requested number and
+        everything fell through to this per-filenum lookup anyway — and, when
+        the company-search returned too few rows, it fell back to streaming the
+        ~1.4 GB submissions ZIP, an instant OOM/SIGKILL in the 1 GiB
+        extract-new-bds Cloud Run Job (it died there before inserting anything).
+        Resolving each number directly keeps memory flat and the work
+        proportional to the (small) net-new set the caller passes.
+
+        Requests are de-duplicated + normalized up front, paced by
+        ``settings.edgar_rate_limit_per_second`` (SEC fair-access), and carry
+        ``SEC_USER_AGENT`` + ``Accept-Encoding: identity``. Numbers EDGAR has no
+        company for are skipped (``_fetch_browse_record`` returns ``None``);
+        429/Retry-After + transient retries are handled inside
+        ``_fetch_browse_record``; a persistent upstream failure for one number
+        is logged and skipped so it can't abort the whole batch (nor, in the
+        extract-new-bds chunk loop, the current chunk) — the next run retries.
+        """
+        # De-duplicate + normalize the requested SEC file numbers.
         requested_sec_numbers: list[str] = []
         seen_sec_numbers: set[str] = set()
         for raw_sec_number in sec_file_numbers:
@@ -275,17 +294,8 @@ class EdgarService:
                 requested_sec_numbers.append(normalized)
                 seen_sec_numbers.add(normalized)
 
-        resolved_records: list[EdgarBrokerDealerRecord] = []
-        missing_sec_numbers: list[str] = []
-        for sec_file_number in requested_sec_numbers:
-            bulk_record = bulk_by_sec.get(sec_file_number)
-            if bulk_record is not None:
-                resolved_records.append(bulk_record)
-            else:
-                missing_sec_numbers.append(sec_file_number)
-
-        if not missing_sec_numbers:
-            return resolved_records
+        if not requested_sec_numbers:
+            return []
 
         headers = {
             "User-Agent": settings.sec_user_agent,
@@ -296,17 +306,26 @@ class EdgarService:
             # Forcing identity bypasses compression entirely (same fix as services/finra.py).
             "Accept-Encoding": "identity",
         }
+        resolved_records: list[EdgarBrokerDealerRecord] = []
         async with httpx.AsyncClient(
             timeout=settings.sec_request_timeout_seconds,
             headers=headers,
             follow_redirects=True,
         ) as client:
-            for index, sec_file_number in enumerate(missing_sec_numbers):
-                browse_record = await self._fetch_browse_record(client, sec_file_number)
+            for index, sec_file_number in enumerate(requested_sec_numbers):
+                try:
+                    browse_record = await self._fetch_browse_record(client, sec_file_number)
+                except httpx.HTTPError as exc:
+                    # Persistent upstream failure after _fetch_browse_record's own
+                    # retries: skip this one number rather than abort the batch.
+                    logger.warning(
+                        "EDGAR browse lookup failed for SEC# %s: %s", sec_file_number, exc,
+                    )
+                    browse_record = None
                 if browse_record is not None:
                     resolved_records.append(browse_record)
 
-                if index < len(missing_sec_numbers) - 1 and settings.edgar_rate_limit_per_second > 0:
+                if index < len(requested_sec_numbers) - 1 and settings.edgar_rate_limit_per_second > 0:
                     await asyncio.sleep(1 / settings.edgar_rate_limit_per_second)
 
         return resolved_records
