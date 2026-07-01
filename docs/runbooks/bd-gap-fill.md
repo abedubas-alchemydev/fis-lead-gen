@@ -15,15 +15,17 @@ auto-resume. It runs as a **Cloud Run Job** — `fis-bd-gap-fill-staging` (stagi
 Neon DB) — fired once nightly at **06:00 ET** (`America/New_York`) by a **Cloud
 Scheduler** cron. The CI workflow redeploys the job on every staging deploy (so
 it always runs the latest image); the scheduler is a **one-time** setup
-documented below. A **production** sibling is **deferred** to a later prod
-rollout — see [One-time setup — production (deferred)](#one-time-setup--production-deferred).
+documented below. The **production** sibling job (`fis-bd-gap-fill-prod`) is now
+wired in CI; its nightly scheduler is created as part of the production
+automation cutover — see [`docs/runbooks/prod-cutover.md`](./prod-cutover.md) and
+[One-time setup — production](#one-time-setup--production).
 
 - **Schedule:** `0 6 * * *`, time zone `America/New_York`. Deliberately **after**
   `fis-extract-new-bds-*` (04:00) and `fis-refresh-registrations-*` (05:00), so
   the BDs those two jobs ingest / newly-approve overnight are enriched the same
   morning.
-- **Target:** staging job → `DATABASE_URL_BACKEND_STAGING`. Production is not
-  wired yet (deferred).
+- **Target:** staging job → `DATABASE_URL_BACKEND_STAGING`; production job →
+  `DATABASE_URL_BACKEND` (wired in CI; nightly scheduler created at the cutover).
 - **Bounded cost:** `--limit 300` caps each run to the first 300 eligible BDs.
   This spends paid-API budget (Apollo, SerpAPI, Gemini, Hunter/Snov) — see
   [Cost & guardrails](#cost--guardrails).
@@ -75,7 +77,7 @@ the 30-day stamp; `--strict` uses IS-NULL-only predicates (no sentinel widening)
 ```
  Cloud Scheduler (cron, America/New_York, 06:00)
    fis-bd-gap-fill-nightly-staging ── POST …/jobs/fis-bd-gap-fill-staging:run
-   fis-bd-gap-fill-nightly-prod    ── (deferred — not created yet)
+   fis-bd-gap-fill-prod-nightly    ── POST …/jobs/fis-bd-gap-fill-prod:run  (created at cutover)
         │ (OAuth, runtime SA)
         ▼
  Cloud Run Job  fis-bd-gap-fill-staging   (backend image, CMD override)
@@ -83,7 +85,7 @@ the 30-day stamp; `--strict` uses IS-NULL-only predicates (no sentinel widening)
         ▼
  FINRA + SEC EDGAR (free) · Apollo · SerpAPI · Gemini · Hunter/Snov  ──►  Neon DB
    staging job → DATABASE_URL_BACKEND_STAGING
-   prod job    → DATABASE_URL_BACKEND   (deferred)
+   prod job    → DATABASE_URL_BACKEND
 ```
 
 The job **reuses the backend image** — the Dockerfile copies repo-root
@@ -96,8 +98,8 @@ from the live backend service is the container command and the enrichment env
 | Piece | Where | Cadence |
 |---|---|---|
 | Staging job deploy (`fis-bd-gap-fill-staging`) | `.github/workflows/test.yml` → "Deploy BD gap-fill Cloud Run Job (staging)", gated `env.ENV == 'staging'` | Re-run on every push to `develop`. |
-| Production job deploy (`fis-bd-gap-fill-prod`) | **Deferred** — intentionally NOT in `test.yml` yet. Add the production deploy step (and this scheduler) as part of the future prod rollout. | — |
-| Cloud Scheduler trigger (staging) | **Not in the repo** — created once with the gcloud commands below. Points at the job by name, so it survives image redeploys. | One-time. |
+| Production job deploy (`fis-bd-gap-fill-prod`) | `.github/workflows/test.yml` → "Deploy BD gap-fill Cloud Run Job (production)", gated `env.ENV == 'production'` | Re-run on every push to `main`. |
+| Cloud Scheduler trigger (staging + prod) | **Not in the repo** — created once with the gcloud commands below (prod: via `docs/runbooks/prod-cutover.md`). Points at the job by name, so it survives image redeploys. | One-time. |
 
 ## Enrichment env (differs from the advisor gap-fill job)
 
@@ -149,33 +151,29 @@ gcloud scheduler jobs create http fis-bd-gap-fill-nightly-staging \
 
 Verify: `gcloud scheduler jobs describe fis-bd-gap-fill-nightly-staging --location=us-central1 --project=fis-lead-gen`.
 
-## One-time setup — production (deferred)
+## One-time setup — production
 
-> **Deferred — part of a future prod rollout. Do NOT create these yet.** This PR
-> is **staging-only**: `test.yml` has no production BD gap-fill deploy step, so no
-> `fis-bd-gap-fill-prod` job exists, and turning it on would start **paid
-> enrichment against the PRODUCTION book**. Enabling prod is a separate,
-> explicitly-approved change.
+> **Prod is gated — enabling this cron starts paid enrichment against the
+> PRODUCTION book.** The production job (`fis-bd-gap-fill-prod`) is wired in
+> `.github/workflows/test.yml` (gated `env.ENV == 'production'`) and created /
+> updated by each `main` deploy, but it stays **inert** until its scheduler
+> exists. Create the scheduler only as part of the approved production cutover.
 
-When the prod rollout is greenlit, it is a two-part change:
-
-1. **Add the production deploy step** to `.github/workflows/test.yml` (mirror the
-   staging step, gated `if: env.ENV == 'production'`, job name
-   `fis-bd-gap-fill-prod`, `DATABASE_URL=DATABASE_URL_BACKEND:latest`,
-   `environment=production` label). Merging to `main` then creates/updates the
-   job resource — which stays **inert** until step 2.
-2. **Create the prod scheduler** (same project/region/SA as staging; only the job
-   name and scheduler name differ). Consider a first manual `--scan-only`
-   execution against prod to size the gap before enabling the nightly cron:
+The cutover — create all three prod schedulers **and** pause the paid staging
+ones so they don't double-spend — is driven by
+**[`docs/runbooks/prod-cutover.md`](./prod-cutover.md)**, the single source of
+truth for the sequence and verification. Do a first manual `--scan-only`
+execution against prod to size the gap before enabling the nightly cron (see the
+cutover runbook's sizing step). The bind + create for this job specifically:
 
 ```bash
-# DO NOT RUN YET — future prod rollout only.
+# Run as part of the prod cutover — see docs/runbooks/prod-cutover.md.
 gcloud run jobs add-iam-policy-binding fis-bd-gap-fill-prod \
   --project=fis-lead-gen --region=us-central1 \
   --member="serviceAccount:136029935063-compute@developer.gserviceaccount.com" \
   --role="roles/run.invoker"
 
-gcloud scheduler jobs create http fis-bd-gap-fill-nightly-prod \
+gcloud scheduler jobs create http fis-bd-gap-fill-prod-nightly \
   --project=fis-lead-gen --location=us-central1 \
   --schedule="0 6 * * *" --time-zone="America/New_York" \
   --uri="https://us-central1-run.googleapis.com/apis/run.googleapis.com/v1/namespaces/fis-lead-gen/jobs/fis-bd-gap-fill-prod:run" \
@@ -185,9 +183,9 @@ gcloud scheduler jobs create http fis-bd-gap-fill-nightly-prod \
 
 ## Manual operations
 
-Staging only for now (prod is deferred — see above). Once the prod rollout
-lands, swap `-staging` for `-prod` (and the `-nightly-staging` scheduler for
-`-nightly-prod`) to operate the production resources.
+Commands below use the staging resources; swap `-staging` for `-prod` (and the
+`fis-bd-gap-fill-nightly-staging` scheduler for `fis-bd-gap-fill-prod-nightly`) to
+operate the production resources once the cutover has created them.
 
 ```bash
 # Cost preview — read-only scan, NO writes, NO API calls (recommended first run).
@@ -242,8 +240,9 @@ gcloud scheduler jobs resume fis-bd-gap-fill-nightly-staging --location=us-centr
 - **Contacts need the provider env:** without `CONTACT_ENRICHMENT_PROVIDER=apollo`
   the contacts sub-pipeline fails per-BD with "Enrichment unavailable" (website /
   financials / clearing still fill). The workflow step sets it; keep it.
-- **Staging vs. prod:** this PR is **staging-only**. The prod job/scheduler are
-  **deferred** (not wired in `test.yml`, not created) and will be separate
-  resources with a separate DB secret when the prod rollout is approved — never a
-  side effect of a staging run.
+- **Staging vs. prod:** the `-staging` and `-prod` jobs are separate resources
+  with separate DB secrets (`DATABASE_URL_BACKEND_STAGING` vs
+  `DATABASE_URL_BACKEND`) and separate schedulers — a prod run is never a side
+  effect of a staging run. The prod job is wired in `test.yml`; its scheduler is
+  created at the cutover (`docs/runbooks/prod-cutover.md`).
 ```
