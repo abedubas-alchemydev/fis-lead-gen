@@ -243,6 +243,17 @@ def _parse_args() -> argparse.Namespace:
         help="Cap to the first N eligible BDs. Useful for cost-bounded "
              "smoke tests before committing to a full pass.",
     )
+    parser.add_argument(
+        "--newest-first",
+        action="store_true",
+        help="Order the eligible walk by never-gap-filled + most-recently-"
+             "created first, instead of the default highest-value order "
+             "(priority bucket -> score -> id). Freshly-ingested BDs score "
+             "'cold', so under the default order they sit behind the entire "
+             "hot/warm/cold backlog and a bounded --limit never reaches them. "
+             "The nightly new-BD gap-fill job passes this so overnight arrivals "
+             "are enriched the same morning; leave it off for value-first passes.",
+    )
     return parser.parse_args()
 
 
@@ -295,6 +306,28 @@ async def main() -> None:
         else_=3,
     )
 
+    # Ordering of the eligible walk. Default = highest-value first (priority
+    # bucket -> lead_score -> id) so a bounded --limit spends the budget on the
+    # best leads. --newest-first flips it to never-gap-filled + most-recently-
+    # created first: freshly-ingested BDs score 'cold', so under the default
+    # order they sit behind the entire hot/warm/cold backlog and a bounded
+    # --limit never reaches them (the nightly BD gap-fill job relies on this so
+    # overnight arrivals are enriched the same morning). NULLS FIRST on the
+    # cooldown stamp keeps never-attempted rows ahead of the cooldown-expired
+    # tail; created_at DESC then orders the newest ingests first.
+    if args.newest_first:
+        order_cols = (
+            BrokerDealer.last_gap_fill_attempt_at.asc().nullsfirst(),
+            BrokerDealer.created_at.desc(),
+            BrokerDealer.id.desc(),
+        )
+    else:
+        order_cols = (
+            priority_rank,
+            BrokerDealer.lead_score.desc().nullslast(),
+            BrokerDealer.id,
+        )
+
     # BDs whose last extraction attempt hit a retryable transient failure
     # (today: network_error from DNS / timeout / connection failures) are
     # eligible regardless of cooldown -- a network blip 12 days ago should
@@ -308,11 +341,7 @@ async def main() -> None:
     async with SessionLocal() as db:
         if args.reset_cooldown:
             # Bypass the cooldown filter entirely -- every BD is eligible.
-            eligible_stmt = select(BrokerDealer).order_by(
-                priority_rank,
-                BrokerDealer.lead_score.desc().nullslast(),
-                BrokerDealer.id,
-            )
+            eligible_stmt = select(BrokerDealer).order_by(*order_cols)
         else:
             eligible_stmt = (
                 select(BrokerDealer)
@@ -323,11 +352,7 @@ async def main() -> None:
                         BrokerDealer.id.in_(retryable_bd_ids_subq),
                     )
                 )
-                .order_by(
-                    priority_rank,
-                    BrokerDealer.lead_score.desc().nullslast(),
-                    BrokerDealer.id,
-                )
+                .order_by(*order_cols)
             )
         eligible = list((await db.execute(eligible_stmt)).scalars().all())
         contact_ids: set[int] = set(
@@ -530,6 +555,25 @@ async def main() -> None:
                     await db.commit()
                     await db.refresh(parent)
                     parent_id = parent.id
+
+                # Stamp the cooldown BEFORE firing the orchestrator, not after.
+                # run_refresh_all drives native PDF parsers (pypdfium2/PDFium is
+                # C++) that can SIGSEGV on a corrupted filing. A segfault is not
+                # a Python exception -- it kills this whole process, so neither
+                # the try/except below nor the post-run stamp would ever run.
+                # If we only stamped afterward, the crashing BD would stay
+                # unstamped and, under --newest-first (last_gap_fill_attempt_at
+                # ASC NULLS FIRST), sort straight back to the front on the next
+                # run -> hit again -> crash again: a poison pill that never lets
+                # the batch advance. Stamping first (its own committed session)
+                # guarantees forward progress: a BD that kills a run is skipped
+                # for the cooldown window on the re-run instead of re-crashing
+                # it. Semantically correct too -- this column records the last
+                # *attempt*, and the attempt starts here. The service-level
+                # subprocess isolation now contains the segfault; this stamp is
+                # the belt to that suspenders so ANY future hard crash (OOM, a
+                # new native dep) still can't wedge the batch.
+                await _safe_stamp_cooldown(bd.id)
 
                 t0 = time.monotonic()
                 try:

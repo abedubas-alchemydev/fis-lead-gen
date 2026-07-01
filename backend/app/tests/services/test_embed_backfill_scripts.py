@@ -7,12 +7,13 @@ current without waiting for the populate-all pipeline:
   exit-code contract (0 unless every selected backfill hard-fails;
   2 for config errors).
 - ``scripts/standalone_extract_new_bds.py`` — the post-apply Doxie
-  freshness hook: fires exactly once after rows are committed, never on
-  dry runs, and an embedding blow-up never leaks into the extractor's
-  exit code.
+  freshness hook: fires exactly once after the net-new rows are upserted,
+  never on dry runs, and an embedding blow-up never leaks into the
+  extractor's exit code.
 
 Everything external is monkeypatched (service methods, sessions, the
-extractor's DB engine and FINRA probe) — no real Postgres, no Gemini.
+extractor's enumerate-and-diff pipeline) — no real Postgres, no FINRA,
+no Gemini.
 Follows ``test_chatbot_semantic_unit.py`` for the session/service fakes.
 """
 
@@ -21,7 +22,7 @@ from __future__ import annotations
 import sys
 from pathlib import Path
 from typing import Any
-from unittest.mock import AsyncMock
+from unittest.mock import AsyncMock, MagicMock
 
 # The scripts live at the repo root (shipped into the backend image at
 # /app/scripts). pytest runs from backend/ with pythonpath=., so the repo
@@ -39,6 +40,11 @@ from app.services.chatbot_semantic import (  # noqa: E402
     BackfillResult,
     ChatbotSemanticService,
 )
+from app.services.broker_dealers import BrokerDealerRepository  # noqa: E402
+from app.services.data_merge import BrokerDealerMergeService  # noqa: E402
+from app.services.edgar import EdgarResolution, EdgarService  # noqa: E402
+from app.services.finra import FinraService  # noqa: E402
+from app.services.service_models import FinraBrokerDealerRecord  # noqa: E402
 
 # Engine creation is lazy in SQLAlchemy — nothing ever connects to this.
 _FAKE_DB_URL = "postgresql://unit:test@127.0.0.1:9/never_connects"
@@ -228,170 +234,259 @@ async def test_runner_missing_gemini_key_exits_two(monkeypatch) -> None:
 
 
 class _FakeResult:
-    def __init__(
-        self,
-        *,
-        rows: list[Any] | None = None,
-        scalar: Any = None,
-    ) -> None:
-        self._rows = rows or []
-        self._scalar = scalar
+    """Stands in for the result of the existing-CRD SELECT."""
 
-    def first(self) -> Any:
-        return self._rows[0] if self._rows else None
+    def __init__(self, rows: list[Any]) -> None:
+        self._rows = rows
 
     def all(self) -> list[Any]:
-        return self._rows
-
-    def scalar_one(self) -> Any:
-        return self._scalar
+        return list(self._rows)
 
 
-class _FakeConn:
-    """Pops canned results off the engine's shared queue, in order."""
+class _FakeSession:
+    """async-session stand-in: every execute() returns the canned existing-CRD
+    rows. main() runs one SELECT through a session before the write path, and
+    the write path itself (upsert_many) is mocked."""
 
-    def __init__(self, engine: "_FakeEngine") -> None:
-        self._engine = engine
+    def __init__(self, existing_rows: list[Any]) -> None:
+        self._existing_rows = existing_rows
+        self.executed = 0
 
-    async def execute(self, _stmt: Any, _params: Any = None) -> _FakeResult:
-        self._engine.executed += 1
-        return self._engine.results.pop(0)
-
-
-class _FakeConnCtx:
-    def __init__(self, engine: "_FakeEngine") -> None:
-        self._engine = engine
-
-    async def __aenter__(self) -> _FakeConn:
-        return _FakeConn(self._engine)
+    async def __aenter__(self) -> "_FakeSession":
+        return self
 
     async def __aexit__(self, *_exc: Any) -> bool:
         return False
 
+    async def execute(self, *_a: Any, **_kw: Any) -> _FakeResult:
+        self.executed += 1
+        return _FakeResult(self._existing_rows)
+
+
+class _FakeSessionMaker:
+    """Stand-in for ``async_sessionmaker(engine)``: each call opens a fresh
+    fake session over the same canned existing-CRD rows."""
+
+    def __init__(self, existing_rows: list[Any]) -> None:
+        self._existing_rows = existing_rows
+        self.opened = 0
+
+    def __call__(self) -> _FakeSession:
+        self.opened += 1
+        return _FakeSession(self._existing_rows)
+
 
 class _FakeEngine:
-    """Async-engine stand-in: connect()/begin() hand out conns that share
-    one ordered result queue — enough to drive the extractor's main()."""
+    """Async-engine stand-in — main() only needs create + dispose; the real
+    work goes through the session-maker and the mocked services."""
 
-    def __init__(self, results: list[_FakeResult]) -> None:
-        self.results = list(results)
-        self.executed = 0
+    def __init__(self) -> None:
         self.disposed = False
-
-    def connect(self) -> _FakeConnCtx:
-        return _FakeConnCtx(self)
-
-    def begin(self) -> _FakeConnCtx:
-        return _FakeConnCtx(self)
 
     async def dispose(self) -> None:
         self.disposed = True
 
 
-_PROBE_ARGS = [
-    "--db-url",
-    _FAKE_DB_URL,
-    "--crd-start",
-    "900001",
-    "--probe-limit",
-    "1",
-]
+_EXTRACT_ARGS = ["--db-url", _FAKE_DB_URL]
 
 
-def _hit_probe(monkeypatch) -> None:
-    """Make the (single) probed CRD resolve to a fake new BD — no HTTP."""
+def _finra_record(crd: str) -> FinraBrokerDealerRecord:
+    """A minimal enumerated active-BD record — the shape
+    ``FinraService.fetch_broker_dealers`` returns. Only the CRD matters to the
+    diff; the rest satisfies the dry-run log line."""
+    return FinraBrokerDealerRecord(
+        crd_number=crd,
+        name="Test Securities LLC",
+        sec_file_number="8-99999",
+        registration_status="Active",
+        branch_count=1,
+        address_city="New York",
+        address_state="NY",
+        business_type=None,
+    )
 
-    async def _fake_probe(_client: Any, crd: int) -> extractor.NewBd:
-        return extractor.NewBd(
-            crd_number=str(crd),
-            name="Test Securities LLC",
-            sec_file_number="8-99999",
-            city="New York",
-            state="NY",
-            status="Active",
-            registration_date=None,
-            formation_date=None,
-        )
 
-    monkeypatch.setattr(extractor, "_probe_one", _fake_probe)
+def _patch_pipeline(
+    monkeypatch,
+    *,
+    enumerated: list[FinraBrokerDealerRecord],
+    existing_rows: list[Any],
+    merged: list[Any],
+    failed_sec_numbers: list[str] | None = None,
+) -> tuple[_FakeEngine, AsyncMock, AsyncMock]:
+    """Wire the extractor's enumerate → diff → enrich → resolve-EDGAR →
+    merge_chunk → upsert path with fakes (no HTTP, no Postgres). Returns the
+    fake engine plus the enrich and upsert mocks so callers can assert what the
+    write path saw. ``failed_sec_numbers`` drives the EDGAR deferral branch. The
+    embed hook is left for each test to handle (spy vs. real)."""
+    engine = _FakeEngine()
+    session_maker = _FakeSessionMaker(existing_rows)
+    monkeypatch.setattr(extractor, "create_async_engine", lambda *_a, **_kw: engine)
+    monkeypatch.setattr(
+        extractor, "async_sessionmaker", lambda _engine, **_kw: session_maker
+    )
+
+    monkeypatch.setattr(
+        FinraService,
+        "fetch_broker_dealers",
+        AsyncMock(return_value=enumerated),
+    )
+    enrich_mock = AsyncMock(side_effect=lambda recs, **_kw: recs)
+    monkeypatch.setattr(FinraService, "enrich_with_detail", enrich_mock)
+
+    # Targeted per-chunk EDGAR resolution → (records, failed_sec_numbers).
+    resolution = EdgarResolution(
+        records=[], failed_sec_numbers=list(failed_sec_numbers or []),
+    )
+    monkeypatch.setattr(
+        EdgarService, "resolve_sec_numbers", AsyncMock(return_value=resolution),
+    )
+
+    # Chunk-aware merge: build_edgar_index once per chunk, merge_chunk with the
+    # threaded cross-chunk accumulators. Both mocked; merge_chunk yields the
+    # canned merged list so upsert receives a real list.
+    monkeypatch.setattr(
+        BrokerDealerMergeService, "build_edgar_index", MagicMock(return_value=object()),
+    )
+    monkeypatch.setattr(
+        BrokerDealerMergeService, "merge_chunk", MagicMock(return_value=merged),
+    )
+    upsert_mock = AsyncMock(return_value=len(merged))
+    monkeypatch.setattr(BrokerDealerRepository, "upsert_many", upsert_mock)
+    return engine, enrich_mock, upsert_mock
 
 
 async def test_extractor_apply_triggers_embed_hook_exactly_once(
     monkeypatch,
 ) -> None:
-    _hit_probe(monkeypatch)
-    # Queue order: dedup SELECT (no existing rows) → INSERT RETURNING id.
-    engine = _FakeEngine(
-        [_FakeResult(rows=[]), _FakeResult(scalar=123)]
-    )
-    monkeypatch.setattr(
-        extractor, "create_async_engine", lambda *_a, **_kw: engine
+    # One enumerated active BD, nothing in the DB → it's net-new → the apply
+    # path enriches, merges, upserts, then fires the hook exactly once.
+    engine, _enrich, upsert_mock = _patch_pipeline(
+        monkeypatch,
+        enumerated=[_finra_record("900001")],
+        existing_rows=[],
+        merged=[object()],
     )
     hook_spy = AsyncMock()
     monkeypatch.setattr(extractor, "_embed_backfill_after_apply", hook_spy)
 
-    rc = await extractor.main([*_PROBE_ARGS, "--apply"])
+    rc = await extractor.main([*_EXTRACT_ARGS, "--apply"])
 
     assert rc == 0
     assert hook_spy.await_count == 1
-    assert engine.executed == 2  # the INSERT really ran before the hook
+    assert upsert_mock.await_count == 1  # the upsert really ran before the hook
     assert engine.disposed
+
+
+async def test_extractor_apply_commits_each_chunk_but_embeds_once(
+    monkeypatch,
+) -> None:
+    """Durable progress: net-new firms spanning multiple chunks trigger one
+    ``upsert_many`` (commit) per chunk, but the embed hook still fires exactly
+    once — after the loop — so the "apply → embed once" contract holds even as
+    each chunk is committed independently."""
+    monkeypatch.setattr(extractor, "_NEW_BD_CHUNK_SIZE", 2)
+    _engine, enrich_mock, upsert_mock = _patch_pipeline(
+        monkeypatch,
+        enumerated=[
+            _finra_record("900001"),
+            _finra_record("900002"),
+            _finra_record("900003"),
+        ],
+        existing_rows=[],
+        merged=[object()],
+    )
+    hook_spy = AsyncMock()
+    monkeypatch.setattr(extractor, "_embed_backfill_after_apply", hook_spy)
+
+    rc = await extractor.main([*_EXTRACT_ARGS, "--apply"])
+
+    assert rc == 0
+    # 3 firms / chunk size 2 → 2 chunks → a commit + an enrichment per chunk.
+    assert upsert_mock.await_count == 2
+    assert enrich_mock.await_count == 2
+    # ...but the embed hook still fires exactly once, after the loop.
+    assert hook_spy.await_count == 1
+
+
+async def test_extractor_defers_firms_when_edgar_lookup_fails(
+    monkeypatch,
+) -> None:
+    """EDGAR-failure firms are DEFERRED, not committed under-enriched: when a
+    chunk's SEC numbers all fail upstream, nothing is upserted and the embed
+    hook does not fire — the firms stay net-new for the next run to retry."""
+    _engine, _enrich, upsert_mock = _patch_pipeline(
+        monkeypatch,
+        enumerated=[_finra_record("900001")],
+        existing_rows=[],
+        merged=[object()],
+        failed_sec_numbers=["8-99999"],  # _finra_record's SEC# — failed upstream
+    )
+    hook_spy = AsyncMock()
+    monkeypatch.setattr(extractor, "_embed_backfill_after_apply", hook_spy)
+
+    rc = await extractor.main([*_EXTRACT_ARGS, "--apply"])
+
+    assert rc == 0
+    assert upsert_mock.await_count == 0  # deferred → nothing committed this chunk
+    assert hook_spy.await_count == 0     # no inserts → no embed
 
 
 async def test_extractor_dry_run_does_not_trigger_embed_hook(
     monkeypatch,
 ) -> None:
-    _hit_probe(monkeypatch)
-    engine = _FakeEngine([_FakeResult(rows=[])])  # dedup SELECT only
-    monkeypatch.setattr(
-        extractor, "create_async_engine", lambda *_a, **_kw: engine
+    _engine, enrich_mock, upsert_mock = _patch_pipeline(
+        monkeypatch,
+        enumerated=[_finra_record("900001")],
+        existing_rows=[],
+        merged=[object()],
     )
     hook_spy = AsyncMock()
     monkeypatch.setattr(extractor, "_embed_backfill_after_apply", hook_spy)
 
-    rc = await extractor.main(_PROBE_ARGS)
+    rc = await extractor.main(_EXTRACT_ARGS)  # no --apply
 
     assert rc == 0
     assert hook_spy.await_count == 0
-    assert engine.executed == 1  # nothing written on a dry run
+    assert enrich_mock.await_count == 0  # dry run stops at the diff
+    assert upsert_mock.await_count == 0  # nothing written on a dry run
 
 
 async def test_extractor_apply_without_inserts_skips_embed_hook(
     monkeypatch,
 ) -> None:
-    """--apply with zero finds returns before the hook — no embed work
-    on nights when FINRA registered nothing new."""
-
-    async def _miss_probe(_client: Any, _crd: int) -> None:
-        return None
-
-    monkeypatch.setattr(extractor, "_probe_one", _miss_probe)
-    engine = _FakeEngine([])
-    monkeypatch.setattr(
-        extractor, "create_async_engine", lambda *_a, **_kw: engine
+    """--apply on a night when every active BD is already in the DB yields zero
+    net-new and returns before the hook — no embed work when FINRA registered
+    nothing new."""
+    _engine, enrich_mock, upsert_mock = _patch_pipeline(
+        monkeypatch,
+        enumerated=[_finra_record("900001")],
+        existing_rows=[("900001",)],  # the only enumerated firm already exists
+        merged=[object()],
     )
     hook_spy = AsyncMock()
     monkeypatch.setattr(extractor, "_embed_backfill_after_apply", hook_spy)
 
-    rc = await extractor.main([*_PROBE_ARGS, "--apply"])
+    rc = await extractor.main([*_EXTRACT_ARGS, "--apply"])
 
     assert rc == 0
     assert hook_spy.await_count == 0
+    assert enrich_mock.await_count == 0  # zero net-new → no enrich/merge/upsert
+    assert upsert_mock.await_count == 0
 
 
 async def test_extractor_embed_failure_does_not_change_exit_code(
     monkeypatch, caplog
 ) -> None:
     """End-to-end isolation: the real hook runs, the embedding service
-    blows up, and the extractor still exits 0 with its rows written."""
-    _hit_probe(monkeypatch)
-    engine = _FakeEngine(
-        [_FakeResult(rows=[]), _FakeResult(scalar=123)]
+    blows up, and the extractor still exits 0 with its rows upserted."""
+    _engine, _enrich, upsert_mock = _patch_pipeline(
+        monkeypatch,
+        enumerated=[_finra_record("900001")],
+        existing_rows=[],
+        merged=[object()],
     )
-    monkeypatch.setattr(
-        extractor, "create_async_engine", lambda *_a, **_kw: engine
-    )
-    # Arm the hook's lazy-imported internals: key present, session fake,
+    # Arm the real hook's lazy-imported internals: key present, session fake,
     # service raising.
     monkeypatch.setattr(settings, "gemini_api_key", "AIzaSyTEST")
     monkeypatch.setattr(app_db_session, "SessionLocal", _FakeSessionLocal())
@@ -401,10 +496,10 @@ async def test_extractor_embed_failure_does_not_change_exit_code(
         AsyncMock(side_effect=RuntimeError("gemini down")),
     )
 
-    rc = await extractor.main([*_PROBE_ARGS, "--apply"])
+    rc = await extractor.main([*_EXTRACT_ARGS, "--apply"])
 
     assert rc == 0
-    assert engine.executed == 2  # the committed insert was not undone
+    assert upsert_mock.await_count == 1  # the committed upsert was not undone
     assert "doxie embed backfill after extract failed" in caplog.text
 
 

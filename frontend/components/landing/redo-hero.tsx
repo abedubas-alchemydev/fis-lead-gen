@@ -1,6 +1,7 @@
 "use client";
 
 import { useEffect, useState } from "react";
+import Image from "next/image";
 import Link from "next/link";
 import { Activity, ArrowRight, Lock, Radio, Shield, Zap } from "lucide-react";
 
@@ -206,7 +207,7 @@ function FilingTerminal() {
 
 export function RedoHero() {
   return (
-    <section className="relative overflow-hidden bg-navy px-6 pb-28 pt-44 text-white lg:pt-48">
+    <section className="relative overflow-hidden bg-navy px-6 pb-28 pt-28 text-white lg:pt-32">
       {/* ── Decorative backdrop: terminal grid + drifting aurora orbs + a slow
           mesh wash, plus the bottom-edge gradient that begins the dark → light
           descent into the next section. All aria-hidden / non-interactive. ── */}
@@ -226,9 +227,26 @@ export function RedoHero() {
         <div className="absolute inset-x-0 bottom-0 h-40 bg-gradient-to-b from-transparent to-[#0b0f1a]" />
       </div>
 
-      <div className="mx-auto grid max-w-7xl items-center gap-12 lg:grid-cols-[1.05fr_1fr] lg:gap-16">
+      <div className="mx-auto grid max-w-7xl items-center gap-12 lg:grid-cols-[1.05fr_1fr] lg:items-start lg:gap-16">
         {/* ── Left: copy + CTAs ── */}
         <div>
+          {/* Brand lockup — the same square dox wordmark the login page paints
+              on its dark left panel. The asset is a navy-bg square that shines
+              on dark surfaces, so it sits naturally on this navy hero. Scaled up
+              to a large hero centerpiece, with object-contain so the swoosh +
+              tagline never distort, stepping down on sm/mobile so it doesn't
+              crowd the headline/CTAs, and one notch larger again at xl where the
+              column has the room. Native asset is 2000px square, so it stays
+              crisp at every step. */}
+          <Image
+            src="/dox-logo.png"
+            alt="DOX — Institutional Finance Intelligence"
+            width={512}
+            height={512}
+            priority
+            className="animate-fade-in mb-6 h-48 w-48 object-contain sm:h-64 sm:w-64 lg:mb-10 lg:h-96 lg:w-96 xl:h-[28rem] xl:w-[28rem]"
+          />
+
           <span className="animate-fade-in inline-flex items-center gap-2 rounded-full border border-white/15 bg-white/5 px-4 py-1.5 text-xs font-semibold uppercase tracking-[0.2em] text-white/80 backdrop-blur">
             <Zap className="h-3.5 w-3.5 text-[var(--accent,#6366f1)]" />
             Real-time regulatory intelligence
