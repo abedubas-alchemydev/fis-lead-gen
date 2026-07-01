@@ -39,6 +39,12 @@ from app.models.audit_log import AuditLog
 from app.models.pipeline_run import PipelineRun
 from app.schemas.auth import AuthenticatedUser
 from app.services.auth import get_current_user, get_current_user_optional
+from app.services.service_models import (
+    EdgarBrokerDealerRecord,
+    FinraBrokerDealerRecord,
+    MergedBrokerDealerRecord,
+    MergeQAReport,
+)
 
 
 def _admin_user() -> AuthenticatedUser:
@@ -426,6 +432,192 @@ async def test_populate_all_background_completes_and_fires_embed_hook(
     assert log.count("embed_hook") == 1
     assert log[-1] == "embed_hook"
     assert log[-2] == "commit"
+
+
+# ────────── initial-load background: merge tuple unpack + insert ──────────
+
+
+def _fake_finra_record() -> FinraBrokerDealerRecord:
+    return FinraBrokerDealerRecord(
+        crd_number="111",
+        name="Acme Securities LLC",
+        sec_file_number="8-12345",
+        registration_status="Active",
+        branch_count=1,
+        address_city="New York",
+        address_state="NY",
+        business_type=None,
+    )
+
+
+def _fake_edgar_record() -> EdgarBrokerDealerRecord:
+    return EdgarBrokerDealerRecord(
+        cik="0001234567",
+        name="Acme Securities LLC",
+        sic="6211",
+        state="NY",
+        city="New York",
+        sec_file_number="8-12345",
+        registration_date=None,
+        last_filing_date=None,
+        filings_index_url="https://www.sec.gov/cgi-bin/browse-edgar",
+    )
+
+
+def _fake_merged_record() -> MergedBrokerDealerRecord:
+    return MergedBrokerDealerRecord(
+        cik="0001234567",
+        crd_number="111",
+        sec_file_number="8-12345",
+        name="Acme Securities LLC",
+        city="New York",
+        state="NY",
+        status="Active",
+        branch_count=1,
+        business_type=None,
+        registration_date=None,
+        matched_source="both",
+        last_filing_date=None,
+        filings_index_url="https://www.sec.gov/cgi-bin/browse-edgar",
+    )
+
+
+async def test_initial_load_background_inserts_and_completes(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Regression for two un-unpacked-tuple bugs in
+    ``_run_initial_load_background``:
+
+    1. The ``merge_service.merge`` call had its arguments REVERSED and —
+       critically — never unpacked its ``(records, report)`` tuple. The
+       un-unpacked 2-tuple was handed to ``repository.upsert_many`` and
+       ``len(...)``, so the upsert blew up on ``'tuple' object has no
+       attribute 'cik'`` and the scheduled run inserted ZERO broker-dealers.
+    2. The ``filing_monitor_service.run`` call (whose real return type is
+       ``tuple[PipelineRun, list[int]]``) was assigned without unpacking, so
+       ``filing_run.id`` raised ``AttributeError`` and the run was marked
+       "failed" — skipping the lead-score refresh — even after the BDs had
+       already been inserted.
+
+    Drives ``_run_initial_load_background`` end-to-end against fakes and
+    asserts (a) the run reaches ``status == "completed"`` (not ``"failed"``)
+    and (b) ``upsert_many`` is awaited with a real
+    ``list[MergedBrokerDealerRecord]`` — NOT the ``(list, MergeQAReport)``
+    tuple the missing unpack produced. The ``filing_monitor_service.run`` stub
+    returns the real ``(run, ids)`` tuple, so assertion (a) catches bug #2 and
+    assertion (b) catches bug #1.
+    """
+    log: list[str] = []
+    run_row = PipelineRun(
+        id=1,
+        pipeline_name="initial_load",
+        trigger_source="test",
+        status="queued",
+        total_items=0,
+        processed_items=0,
+        success_count=0,
+        failure_count=0,
+    )
+    fake_db = _BgFakeDb(run_row, log)
+    monkeypatch.setattr(
+        pipeline_endpoint, "SessionLocal", _BgFakeSessionLocal(fake_db)
+    )
+
+    # The harvest + merge classes are lazily imported INSIDE the background
+    # task, so they must be patched at their SOURCE modules — the function
+    # runs ``from app.services.finra import FinraService`` at call time, which
+    # resolves the (patched) module attribute.
+    merged_record = _fake_merged_record()
+
+    class _FakeFinraService:
+        async def fetch_broker_dealers(
+            self, limit: int | None = None
+        ) -> list[FinraBrokerDealerRecord]:
+            return [_fake_finra_record()]
+
+        async def enrich_with_detail(
+            self, records: list[FinraBrokerDealerRecord]
+        ) -> list[FinraBrokerDealerRecord]:
+            return records
+
+    class _FakeEdgarService:
+        async def fetch_records_for_sec_numbers(
+            self, sec_file_numbers: list[str]
+        ) -> list[EdgarBrokerDealerRecord]:
+            return [_fake_edgar_record()]
+
+    class _FakeMergeService:
+        def merge(self, edgar_records: Any, finra_records: Any) -> Any:
+            # Returns the real ``(records, report)`` tuple shape. The call site
+            # MUST unpack it; the bug assigned the whole tuple to ``merged``.
+            return [merged_record], MergeQAReport(
+                edgar_input_count=1,
+                finra_input_count=1,
+                matched_both_count=1,
+                output_count=1,
+            )
+
+    monkeypatch.setattr("app.services.finra.FinraService", _FakeFinraService)
+    monkeypatch.setattr("app.services.edgar.EdgarService", _FakeEdgarService)
+    monkeypatch.setattr(
+        "app.services.data_merge.BrokerDealerMergeService", _FakeMergeService
+    )
+
+    # Spy on the repository upsert to capture EXACTLY what the call site hands
+    # it — a list (correct) vs the un-unpacked tuple (bug).
+    captured: dict[str, Any] = {}
+
+    async def _spy_upsert_many(_db: Any, records: Any) -> int:
+        captured["records"] = records
+        return len(records) if isinstance(records, list) else 0
+
+    monkeypatch.setattr(
+        pipeline_endpoint.repository, "upsert_many", _spy_upsert_many
+    )
+
+    filing_run = PipelineRun(
+        id=99,
+        pipeline_name="daily_filing_monitor",
+        trigger_source="t",
+        status="completed",
+        total_items=3,
+        processed_items=3,
+        success_count=3,
+        failure_count=0,
+    )
+    # FilingMonitorService.run returns the real ``tuple[PipelineRun, list[int]]``
+    # — the call site MUST unpack it (``filing_run, _ = await ...``). Returning a
+    # bare PipelineRun here would mask the line-236 unpack bug; the tuple makes
+    # the test fail (``filing_run.id`` raises → run marked "failed") if that
+    # unpack ever regresses.
+    monkeypatch.setattr(
+        pipeline_endpoint.filing_monitor_service,
+        "run",
+        AsyncMock(return_value=(filing_run, [])),
+    )
+    monkeypatch.setattr(
+        pipeline_endpoint.repository,
+        "refresh_lead_scores",
+        AsyncMock(return_value=None),
+    )
+
+    await pipeline_endpoint._run_initial_load_background(1, "test")
+
+    # (a) The run reached "completed" — catches the filing-monitor unpack bug
+    # (line 236): a bare ``filing_run = await ...run(...)`` leaves ``filing_run``
+    # a tuple, ``filing_run.id`` raises, and the run is marked "failed".
+    assert run_row.status == "completed"
+
+    # (b) ``upsert_many`` received a real list of MergedBrokerDealerRecord,
+    # NOT the ``(list, MergeQAReport)`` tuple. This is the assertion that
+    # catches the missing merge() tuple-unpack (Bug #1).
+    captured_records = captured["records"]
+    assert isinstance(captured_records, list)
+    assert len(captured_records) == 1
+    assert all(
+        isinstance(record, MergedBrokerDealerRecord)
+        for record in captured_records
+    )
 
 
 # ───────────────────────── route registration ─────────────────────────
