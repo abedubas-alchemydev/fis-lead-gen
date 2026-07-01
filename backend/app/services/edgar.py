@@ -6,6 +6,7 @@ import json
 import logging
 import re
 import time
+from dataclasses import dataclass
 from datetime import date
 from pathlib import Path
 from typing import Protocol
@@ -33,6 +34,33 @@ _BULK_ZIP_TTL_SECONDS = 7 * 24 * 60 * 60
 # (monotonic-stamped-at, parsed-filings) tuples. Per Cloud Run instance.
 _FILINGS_CACHE: dict[str, tuple[float, list[dict[str, object]]]] = {}
 _FILINGS_CACHE_TTL_SECONDS = 60 * 60
+
+
+class EdgarLookupError(Exception):
+    """A browse-edgar per-filenum lookup FAILED upstream — 429 retries
+    exhausted, a network error on the final attempt, or a persistent 5xx — as
+    opposed to a clean no-match. Surfaced (rather than collapsed into ``None``)
+    so callers can DEFER the firm and retry it later instead of durably
+    committing it under-enriched. See ``EdgarService.resolve_sec_numbers``.
+    """
+
+
+@dataclass(slots=True)
+class EdgarResolution:
+    """Outcome of :meth:`EdgarService.resolve_sec_numbers`, splitting the three
+    per-number outcomes so the caller can act on each:
+
+    * ``records`` — firms EDGAR resolved (matched to a CIK).
+    * ``failed_sec_numbers`` — numbers whose lookup FAILED upstream; the caller
+      should DEFER these (they are not no-matches, and committing them now would
+      leave them under-enriched).
+
+    Clean no-matches appear in neither list — they legitimately have no EDGAR
+    entity and downstream merges them as ``finra_only``.
+    """
+
+    records: list[EdgarBrokerDealerRecord]
+    failed_sec_numbers: list[str]
 
 
 def build_edgar_filing_url(
@@ -90,6 +118,12 @@ class EdgarService:
         *,
         force_refresh: bool = False,
     ) -> list[EdgarBrokerDealerRecord]:
+        # NOTE: retained but currently UNUSED by production paths. EDGAR is now
+        # resolved per-SEC-number via resolve_sec_numbers / fetch_records_for_
+        # sec_numbers (the targeted OOM fix). This whole-universe enumeration and
+        # its bulk siblings (_fetch_via_company_search / _ensure_bulk_submissions_
+        # zip / _parse_bulk_submissions_zip) are kept for the Accept-Encoding
+        # regression guard + any future bulk need — not wired into a live caller.
         # Try the lightweight EDGAR company-search endpoint first.  It lists
         # all filers matching a SIC code via a small, paginated Atom feed
         # (~50 pages of 100 results) instead of the multi-GB bulk ZIP.
@@ -259,14 +293,34 @@ class EdgarService:
 
         return records
 
-    async def fetch_records_for_sec_numbers(self, sec_file_numbers: list[str]) -> list[EdgarBrokerDealerRecord]:
-        bulk_records = await self.fetch_all_broker_dealers()
-        bulk_by_sec = {
-            normalized_sec: record
-            for record in bulk_records
-            if (normalized_sec := normalize_sec_file_number(record.sec_file_number)) is not None
-        }
+    async def resolve_sec_numbers(self, sec_file_numbers: list[str]) -> EdgarResolution:
+        """Resolve each SEC file number to an ``EdgarBrokerDealerRecord`` with a
+        TARGETED browse-edgar lookup (``getcompany&filenum=<sec>``) — one
+        request per number, via the same per-filenum path
+        :meth:`lookup_cik_for_bd` uses — splitting the outcomes into resolved /
+        failed (see :class:`EdgarResolution`).
 
+        This deliberately does **not** call :meth:`fetch_all_broker_dealers` or
+        the bulk-submissions ZIP path. That whole-universe fetch was pure
+        overhead here — the company-search fast-path never populates
+        ``sec_file_number``, so its records never matched a requested number and
+        everything fell through to this per-filenum lookup anyway — and, when
+        the company-search returned too few rows, it fell back to streaming the
+        ~1.4 GB submissions ZIP, an instant OOM/SIGKILL in the 1 GiB
+        extract-new-bds Cloud Run Job. Resolving each number directly keeps
+        memory flat and the work proportional to the (small) set passed in.
+
+        De-duplicated + normalized up front, paced by
+        ``settings.edgar_rate_limit_per_second`` (SEC fair-access), carrying
+        ``SEC_USER_AGENT`` + ``Accept-Encoding: identity``. Per number:
+
+        * clean no-match → omitted from ``records`` (and NOT counted failed);
+        * UPSTREAM FAILURE (``EdgarLookupError`` / any httpx error — 429 storm
+          exhausted, network error, persistent 5xx) → recorded in
+          ``failed_sec_numbers`` so the caller can defer + retry, never
+          committing the firm under-enriched.
+        """
+        # De-duplicate + normalize the requested SEC file numbers.
         requested_sec_numbers: list[str] = []
         seen_sec_numbers: set[str] = set()
         for raw_sec_number in sec_file_numbers:
@@ -275,17 +329,8 @@ class EdgarService:
                 requested_sec_numbers.append(normalized)
                 seen_sec_numbers.add(normalized)
 
-        resolved_records: list[EdgarBrokerDealerRecord] = []
-        missing_sec_numbers: list[str] = []
-        for sec_file_number in requested_sec_numbers:
-            bulk_record = bulk_by_sec.get(sec_file_number)
-            if bulk_record is not None:
-                resolved_records.append(bulk_record)
-            else:
-                missing_sec_numbers.append(sec_file_number)
-
-        if not missing_sec_numbers:
-            return resolved_records
+        if not requested_sec_numbers:
+            return EdgarResolution(records=[], failed_sec_numbers=[])
 
         headers = {
             "User-Agent": settings.sec_user_agent,
@@ -296,20 +341,47 @@ class EdgarService:
             # Forcing identity bypasses compression entirely (same fix as services/finra.py).
             "Accept-Encoding": "identity",
         }
+        resolved_records: list[EdgarBrokerDealerRecord] = []
+        failed_sec_numbers: list[str] = []
         async with httpx.AsyncClient(
             timeout=settings.sec_request_timeout_seconds,
             headers=headers,
             follow_redirects=True,
         ) as client:
-            for index, sec_file_number in enumerate(missing_sec_numbers):
-                browse_record = await self._fetch_browse_record(client, sec_file_number)
-                if browse_record is not None:
-                    resolved_records.append(browse_record)
+            for index, sec_file_number in enumerate(requested_sec_numbers):
+                try:
+                    browse_record = await self._fetch_browse_record(client, sec_file_number)
+                except (EdgarLookupError, httpx.HTTPError) as exc:
+                    # UPSTREAM FAILURE (not a no-match): flag for deferral instead
+                    # of silently dropping the firm — dropping it would let it
+                    # commit under-enriched and never be retried by the CRD diff.
+                    logger.warning(
+                        "EDGAR browse lookup failed for SEC# %s (deferring): %s",
+                        sec_file_number, exc,
+                    )
+                    failed_sec_numbers.append(sec_file_number)
+                else:
+                    if browse_record is not None:
+                        resolved_records.append(browse_record)
+                    # browse_record is None → clean no-match → merges finra_only.
 
-                if index < len(missing_sec_numbers) - 1 and settings.edgar_rate_limit_per_second > 0:
+                if index < len(requested_sec_numbers) - 1 and settings.edgar_rate_limit_per_second > 0:
                     await asyncio.sleep(1 / settings.edgar_rate_limit_per_second)
 
-        return resolved_records
+        return EdgarResolution(
+            records=resolved_records, failed_sec_numbers=failed_sec_numbers,
+        )
+
+    async def fetch_records_for_sec_numbers(self, sec_file_numbers: list[str]) -> list[EdgarBrokerDealerRecord]:
+        """Back-compat convenience over :meth:`resolve_sec_numbers` returning
+        just the resolved records. Used by the full-load callers
+        (``scripts.initial_load``, the ``/pipeline`` initial-load task) that
+        re-run the whole set every time, so a transient EDGAR miss just yields a
+        ``finra_only`` row this pass and self-heals next run — they don't need
+        the deferral bookkeeping the incremental extract-new-bds job relies on.
+        New incremental callers should use :meth:`resolve_sec_numbers`.
+        """
+        return (await self.resolve_sec_numbers(sec_file_numbers)).records
 
     async def fetch_last_filing_for_cik(self, cik: str) -> date | None:
         """Fetch the most recent filing date for a single CIK via the
@@ -619,12 +691,16 @@ class EdgarService:
                 )
                 continue
 
+            # 404 == EDGAR has no filer for this file number — a clean no-match.
+            if response.status_code == 404:
+                return None
+
             try:
                 response.raise_for_status()
             except httpx.HTTPStatusError as exc:
                 last_error = exc
                 if attempt == settings.sec_request_max_retries:
-                    raise
+                    break
                 await asyncio.sleep(min(2**attempt, 8))
                 continue
 
@@ -632,9 +708,13 @@ class EdgarService:
             break
 
         if not page:
-            if last_error is not None:
-                logger.warning("SEC browse-edgar lookup failed for %s: %s", sec_file_number, last_error)
-            return None
+            # Distinguish an UPSTREAM FAILURE (429 storm exhausted, network error
+            # on the final attempt, or persistent 5xx) from a clean no-match, so
+            # the caller can DEFER + retry rather than commit the firm
+            # under-enriched. resolve_sec_numbers catches this to flag deferral.
+            raise EdgarLookupError(
+                f"SEC browse-edgar lookup failed for {sec_file_number}: {last_error}"
+            ) from last_error
 
         if "No matching" in page:
             return None
@@ -805,7 +885,13 @@ class EdgarService:
           write a guess (cik is None)
         """
         if bd.sec_file_number:
-            record = await self._fetch_browse_record(client, bd.sec_file_number)
+            try:
+                record = await self._fetch_browse_record(client, bd.sec_file_number)
+            except EdgarLookupError:
+                # Upstream failure on the file-number path — fall through to the
+                # name search (whose own failure degrades to not_found) rather
+                # than propagate, preserving this method's best-effort contract.
+                record = None
             if record is not None and record.cik:
                 return ("found", record.cik)
 

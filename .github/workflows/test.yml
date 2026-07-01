@@ -354,7 +354,7 @@ jobs:
             --command=python \
             --args=scripts/standalone_extract_new_bds.py,--apply \
             --task-timeout=3600 \
-            --memory=1Gi \
+            --memory=4Gi \
             --cpu=1 \
             --max-retries=0 \
             --parallelism=1 \
@@ -363,7 +363,7 @@ jobs:
             --labels=commit-sha=${{ env.SHORT_SHA }},environment=staging,kind=batch-job
 
       # Production sibling of the staging extract-new-bds job above. Identical
-      # shape (enumerate-and-diff, --apply, 1Gi/1cpu/1h, GEMINI_API_KEY for the
+      # shape (enumerate-and-diff, --apply, 4Gi/1cpu/1h, GEMINI_API_KEY for the
       # Doxie embed hook); the only differences are the job name
       # (fis-extract-new-bds-prod), the prod DATABASE_URL secret
       # (DATABASE_URL_BACKEND vs the staging DATABASE_URL_BACKEND_STAGING), and
@@ -380,7 +380,7 @@ jobs:
             --command=python \
             --args=scripts/standalone_extract_new_bds.py,--apply \
             --task-timeout=3600 \
-            --memory=1Gi \
+            --memory=4Gi \
             --cpu=1 \
             --max-retries=0 \
             --parallelism=1 \

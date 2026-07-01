@@ -42,7 +42,7 @@ from app.services.chatbot_semantic import (  # noqa: E402
 )
 from app.services.broker_dealers import BrokerDealerRepository  # noqa: E402
 from app.services.data_merge import BrokerDealerMergeService  # noqa: E402
-from app.services.edgar import EdgarService  # noqa: E402
+from app.services.edgar import EdgarResolution, EdgarService  # noqa: E402
 from app.services.finra import FinraService  # noqa: E402
 from app.services.service_models import FinraBrokerDealerRecord  # noqa: E402
 
@@ -287,13 +287,6 @@ class _FakeEngine:
         self.disposed = True
 
 
-class _FakeReport:
-    """Minimal MergeQAReport stand-in — main() only calls summary_lines()."""
-
-    def summary_lines(self) -> list[str]:
-        return ["(merge QA report stubbed for unit test)"]
-
-
 _EXTRACT_ARGS = ["--db-url", _FAKE_DB_URL]
 
 
@@ -319,10 +312,12 @@ def _patch_pipeline(
     enumerated: list[FinraBrokerDealerRecord],
     existing_rows: list[Any],
     merged: list[Any],
+    failed_sec_numbers: list[str] | None = None,
 ) -> tuple[_FakeEngine, AsyncMock, AsyncMock]:
-    """Wire the extractor's enumerate → diff → enrich → EDGAR → merge → upsert
-    path with fakes (no HTTP, no Postgres). Returns the fake engine plus the
-    enrich and upsert mocks so callers can assert what the write path saw. The
+    """Wire the extractor's enumerate → diff → enrich → resolve-EDGAR →
+    merge_chunk → upsert path with fakes (no HTTP, no Postgres). Returns the
+    fake engine plus the enrich and upsert mocks so callers can assert what the
+    write path saw. ``failed_sec_numbers`` drives the EDGAR deferral branch. The
     embed hook is left for each test to handle (spy vs. real)."""
     engine = _FakeEngine()
     session_maker = _FakeSessionMaker(existing_rows)
@@ -338,15 +333,23 @@ def _patch_pipeline(
     )
     enrich_mock = AsyncMock(side_effect=lambda recs, **_kw: recs)
     monkeypatch.setattr(FinraService, "enrich_with_detail", enrich_mock)
-    monkeypatch.setattr(
-        EdgarService,
-        "fetch_records_for_sec_numbers",
-        AsyncMock(return_value=[]),
+
+    # Targeted per-chunk EDGAR resolution → (records, failed_sec_numbers).
+    resolution = EdgarResolution(
+        records=[], failed_sec_numbers=list(failed_sec_numbers or []),
     )
     monkeypatch.setattr(
-        BrokerDealerMergeService,
-        "merge",
-        MagicMock(return_value=(merged, _FakeReport())),
+        EdgarService, "resolve_sec_numbers", AsyncMock(return_value=resolution),
+    )
+
+    # Chunk-aware merge: build_edgar_index once per chunk, merge_chunk with the
+    # threaded cross-chunk accumulators. Both mocked; merge_chunk yields the
+    # canned merged list so upsert receives a real list.
+    monkeypatch.setattr(
+        BrokerDealerMergeService, "build_edgar_index", MagicMock(return_value=object()),
+    )
+    monkeypatch.setattr(
+        BrokerDealerMergeService, "merge_chunk", MagicMock(return_value=merged),
     )
     upsert_mock = AsyncMock(return_value=len(merged))
     monkeypatch.setattr(BrokerDealerRepository, "upsert_many", upsert_mock)
@@ -373,6 +376,60 @@ async def test_extractor_apply_triggers_embed_hook_exactly_once(
     assert hook_spy.await_count == 1
     assert upsert_mock.await_count == 1  # the upsert really ran before the hook
     assert engine.disposed
+
+
+async def test_extractor_apply_commits_each_chunk_but_embeds_once(
+    monkeypatch,
+) -> None:
+    """Durable progress: net-new firms spanning multiple chunks trigger one
+    ``upsert_many`` (commit) per chunk, but the embed hook still fires exactly
+    once — after the loop — so the "apply → embed once" contract holds even as
+    each chunk is committed independently."""
+    monkeypatch.setattr(extractor, "_NEW_BD_CHUNK_SIZE", 2)
+    _engine, enrich_mock, upsert_mock = _patch_pipeline(
+        monkeypatch,
+        enumerated=[
+            _finra_record("900001"),
+            _finra_record("900002"),
+            _finra_record("900003"),
+        ],
+        existing_rows=[],
+        merged=[object()],
+    )
+    hook_spy = AsyncMock()
+    monkeypatch.setattr(extractor, "_embed_backfill_after_apply", hook_spy)
+
+    rc = await extractor.main([*_EXTRACT_ARGS, "--apply"])
+
+    assert rc == 0
+    # 3 firms / chunk size 2 → 2 chunks → a commit + an enrichment per chunk.
+    assert upsert_mock.await_count == 2
+    assert enrich_mock.await_count == 2
+    # ...but the embed hook still fires exactly once, after the loop.
+    assert hook_spy.await_count == 1
+
+
+async def test_extractor_defers_firms_when_edgar_lookup_fails(
+    monkeypatch,
+) -> None:
+    """EDGAR-failure firms are DEFERRED, not committed under-enriched: when a
+    chunk's SEC numbers all fail upstream, nothing is upserted and the embed
+    hook does not fire — the firms stay net-new for the next run to retry."""
+    _engine, _enrich, upsert_mock = _patch_pipeline(
+        monkeypatch,
+        enumerated=[_finra_record("900001")],
+        existing_rows=[],
+        merged=[object()],
+        failed_sec_numbers=["8-99999"],  # _finra_record's SEC# — failed upstream
+    )
+    hook_spy = AsyncMock()
+    monkeypatch.setattr(extractor, "_embed_backfill_after_apply", hook_spy)
+
+    rc = await extractor.main([*_EXTRACT_ARGS, "--apply"])
+
+    assert rc == 0
+    assert upsert_mock.await_count == 0  # deferred → nothing committed this chunk
+    assert hook_spy.await_count == 0     # no inserts → no embed
 
 
 async def test_extractor_dry_run_does_not_trigger_embed_hook(
