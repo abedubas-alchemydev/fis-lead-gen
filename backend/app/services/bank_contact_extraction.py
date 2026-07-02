@@ -992,15 +992,23 @@ class BankContactExtractionService:
         """
         if self._llm_disabled:
             return [], 0
-        # Lazy imports keep this module import-light and avoid a cycle
-        # (bank_contact_llm imports our dataclass/vocabulary at module level).
-        from app.services.bank_contact_llm import extract_contacts_via_llm
+        # gemini_responses is import-safe (a plain exception class + the
+        # client); import it OUTSIDE the try so the ``except
+        # GeminiConfigurationError`` clause below can always be evaluated even
+        # if a sibling import blows up.
         from app.services.gemini_responses import (
             GeminiConfigurationError,
             GeminiResponsesClient,
         )
 
         try:
+            # Lazy AND inside the try (L1): bank_contact_llm parses its spend
+            # ceilings from the environment at import time. That parsing is now
+            # crash-proof (see _env_int there), but keeping the import here means
+            # ANY import-time surprise degrades this PDF to regex-only rather
+            # than propagating out of collect_contacts and failing the watcher.
+            from app.services.bank_contact_llm import extract_contacts_via_llm
+
             if self._llm_client is None:
                 self._llm_client = GeminiResponsesClient()
             return await extract_contacts_via_llm(
