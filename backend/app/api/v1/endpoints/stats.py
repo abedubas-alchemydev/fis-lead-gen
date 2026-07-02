@@ -16,14 +16,12 @@ from app.schemas.stats import (
     TimeSeriesResponse,
     TotalBrokerDealersResponse,
 )
-from app.services.alerts import AlertRepository
 from app.services.auth import get_current_user
 from app.services.broker_dealers import BrokerDealerRepository
 from app.services.stats_service import RANGE_DAYS, fetch_time_series
 
 router = APIRouter(prefix="/stats")
 repository = BrokerDealerRepository()
-alert_repository = AlertRepository()
 
 
 @router.get("/total-bds", response_model=TotalBrokerDealersResponse)
@@ -50,13 +48,20 @@ async def get_dashboard_stats(
 
     new_bds_stmt = select(func.count(BrokerDealer.id)).where(BrokerDealer.registration_date >= ninety_days_ago)
     new_bds_90_days = int((await db.execute(new_bds_stmt)).scalar_one())
-    deficiency_alerts = await alert_repository.count_deficiency_firms(db)
+    # "Pending Approval BDs" replaced the deficiency-notices KPI on the
+    # dashboard (client request): firms that have filed (CRD assigned,
+    # nightly registration refresh checked them) but show no SEC approval
+    # date yet. Same 90-day recency convention as new_bds_90_days, anchored
+    # on the filed-date proxy since a pending firm's registration_date is
+    # NULL by definition. Disjoint from new_bds_90_days by construction.
+    # The alerts endpoints/pages are untouched — only this tile moved.
+    pending_approval_bds = await repository.count_pending_approval(db)
     high_value_participants = await repository.count_high_value_participants(db)
 
     return DashboardStatsResponse(
         total_active_bds=total_active_bds,
         new_bds_90_days=new_bds_90_days,
-        deficiency_alerts=deficiency_alerts,
+        pending_approval_bds=pending_approval_bds,
         high_value_participants=high_value_participants,
     )
 

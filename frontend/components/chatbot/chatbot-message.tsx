@@ -48,6 +48,7 @@ export interface ChatMessage {
 const INTERNAL_ROUTE_PREFIXES = [
   "/advisor-list",
   "/alerts",
+  "/banks",
   "/dashboard",
   "/email-extractor",
   "/institutional-investors",
