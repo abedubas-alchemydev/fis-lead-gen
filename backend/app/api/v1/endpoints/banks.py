@@ -22,6 +22,7 @@ from app.models.bank import Bank
 from app.schemas.auth import AuthenticatedUser
 from app.schemas.bank import (
     BankApplicationEventItem,
+    BankContactItem,
     BankDetail,
     BankListResponse,
     BankSourceLink,
@@ -154,9 +155,10 @@ async def get_bank(
     _: AuthenticatedUser = Depends(_require_banks),
     db: AsyncSession = Depends(get_db_session),
 ) -> BankDetail:
-    """Bank detail: the row plus its OCC application-event timeline and
-    the official source links (FDIC BankFind page, OCC CAS filing page,
-    digital-assets application PDFs)."""
+    """Bank detail: the row plus its OCC application-event timeline, the
+    official source links (FDIC BankFind page, OCC CAS filing page,
+    digital-assets application PDFs), and the people extracted from those
+    PDFs (``contacts`` — same style as the BD detail's executive contacts)."""
     bank = await repository.get_bank(db, bank_id)
     if bank is None:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Bank not found.")
@@ -166,4 +168,5 @@ async def get_bank(
         BankApplicationEventItem.model_validate(event) for event in bank.application_events
     ]
     detail.source_links = _build_source_links(bank)
+    detail.contacts = [BankContactItem.model_validate(contact) for contact in bank.contacts]
     return detail
