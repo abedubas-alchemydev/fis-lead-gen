@@ -27,6 +27,19 @@ firm where a person was expected, an ALL-CAPS section header, a "TBD" — is
 logged and counted as ``skipped_ambiguous``, never written. Every stored row
 keeps its receipt: ``page_number`` + ``context_snippet`` + ``source_url``.
 
+Recall pass (``bank_contact_llm``): the regex extractor's strictness costs
+recall (ALL-CAPS names, >4-word names, layouts the patterns don't know), so
+``collect_contacts`` ALSO sends each PDF's per-page text to Gemini and unions
+the results — but only after GROUNDING VALIDATION: an LLM-returned person
+survives only when their name is printed verbatim (case-insensitive,
+whitespace-flexible) on a source page, ungrounded email/phone/title values
+are nulled, and the receipt (page + snippet) is cut from where the name
+ACTUALLY matched. Regex rows win on merge conflicts; LLM-only rows are
+tagged ``source='application_pdf_llm'``. The pass is best-effort: no
+GEMINI_API_KEY / API error / schema surprise degrades to regex-only with a
+warning — never a failed run. Never-fabricate holds: a dropped hallucination
+cannot reach the DB.
+
 Safety rails:
 
 - **Host allowlist** — URLs are re-verified against the same occ.gov
@@ -85,6 +98,13 @@ ROLE_PROPOSED_OFFICER = "proposed_officer"
 ROLE_COUNSEL = "counsel"
 
 DEFAULT_SOURCE = "application_pdf"
+# Rows contributed by the Gemini recall pass (``bank_contact_llm``). A
+# distinct value on the SAME plain-string column (String(64); the API
+# schema's ``source`` is a plain ``str``) so LLM-found people are always
+# distinguishable from regex-found ones — in the DB, on the detail card,
+# and in the dedupe key. Regex rows win on conflict (they carry the
+# richer receipt); see ``collect_contacts`` / ``upsert_contacts``.
+LLM_SOURCE = "application_pdf_llm"
 
 # ── Fetch limits ─────────────────────────────────────────────────────────────
 # Public-portion application PDFs are a few hundred KB to a few MB; 20MB is
@@ -146,16 +166,29 @@ class BankContactExtractionStats:
     - ``skipped_ambiguous``  → ``bank_contacts_skipped_ambiguous``: pattern
       hits whose person candidate failed conservative validation — logged and
       never written (the never-guess policy's visible counter).
+    - ``llm_extracted``      → ``bank_contacts_llm_extracted``: people the
+      Gemini recall pass ADDED beyond the regex extractor (grounded, deduped
+      per bank, novel vs the regex set) — the ``source='application_pdf_llm'``
+      subset of ``contacts_extracted``.
+    - ``llm_dropped_ungrounded`` → ``bank_contacts_llm_dropped_ungrounded``:
+      Gemini-returned person records REFUSED by the grounding/validation gate
+      (name not printed verbatim on the source pages, org-vocabulary name, or
+      unmappable role) — logged with the reason, never written. The
+      never-fabricate policy's visible counter for the LLM pass.
     """
 
     pdfs_fetched: int = 0
     contacts_extracted: int = 0
     skipped_ambiguous: int = 0
+    llm_extracted: int = 0
+    llm_dropped_ungrounded: int = 0
 
     def add(self, other: "BankContactExtractionStats") -> None:
         self.pdfs_fetched += other.pdfs_fetched
         self.contacts_extracted += other.contacts_extracted
         self.skipped_ambiguous += other.skipped_ambiguous
+        self.llm_extracted += other.llm_extracted
+        self.llm_dropped_ungrounded += other.llm_dropped_ungrounded
 
 
 # ── Person-name / title validation (the never-guess gate) ───────────────────
@@ -182,12 +215,28 @@ _NON_PERSON_WORDS = frozenset(
         "and", "for", "new", "name", "telephone", "email", "address",
     }
 )
+# Corporate nouns that can never be part of a person's name — the precision
+# fix for the "Privacy Technology" bug: a title-cased two-token company
+# fragment ("Privacy Technology", "Sterling Capital") passes the pure shape
+# check unless its vocabulary is blocked. Complements ``_NON_PERSON_WORDS``
+# (which already blocks bank/trust/company/holdings/group/…). Split out so
+# the LLM grounding gate (``bank_contact_llm``) reuses the SAME definition.
+_CORPORATE_NOUNS = frozenset(
+    {
+        "technology", "technologies", "privacy", "solutions", "capital",
+        "services", "systems", "ventures", "fintech",
+    }
+)
+# The single vocabulary gate ``looks_like_person_name`` and the LLM pass
+# apply: any candidate containing one of these tokens is not a person.
+_BLOCKED_NAME_WORDS = _NON_PERSON_WORDS | _CORPORATE_NOUNS
 
 
 def looks_like_person_name(candidate: str | None) -> bool:
     """Strict person-name shape: 2-4 title-cased words (initials and
     generational/professional suffixes allowed), no digits, no '@', no
-    organization/form vocabulary, and at least two full words (a lone
+    organization/form vocabulary or corporate nouns ("Privacy Technology"
+    is a product, not an organizer), and at least two full words (a lone
     "J. P." never qualifies). ALL-CAPS section headers ("PUBLIC PORTION")
     and firm names ("Sullivan & Cromwell LLP") fail by construction."""
     if not candidate:
@@ -208,7 +257,7 @@ def looks_like_person_name(candidate: str | None) -> bool:
         return False
     full_words = 0
     for word in words:
-        if word.rstrip(".").lower() in _NON_PERSON_WORDS:
+        if word.rstrip(".").lower() in _BLOCKED_NAME_WORDS:
             return False
         if _NAME_WORD_RE.match(word):
             full_words += 1
@@ -851,9 +900,15 @@ class BankContactExtractionService:
         *,
         timeout_seconds: float = _DOWNLOAD_TIMEOUT_SECONDS,
         transport: httpx.AsyncBaseTransport | None = None,
+        llm_client: object | None = None,
     ) -> None:
         self._timeout = timeout_seconds
         self._transport = transport  # tests inject httpx.MockTransport
+        # Gemini client for the recall pass. Tests inject a fake; production
+        # constructs the real ``GeminiResponsesClient`` lazily on first use so
+        # a malformed/missing key degrades to regex-only, never an init crash.
+        self._llm_client = llm_client
+        self._llm_disabled = False
 
     async def collect_contacts(
         self,
@@ -862,7 +917,22 @@ class BankContactExtractionService:
         bank_name: str,
         pdf_entries: Sequence[object],
     ) -> tuple[list[ExtractedBankContact], BankContactExtractionStats]:
-        """Fetch + parse every allowlisted PDF for one bank. No DB touched."""
+        """Fetch + parse every allowlisted PDF for one bank. No DB touched.
+
+        Two extraction passes run over the SAME per-page text of each PDF:
+
+        1. the conservative regex extractor (``parse_bank_contacts``);
+        2. the Gemini recall pass (``bank_contact_llm``), grounded so only
+           people printed verbatim on the source pages survive.
+
+        Merge policy: union of both, deduped on ``(name, title)`` — the same
+        key the upsert uses — with REGEX ROWS WINNING on conflict (they carry
+        the richer pattern-anchored snippet), even when an earlier PDF's LLM
+        hit landed first. LLM-only people keep ``source='application_pdf_llm'``.
+        The LLM pass is best-effort: no GEMINI_API_KEY, an API error, or a
+        schema surprise logs a warning and yields exactly the regex-only
+        behavior — it can never fail the run.
+        """
         stats = BankContactExtractionStats()
         collected: dict[tuple[str, str], ExtractedBankContact] = {}
 
@@ -885,14 +955,70 @@ class BankContactExtractionService:
                     continue
                 contacts, ambiguous = parse_bank_contacts(pages, source_url=str(url))
                 stats.skipped_ambiguous += ambiguous
+                llm_contacts, llm_dropped = await self._collect_llm_contacts(
+                    pages, source_url=str(url)
+                )
+                stats.llm_dropped_ungrounded += llm_dropped
                 for contact in contacts:
+                    key = (contact.name.lower(), (contact.title or "").lower())
+                    existing = collected.get(key)
+                    if existing is None or existing.source == LLM_SOURCE:
+                        # First regex hit wins; a regex hit also REPLACES an
+                        # LLM hit for the same person from an earlier PDF.
+                        collected[key] = contact
+                for contact in llm_contacts:
                     key = (contact.name.lower(), (contact.title or "").lower())
                     if key not in collected:
                         collected[key] = contact
 
         contacts = list(collected.values())
         stats.contacts_extracted = len(contacts)
+        stats.llm_extracted = sum(
+            1 for contact in contacts if contact.source == LLM_SOURCE
+        )
         return contacts, stats
+
+    async def _collect_llm_contacts(
+        self, pages: Sequence[dict], *, source_url: str
+    ) -> tuple[list[ExtractedBankContact], int]:
+        """Run the Gemini recall pass with the never-fail contract.
+
+        Returns ``(grounded_contacts, dropped_ungrounded)``; returns
+        ``([], 0)`` — exactly the pre-LLM behavior — whenever the pass is
+        unavailable: missing/malformed GEMINI_API_KEY (logged once, then
+        disabled for the rest of this service's run), a provider/network
+        error, or a response-shape surprise. The watcher phase must never
+        fail because Gemini is down.
+        """
+        if self._llm_disabled:
+            return [], 0
+        # Lazy imports keep this module import-light and avoid a cycle
+        # (bank_contact_llm imports our dataclass/vocabulary at module level).
+        from app.services.bank_contact_llm import extract_contacts_via_llm
+        from app.services.gemini_responses import (
+            GeminiConfigurationError,
+            GeminiResponsesClient,
+        )
+
+        try:
+            if self._llm_client is None:
+                self._llm_client = GeminiResponsesClient()
+            return await extract_contacts_via_llm(
+                pages, source_url=source_url, client=self._llm_client
+            )
+        except GeminiConfigurationError as exc:
+            self._llm_disabled = True
+            logger.warning(
+                "bank_contacts: Gemini unavailable (%s); LLM recall pass "
+                "disabled for this run — continuing regex-only (previous "
+                "behavior).", exc,
+            )
+        except Exception as exc:  # never let the LLM pass kill the watcher
+            logger.warning(
+                "bank_contacts: LLM recall pass failed for %s (%s); "
+                "continuing regex-only for this PDF.", source_url, exc,
+            )
+        return [], 0
 
     async def download_pdf(self, url: str, dest_dir: Path) -> Path | None:
         """Fetch one public-portion PDF with the full guard stack.
@@ -991,10 +1117,35 @@ class BankContactExtractionService:
         parallel run are contained to a SAVEPOINT and fall through to the
         update path — same pattern as
         ``focus_ceo_extraction._persist_net_capital``.
+
+        Regex-wins-on-conflict holds ACROSS runs too: when a regex-sourced
+        contact arrives for a ``(name, title)`` an earlier run stored via
+        the LLM pass (``source='application_pdf_llm'``), the LLM twin is
+        deleted in the same transaction — the regex row supersedes it, so
+        the same person never shows twice on the detail card.
         """
         inserted = updated = 0
         for contact in contacts:
             title_key = contact.title or ""
+
+            if contact.source == DEFAULT_SOURCE:
+                llm_twin = (
+                    await db.execute(
+                        select(BankContact).where(
+                            BankContact.bank_id == bank_id,
+                            BankContact.name == contact.name,
+                            func.coalesce(BankContact.title, "") == title_key,
+                            BankContact.source == LLM_SOURCE,
+                        )
+                    )
+                ).scalar_one_or_none()
+                if llm_twin is not None:
+                    await db.delete(llm_twin)
+                    await db.flush()
+                    logger.info(
+                        "bank_contacts: regex row supersedes LLM row for %r "
+                        "(bank id=%d).", contact.name, bank_id,
+                    )
 
             def _apply_update(row: BankContact, contact: ExtractedBankContact = contact) -> None:
                 if contact.email is not None:

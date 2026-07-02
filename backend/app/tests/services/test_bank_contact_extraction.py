@@ -26,6 +26,7 @@ pdfplumber path end-to-end through the subprocess.
 
 from __future__ import annotations
 
+import logging
 from pathlib import Path
 
 import httpx
@@ -35,9 +36,12 @@ from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 
 import app.services.bank_contact_extraction as extraction
+import app.services.bank_contact_llm as llm_extraction
 from app.db.base import Base
 from app.models.bank import BankContact
 from app.services.bank_contact_extraction import (
+    DEFAULT_SOURCE,
+    LLM_SOURCE,
     ROLE_CONTACT_PERSON,
     ROLE_COUNSEL,
     ROLE_ORGANIZER,
@@ -48,6 +52,13 @@ from app.services.bank_contact_extraction import (
     is_allowed_application_pdf_url,
     looks_like_person_name,
     parse_bank_contacts,
+)
+from app.services.bank_contact_llm import extract_contacts_via_llm
+from app.services.gemini_responses import (
+    GeminiBankContactExtraction,
+    GeminiBankContactPerson,
+    GeminiConfigurationError,
+    GeminiExtractionError,
 )
 
 _PDF_URL = "https://www.occ.gov/topics/digital-assets/apps/erebor-public.pdf"
@@ -124,6 +135,13 @@ def test_person_gate_accepts_real_names(candidate: str) -> None:
         "Jane",  # single token
         "Alka Patel +44 203 696",  # digits (phone-in-name)
         "jane.doe@erebor.example",
+        # Corporate-noun blocklist (the "Privacy Technology" precision bug):
+        # title-cased two-token company fragments must never pass as people.
+        "Privacy Technology",
+        "Quantum Solutions",
+        "Sterling Capital",
+        "Apex Services",
+        "Meridian Systems",
     ],
 )
 def test_person_gate_rejects_non_people(candidate: str | None) -> None:
@@ -204,6 +222,18 @@ def test_organizers_narrative_sentence_with_middle_initials() -> None:
     )
     assert ambiguous == 0
     assert [c.name for c in contacts] == ["Henry Adams", "Ida B. Wells", "John Jay"]
+
+
+def test_organizers_list_refuses_privacy_technology_regression() -> None:
+    # Regression: the shape heuristic let "Privacy Technology" through as an
+    # organizer (2 title-cased words, no digits). The corporate-noun
+    # blocklist must refuse it — counted ambiguous, never extracted — while
+    # the real person in the same list still lands.
+    contacts, ambiguous = _parse(
+        "The organizers of the proposed bank are Privacy Technology and John Jay.\n"
+    )
+    assert [c.name for c in contacts] == ["John Jay"]
+    assert ambiguous == 1
 
 
 def test_proposed_officer_title_then_name_and_name_then_title() -> None:
@@ -404,6 +434,37 @@ def test_corrupt_pdf_is_a_parse_miss_not_an_exception(tmp_path: Path) -> None:
     assert extract_pdf_text_pages(pdf_path) == []
 
 
+# ── Gemini fake (no live calls, ever) ───────────────────────────────────────
+
+
+class _FakeGeminiClient:
+    """Stands in for ``GeminiResponsesClient`` — records prompts, no HTTP."""
+
+    def __init__(self, *, people=None, exc: Exception | None = None) -> None:
+        self._people = list(people or [])
+        self._exc = exc
+        self.prompts: list[str] = []
+
+    async def extract_bank_contacts(self, *, prompt: str) -> GeminiBankContactExtraction:
+        self.prompts.append(prompt)
+        if self._exc is not None:
+            raise self._exc
+        return GeminiBankContactExtraction(people=self._people)
+
+
+def _llm_person(**overrides) -> GeminiBankContactPerson:
+    defaults = dict(
+        name="Priya Krishnamurthy",
+        title=None,
+        role="organizer",
+        email=None,
+        phone=None,
+        page_number=3,
+    )
+    defaults.update(overrides)
+    return GeminiBankContactPerson(**defaults)
+
+
 # ── End-to-end: fetch → subprocess → parse (no DB) ─────────────────────────
 
 
@@ -419,7 +480,10 @@ async def test_collect_contacts_end_to_end() -> None:
     def _handler(request: httpx.Request) -> httpx.Response:
         return httpx.Response(200, stream=httpx.ByteStream(body))
 
-    service = _service(_handler)
+    service = BankContactExtractionService(
+        transport=httpx.MockTransport(_handler),
+        llm_client=_FakeGeminiClient(),  # Gemini finds nothing extra
+    )
     contacts, stats = await service.collect_contacts(
         bank_id=42,
         bank_name="Erebor Bank, N.A.",
@@ -432,12 +496,287 @@ async def test_collect_contacts_end_to_end() -> None:
     assert stats.pdfs_fetched == 1
     assert stats.contacts_extracted == 1
     assert stats.skipped_ambiguous == 0
+    assert stats.llm_extracted == 0
+    assert stats.llm_dropped_ungrounded == 0
     (contact,) = contacts
     assert contact.name == "Jane A. Doe"
     assert contact.title == "President"
     assert contact.phone == "(202) 555-0100"
     assert contact.email == "jane.doe@erebor.example"
     assert contact.source_url == _PDF_URL
+    assert contact.source == DEFAULT_SOURCE
+
+
+# ── 5. Gemini recall pass: grounding validation (the never-fabricate gate) ──
+# All via _FakeGeminiClient — no live calls. The page fixture is a case the
+# REGEX pass refuses (ALL-CAPS name under a heading it can't anchor): the
+# recall win, provable end to end.
+
+_LLM_PAGES = [
+    {"page": 1, "text": "PUBLIC PORTION\nErebor Bank, N.A.\nApplication to the OCC.\n"},
+    {
+        "page": 3,
+        "text": (
+            "ORGANIZING GROUP OF THE PROPOSED BANK\n"
+            "PRIYA KRISHNAMURTHY, chair of the organizing group\n"
+            "Questions may be directed to pkrishnamurthy@erebor.example\n"
+            "or (614) 555-0142.\n"
+        ),
+    },
+]
+
+
+def test_llm_fixture_is_refused_by_the_regex_pass() -> None:
+    # Pin the premise: this exact text is a regex MISS (the ALL-CAPS name
+    # fails the strict shape gate), so anything the LLM pass grounds here is
+    # genuinely additive recall.
+    contacts, ambiguous = parse_bank_contacts(_LLM_PAGES, source_url=_PDF_URL)
+    assert contacts == []
+    assert ambiguous == 1
+
+
+async def test_llm_grounded_person_is_kept_with_source_receipt() -> None:
+    client = _FakeGeminiClient(
+        people=[
+            _llm_person(
+                title="chair of the organizing group",
+                email="pkrishnamurthy@erebor.example",
+                phone="(614) 555-0142",
+            )
+        ]
+    )
+    contacts, dropped = await extract_contacts_via_llm(
+        _LLM_PAGES, source_url=_PDF_URL, client=client
+    )
+    assert dropped == 0
+    (contact,) = contacts
+    assert contact.source == LLM_SOURCE
+    # Case-insensitive + whitespace-flexible grounding: the model returned
+    # title case, the page prints ALL CAPS — verbatim tokens either way.
+    assert contact.name == "Priya Krishnamurthy"
+    assert contact.role_context == ROLE_ORGANIZER
+    assert contact.title == "chair of the organizing group"
+    assert contact.email == "pkrishnamurthy@erebor.example"
+    assert contact.phone == "(614) 555-0142"
+    assert contact.page_number == 3
+    # The receipt is cut from the SOURCE page around the actual match.
+    assert "PRIYA KRISHNAMURTHY" in (contact.context_snippet or "")
+    assert contact.source_url == _PDF_URL
+
+
+async def test_llm_ungrounded_name_is_dropped_and_counted() -> None:
+    client = _FakeGeminiClient(
+        people=[_llm_person(name="Robert Fabricated", page_number=3)]
+    )
+    contacts, dropped = await extract_contacts_via_llm(
+        _LLM_PAGES, source_url=_PDF_URL, client=client
+    )
+    assert contacts == []  # a hallucination must never reach the caller
+    assert dropped == 1
+
+
+async def test_llm_ungrounded_email_and_phone_are_nulled_person_kept() -> None:
+    client = _FakeGeminiClient(
+        people=[
+            _llm_person(
+                email="fabricated@nowhere.example",
+                phone="(999) 999-9999",
+            )
+        ]
+    )
+    contacts, dropped = await extract_contacts_via_llm(
+        _LLM_PAGES, source_url=_PDF_URL, client=client
+    )
+    assert dropped == 0
+    (contact,) = contacts
+    assert contact.name == "Priya Krishnamurthy"
+    assert contact.email is None  # not printed on the page → never stored
+    assert contact.phone is None
+
+
+async def test_llm_wrong_page_claim_self_corrects_to_the_actual_page() -> None:
+    # Model claims page 1; the name is printed on page 3. Grounding stores
+    # the page where the name ACTUALLY appears, not the model's claim.
+    client = _FakeGeminiClient(people=[_llm_person(page_number=1)])
+    contacts, dropped = await extract_contacts_via_llm(
+        _LLM_PAGES, source_url=_PDF_URL, client=client
+    )
+    assert dropped == 0
+    (contact,) = contacts
+    assert contact.page_number == 3
+
+
+async def test_llm_role_other_salvaged_only_from_grounded_title() -> None:
+    pages = [{"page": 2, "text": "Prepared by Mark Stone, counsel to the organizers.\n"}]
+    salvage = _FakeGeminiClient(
+        people=[
+            _llm_person(
+                name="Mark Stone",
+                title="counsel to the organizers",
+                role="other",
+                page_number=2,
+            )
+        ]
+    )
+    contacts, dropped = await extract_contacts_via_llm(
+        pages, source_url=_PDF_URL, client=salvage
+    )
+    assert dropped == 0
+    assert contacts[0].role_context == ROLE_COUNSEL
+
+    # Same person, role 'other', NO title to salvage from → dropped.
+    unmapped = _FakeGeminiClient(
+        people=[_llm_person(name="Mark Stone", role="other", page_number=2)]
+    )
+    contacts, dropped = await extract_contacts_via_llm(
+        pages, source_url=_PDF_URL, client=unmapped
+    )
+    assert contacts == []
+    assert dropped == 1
+
+
+async def test_llm_corporate_noun_name_dropped_even_when_grounded() -> None:
+    # "Privacy Technology" IS printed verbatim on the page — grounding alone
+    # would pass. The shared corporate-noun blocklist must still refuse it.
+    pages = [
+        {
+            "page": 4,
+            "text": "The organizers retained Privacy Technology to build controls.\n",
+        }
+    ]
+    client = _FakeGeminiClient(
+        people=[_llm_person(name="Privacy Technology", role="organizer", page_number=4)]
+    )
+    contacts, dropped = await extract_contacts_via_llm(
+        pages, source_url=_PDF_URL, client=client
+    )
+    assert contacts == []
+    assert dropped == 1
+
+
+async def test_llm_chunking_splits_on_page_boundaries(monkeypatch) -> None:
+    # Force one page per chunk; grounding is per chunk, so the person only
+    # survives from the chunk that actually contains page 3.
+    monkeypatch.setattr(llm_extraction, "_CHUNK_CHAR_BUDGET", 10)
+    client = _FakeGeminiClient(
+        people=[_llm_person()]  # returned for BOTH chunk calls
+    )
+    contacts, dropped = await extract_contacts_via_llm(
+        _LLM_PAGES, source_url=_PDF_URL, client=client
+    )
+    assert len(client.prompts) == 2  # one call per page-chunk, never mid-page
+    assert "--- PAGE 1 ---" in client.prompts[0]
+    assert "--- PAGE 3 ---" in client.prompts[1]
+    assert "NEVER invent" in client.prompts[0]  # the verbatim-only order
+    (contact,) = contacts
+    assert contact.page_number == 3
+    assert dropped == 1  # the chunk-1 copy could not ground → refused
+
+
+async def test_llm_provider_error_degrades_to_no_results_not_a_raise() -> None:
+    client = _FakeGeminiClient(exc=GeminiExtractionError("Gemini 503"))
+    contacts, dropped = await extract_contacts_via_llm(
+        _LLM_PAGES, source_url=_PDF_URL, client=client
+    )
+    assert (contacts, dropped) == ([], 0)
+
+
+# ── 5b. Service-level fallback + merge (regex wins, LLM adds recall) ────────
+
+
+def _two_pass_pdf_body() -> bytes:
+    return _build_minimal_pdf(
+        [
+            "Contact person: Jane A. Doe, President",
+            "Telephone: (202) 555-0100",
+            "PROPOSED CHIEF RISK OFFICER: TUNDE ADEYEMI-OKAFOR",
+        ]
+    )
+
+
+def _two_pass_service(llm_client) -> BankContactExtractionService:
+    body = _two_pass_pdf_body()
+
+    def _handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, stream=httpx.ByteStream(body))
+
+    return BankContactExtractionService(
+        transport=httpx.MockTransport(_handler), llm_client=llm_client
+    )
+
+
+async def test_collect_contacts_merges_llm_recall_and_regex_wins_conflicts() -> None:
+    llm_client = _FakeGeminiClient(
+        people=[
+            # Duplicate of the regex hit (same name + title): regex must win.
+            _llm_person(
+                name="Jane A. Doe",
+                title="President",
+                role="contact_person",
+                page_number=1,
+            ),
+            # The regex miss (ALL-CAPS officer): the LLM recall win.
+            _llm_person(
+                name="TUNDE ADEYEMI-OKAFOR",
+                title="Chief Risk Officer",
+                role="proposed_officer",
+                page_number=1,
+            ),
+        ]
+    )
+    service = _two_pass_service(llm_client)
+    contacts, stats = await service.collect_contacts(
+        bank_id=42,
+        bank_name="Erebor Bank, N.A.",
+        pdf_entries=[{"url": _PDF_URL}],
+    )
+    by_name = {c.name: c for c in contacts}
+    assert set(by_name) == {"Jane A. Doe", "TUNDE ADEYEMI-OKAFOR"}
+    # Regex row won the (name, title) conflict — it keeps the regex source
+    # and the pattern-anchored snippet.
+    assert by_name["Jane A. Doe"].source == DEFAULT_SOURCE
+    assert by_name["Jane A. Doe"].phone == "(202) 555-0100"
+    # The LLM-only person is tagged distinctly and grounded to the page.
+    assert by_name["TUNDE ADEYEMI-OKAFOR"].source == LLM_SOURCE
+    assert by_name["TUNDE ADEYEMI-OKAFOR"].title == "Chief Risk Officer"
+    assert by_name["TUNDE ADEYEMI-OKAFOR"].role_context == ROLE_PROPOSED_OFFICER
+    assert stats.contacts_extracted == 2
+    assert stats.llm_extracted == 1  # only the NOVEL person counts
+    assert stats.llm_dropped_ungrounded == 0
+
+
+async def test_collect_contacts_without_gemini_key_is_regex_only(caplog) -> None:
+    # GeminiConfigurationError (no key) → warning once, LLM pass disabled
+    # for the rest of the run, results identical to the pre-LLM extractor.
+    llm_client = _FakeGeminiClient(
+        exc=GeminiConfigurationError("GEMINI_API_KEY is not configured.")
+    )
+    service = _two_pass_service(llm_client)
+    with caplog.at_level(logging.WARNING, logger="app.services.bank_contact_extraction"):
+        contacts, stats = await service.collect_contacts(
+            bank_id=42,
+            bank_name="Erebor Bank, N.A.",
+            pdf_entries=[{"url": _PDF_URL}, {"url": _PDF_URL + "?copy=2"}],
+        )
+    assert [c.name for c in contacts] == ["Jane A. Doe"]
+    assert contacts[0].source == DEFAULT_SOURCE
+    assert stats.pdfs_fetched == 2
+    assert stats.llm_extracted == 0
+    assert stats.llm_dropped_ungrounded == 0
+    assert len(llm_client.prompts) == 1  # disabled after the first failure
+    assert any("regex-only" in message for message in caplog.messages)
+
+
+async def test_collect_contacts_survives_llm_schema_surprise() -> None:
+    # An unexpected exception from the LLM pass (e.g. a response-shape
+    # surprise) must degrade to regex-only for that PDF — never a raise.
+    llm_client = _FakeGeminiClient(exc=RuntimeError("schema surprise"))
+    service = _two_pass_service(llm_client)
+    contacts, stats = await service.collect_contacts(
+        bank_id=42, bank_name="Erebor Bank, N.A.", pdf_entries=[{"url": _PDF_URL}]
+    )
+    assert [c.name for c in contacts] == ["Jane A. Doe"]
+    assert stats.llm_extracted == 0
 
 
 # ── 4. Idempotent upserts (real engine) ─────────────────────────────────────
@@ -544,3 +883,45 @@ async def test_unique_index_rejects_raw_duplicates(sqlite_session) -> None:
     )
     with pytest.raises(IntegrityError):
         await sqlite_session.commit()
+
+
+async def test_llm_and_regex_rows_coexist_for_different_people(sqlite_session) -> None:
+    # Distinct people from the two passes land as distinct rows; the LLM row
+    # keeps its distinguishing source through the same upsert path.
+    service = BankContactExtractionService()
+    await service.upsert_contacts(
+        sqlite_session, 1,
+        [
+            _contact(),
+            _contact(name="Priya Krishnamurthy", title=None, email=None,
+                     phone=None, role_context=ROLE_ORGANIZER, source=LLM_SOURCE),
+        ],
+    )
+    await sqlite_session.commit()
+    rows = (await sqlite_session.execute(select(BankContact))).scalars().all()
+    assert {(row.name, row.source) for row in rows} == {
+        ("Jane A. Doe", DEFAULT_SOURCE),
+        ("Priya Krishnamurthy", LLM_SOURCE),
+    }
+
+
+async def test_upsert_regex_row_supersedes_llm_twin_across_runs(sqlite_session) -> None:
+    # Run 1: the person was only found by the LLM pass. Run 2: the regex
+    # pass now anchors them — the regex row must REPLACE the LLM twin
+    # (same name + title), never duplicate the person on the detail card.
+    service = BankContactExtractionService()
+    await service.upsert_contacts(
+        sqlite_session, 1,
+        [_contact(email=None, phone=None, source=LLM_SOURCE,
+                  context_snippet="llm receipt")],
+    )
+    await sqlite_session.commit()
+
+    inserted, updated = await service.upsert_contacts(sqlite_session, 1, [_contact()])
+    await sqlite_session.commit()
+
+    assert (inserted, updated) == (1, 0)
+    (row,) = (await sqlite_session.execute(select(BankContact))).scalars().all()
+    assert row.source == DEFAULT_SOURCE
+    assert row.email == "jane.doe@erebor.example"
+    assert row.context_snippet == "Contact person: Jane A. Doe, President"

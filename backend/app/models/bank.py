@@ -187,13 +187,17 @@ class BankContact(Base):
     """A person extracted from a bank's OCC charter-application PDF.
 
     The banks-vertical sibling of ``executive_contacts`` on the BD side.
-    Rows are written exclusively by the conservative extractor
+    Rows are written exclusively by the extraction service
     (``services/bank_contact_extraction.py``, wired into the watcher's
-    opt-in ``--extract-contacts`` phase): people are persisted only when
-    the surrounding pattern in the public-portion PDF is unambiguous —
-    the contact-person block, an organizers list, a "proposed <officer>"
-    sentence, or counsel-of-record. Ambiguous hits are logged and skipped,
-    never guessed.
+    opt-in ``--extract-contacts`` phase) via two never-guess passes:
+    the conservative regex extractor (``source='application_pdf'``) —
+    people persisted only when the surrounding pattern in the
+    public-portion PDF is unambiguous (contact-person block, organizers
+    list, "proposed <officer>" sentence, counsel-of-record) — and the
+    grounded Gemini recall pass (``source='application_pdf_llm'``,
+    ``services/bank_contact_llm.py``), whose rows survive only when the
+    name is printed verbatim on the source page. Ambiguous/ungrounded
+    hits are logged and skipped, never guessed or fabricated.
 
     ``role_context`` records WHY the person appears in the filing
     ('contact_person' | 'organizer' | 'proposed_officer' | 'counsel');
