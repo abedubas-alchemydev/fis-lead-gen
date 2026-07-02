@@ -15,13 +15,19 @@ import os
 import sys
 from datetime import date, datetime
 from decimal import Decimal
+from pathlib import Path
 
 import psycopg
 from psycopg import sql
 from psycopg.rows import dict_row
 
 APPLY = "--apply" in sys.argv
-BACKUP = sys.argv[sys.argv.index("--backup") + 1] if "--backup" in sys.argv else "bd_dupe_backup.jsonl"
+# The backup holds dupe BD rows + their children — prod PII. Default it under
+# the repo's gitignored /backups/ dir so a stray run can't drop an
+# un-ignored bd_dupe_backup.jsonl in CWD that later gets committed. A
+# --backup override still lets ops point it anywhere.
+_DEFAULT_BACKUP = Path(__file__).resolve().parent.parent / "backups" / "bd_dupe_backup.jsonl"
+BACKUP = sys.argv[sys.argv.index("--backup") + 1] if "--backup" in sys.argv else str(_DEFAULT_BACKUP)
 
 # fill-only scalar merge: original keeps its value; dupe fills NULLs.
 FILL_COLS = [
@@ -82,6 +88,7 @@ def main() -> int:
     print("FK children:", fks)
 
     # ── backup (always, even in dry-run: it is read-only) ──
+    os.makedirs(os.path.dirname(BACKUP) or ".", exist_ok=True)
     with open(BACKUP, "w") as f:
         cur.execute("SELECT * FROM broker_dealers WHERE id = ANY(%s)", (dupe_ids,))
         for row in cur.fetchall():

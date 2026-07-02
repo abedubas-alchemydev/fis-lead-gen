@@ -23,9 +23,12 @@ brand-new entities Apollo often hasn't indexed yet:
 
 Everything else is rejected **and logged** (reason included). When the
 accepted Apollo full name differs from the stored name by 1–2 edits, the
-stored name is corrected to Apollo's rendering and a provenance note is
-appended to ``context_snippet`` so the original PDF rendering survives as
-the audit trail.
+stored ``name`` is deliberately LEFT UNCHANGED — it is the extraction upsert
+key ``(bank_id, name, coalesce(title,''), source)``, so renaming it would let
+the next ``--extract-contacts`` re-insert the PDF-rendered name as a twin row
+and re-spend the Apollo credit. Instead, Apollo's alternate rendering is
+recorded in a provenance note appended to ``context_snippet`` (the audit
+trail keeps both spellings; the dedupe key stays stable).
 
 Idempotency / cost discipline (the same shape as every paid job in this
 repo): each lookup ATTEMPT that reaches a decision stamps
@@ -48,7 +51,7 @@ import asyncio
 import logging
 import random
 import re
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from datetime import datetime, timezone
 from typing import Any, Final
 from urllib.parse import urlparse
@@ -492,6 +495,9 @@ class BankContactEnrichmentStats:
     emails_added: int = 0
     phones_added: int = 0
     titles_added: int = 0
+    # Apollo name VARIANTS recorded in the provenance note. The stored `name`
+    # is never mutated (M3); the summary key stays `names_corrected` for the
+    # repo's stable paid-job summary-line contract.
     names_corrected: int = 0
     provider_errors: int = 0
     skipped_stale: int = 0            # row changed between plan and execute
@@ -595,43 +601,52 @@ class ProposedUpdates:
     """What an accepted match would change — computed pure so the write
     path (and the tests) can inspect it before any mutation."""
 
-    email: str | None            # fill only (current is NULL)
-    phone: str | None            # fill only
-    title: str | None            # fill only
-    corrected_name: str | None   # replaces contact.name (provenance kept)
+    email: str | None               # fill only (current is NULL)
+    phone: str | None               # fill only
+    title: str | None               # fill only
+    # Apollo's alternate spelling of the name, recorded in the provenance note
+    # ONLY. It is NEVER written to ``contact.name`` — that column is the
+    # extraction dedupe key and must stay byte-stable (see propose_updates).
+    apollo_name_variant: str | None
     provenance_note: str | None
 
 
 def propose_updates(contact: BankContact, match: ApolloPersonMatch) -> ProposedUpdates:
-    """NULL-fill proposals + the near-name correction.
+    """NULL-fill proposals + a provenance-only note for a near-name variant.
 
     Never proposes overwriting a value extracted from the filing: email /
-    phone / title are proposed only when the stored column is NULL. The
-    stored NAME is corrected only when Apollo's accepted full name is
-    1..MAX_NAME_EDIT_DISTANCE edits away (case-insensitive) — the classic
-    PDF text-layer artifact window — and the original rendering is
-    preserved in a provenance note appended to ``context_snippet``.
+    phone / title are proposed only when the stored column is NULL.
+
+    The stored ``name`` is NEVER changed. When Apollo's accepted full name is
+    1..MAX_NAME_EDIT_DISTANCE edits away (case-insensitive) — the classic PDF
+    text-layer artifact window — that alternate rendering is surfaced as
+    ``apollo_name_variant`` and a provenance note, both destined for
+    ``context_snippet`` only. Mutating the name would drift the extraction
+    upsert key ``(bank_id, name, coalesce(title,''), source)`` and cause the
+    next ``--extract-contacts`` to re-insert the PDF-rendered name as a twin
+    row (and re-spend the credit); keeping it stable is the fix.
     """
     email = match.email if contact.email is None and match.email else None
     phone = match.phone if contact.phone is None and match.phone else None
     title = match.title if contact.title is None and match.title else None
 
-    corrected_name: str | None = None
+    apollo_name_variant: str | None = None
     provenance_note: str | None = None
     stored = " ".join((contact.name or "").split())
     apollo_full = " ".join(match.full_name.split())
     if stored and apollo_full and stored != apollo_full:
         distance = levenshtein(stored.lower(), apollo_full.lower())
         if 1 <= distance <= MAX_NAME_EDIT_DISTANCE:
-            corrected_name = apollo_full
+            apollo_name_variant = apollo_full
             provenance_note = (
-                f" [name corrected via Apollo match; PDF rendered '{contact.name}']"
+                f" [Apollo match rendered this name as '{apollo_full}'; "
+                f"keeping the filing's '{contact.name}' as the stable key]"
             )
     return ProposedUpdates(
         email=email,
         phone=phone,
         title=title,
-        corrected_name=corrected_name,
+        apollo_name_variant=apollo_name_variant,
         provenance_note=provenance_note,
     )
 
@@ -735,31 +750,28 @@ async def execute_enrichment(
             continue
 
         updates = propose_updates(contact, match)
-        final_name = updates.corrected_name or contact.name
+        # M3: the stored `name` is NEVER mutated — it is the extraction dedupe
+        # key. Only a TITLE fill can still move the
+        # (bank_id, name, coalesce(title,''), source) key onto another row, so
+        # that is the sole case the collision guard must cover now.
         final_title = updates.title or contact.title
-        apply_name_or_title = updates.corrected_name is not None or updates.title is not None
-        if apply_name_or_title and await _dedupe_key_collides(
+        if updates.title is not None and await _dedupe_key_collides(
             db,
             bank_id=contact.bank_id,
-            name=final_name,
+            name=contact.name,
             title=final_title,
             source=contact.source,
             exclude_id=contact.id,
         ):
-            # Another row already holds the (name, title) key this update
-            # would move onto — keep the channel fills, skip the rename/title.
+            # Another row already holds the (name, title) key this title fill
+            # would move onto — drop the title, keep the channel fills and the
+            # provenance note (neither touches the key).
             logger.warning(
                 "bank_contacts_enrich: dedupe-key collision for contact id=%s — "
-                "skipping name/title update ('%s' / '%s'), keeping channel fills",
-                contact.id, final_name, final_title,
+                "skipping title fill ('%s'), keeping channel fills",
+                contact.id, final_title,
             )
-            updates = ProposedUpdates(
-                email=updates.email,
-                phone=updates.phone,
-                title=None,
-                corrected_name=None,
-                provenance_note=None,
-            )
+            updates = replace(updates, title=None)
 
         if updates.email is not None:
             contact.email = updates.email
@@ -770,8 +782,9 @@ async def execute_enrichment(
         if updates.title is not None:
             contact.title = updates.title
             stats.titles_added += 1
-        if updates.corrected_name is not None:
-            contact.name = updates.corrected_name
+        if updates.apollo_name_variant is not None:
+            # Record Apollo's alternate spelling in the provenance/context
+            # field ONLY — the dedupe-key `name` stays exactly as extracted.
             note = updates.provenance_note or ""
             existing_snippet = (contact.context_snippet or "").rstrip()
             contact.context_snippet = (
@@ -784,14 +797,14 @@ async def execute_enrichment(
         stats.matched += 1
         logger.info(
             "bank_contacts_enrich: MATCH contact id=%s '%s' @ '%s' — "
-            "email=%s phone=%s title=%s name_corrected=%s",
+            "email=%s phone=%s title=%s name_variant_recorded=%s",
             contact.id,
             contact.name,
             item.bank_name,
             "added" if updates.email else ("kept" if contact.email else "none"),
             "added" if updates.phone else ("kept" if contact.phone else "none"),
             "added" if updates.title else ("kept" if contact.title else "none"),
-            "yes" if updates.corrected_name else "no",
+            "yes" if updates.apollo_name_variant else "no",
         )
         await db.commit()
 

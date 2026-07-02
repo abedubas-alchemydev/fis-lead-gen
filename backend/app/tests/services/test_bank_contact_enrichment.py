@@ -6,9 +6,10 @@ contracts the paid job must keep:
 
 1. **Match-accept** — a close-name + plausible-org Apollo person fills
    email/phone/title where NULL and stamps ``matched``.
-2. **Near-name correction** — an accepted name within 2 edits corrects the
-   stored name AND appends a provenance note to ``context_snippet`` (the
-   PDF's original rendering survives as the audit trail).
+2. **Near-name variant (M3)** — an accepted name within 2 edits is recorded
+   as a provenance note on ``context_snippet`` while the stored ``name`` (the
+   extraction dedupe key) is left byte-stable, so a later ``--extract-contacts``
+   of the same PDF can't re-insert the PDF-rendered name as a twin row.
 3. **Reject ambiguous** — a different person name or an implausible org
    association fills NOTHING and stamps ``no_match`` (reject-and-log).
 4. **Never overwrite extracted values** — channels/titles already on the
@@ -52,6 +53,10 @@ from app.services.bank_contact_enrichment import (
     plan_enrichment,
     split_person_name,
     strip_bank_suffixes,
+)
+from app.services.bank_contact_extraction import (
+    BankContactExtractionService,
+    ExtractedBankContact,
 )
 
 _APOLLO_MATCH_URL = "https://api.apollo.io/api/v1/people/match"
@@ -320,7 +325,9 @@ async def test_match_accept_fills_null_channels_and_stamps_matched(db_session) -
 
 
 @respx.mock
-async def test_near_name_correction_appends_provenance(db_session) -> None:
+async def test_near_name_variant_recorded_but_name_left_stable(db_session) -> None:
+    # M3: Apollo's alternate spelling is recorded in the provenance note, but
+    # the stored `name` (the extraction dedupe key) is LEFT UNCHANGED.
     respx.post(_APOLLO_MATCH_URL).mock(
         return_value=httpx.Response(200, json=_apollo_payload("John", "Hirshman"))
     )
@@ -336,13 +343,62 @@ async def test_near_name_correction_appends_provenance(db_session) -> None:
     stats = await execute_enrichment(db_session, client, plan.planned)
 
     (row,) = (await db_session.execute(select(BankContact))).scalars().all()
-    assert row.name == "John Hirshman"
+    assert row.name == "John Hirshrnan"  # dedupe key stays exactly as extracted
     assert row.enrich_status == ENRICH_STATUS_MATCHED
-    assert "name corrected via Apollo match" in row.context_snippet
-    assert "PDF rendered 'John Hirshrnan'" in row.context_snippet
+    assert "Apollo match rendered this name as 'John Hirshman'" in row.context_snippet
+    assert "John Hirshrnan" in row.context_snippet  # filing rendering survives
     assert row.context_snippet.startswith("Contact person: John Hirshrnan")
-    assert stats.names_corrected == 1
+    assert stats.names_corrected == 1  # variant recorded (name itself unchanged)
     assert stats.matched == 1
+
+
+@respx.mock
+async def test_enriched_name_variant_does_not_spawn_twin_on_reextraction(db_session) -> None:
+    # The M3 must-fix, end to end: enrich a row whose name Apollo spells
+    # differently, then re-run the PDF extraction upsert with the ORIGINAL
+    # PDF-rendered name. Because enrichment never mutated the dedupe key, the
+    # re-extraction lands on the SAME row (idempotent update) instead of
+    # inserting a second, PDF-named twin (which would also re-spend a credit).
+    respx.post(_APOLLO_MATCH_URL).mock(
+        return_value=httpx.Response(200, json=_apollo_payload("John", "Hirshman"))
+    )
+    await _seed_bank(db_session)
+    # Title present up front so enrichment doesn't fill it — isolates the NAME
+    # axis this test is about (title-fill collisions are covered separately).
+    db_session.add(
+        _contact(
+            name="John Hirshrnan",
+            title="President",
+            context_snippet="Contact person: John Hirshrnan, President",
+        )
+    )
+    await db_session.commit()
+
+    plan = await plan_enrichment(db_session, limit=50)
+    await execute_enrichment(db_session, _client(), plan.planned)
+
+    # A subsequent `--extract-contacts` of the same PDF re-derives the SAME
+    # PDF-rendered name/title/source.
+    service = BankContactExtractionService()
+    reextracted = ExtractedBankContact(
+        name="John Hirshrnan",
+        title="President",
+        role_context="contact_person",
+        email=None,
+        phone=None,
+        source_url=_PDF_URL,
+        page_number=1,
+        context_snippet="Contact person: John Hirshrnan, President",
+        source="application_pdf",
+    )
+    inserted, updated = await service.upsert_contacts(db_session, 1, [reextracted])
+    await db_session.commit()
+
+    assert (inserted, updated) == (0, 1)  # matched the existing row, no twin
+    rows = (await db_session.execute(select(BankContact))).scalars().all()
+    assert len(rows) == 1  # exactly one row for this person
+    assert rows[0].name == "John Hirshrnan"
+    assert rows[0].email == "john.hirshman@erebor.example"  # enrichment survives
 
 
 @respx.mock
@@ -457,32 +513,36 @@ async def test_apollo_locked_email_sentinel_is_never_persisted(db_session) -> No
 
 
 @respx.mock
-async def test_name_correction_dedupe_collision_keeps_channel_fills_only(db_session) -> None:
+async def test_title_fill_dedupe_collision_keeps_channel_fills_only(db_session) -> None:
+    # M3: the name is never mutated, but a TITLE fill can still move the
+    # (bank, name, coalesce(title,''), source) key onto an existing row. The
+    # guard drops the title fill while keeping the channel fills.
     respx.post(_APOLLO_MATCH_URL).mock(
-        return_value=httpx.Response(200, json=_apollo_payload())
+        return_value=httpx.Response(200, json=_apollo_payload())  # Apollo title = CEO
     )
     await _seed_bank(db_session)
-    # The corrected (name, title) pair is already occupied by another row:
-    # applying the rename/title-fill would trip uq_bank_contacts_dedupe.
+    # Another row already holds (bank, 'John Hirshman', 'Chief Executive
+    # Officer', 'application_pdf'); filling the eligible row's title to CEO
+    # would trip uq_bank_contacts_dedupe.
     db_session.add(
         _contact(
             name="John Hirshman",
             title="Chief Executive Officer",
-            email="already@erebor.example",  # not eligible itself
+            email="already@erebor.example",  # has email -> not eligible itself
         )
     )
-    db_session.add(_contact(name="John Hirshrnan"))
+    db_session.add(_contact(name="John Hirshman", title=None))  # eligible, no title
     await db_session.commit()
 
     client = _client()
     plan = await plan_enrichment(db_session, limit=50)
-    assert [p.contact_name for p in plan.planned] == ["John Hirshrnan"]
+    assert [p.contact_name for p in plan.planned] == ["John Hirshman"]
     stats = await execute_enrichment(db_session, client, plan.planned)
 
     rows = (await db_session.execute(select(BankContact))).scalars().all()
-    enriched = next(r for r in rows if r.name == "John Hirshrnan")
-    assert enriched.email == "john.hirshman@erebor.example"  # fill kept
-    assert enriched.title is None                            # guarded
+    enriched = next(r for r in rows if r.email == "john.hirshman@erebor.example")
+    assert enriched.title is None            # title fill guarded (would collide)
+    assert enriched.name == "John Hirshman"  # name never mutated
     assert enriched.enrich_status == ENRICH_STATUS_MATCHED
     assert stats.names_corrected == 0 and stats.titles_added == 0
     assert stats.emails_added == 1
