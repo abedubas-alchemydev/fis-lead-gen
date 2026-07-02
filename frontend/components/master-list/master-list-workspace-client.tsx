@@ -4,6 +4,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import Link from "next/link";
 import type { Route } from "next";
 import clsx from "clsx";
+import { useUnreadAlertsCount } from "@/lib/use-unread-alerts-count";
 import { useUrlSyncedState } from "@/lib/use-url-synced-state";
 
 import {
@@ -470,11 +471,12 @@ export function MasterListWorkspaceClient() {
     };
   }, []);
 
-  // The topbar bell used to show a red pip fed by ``stats.deficiency_alerts``
-  // (mirroring the sidebar's Alerts badge). That stat was retired when the
-  // dashboard's Deficiency Alerts KPI became "Pending Approval BDs" — the
-  // /alerts page is unchanged, but /api/v1/stats no longer carries the count,
-  // so the bell renders without a pip now.
+  // Topbar bell pip — lights up when unread filing alerts exist. Originally
+  // fed by ``stats.deficiency_alerts`` (retired with the "Pending Approval
+  // BDs" KPI swap); now sourced from the /alerts API via the same
+  // useUnreadAlertsCount probe that drives the sidebar's Alerts badge, so
+  // the affordance no longer depends on the dashboard stats payload.
+  const unreadAlertsCount = useUnreadAlertsCount();
 
   function toggleSort(columnKey: string) {
     if (sortBy === columnKey) {
@@ -581,7 +583,8 @@ export function MasterListWorkspaceClient() {
         {/* .topbar-actions — search + theme + notifications. The search
             form shares the searchInput / submitted-search contract with
             the toolbar-card search below, so both inputs drive the same
-            URL-backed filter. */}
+            URL-backed filter. The bell pip lights up whenever there are
+            unread filing alerts. */}
         <div className="ml-auto flex items-center gap-2.5">
           <form
             onSubmit={(event) => {
@@ -605,10 +608,20 @@ export function MasterListWorkspaceClient() {
           <ThemeToggle />
           <button
             type="button"
-            aria-label="Notifications"
+            aria-label={
+              unreadAlertsCount > 0
+                ? `${unreadAlertsCount} unread filing alert${unreadAlertsCount === 1 ? "" : "s"}`
+                : "Notifications"
+            }
             className="relative grid h-[38px] w-[38px] place-items-center rounded-[10px] border border-[var(--border,rgba(30,64,175,0.1))] bg-[var(--surface,#ffffff)] text-[var(--text-dim,#475569)] transition hover:bg-[var(--surface-2,#f1f6fd)] hover:text-[var(--text,#0f172a)]"
           >
             <Bell className="h-[18px] w-[18px]" strokeWidth={2} />
+            {unreadAlertsCount > 0 ? (
+              <span
+                aria-hidden
+                className="absolute right-1.5 top-1.5 h-2 w-2 rounded-full border-2 border-[var(--bg,#eaf3ff)] bg-[var(--red,#ef4444)]"
+              />
+            ) : null}
           </button>
         </div>
       </div>
