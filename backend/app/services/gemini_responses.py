@@ -276,6 +276,43 @@ class GeminiAdvisorProfileExtraction(BaseModel):
     rationale: str = Field(min_length=1, max_length=1000)
 
 
+class GeminiBankContactPerson(BaseModel):
+    """One person named in an OCC charter-application public-portion PDF.
+
+    Backs ``services/bank_contact_llm.py`` (the recall pass beside the
+    regex extractor in ``bank_contact_extraction``). Every field is
+    tolerant on purpose — requiredness lives in the Gemini response
+    schema, and the grounding gate downstream is the real validator: a
+    schema surprise must degrade to "this person is dropped/ignored",
+    never to a ValidationError that discards a whole chunk of results.
+    """
+
+    # extra="ignore" (not "forbid" like the single-shot extractions
+    # above): one unexpected key from the provider must not throw away
+    # every other person in the same response.
+    model_config = ConfigDict(extra="ignore")
+
+    name: str = ""
+    title: str | None = None
+    # Nominally one of contact_person | organizer | proposed_officer |
+    # counsel | other (enforced by the response schema enum); kept a plain
+    # str so an off-enum value maps to a per-person drop, not a chunk loss.
+    role: str = "other"
+    email: str | None = None
+    phone: str | None = None
+    # 1-based page marker the model saw ("--- PAGE N ---"); the grounding
+    # gate re-verifies and corrects it against the actual page text.
+    page_number: int | None = None
+
+
+class GeminiBankContactExtraction(BaseModel):
+    """People-only extraction from per-page OCC application text."""
+
+    model_config = ConfigDict(extra="ignore")
+
+    people: list[GeminiBankContactPerson] = Field(default_factory=list)
+
+
 class GeminiResponsesClient:
     def __init__(self) -> None:
         self.base_url = settings.gemini_api_base.rstrip("/")
@@ -476,6 +513,79 @@ class GeminiResponsesClient:
             ) from exc
 
         return GeminiFirmAliasExtraction.model_validate(self._normalize_text_fields(parsed))
+
+    async def extract_bank_contacts(self, *, prompt: str) -> GeminiBankContactExtraction:
+        """Text-only extraction of PEOPLE from OCC application page text.
+
+        Used by ``services/bank_contact_llm.py``. The prompt embeds the
+        per-page text (already pulled by the crash-isolated
+        ``_pdf_text_worker`` subprocess) with ``--- PAGE N ---`` markers;
+        the response is constrained to a ``people`` array via a JSON
+        schema. No PDF / Files API path — the text is already extracted,
+        so sending it inline keeps the call cheap and lets the caller run
+        verbatim grounding against exactly what the model saw.
+        """
+        if not settings.gemini_api_key:
+            raise GeminiConfigurationError("GEMINI_API_KEY is not configured.")
+
+        person_schema = {
+            "type": "OBJECT",
+            "properties": {
+                "name": {"type": "STRING"},
+                "title": {"type": ["STRING", "NULL"]},
+                "role": {
+                    "type": "STRING",
+                    "enum": [
+                        "contact_person",
+                        "organizer",
+                        "proposed_officer",
+                        "counsel",
+                        "other",
+                    ],
+                },
+                "email": {"type": ["STRING", "NULL"]},
+                "phone": {"type": ["STRING", "NULL"]},
+                "page_number": {"type": ["INTEGER", "NULL"]},
+            },
+            "required": ["name", "role", "page_number"],
+            "propertyOrdering": [
+                "name", "title", "role", "email", "phone", "page_number",
+            ],
+        }
+        schema = {
+            "type": "OBJECT",
+            "properties": {
+                "people": {"type": "ARRAY", "items": person_schema},
+            },
+            "required": ["people"],
+            "propertyOrdering": ["people"],
+        }
+
+        payload: dict[str, object] = {
+            "contents": [
+                {
+                    "role": "user",
+                    "parts": [{"text": prompt}],
+                }
+            ],
+            "generationConfig": {
+                "responseMimeType": "application/json",
+                "responseJsonSchema": schema,
+                "temperature": 0.1,
+                "topP": 0.95,
+            },
+        }
+        response_payload = await self._post_with_retries(payload)
+        response_text = self._extract_response_text(response_payload)
+
+        try:
+            parsed = json.loads(response_text)
+        except json.JSONDecodeError as exc:
+            raise GeminiExtractionError(
+                "Gemini returned invalid JSON for bank-contact extraction."
+            ) from exc
+
+        return GeminiBankContactExtraction.model_validate(parsed)
 
     async def extract_financial_data(self, *, pdf_bytes_base64: str, prompt: str) -> GeminiFinancialExtraction:
         if not settings.gemini_api_key:

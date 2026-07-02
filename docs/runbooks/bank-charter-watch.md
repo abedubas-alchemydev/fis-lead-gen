@@ -370,6 +370,35 @@ never kill the run. No paid APIs; occ.gov only.
 (`uq_bank_contacts_dedupe`), so re-running over the same PDFs is a no-op —
 safe to compose with any other phase, any night.
 
+### LLM-assisted extraction (Gemini recall pass)
+
+The regex extractor's strictness costs recall (its first production sweep
+stored 40 people while refusing ~290 ambiguous candidates), so the phase
+also sends each PDF's per-page text to **Gemini**
+(`services/bank_contact_llm.py`, the repo's structured-output client) and
+unions the results. The never-fabricate policy is enforced by **grounding
+validation**, not by trusting the model:
+
+- **Grounding rule** — an LLM-returned person is kept ONLY when their name
+  appears **verbatim in the source page text** (case-insensitive,
+  whitespace-flexible: name tokens in order, separated only by whitespace,
+  word-boundary guarded). Email/phone/title values pass the same check;
+  an ungrounded value is nulled, never stored. The stored `page_number` +
+  `context_snippet` are cut from where the name *actually* matched in the
+  source text. Everything the gate refuses is logged with its reason and
+  counted (`bank_contacts_llm_dropped_ungrounded`) — a dropped
+  hallucination can never reach the DB.
+- **Merge** — regex + Gemini results union per bank, deduped on the same
+  `(name, title)` key the upsert uses; **regex rows win on conflict** (they
+  carry the pattern-anchored snippet). LLM-only people are tagged
+  `source='application_pdf_llm'` so they stay distinguishable in the DB and
+  on the detail card; a later regex hit for the same person supersedes
+  (deletes) its LLM twin at upsert time.
+- **GEMINI_API_KEY is optional** — without it (or on any API error /
+  response-shape surprise) the service logs a warning and the phase behaves
+  **exactly like the regex-only extractor**: the watcher can never fail
+  because Gemini is down. No new flags; setting the key is the switch.
+
 One-off commands (DB URL via the environment, exactly like the other
 backfills — never on the command line; dry-run first):
 
@@ -396,18 +425,25 @@ steps' `--args=scripts/watch_bank_charters.py,--apply,--extract-contacts`)
 — idempotency makes the nightly re-scan free; only new PDFs/people produce
 writes.
 
-The summary line reports three keys:
+The summary line reports five keys:
 
 - `bank_contacts_pdfs_fetched` — PDFs actually downloaded (allowlist-passed,
   HTTP 200, under the size cap) across all banks;
-- `bank_contacts_extracted` — unambiguous people parsed (deduped per bank).
-  Dry-run: the would-write set. Apply: the upserted set — a re-run reports
-  the same number with zero DB changes (the per-bank log line breaks out
-  `inserted=` vs `updated=`);
+- `bank_contacts_extracted` — people in the final merged set (regex +
+  grounded Gemini, deduped per bank). Dry-run: the would-write set. Apply:
+  the upserted set — a re-run reports the same number with zero DB changes
+  (the per-bank log line breaks out `inserted=` vs `updated=`);
 - `bank_contacts_skipped_ambiguous` — pattern hits refused by the
-  conservative validators (logged with page + reason, never written). A
-  non-zero count is NORMAL — redacted public portions and law-firm counsel
-  lines land here by design.
+  conservative regex validators (logged with page + reason, never written).
+  A non-zero count is NORMAL — redacted public portions and law-firm counsel
+  lines land here by design;
+- `bank_contacts_llm_extracted` — people the Gemini recall pass ADDED beyond
+  regex (grounded + novel, `source='application_pdf_llm'`; the recall win).
+  Zero when GEMINI_API_KEY is unset;
+- `bank_contacts_llm_dropped_ungrounded` — Gemini-returned records refused
+  by the grounding gate (name/value not printed verbatim on the source
+  pages, org vocabulary, unmappable role — logged with reason, never
+  written). Non-zero is the gate WORKING, not a failure.
 
 ## Notes & gotchas
 
