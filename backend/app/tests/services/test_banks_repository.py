@@ -131,6 +131,27 @@ async def test_digital_assets_tri_state(repository: BankRepository) -> None:
     assert "banks.digital_assets is false" in _captured_where_sql(session)
 
 
+async def test_find_banks_by_occ_charter_number_filters_on_the_column(
+    repository: BankRepository,
+) -> None:
+    # Strong-key lookup used by the watcher's digital-assets seed
+    # (KNOWN_DIGITAL_ASSET_APPLICANTS): exact equality on
+    # occ_charter_number, nothing fuzzy.
+    session = _StagedSession()
+    session_result = MagicMock()
+    session_result.scalars.return_value.all.return_value = []
+
+    async def execute(statement: object) -> object:
+        session.executed_statements.append(statement)
+        return session_result
+
+    session.execute = execute  # type: ignore[method-assign]
+    banks = await repository.find_banks_by_occ_charter_number(session, "25357")
+    assert banks == []
+    sql = _compile_sql(session.executed_statements[0])
+    assert "banks.occ_charter_number = '25357'" in sql
+
+
 async def test_unknown_sort_falls_back_to_established_date(repository: BankRepository) -> None:
     session = _StagedSession()
     kwargs = _default_kwargs()

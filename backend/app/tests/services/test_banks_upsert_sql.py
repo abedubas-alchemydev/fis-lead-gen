@@ -347,6 +347,10 @@ def _merge_pair() -> tuple[Bank, Bank]:
         source="occ",
         application_received_date=date(2026, 4, 13),
         last_action_date=date(2026, 6, 24),
+        # Institutions-API enrichment stamped by the reconcile phase just
+        # before the merge — it must survive onto the FDIC row.
+        lei="549300OPENRSRV00LE00",
+        charter_type="National",
     )
     fdic_bank = Bank(
         id=1,
@@ -371,6 +375,8 @@ async def test_merge_moves_key_dates_and_events_onto_the_fdic_row() -> None:
     assert fdic_bank.occ_control_number == "2026-Charter-345612"
     assert fdic_bank.application_received_date == date(2026, 4, 13)
     assert fdic_bank.source == "fdic+occ"
+    assert fdic_bank.lei == "549300OPENRSRV00LE00"
+    assert fdic_bank.charter_type == "National"
     assert event.bank_id == 1  # events follow the surviving row
     assert session.deleted == [occ_bank]
     assert session.flush_count == 2  # release-then-take unique-key handover

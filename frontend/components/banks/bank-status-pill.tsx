@@ -52,3 +52,12 @@ export function charterAuthorityLabel(authority: string | null): string {
   if (authority === "STATE") return "State";
   return authority ?? "—";
 }
+
+// Why a bank shows "—" instead of a value. Shared verbatim between the
+// list's dash tooltips (bank-list-workspace-client.tsx) and the detail
+// page's timeline empty-state (bank-detail-client.tsx) so the two
+// surfaces never drift apart.
+export const DIGITAL_ASSETS_DASH_EXPLANATION =
+  "Not listed on OCC's digital-assets applications registry";
+export const NO_OCC_TIMELINE_EXPLANATION =
+  "No OCC application timeline — state-chartered banks don't file with the OCC";

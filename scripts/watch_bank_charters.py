@@ -2,7 +2,9 @@
 and keep the ``banks`` vertical fresh — the banking sibling of
 ``standalone_extract_new_bds.py``.
 
-Sources (all official, public, keyless — no gray-area methods):
+Sources (all official + public — no gray-area methods; keyless except the
+OPTIONAL ``OCC_API_KEY`` for source 3's primary path, which degrades to a
+keyless fallback when unset):
 
 1. **FDIC BankFind** (``api.fdic.gov/banks/institutions``) — newly
    *opened* insured institutions, selected on an ``ESTYMD`` (establishment
@@ -15,15 +17,27 @@ Sources (all official, public, keyless — no gray-area methods):
    charter *applications* and their action timeline (Receipt → Approved →
    Consummated-Effective / Withdrawn). This is the pending-charter pipeline
    the FDIC can't see: an applicant has no FDIC cert until it opens.
-3. **OCC national-banks directory** (``national-by-name.xlsx``) — used to
-   RECONCILE an opened OCC application onto its FDIC row (the workbook
-   carries charter number, FDIC CERT, and RSSD side by side). Conservative:
-   links only on an exact normalized-name (+state when both sides have one)
-   match that is UNIQUE.
+3. **OCC active-institutions directory** — used to RECONCILE an opened OCC
+   application onto its FDIC row (charter number, FDIC CERT, and RSSD side
+   by side). PRIMARY: the official, documented **OCC Institutions API**
+   (``api.occ.gov/institutions/active``, api.data.gov key via the
+   ``OCC_API_KEY`` env var; also carries LEI + CharterType enrichment).
+   FALLBACK when the key is unset or the API is down: the keyless
+   ``national-by-name.xlsx`` workbook. Identical match semantics either
+   way — links only on an exact normalized-name (+state when both sides
+   have one) match that is UNIQUE; the summary logs which source ran
+   (``reconcile_source=api|xlsx``).
 4. **OCC Digital Assets Licensing Applications page** (client addition) —
    novel / de-novo digital-asset national bank charters and conversions.
    Matching banks get ``digital_assets=true`` plus the public-portion
-   application PDF *URLs* (the PDFs are never fetched or rendered).
+   application PDF *URLs* (the PDFs are never fetched or rendered). The
+   page only lists CURRENT applications, so the phase also applies the
+   curated ``KNOWN_DIGITAL_ASSET_APPLICANTS`` seed for publicly-known
+   digital-asset charters that rolled off the page before our first scrape
+   — and the one-off ``--backfill-digital-assets-history`` mode makes that
+   data-driven by unioning every archived monthly capture of the page
+   (OCC's own content, served from the public Internet Archive) through
+   the same tagging path.
 
 Idempotency. Every write is an upsert keyed on a stable source identifier
 (``fdic_cert`` / ``occ_control_number`` / the ``(bank_id, action,
@@ -46,6 +60,11 @@ Usage::
 
     # one-time backfill: widen the window (e.g. all of 2024-present)
     python scripts/watch_bank_charters.py --apply --from-date 2024-01-01
+
+    # one-off: union the Wayback Machine's monthly captures of the OCC
+    # digital-assets page (applicants that rolled off pre-scrape)
+    python scripts/watch_bank_charters.py --apply --skip-fdic --skip-occ \
+        --backfill-digital-assets-history
 
     # override DB URL (defaults to the DATABASE_URL env var)
     python scripts/watch_bank_charters.py --db-url <URL>
@@ -93,6 +112,20 @@ logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(me
 # CAS filings accrete actions over weeks, the FDIC institutions index can
 # lag its history stream, and upserts make the overlap free.
 _DEFAULT_WINDOW_DAYS = 30
+
+# Curated digital-assets seed. The OCC digital-assets page lists only
+# CURRENT applications (decided ones are pruned), so a publicly-known
+# digital-asset charter that rolled off the page before our first scrape
+# can never be tagged from the page alone. Entries here are
+# client-confirmed PUBLIC knowledge (OCC news releases / press coverage) —
+# extend with one line each: (name, state, occ_charter_number or None).
+# Matching follows the page policy (unique match or log-and-skip, never
+# guess); the tag is sticky and seed entries carry no PDFs. See
+# docs/runbooks/bank-charter-watch.md, "Manually tagging known
+# digital-asset banks".
+KNOWN_DIGITAL_ASSET_APPLICANTS: tuple[tuple[str, str, str | None], ...] = (
+    ("Erebor Bank, N.A.", "OH", "25357"),  # opened 2026-02; off the page pre-scrape
+)
 
 
 def _normalize_db_url(url: str) -> str:
@@ -160,6 +193,18 @@ async def main(argv: list[str] | None = None) -> int:
         "--skip-digital-assets", action="store_true",
         help="Skip the OCC digital-assets page phase.",
     )
+    parser.add_argument(
+        "--backfill-digital-assets-history",
+        action="store_true",
+        help=(
+            "One-off: union every archived monthly capture of the OCC "
+            "digital-assets page (Wayback Machine CDX) and feed the rows "
+            "through the same sticky digital-assets tagging. Implies the "
+            "digital-assets machinery — it runs even under "
+            "--skip-digital-assets (which then skips just the live page + "
+            "seed); composes with --apply and the other --skip-* flags."
+        ),
+    )
     args = parser.parse_args(argv)
 
     if not args.db_url:
@@ -191,7 +236,7 @@ async def main(argv: list[str] | None = None) -> int:
     mode = "apply" if args.apply else "dry-run"
     logger.info("watch_bank_charters: %s, window %s..%s", mode, window_start, window_end)
 
-    summary: dict[str, int] = {}
+    summary: dict[str, int | str] = {}
     try:
         # ── Phase 1: FDIC BankFind (opened insured institutions) ──────────
         if not args.skip_fdic:
@@ -252,7 +297,7 @@ async def main(argv: list[str] | None = None) -> int:
                 unreconciled = await repository.list_unreconciled_occ_banks(db)
                 summary["occ_unreconciled"] = len(unreconciled)
                 if unreconciled:
-                    linked = await _reconcile_occ_banks(
+                    linked, reconcile_source = await _reconcile_occ_banks(
                         db,
                         repository=repository,
                         occ=occ,
@@ -261,6 +306,7 @@ async def main(argv: list[str] | None = None) -> int:
                         apply=args.apply,
                     )
                     summary["occ_reconciled"] = linked
+                    summary["reconcile_source"] = reconcile_source
                     if args.apply:
                         await db.commit()
 
@@ -300,10 +346,41 @@ async def main(argv: list[str] | None = None) -> int:
                             "  dry-run: would tag bank id=%d %r digital_assets=true pdf=%s",
                             bank.id, bank.name, application.pdf_url or "-",
                         )
+                # Curated seed: publicly-known digital-asset charters that
+                # rolled off the OCC page before our first scrape (the page
+                # lists only current applications). Same session/commit as
+                # the page matches.
+                seed_tagged, seed_unmatched = await _apply_digital_asset_seed(
+                    db, repository=repository, apply=args.apply
+                )
                 if args.apply:
                     await db.commit()
             summary["digital_assets_tagged"] = tagged
             summary["digital_assets_unmatched"] = unmatched
+            summary["digital_assets_seed_tagged"] = seed_tagged
+            summary["digital_assets_seed_unmatched"] = seed_unmatched
+
+        # ── Phase 4b: one-off Wayback backfill of the digital-assets page ─
+        # The live page lists only CURRENT applications; the public
+        # Internet Archive holds monthly captures of OCC's own page, so
+        # this mode unions every applicant row EVER listed and feeds the
+        # union through the SAME sticky tagging path as live-page rows.
+        # Runs regardless of --skip-digital-assets (which skips just the
+        # live page + seed); own session/commit like every other phase.
+        if args.backfill_digital_assets_history:
+            snapshots_parsed, history_entries = (
+                await occ.fetch_digital_asset_application_history()
+            )
+            summary["digital_assets_history_snapshots"] = snapshots_parsed
+            summary["digital_assets_history_rows"] = len(history_entries)
+            async with session_maker() as db:
+                history_tagged, history_unmatched = await _tag_digital_asset_history_entries(
+                    db, repository=repository, entries=history_entries, apply=args.apply
+                )
+                if args.apply:
+                    await db.commit()
+            summary["digital_assets_history_tagged"] = history_tagged
+            summary["digital_assets_history_unmatched"] = history_unmatched
 
         logger.info(
             "summary (%s): %s", mode,
@@ -322,22 +399,38 @@ async def _reconcile_occ_banks(
     fdic,
     unreconciled,
     apply: bool,
-) -> int:
+) -> tuple[int, str]:
     """Link opened OCC application rows to their FDIC/charter identity.
 
-    Uses the OCC national-banks directory (charter no ↔ CERT ↔ RSSD).
+    Uses the OCC active-institutions directory (charter no ↔ CERT ↔ RSSD):
+    PRIMARY the official Institutions API (``fetch_active_institutions``,
+    None on missing OCC_API_KEY / HTTP error / schema surprise), FALLBACK
+    the keyless national-by-name.xlsx workbook. Both sources yield the
+    same row shape, so the match semantics below are IDENTICAL either way.
     Match rule (conservative, in order):
       1. exact normalized-name match, narrowed by state when BOTH sides
          have one — must be UNIQUE among directory rows;
-      2. on a match: stamp ``occ_charter_number`` / ``fed_rssd``; when the
-         directory carries a CERT, either fold this row into an existing
-         FDIC row for that cert (both were inserted independently) or
-         stamp the cert and pull the FDIC record to enrich in place.
-    Returns the number of rows linked (or that WOULD link, in dry-run).
+      2. on a match: stamp ``occ_charter_number`` / ``fed_rssd`` (plus the
+         API-only ``lei`` / ``charter_type`` enrichment when present —
+         never overwriting); when the directory carries a CERT, either
+         fold this row into an existing FDIC row for that cert (both were
+         inserted independently) or stamp the cert and pull the FDIC
+         record to enrich in place.
+    Returns ``(linked, source)`` — rows linked (or that WOULD link, in
+    dry-run) and which directory served: ``"api"`` or ``"xlsx"``.
     """
     from app.services.occ_cas import normalize_bank_name
 
-    directory = await occ.fetch_national_bank_directory()
+    directory = await occ.fetch_active_institutions()
+    reconcile_source = "api"
+    if directory is None:
+        # Key unset or API down — fetch_active_institutions already logged
+        # the specific reason at WARNING level.
+        reconcile_source = "xlsx"
+        directory = await occ.fetch_national_bank_directory()
+    logger.info(
+        "reconcile: directory source=%s (%d row(s))", reconcile_source, len(directory)
+    )
     by_name: dict[str, list] = {}
     for row in directory:
         by_name.setdefault(normalize_bank_name(row.name), []).append(row)
@@ -368,6 +461,11 @@ async def _reconcile_occ_banks(
 
         bank.occ_charter_number = bank.occ_charter_number or match.charter_number
         bank.fed_rssd = bank.fed_rssd or match.fed_rssd
+        # Institutions-API enrichment (XLSX rows carry neither): additive
+        # only, never overwrite. Stamped before any merge so the values
+        # ride onto the surviving FDIC row.
+        bank.lei = bank.lei or match.lei
+        bank.charter_type = bank.charter_type or match.charter_type
         if match.fdic_cert:
             existing = await repository.find_by_cert(db, match.fdic_cert)
             if existing is not None and existing.id != bank.id:
@@ -390,7 +488,146 @@ async def _reconcile_occ_banks(
         records = await fdic.fetch_institutions_by_certs(newly_linked_certs)
         if records:
             await repository.upsert_fdic_institutions(db, records)
-    return linked
+    return linked, reconcile_source
+
+
+async def _apply_digital_asset_seed(
+    db,
+    *,
+    repository,
+    apply: bool,
+    seed: tuple[tuple[str, str, str | None], ...] = KNOWN_DIGITAL_ASSET_APPLICANTS,
+) -> tuple[int, int]:
+    """Tag the curated ``KNOWN_DIGITAL_ASSET_APPLICANTS`` entries.
+
+    Runs after the page matcher in the digital-assets phase. Match rule
+    (conservative, same never-guess policy as the page matcher):
+
+    1. ``occ_charter_number`` when the entry carries one (strong key) — a
+       unique hit wins outright; two rows claiming one charter number is a
+       data problem and skips without falling through;
+    2. else — including when no row carries that charter number yet (e.g.
+       reconciliation hasn't stamped it) — the same normalized-name matcher
+       the page rows use, narrowed by the entry's state like the reconcile
+       pass; must be UNIQUE.
+
+    On a match the sticky tag flips via ``apply_digital_asset_tag`` with no
+    PDF and no received-date (seed entries carry neither, so the row's
+    ``digital_asset_pdfs`` / ``application_received_date`` are untouched
+    and re-runs are no-ops). Zero or ambiguous matches log and skip.
+    Returns ``(tagged, unmatched)``; dry-run counts matches without writing.
+    """
+    tagged = unmatched = 0
+    for name, state, charter_number in seed:
+        matches: list = []
+        matched_by = ""
+        if charter_number:
+            matches = await repository.find_banks_by_occ_charter_number(db, charter_number)
+            matched_by = f"charter={charter_number}"
+            if len(matches) > 1:
+                unmatched += 1
+                logger.info(
+                    "  digital-assets: seed %r charter=%s -> %d match(es); skipping",
+                    name, charter_number, len(matches),
+                )
+                continue
+        if not matches:
+            candidates = await repository.find_banks_by_normalized_name(db, name)
+            matches = [bank for bank in candidates if not bank.state or bank.state == state]
+            matched_by = f"name+state={state}"
+            if len(matches) != 1:
+                unmatched += 1
+                logger.info(
+                    "  digital-assets: seed %r (%s) -> %d match(es); skipping",
+                    name, state, len(matches),
+                )
+                continue
+        bank = matches[0]
+        if not apply:
+            tagged += 1
+            logger.info(
+                "  dry-run: would seed-tag %r (bank id=%s, matched by %s)",
+                name, bank.id, matched_by,
+            )
+            continue
+        changed = repository.apply_digital_asset_tag(
+            bank, pdf_url=None, pdf_title=None, received_date=None
+        )
+        tagged += int(changed)
+        if changed:
+            logger.info(
+                "  digital-assets: seed-tagged %r (bank id=%s, matched by %s)",
+                name, bank.id, matched_by,
+            )
+        else:
+            logger.info(
+                "  digital-assets: seed %r already tagged (bank id=%s); no-op",
+                name, bank.id,
+            )
+    return tagged, unmatched
+
+
+async def _tag_digital_asset_history_entries(
+    db,
+    *,
+    repository,
+    entries,
+    apply: bool,
+) -> tuple[int, int]:
+    """Feed Wayback-unioned applicant rows through the page tagging path.
+
+    ``entries`` are ``OccDigitalAssetHistoryEntry`` rows from
+    ``OccCasService.fetch_digital_asset_application_history`` (already
+    deduped by normalized name + received date, PDF URLs already
+    normalized to their original occ.gov form and allowlisted). Policy is
+    IDENTICAL to the live-page loop: a UNIQUE normalized-name match tags
+    via the sticky ``apply_digital_asset_tag``; zero or ambiguous matches
+    log and skip, never guess. The only delta: an entry carries the
+    newest non-empty PDF URL *set* for its key, so every URL in the set
+    is merged (the repository dedupes by URL, keeping re-runs no-ops).
+
+    Returns ``(tagged, unmatched)``; apply-mode ``tagged`` counts rows
+    that actually CHANGED, mirroring the live loop.
+    """
+    tagged = unmatched = 0
+    for entry in entries:
+        matches = await repository.find_banks_by_normalized_name(db, entry.applicant)
+        if len(matches) != 1:
+            # 0 = a conversion / never-ingested applicant (expected for
+            # decided history); >1 = ambiguous. Both log-only — never
+            # guess, exactly like the live-page rows.
+            unmatched += 1
+            logger.info(
+                "  digital-assets-history: %r received %s -> %d match(es); skipping",
+                entry.applicant, entry.received_date, len(matches),
+            )
+            continue
+        bank = matches[0]
+        if not apply:
+            tagged += 1
+            logger.info(
+                "  dry-run: would tag bank id=%d %r digital_assets=true pdf=%s",
+                bank.id, bank.name, ", ".join(entry.pdf_urls) or "-",
+            )
+            continue
+        changed = False
+        for pdf_url in entry.pdf_urls or (None,):
+            changed = (
+                repository.apply_digital_asset_tag(
+                    bank,
+                    pdf_url=pdf_url,
+                    pdf_title=entry.applicant,
+                    received_date=entry.received_date,
+                )
+                or changed
+            )
+        tagged += int(changed)
+        if changed:
+            logger.info(
+                "  digital-assets-history: tagged bank id=%d %r (%d pdf url(s))",
+                bank.id, bank.name, len(entry.pdf_urls),
+            )
+    return tagged, unmatched
 
 
 if __name__ == "__main__":

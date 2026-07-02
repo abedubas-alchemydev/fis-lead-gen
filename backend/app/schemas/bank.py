@@ -112,6 +112,13 @@ class BankSourceLink(BaseModel):
 
 
 class BankDetail(BankListItem):
+    # ── OCC Institutions API enrichment (reconcile phase; NULL for rows
+    # reconciled via the keyless XLSX fallback and for state charters) ──
+    # ISO 17442 Legal Entity Identifier.
+    lei: str | None = None
+    # OCC CharterType verbatim (e.g. 'National', 'TrustCo-National').
+    # Descriptive only — NOT a digital-assets signal.
+    charter_type: str | None = None
     # Newest-first OCC action timeline (empty for FDIC-only state charters).
     application_events: list[BankApplicationEventItem] = []
     # Assembled by the endpoint from whatever identifiers the row carries.

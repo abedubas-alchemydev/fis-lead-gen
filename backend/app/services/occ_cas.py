@@ -29,11 +29,29 @@ in multiple windows as it accretes actions — exactly what the watcher
 wants for status transitions. Requests MUST carry the query params: the
 bare endpoint 302-redirects to the search UI (verified).
 
-Also here: the OCC "Financial Institution Lists" national-banks directory
-(``national-by-name.xlsx``) used to reconcile an opened application to its
-FDIC row. Verified live 2026-07-02: header row 4 = CHARTER NO | NAME |
-ADDRESS (LOC) | CITY | STATE | CERT | RSSD — it carries the FDIC CERT
-directly, so charter-number reconciliation is a lookup, not a fuzzy match.
+Also here: the two ACTIVE-institutions directory sources used to reconcile
+an opened application to its FDIC row.
+
+PRIMARY — the OCC's official, documented **Institutions API**
+(``api.occ.gov``; the docs SPA at the api.occ.gov portal is JS-rendered,
+its content lives in ``assets/data/institution.json``). Verified live
+2026-07-02::
+
+    GET https://api.occ.gov/institutions/active   (X-Api-Key header)
+
+990 records with CharterNumber / BankName / BankCity / BankStateCode /
+BankAddress / ZipCode / InstNationalTrustCompanyInd / CharterType (e.g.
+"TrustCo-National") / CharterDate (ISO) / FDICCertificateNumber /
+FDICInsuranceStatus / FRBRSSDNumber / LegalEntityIdentifier / RCON.
+Auth is an api.data.gov key (env ``OCC_API_KEY``), rate limit ~1000/hr —
+the watcher makes one call per run. Missing key / HTTP failure / schema
+surprise all log a warning and return None so callers can fall back.
+
+FALLBACK — the OCC "Financial Institution Lists" national-banks workbook
+(``national-by-name.xlsx``), keyless. Verified live 2026-07-02: header
+row 4 = CHARTER NO | NAME | ADDRESS (LOC) | CITY | STATE | CERT | RSSD —
+it carries the FDIC CERT directly, so charter-number reconciliation is a
+lookup, not a fuzzy match, in both sources.
 
 And the OCC "Digital Assets Licensing Applications" page (client
 addition): a single HTML table (verified live 2026-07-02 at
@@ -51,9 +69,12 @@ consumes today is JSON, XLSX, or plain HTML).
 
 from __future__ import annotations
 
+import asyncio
 import io
 import logging
+import os
 import re
+from collections.abc import Sequence
 from dataclasses import dataclass, field
 from datetime import date, datetime
 from html.parser import HTMLParser
@@ -65,8 +86,15 @@ logger = logging.getLogger(__name__)
 
 OCC_CAS_SEARCH_URL = "https://apps.occ.gov/CAS/api/search"
 OCC_CAS_DETAILS_URL = "https://apps.occ.gov/CAS/home/details"
+# OCC Institutions API (official + documented) — the PRIMARY directory of
+# active national banks / federal trust companies. One GET per watcher run.
+# Auth: api.data.gov key via the X-Api-Key header (?api_key= also works,
+# but the header keeps the key out of URLs and logged exception messages).
+OCC_INSTITUTIONS_API_URL = "https://api.occ.gov/institutions/active"
+OCC_API_KEY_ENV = "OCC_API_KEY"
 # OCC "Financial Institution Lists" — active national banks with charter
-# number, FDIC CERT, and RSSD. ~80 KB workbook, refreshed monthly.
+# number, FDIC CERT, and RSSD. ~80 KB workbook, refreshed monthly. The
+# keyless FALLBACK directory when the Institutions API is unavailable.
 OCC_NATIONAL_BANKS_XLSX_URL = (
     "https://www.occ.gov/topics/charters-and-licensing/"
     "financial-institution-lists/national-by-name.xlsx"
@@ -81,6 +109,28 @@ OCC_DIGITAL_ASSETS_URL = (
     "index-digital-assets-licensing-applications.html"
 )
 _OCC_BASE_URL = "https://www.occ.gov"
+
+# Wayback Machine (public Internet Archive) — one-off history backfill of
+# the digital-assets page (it prunes decided applications, so its PAST
+# tenants exist only in archived captures of OCC's own page). CDX is the
+# archive's capture index; the ``id_`` ("identity") URL flag serves the
+# ORIGINAL captured bytes — no archive chrome, no link rewriting — so
+# ``parse_digital_assets_page`` works unchanged on a snapshot.
+WAYBACK_CDX_URL = "https://web.archive.org/cdx/search/cdx"
+_WAYBACK_SNAPSHOT_URL = "https://web.archive.org/web/{timestamp}id_/{original}"
+# ~one capture per month: collapse on the first 6 timestamp digits (YYYYMM).
+_WAYBACK_CDX_PARAMS = {
+    "output": "json",
+    "fl": "timestamp,statuscode",
+    "filter": "statuscode:200",
+    "collapse": "timestamp:6",
+}
+# Polite crawl delay between snapshot fetches.
+_WAYBACK_DELAY_SECONDS = 1.0
+# The archive's latency is spiky (a CDX call was observed to exceed 30s and
+# then answer in 6s on retry) — give the one-off backfill a generous
+# timeout instead of the service's 30s default.
+_WAYBACK_TIMEOUT_SECONDS = 120.0
 
 # CAS FilingTypeID for "New Bank Charter".
 OCC_FILING_TYPE_NEW_BANK_CHARTER = "2"
@@ -226,7 +276,14 @@ def parse_cas_item(item: dict) -> OccCharterFiling | None:
 
 @dataclass
 class OccNationalBankDirectoryRow:
-    """One row of national-by-name.xlsx (active national banks)."""
+    """One active-institutions directory row (charter no ↔ CERT ↔ RSSD).
+
+    Produced by BOTH directory sources — the official Institutions API
+    (``api.occ.gov``, primary) and the ``national-by-name.xlsx`` workbook
+    (fallback) — so the watcher's reconcile phase is source-agnostic:
+    identical unique-match semantics either way. ``lei`` / ``charter_type``
+    are API-only enrichment; XLSX rows leave them None.
+    """
 
     charter_number: str
     name: str
@@ -234,6 +291,74 @@ class OccNationalBankDirectoryRow:
     state: str | None = None
     fdic_cert: str | None = None
     fed_rssd: str | None = None
+    # ISO 17442 Legal Entity Identifier (Institutions API only).
+    lei: str | None = None
+    # OCC CharterType verbatim, e.g. 'National' / 'TrustCo-National'
+    # (Institutions API only). Descriptive — deliberately NOT a
+    # digital-assets signal: plenty of TrustCo-National institutions
+    # (e.g. Citicorp Trust Delaware) are not digital-asset businesses.
+    charter_type: str | None = None
+
+
+def _identifier_str(value: object) -> str | None:
+    """Normalize a numeric-ish identifier (cert / RSSD / charter number).
+
+    The Institutions API emits these as JSON numbers; the XLSX cell reader
+    already handles its own float-formatting. ``0`` / ``"0"`` means "no
+    such identifier" (uninsured trust companies carry cert 0), and MUST
+    map to None — stamping a literal '0' cert onto two banks would trip
+    the unique index and corrupt reconciliation.
+    """
+    if value is None:
+        return None
+    text = str(value).strip()
+    if text.endswith(".0"):
+        text = text[:-2]
+    if not text or text == "0" or text.lower() in _CAS_PLACEHOLDERS:
+        return None
+    return text
+
+
+def parse_active_institution(item: dict) -> OccNationalBankDirectoryRow | None:
+    """Normalize one Institutions-API record; None (logged) when the keys
+    reconciliation matches on are missing. Schema-tolerant like the CAS
+    parser: everything beyond CharterNumber/BankName is optional."""
+    charter_number = _identifier_str(item.get("CharterNumber"))
+    name = _opt_str(item, "BankName")
+    if not charter_number or not name:
+        logger.warning(
+            "occ_cas: skipping institutions-API item missing CharterNumber/BankName: %r",
+            item,
+        )
+        return None
+    return OccNationalBankDirectoryRow(
+        charter_number=charter_number,
+        name=name,
+        city=_opt_str(item, "BankCity"),
+        state=_opt_str(item, "BankStateCode"),
+        fdic_cert=_identifier_str(item.get("FDICCertificateNumber")),
+        fed_rssd=_identifier_str(item.get("FRBRSSDNumber")),
+        lei=_opt_str(item, "LegalEntityIdentifier"),
+        charter_type=_opt_str(item, "CharterType"),
+    )
+
+
+def _institutions_api_items(body: object) -> list | None:
+    """Locate the record list in the Institutions-API response body.
+
+    Verified live as a bare JSON array; tolerate a wrapped envelope too
+    (the API is documented but young). None = unrecognizable shape."""
+    if isinstance(body, list):
+        return body
+    if isinstance(body, dict):
+        for key in ("institutions", "items", "data", "results"):
+            value = body.get(key)
+            if isinstance(value, list):
+                return value
+        lists = [value for value in body.values() if isinstance(value, list)]
+        if len(lists) == 1:
+            return lists[0]
+    return None
 
 
 def normalize_bank_name(name: str) -> str:
@@ -303,6 +428,67 @@ class OccCasService:
             len(items or []), len(filings),
         )
         return filings
+
+    async def fetch_active_institutions(self) -> list[OccNationalBankDirectoryRow] | None:
+        """Fetch the OCC Institutions API's active-institutions directory.
+
+        The PRIMARY reconcile source (official + documented; the XLSX
+        workbook below is the keyless fallback). One GET per run against
+        ``OCC_INSTITUTIONS_API_URL`` with the api.data.gov key from the
+        ``OCC_API_KEY`` env var in the ``X-Api-Key`` header.
+
+        NEVER raises — returns None (with a logged warning) on a missing
+        key, an HTTP/network failure, a non-JSON body, an unrecognizable
+        response shape, or zero parseable records, so the caller can fall
+        back to ``fetch_national_bank_directory``. Same schema-tolerance
+        philosophy as the CAS parsing: a malformed record is logged and
+        skipped, never raised.
+        """
+        api_key = (os.environ.get(OCC_API_KEY_ENV) or "").strip()
+        if not api_key:
+            logger.warning(
+                "occ_cas: %s unset; skipping the Institutions API (XLSX fallback)",
+                OCC_API_KEY_ENV,
+            )
+            return None
+        try:
+            async with httpx.AsyncClient(
+                timeout=self._timeout, follow_redirects=True
+            ) as client:
+                response = await client.get(
+                    OCC_INSTITUTIONS_API_URL,
+                    headers={"X-Api-Key": api_key, "Accept": "application/json"},
+                )
+                response.raise_for_status()
+                body = response.json()
+        except (httpx.HTTPError, ValueError) as exc:
+            # str(exc) carries the URL at most — the key rides in a header,
+            # so nothing secret can leak into this log line.
+            logger.warning("occ_cas: Institutions API failed (%s); XLSX fallback", exc)
+            return None
+        items = _institutions_api_items(body)
+        if items is None:
+            logger.warning(
+                "occ_cas: Institutions API body shape unrecognized (%s); XLSX fallback",
+                type(body).__name__,
+            )
+            return None
+        rows = [
+            row
+            for item in items
+            if isinstance(item, dict)
+            and (row := parse_active_institution(item)) is not None
+        ]
+        if not rows:
+            # A directory that parses to 0 rows must not silently reconcile
+            # nothing under reconcile_source=api — let the XLSX path try.
+            logger.warning(
+                "occ_cas: Institutions API -> 0 parseable row(s) of %d item(s); XLSX fallback",
+                len(items),
+            )
+            return None
+        logger.info("occ_cas: Institutions API -> %d active institution row(s)", len(rows))
+        return rows
 
     async def fetch_national_bank_directory(self) -> list[OccNationalBankDirectoryRow]:
         """Download + parse national-by-name.xlsx (charter no ↔ CERT ↔ RSSD).
@@ -382,6 +568,74 @@ class OccCasService:
             sum(1 for a in applications if a.pdf_url),
         )
         return applications
+
+    async def fetch_digital_asset_application_history(
+        self, *, delay_seconds: float = _WAYBACK_DELAY_SECONDS
+    ) -> tuple[int, list[OccDigitalAssetHistoryEntry]]:
+        """Union the Wayback Machine's monthly captures of the digital-assets page.
+
+        One-off backfill source: the live page lists only CURRENT
+        applications, so an applicant that rolled off before our first
+        scrape exists only in the public Internet Archive's captures of
+        OCC's own page. The CDX index yields ~one 200-OK capture per month
+        (``collapse=timestamp:6``); each is fetched via the raw ``id_``
+        URL (original page bytes, no archive chrome, no link rewriting)
+        with a polite delay, parsed by the UNCHANGED live-page parser
+        (after ``strip_wayback_rewrites`` undoes any stray archive href
+        rewriting so the occ.gov allowlist judges original URLs), then
+        unioned oldest→newest. A failed capture logs a warning and is
+        skipped; a CDX failure raises — without the index there is no
+        backfill. Returns ``(snapshots_parsed, entries)``.
+        """
+        params = {
+            # The CDX capture key is scheme-/www-less; query with the same
+            # canonical form (verified to return the monthly 200s).
+            "url": re.sub(r"^https?://(?:www\.)?", "", OCC_DIGITAL_ASSETS_URL),
+            **_WAYBACK_CDX_PARAMS,
+        }
+        parsed_snapshots: list[tuple[str, list[OccDigitalAssetApplication]]] = []
+        timeout = max(self._timeout, _WAYBACK_TIMEOUT_SECONDS)
+        async with httpx.AsyncClient(timeout=timeout, follow_redirects=True) as client:
+            response = await client.get(
+                WAYBACK_CDX_URL, params=params, headers={"Accept": "application/json"}
+            )
+            response.raise_for_status()
+            timestamps = parse_cdx_timestamps(response.json())
+            logger.info("occ_cas: wayback CDX -> %d monthly capture(s)", len(timestamps))
+            for index, timestamp in enumerate(timestamps):
+                if index and delay_seconds > 0:
+                    # Polite crawl delay — the archive is a shared public
+                    # service and the whole history is a few dozen fetches.
+                    await asyncio.sleep(delay_seconds)
+                snapshot_url = _WAYBACK_SNAPSHOT_URL.format(
+                    timestamp=timestamp, original=OCC_DIGITAL_ASSETS_URL
+                )
+                try:
+                    snapshot = await client.get(
+                        snapshot_url, headers={"Accept": "text/html"}
+                    )
+                    snapshot.raise_for_status()
+                except httpx.HTTPError as exc:
+                    logger.warning(
+                        "occ_cas: wayback snapshot %s failed (%s); continuing",
+                        timestamp, exc,
+                    )
+                    continue
+                applications = parse_digital_assets_page(
+                    strip_wayback_rewrites(snapshot.text)
+                )
+                logger.info(
+                    "occ_cas: wayback snapshot %s -> %d row(s), %d with PDF",
+                    timestamp, len(applications),
+                    sum(1 for a in applications if a.pdf_url),
+                )
+                parsed_snapshots.append((timestamp, applications))
+        entries = union_digital_asset_history(parsed_snapshots)
+        logger.info(
+            "occ_cas: wayback history -> %d snapshot(s) parsed, %d unique applicant row(s)",
+            len(parsed_snapshots), len(entries),
+        )
+        return len(parsed_snapshots), entries
 
 
 # ── OCC "Digital Assets Licensing Applications" page (client addition) ──
@@ -509,3 +763,152 @@ def parse_digital_assets_page(html: str) -> list[OccDigitalAssetApplication]:
     if not applications:
         logger.warning("occ_cas: digital-assets page parsed to 0 rows — layout change?")
     return applications
+
+
+# ── Wayback Machine history of the digital-assets page (one-off backfill) ──
+# (URL constants live up top with the other endpoints; the parsing/union
+# helpers below are pure and unit-tested.)
+
+_WAYBACK_TIMESTAMP_RE = re.compile(r"\d{4,14}")
+
+
+def parse_cdx_timestamps(body: object) -> list[str]:
+    """CDX ``output=json`` body -> unique capture timestamps, oldest first.
+
+    Verified shape: a JSON array whose first row is the header
+    (``["timestamp","statuscode"]``) followed by one ``["<ts>","200"]``
+    row per collapsed capture. Tolerant like every other parser here:
+    junk rows, non-200 strays, and a non-list body skip / return empty
+    rather than raise. Ascending order matters downstream — the history
+    union lets the NEWEST snapshot win each applicant's PDF set.
+    """
+    if not isinstance(body, list):
+        logger.warning("occ_cas: wayback CDX body is not a list (%s)", type(body).__name__)
+        return []
+    timestamps: set[str] = set()
+    for row in body:
+        if not isinstance(row, (list, tuple)) or not row:
+            continue
+        timestamp = str(row[0]).strip()
+        status = str(row[1]).strip() if len(row) > 1 else "200"
+        if not _WAYBACK_TIMESTAMP_RE.fullmatch(timestamp):
+            continue  # header row ('timestamp') or junk
+        if status != "200":
+            continue  # filter=statuscode:200 should guarantee this; belt-and-braces
+        timestamps.add(timestamp)
+    return sorted(timestamps)
+
+
+# Wayback link rewriting: an archived page's hrefs can arrive as
+# ``https://web.archive.org/web/<ts><flags>/<original-url>`` or the
+# root-relative ``/web/<ts><flags>/<original-url>``. The ``id_`` fetch is
+# supposed to return unrewritten bytes, but belt-and-braces: normalize any
+# rewritten href back to its ORIGINAL URL *before* the parser applies the
+# occ.gov allowlist — otherwise a root-relative ``/web/…`` href would
+# absolutize onto www.occ.gov as a broken (but allowlist-passing!) URL.
+_WAYBACK_REWRITE_RE = re.compile(
+    r"^(?:https?://web\.archive\.org)?/web/\d{4,14}[a-z_]*/(?P<original>.*)$",
+    re.IGNORECASE,
+)
+# Sentinel for a rewritten href with no recoverable original: it is not an
+# occ.gov URL, so the parser's existing allowlist drops it (with its
+# standard warning) — the "doesn't normalize cleanly -> drop" rule rides
+# the same enforcement point as every other link.
+_WAYBACK_UNRESOLVED = "https://web.archive.org/__unresolved-wayback-href__"
+
+_HREF_ATTR_RE = re.compile(r"""(href\s*=\s*)(["'])(.*?)\2""", re.IGNORECASE | re.DOTALL)
+
+
+def normalize_wayback_snapshot_href(href: str) -> str | None:
+    """Undo Wayback rewriting on one href.
+
+    Returns the embedded original URL for a cleanly rewritten href, the
+    href unchanged when it is not archive-shaped at all (relative occ.gov
+    paths, absolute occ.gov URLs — the normal id_ snapshot content), and
+    None when it IS archive-shaped but no absolute http(s) original can be
+    recovered. Pure; never raises.
+    """
+    match = _WAYBACK_REWRITE_RE.match(href.strip())
+    if match is None:
+        return href
+    original = match.group("original").strip()
+    if original.startswith(("http://", "https://")):
+        return original
+    if original.startswith("//"):
+        # Scheme-relative rewrite variant (/web/<ts>///host/path).
+        return f"https:{original}"
+    return None
+
+
+def strip_wayback_rewrites(html: str) -> str:
+    """Normalize every quoted ``href`` attribute in snapshot HTML back to
+    its original URL so the UNCHANGED live-page parser — and its occ.gov
+    host allowlist — sees exactly what the original page served.
+    Unresolvable archive-shaped hrefs become a web.archive.org sentinel
+    the allowlist then drops."""
+
+    def _replace(match: re.Match[str]) -> str:
+        normalized = normalize_wayback_snapshot_href(match.group(3))
+        if normalized is None:
+            normalized = _WAYBACK_UNRESOLVED
+        return f"{match.group(1)}{match.group(2)}{normalized}{match.group(2)}"
+
+    return _HREF_ATTR_RE.sub(_replace, html)
+
+
+@dataclass
+class OccDigitalAssetHistoryEntry:
+    """One applicant row unioned across every archived snapshot.
+
+    Identity = (normalized applicant name, received date) — the page's
+    only stable key. ``pdf_urls`` is the newest NON-EMPTY set of
+    allowlisted public-portion PDF URLs seen for the key: a later capture
+    that re-links the PDF elsewhere replaces the set; one that drops the
+    link entirely (or the row itself) does not erase history.
+    """
+
+    applicant: str
+    received_date: date | None = None
+    pdf_urls: tuple[str, ...] = ()
+
+
+def union_digital_asset_history(
+    snapshots: Sequence[tuple[str, Sequence[OccDigitalAssetApplication]]],
+) -> list[OccDigitalAssetHistoryEntry]:
+    """Union parsed snapshot rows (``(timestamp, applications)`` pairs).
+
+    Snapshots are processed oldest→newest regardless of input order.
+    Dedupe key: ``normalize_bank_name(applicant)`` + received date, so the
+    page re-spelling a name ("TR CO, NA" vs "Trust Company, N.A.") does
+    not duplicate an applicant, while a re-filed application (new received
+    date) stays a distinct row. The newest capture wins the display casing
+    and, when it carries at least one PDF URL for the key, the PDF set.
+    Output is sorted by received date then name for stable logs.
+    """
+    entries: dict[tuple[str, date | None], OccDigitalAssetHistoryEntry] = {}
+    for _timestamp, applications in sorted(snapshots, key=lambda pair: pair[0]):
+        snapshot_urls: dict[tuple[str, date | None], list[str]] = {}
+        for application in applications:
+            key = (normalize_bank_name(application.applicant), application.received_date)
+            if not key[0]:
+                continue
+            entry = entries.get(key)
+            if entry is None:
+                entry = OccDigitalAssetHistoryEntry(
+                    applicant=application.applicant,
+                    received_date=application.received_date,
+                )
+                entries[key] = entry
+            else:
+                entry.applicant = application.applicant  # newest casing wins
+            if application.pdf_url:
+                urls = snapshot_urls.setdefault(key, [])
+                if application.pdf_url not in urls:
+                    urls.append(application.pdf_url)
+        # Only a non-empty per-snapshot set REPLACES the stored set.
+        for key, urls in snapshot_urls.items():
+            entries[key].pdf_urls = tuple(urls)
+    return sorted(
+        entries.values(),
+        key=lambda entry: (entry.received_date or date.min, entry.applicant.lower()),
+    )
