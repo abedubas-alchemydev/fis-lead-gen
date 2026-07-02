@@ -42,7 +42,11 @@ def main() -> int:
     dsn = (os.environ["DATABASE_URL"]
            .replace("postgresql+psycopg://", "postgresql://")
            .replace("postgresql+asyncpg://", "postgresql://"))
-    conn = psycopg.connect(dsn, connect_timeout=30, autocommit=False, row_factory=dict_row)
+    conn = psycopg.connect(
+        dsn, connect_timeout=30, autocommit=False, row_factory=dict_row,
+        keepalives=1, keepalives_idle=30, keepalives_interval=10, keepalives_count=5,
+        options="-c idle_in_transaction_session_timeout=0 -c statement_timeout=120000",
+    )
     cur = conn.cursor()
     # Dry-run exercises the FULL write path and rolls back at the end
     # (same pattern as replicate_staging_to_prod --validate-apply).
@@ -62,6 +66,7 @@ def main() -> int:
     if not pairs:
         return 0
     dupe_ids = list(pairs.keys())
+    orig_ids = [pairs[d] for d in dupe_ids]  # positionally aligned with dupe_ids
 
     # discover every FK column referencing broker_dealers.id
     cur.execute("""
@@ -101,25 +106,57 @@ def main() -> int:
         """).format(assigns=assigns), (dupe_ids,))
     print(f"originals scalar-merged (fill-only): {cur.rowcount}")
 
-    # ── re-point children row by row; delete child on unique conflict ──
+    # ── re-point children set-based: per-table, one DELETE for each unique
+    #    index that includes the FK column (drop the dupe's child where the
+    #    original already holds that key), then one bulk UPDATE re-pointing the
+    #    survivors. Set-based keeps the whole write to a handful of statements —
+    #    the old row-by-row loop held the transaction open across ~1900
+    #    round-trips and a transient Neon SSL drop aborted a prod apply
+    #    (2026-07-02). Semantics are identical: every duplicated CRD group has
+    #    exactly two rows, so each dupe maps to a unique original and two
+    #    re-pointed children can never collide with each other — only with an
+    #    original's existing child, which the EXISTS anti-join removes.
     moved = {}
     deleted_children = {}
     for tbl, col in fks:
-        cur.execute(sql.SQL("SELECT id, {c} AS ref FROM {t} WHERE {c} = ANY(%s)").format(
-            c=sql.Identifier(col), t=sql.Identifier(tbl)), (dupe_ids,))
-        rows = cur.fetchall()
-        m = dc = 0
-        for r in rows:
-            try:
-                with conn.transaction():  # savepoint per row
-                    cur.execute(sql.SQL("UPDATE {t} SET {c} = %s WHERE id = %s").format(
-                        t=sql.Identifier(tbl), c=sql.Identifier(col)), (pairs[r["ref"]], r["id"]))
-                m += 1
-            except psycopg.errors.UniqueViolation:
-                cur.execute(sql.SQL("DELETE FROM {t} WHERE id = %s").format(
-                    t=sql.Identifier(tbl)), (r["id"],))
-                dc += 1
-        if rows:
+        # unique indexes on this table whose columns include the FK column;
+        # re-pointing (which changes only that column) can newly violate one of
+        # these and nothing else. Skip expression indexes (attnum 0).
+        cur.execute("""
+            SELECT array_agg(a.attname ORDER BY k.ord) AS cols
+            FROM pg_index ix
+            JOIN pg_class t ON t.oid = ix.indrelid
+            JOIN unnest(ix.indkey) WITH ORDINALITY AS k(attnum, ord) ON true
+            JOIN pg_attribute a ON a.attrelid = ix.indrelid AND a.attnum = k.attnum
+            WHERE t.relname = %s AND t.relnamespace = 'public'::regnamespace
+              AND ix.indisunique AND 0 <> ALL (ix.indkey)
+            GROUP BY ix.indexrelid
+            HAVING %s = ANY(array_agg(a.attname))
+        """, (tbl, col))
+        uniq_indexes = [r["cols"] for r in cur.fetchall()]
+
+        dc = 0
+        for cols in uniq_indexes:
+            others = [c for c in cols if c != col]
+            match = (sql.SQL(" AND ").join(
+                sql.SQL("o.{c} = d.{c}").format(c=sql.Identifier(c)) for c in others)
+                if others else sql.SQL("true"))
+            cur.execute(sql.SQL("""
+                WITH m(dupe, orig) AS (SELECT * FROM unnest(%s::bigint[], %s::bigint[]))
+                DELETE FROM {t} d USING m
+                WHERE d.{c} = m.dupe
+                  AND EXISTS (SELECT 1 FROM {t} o WHERE o.{c} = m.orig AND {match})
+            """).format(t=sql.Identifier(tbl), c=sql.Identifier(col), match=match),
+                (dupe_ids, orig_ids))
+            dc += cur.rowcount
+
+        cur.execute(sql.SQL("""
+            WITH m(dupe, orig) AS (SELECT * FROM unnest(%s::bigint[], %s::bigint[]))
+            UPDATE {t} d SET {c} = m.orig FROM m WHERE d.{c} = m.dupe
+        """).format(t=sql.Identifier(tbl), c=sql.Identifier(col)), (dupe_ids, orig_ids))
+        m = cur.rowcount
+
+        if m or dc:
             moved[tbl], deleted_children[tbl] = m, dc
     # soft refs: original already has its own embedding -> just delete dupes'
     cur.execute("DELETE FROM chatbot_firm_embedding WHERE entity_type='broker_dealer' AND entity_id = ANY(%s)", (dupe_ids,))
