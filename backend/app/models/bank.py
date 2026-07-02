@@ -243,6 +243,17 @@ class BankContact(Base):
     page_number: Mapped[int | None] = mapped_column(Integer, nullable=True)
     # Short raw text around the hit — the audit trail for the extraction.
     context_snippet: Mapped[str | None] = mapped_column(Text, nullable=True)
+    # ── Tier-2 Apollo enrichment bookkeeping (services/bank_contact_enrichment.py) ──
+    # Stamped on every PAID lookup attempt that reached a decision (matched
+    # OR no-match) so re-runs skip the row and never re-spend the credit.
+    # NULL = never attempted. Provider errors (timeouts, 429/5xx exhaustion)
+    # deliberately do NOT stamp — a transient Apollo outage must not
+    # permanently mark the row as attempted.
+    enriched_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    # 'matched' | 'no_match' — outcome of the last Apollo lookup; NULL =
+    # never attempted. Deliberately not an enum (the vocabulary must be able
+    # to grow without a crash), mirroring role_context above.
+    enrich_status: Mapped[str | None] = mapped_column(String(32), nullable=True)
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=func.now(), nullable=False
     )
