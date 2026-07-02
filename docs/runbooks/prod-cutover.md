@@ -81,11 +81,13 @@ Timezone: America/New_York   (Eastern; auto-tracks EST↔EDT)
 
    ```bash
    # Preview only — no writes, no paid calls.
-   gcloud run jobs deploy fis-bd-gap-fill-prod --region=us-central1 --project=fis-lead-gen \
+   # NOTE: `jobs update` (not `deploy`) — deploy requires --image; update
+   # patches args in place on the existing job (verified 2026-07-02).
+   gcloud run jobs update fis-bd-gap-fill-prod --region=us-central1 --project=fis-lead-gen \
      --args=scripts/gap_fill_broker_dealers.py,--scan-only
    gcloud run jobs execute fis-bd-gap-fill-prod --region=us-central1 --project=fis-lead-gen --wait
    # Read the scan summary in the logs, then RESTORE the applied args:
-   gcloud run jobs deploy fis-bd-gap-fill-prod --region=us-central1 --project=fis-lead-gen \
+   gcloud run jobs update fis-bd-gap-fill-prod --region=us-central1 --project=fis-lead-gen \
      --args=scripts/gap_fill_broker_dealers.py,--apply,--newest-first,--limit,300
    ```
 
