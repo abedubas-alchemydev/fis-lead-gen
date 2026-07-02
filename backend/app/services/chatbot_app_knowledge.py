@@ -30,6 +30,7 @@ from dataclasses import dataclass
 from app.core.feature_permissions import (
     ALERTS,
     ALL_FEATURE_KEYS,
+    BANKS,
     DASHBOARD,
     EMAIL_EXTRACTOR,
     INSTITUTIONAL_INVESTORS,
@@ -141,6 +142,38 @@ APP_KNOWLEDGE: dict[str, AppFeatureHelp] = {
             "form x-17a-5",
             "clearing arrangements",
             "net capital",
+        ),
+    ),
+    BANKS: AppFeatureHelp(
+        label="Banks",
+        route="/banks",
+        summary=(
+            "New banking charters (national + state) tracked from official "
+            "public government sources: FDIC BankFind for newly opened "
+            "insured institutions and the OCC Corporate Applications Search "
+            "for pending national-bank / federal-trust charter applications "
+            "(Receipt, Approved, Consummated-Effective, Withdrawn), "
+            "including digital-assets charter applications."
+        ),
+        what_to_do_here=(
+            "Browse newly chartered and pending banks the same way as the "
+            "Master List: filter by state, charter authority (OCC vs "
+            "state), charter status, or the digital-assets tag; click an "
+            "institution for its application timeline and official FDIC / "
+            "OCC source links."
+        ),
+        permission_key=BANKS,
+        synonyms=(
+            "bank charters",
+            "new banks",
+            "bank list",
+            "banking charters",
+            "pending charters",
+            "de novo banks",
+            "occ applications",
+            "fdic banks",
+            "digital asset banks",
+            "trust banks",
         ),
     ),
     INVESTMENT_ADVISORS: AppFeatureHelp(

@@ -11,6 +11,7 @@ Only viewer accounts are filtered by this set.
 from __future__ import annotations
 
 MASTER_LIST = "master_list"
+BANKS = "banks"
 INVESTMENT_ADVISORS = "investment_advisors"
 INVESTORS = "investors"
 INSTITUTIONAL_INVESTORS = "institutional_investors"
@@ -28,6 +29,7 @@ VAULT = "vault"
 ALL_FEATURE_KEYS: frozenset[str] = frozenset(
     {
         MASTER_LIST,
+        BANKS,
         INVESTMENT_ADVISORS,
         INVESTORS,
         INSTITUTIONAL_INVESTORS,

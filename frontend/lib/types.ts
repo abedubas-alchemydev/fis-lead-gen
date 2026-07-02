@@ -153,7 +153,13 @@ export type BrokerDealerListResponse = {
 export type DashboardStats = {
   total_active_bds: number;
   new_bds_90_days: number;
-  deficiency_alerts: number;
+  // "Pending Approval BDs" — filed (CRD assigned, registration refresh has
+  // checked the firm) but no SEC approval date observed yet, windowed to the
+  // same 90 days as new_bds_90_days on the filed-date proxy
+  // COALESCE(formation_date, created_at::date). Replaced the retired
+  // ``deficiency_alerts`` KPI (the /alerts endpoints + page are unchanged —
+  // only this dashboard stat moved). Mirrors backend/app/schemas/stats.py.
+  pending_approval_bds: number;
   // BE boundary field — mirrors FastAPI response shape. Counts firms in the
   // "High Value Participant" segment: latest_net_capital in the [$5M, $100M]
   // band OR the OTC corporate-equity retailing business type. Decoupled from
@@ -1251,6 +1257,101 @@ export type InstitutionalInvestorProfileResponse = {
   contacts: InvestorContactItem[];
   filings: InvestorFilingItem[];
   is_favorited: boolean;
+};
+
+// ── Bank charter (FDIC BankFind + OCC Corporate Applications) types ──
+//
+// Mirrors backend/app/schemas/bank.py. The banks vertical is the sibling
+// of the BD master list: rows are written exclusively by the nightly
+// charter watcher (scripts/watch_bank_charters.py) from the two official
+// public sources, so every endpoint here is read-only. Field names match
+// the FastAPI contract verbatim.
+
+// One public-portion application PDF from the OCC "Digital Assets
+// Licensing Applications" page. URL points at occ.gov — never proxied.
+export type BankPdfLink = {
+  title: string | null;
+  url: string;
+  received_date: string | null;
+};
+
+export type BankListItem = {
+  id: number;
+  // Identifiers — each nullable: a pending application has no FDIC cert
+  // yet; a state-chartered bank never has OCC identifiers.
+  fdic_cert: string | null;
+  fed_rssd: string | null;
+  occ_charter_number: string | null;
+  occ_control_number: string | null;
+  name: string;
+  address: string | null;
+  city: string | null;
+  state: string | null;
+  zip: string | null;
+  website: string | null;
+  // 'OCC' (national charter) | 'STATE' (FDIC CHRTAGNT verbatim).
+  charter_authority: string | null;
+  bkclass: string | null;
+  regulator: string | null;
+  // pending | approved | opened | withdrawn | rescinded
+  charter_status: string;
+  established_date: string | null;
+  insured_date: string | null;
+  application_received_date: string | null;
+  last_action_date: string | null;
+  // FDIC BankFind ASSET/DEP as reported — $ THOUSANDS, not dollars.
+  asset: number | null;
+  deposits: number | null;
+  offices: number | null;
+  // Tri-state: null = no FDIC record yet (OCC-only application).
+  active: boolean | null;
+  // OCC Digital Assets Licensing Applications page match + its
+  // public-portion application PDF links (URLs only).
+  digital_assets: boolean;
+  digital_asset_pdfs: BankPdfLink[];
+  // 'fdic' | 'occ' | 'fdic+occ' — which official source(s) contributed.
+  source: string;
+  fdic_checked_at: string | null;
+  occ_checked_at: string | null;
+  created_at: string;
+  updated_at: string;
+};
+
+export type BankListMeta = {
+  page: number;
+  limit: number;
+  total: number;
+  total_pages: number;
+};
+
+export type BankListResponse = {
+  items: BankListItem[];
+  meta: BankListMeta;
+};
+
+// One OCC charter-application action (Receipt / Approved / Consummated…).
+// source_url is the official CAS details page for the filing.
+export type BankApplicationEventItem = {
+  id: number;
+  action: string;
+  action_date: string | null;
+  filing_type: string | null;
+  source_url: string | null;
+  created_at: string;
+};
+
+// An official public source page for a bank (FDIC BankFind institution
+// profile, OCC CAS filing details, digital-assets application PDF, …).
+export type BankSourceLink = {
+  label: string;
+  url: string;
+};
+
+export type BankDetail = BankListItem & {
+  // Newest-first OCC action timeline (empty for FDIC-only state charters).
+  application_events: BankApplicationEventItem[];
+  // Assembled by the endpoint from whatever identifiers the row carries.
+  source_links: BankSourceLink[];
 };
 
 export type AdjacentResponse = {

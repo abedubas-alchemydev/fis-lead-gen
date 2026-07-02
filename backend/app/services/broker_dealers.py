@@ -1,11 +1,11 @@
 from __future__ import annotations
 
-from datetime import date
+from datetime import date, timedelta
 from math import ceil
 import logging
 import re
 
-from sqlalchemy import ARRAY, String, cast, delete, func, or_, select, update
+from sqlalchemy import ARRAY, Date, String, and_, cast, delete, func, or_, select, update
 from sqlalchemy.dialects.postgresql import insert
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -115,6 +115,54 @@ HIGH_VALUE_NET_CAPITAL_MAX = 100_000_000
 HIGH_VALUE_BUSINESS_TYPES = (
     "Broker or dealer retailing corporate equity securities over-the-counter",
 )
+
+
+# "Pending Approval BDs" — firms that have FILED with FINRA/SEC (a CRD is
+# assigned at application) but whose SEC approval has not been observed.
+# The predicate requires all three:
+#   • crd_number NOT NULL          — the firm exists in FINRA Web CRD (filed);
+#   • registration_date IS NULL    — no "SEC Approved/Active/Registered/
+#     Effective <date>" line parsed from its BrokerCheck Form BD PDF (that
+#     line is exactly what scripts/refresh_registration_dates.py writes into
+#     registration_date — verified live 2026-07-02 on CRDs 19616/13071:
+#     approved firms always carry it and BrokerCheck's own firmStatus
+#     'Approved' + firmStatusDate mirror it);
+#   • registration_checked_at NOT NULL — the nightly refresh actually
+#     evaluated this firm. Without this sentinel the set would be polluted
+#     by never-checked rows whose date is merely un-backfilled.
+# Disjoint from the "New BDs" window BY CONSTRUCTION: New BDs filters on
+# registration_date >= cutoff, and SQL's NULL never satisfies a range
+# comparison, so a pending firm (NULL date) can never appear on both.
+# Known caveat: a Form BD PDF parse-miss also leaves the date NULL; the
+# rolling nightly refresh re-checks the book (~2-week cycle), so such rows
+# self-heal out of this set once the date parses.
+def pending_approval_filter():
+    return and_(
+        BrokerDealer.crd_number.is_not(None),
+        BrokerDealer.registration_date.is_(None),
+        BrokerDealer.registration_checked_at.is_not(None),
+    )
+
+
+def pending_filed_date_proxy():
+    """Filed-date proxy for windowing PENDING firms (their
+    ``registration_date`` is NULL by definition, so the New BD card's 30/90-
+    day window needs a different anchor).
+
+    ``COALESCE(formation_date, created_at::date)``: ``formation_date`` (the
+    firm's legal formation, parsed from the same Form BD PDF) is the real-
+    world signal — new broker-dealers are typically formed shortly before
+    filing. ``created_at`` (when our nightly extractor first saw the firm in
+    FINRA's active enumeration ≈ when the application surfaced) is the
+    fallback for rows missing a formation date. created_at is deliberately
+    NOT preferred: bulk loads stamp thousands of rows with one created_at,
+    which would flood the window with false "recent filers" after every
+    load, whereas formation_date can only err conservatively (a firm formed
+    years before filing drops out of the window). Staging-data distribution
+    check deferred to the post-merge staging pass (local DB is a fixture) —
+    documented in the PR.
+    """
+    return func.coalesce(BrokerDealer.formation_date, cast(BrokerDealer.created_at, Date))
 
 
 def high_value_participant_filter():
@@ -401,6 +449,7 @@ class BrokerDealerRepository:
         registered_before: date | None = None,
         segment: str | None = None,
         ids: list[int] | None = None,
+        pending_approval: bool = False,
     ) -> BrokerDealerListResponse:
         filters = []
         if search:
@@ -492,10 +541,21 @@ class BrokerDealerRepository:
             filters.append(BrokerDealer.latest_net_capital >= min_net_capital)
         if max_net_capital is not None:
             filters.append(BrokerDealer.latest_net_capital <= max_net_capital)
+        # "Pending Approval BDs" mode: filed (CRD assigned) + checked, but no
+        # SEC approval date observed. Every pending row has
+        # registration_date IS NULL by definition, so the 30/90-day window
+        # params retarget to the filed-date proxy — otherwise ANY window
+        # would return zero rows. In normal mode they hit registration_date
+        # exactly as before.
+        if pending_approval:
+            filters.append(pending_approval_filter())
+        window_column = (
+            pending_filed_date_proxy() if pending_approval else BrokerDealer.registration_date
+        )
         if registered_after is not None:
-            filters.append(BrokerDealer.registration_date >= registered_after)
+            filters.append(window_column >= registered_after)
         if registered_before is not None:
-            filters.append(BrokerDealer.registration_date <= registered_before)
+            filters.append(window_column <= registered_before)
 
         # Named-segment preset (currently just the dashboard "High Value
         # Participants" tile). ANDs with every other filter, so a user can
@@ -718,6 +778,25 @@ class BrokerDealerRepository:
         # card. Stays in lockstep with the ``?segment=high_value`` list filter
         # so the KPI count and the drill-down list always agree.
         stmt = select(func.count(BrokerDealer.id)).where(high_value_participant_filter())
+        return int((await db.execute(stmt)).scalar_one())
+
+    async def count_pending_approval(
+        self, db: AsyncSession, *, filed_within_days: int | None = 90, today: date | None = None
+    ) -> int:
+        """Dashboard KPI for the "Pending Approval BDs" card.
+
+        Windowed at 90 days on the filed-date proxy to mirror the New BD
+        card's ``new_bds_90_days`` convention (and so a one-time
+        registration backfill can't flood the tile with years-old zombie
+        applications). Pass ``filed_within_days=None`` for the raw total.
+        Stays in lockstep with ``?pending_approval=true`` +
+        ``registered_after=<today-90d>`` on the list endpoint so the KPI
+        and its drill-down list always agree.
+        """
+        stmt = select(func.count(BrokerDealer.id)).where(pending_approval_filter())
+        if filed_within_days is not None:
+            cutoff = (today or date.today()) - timedelta(days=filed_within_days)
+            stmt = stmt.where(pending_filed_date_proxy() >= cutoff)
         return int((await db.execute(stmt)).scalar_one())
 
     async def list_states(self, db: AsyncSession) -> list[str]:

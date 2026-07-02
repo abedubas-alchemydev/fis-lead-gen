@@ -359,6 +359,7 @@ def investors_url(
 INTERNAL_ROUTE_PREFIXES: tuple[str, ...] = (
     "/advisor-list",
     "/alerts",
+    "/banks",
     "/dashboard",
     "/email-extractor",
     "/institutional-investors",

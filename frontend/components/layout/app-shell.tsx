@@ -57,6 +57,18 @@ function MasterListIcon(props: IconProps) {
   );
 }
 
+// Landmark (columned building) mark for the bank-charter list — reads as
+// "bank" at a glance next to the Master List's three-line glyph.
+function BanksIcon(props: IconProps) {
+  return (
+    <IconBase {...props}>
+      <path d="M3 21h18" />
+      <path d="M5 21v-8M9.5 21v-8M14.5 21v-8M19 21v-8" />
+      <path d="M12 3l9 7H3l9-7z" />
+    </IconBase>
+  );
+}
+
 // Briefcase + chart-bar mark — distinguishes the Investment Advisor list
 // from the Master List's three-line glyph at a glance.
 function AdvisorListIcon(props: IconProps) {
@@ -258,12 +270,16 @@ type SessionUser = {
   feature_permissions?: string[] | null;
 };
 
+// Subset of DashboardStats the sidebar reads. The Alerts badge used to
+// mirror ``deficiency_alerts``, but that stat was retired when the
+// dashboard's Deficiency Alerts KPI became "Pending Approval BDs" (the
+// /alerts page itself is unchanged) — so the Alerts nav entry no longer
+// renders a count.
 type StatsLite = {
   total_active_bds: number;
-  deficiency_alerts: number;
 };
 
-type BadgeKey = "total" | "alerts" | null;
+type BadgeKey = "total" | null;
 
 type NavIconComponent = (props: IconProps) => JSX.Element;
 
@@ -291,13 +307,14 @@ const navSections: ReadonlyArray<NavSection> = [
     label: "Overview",
     items: [
       { href: "/dashboard", label: "Dashboard", icon: DashboardIcon, badgeKey: null, permissionKey: "dashboard" },
-      { href: "/alerts", label: "Alerts", icon: AlertsIcon, badgeKey: "alerts", permissionKey: "alerts" }
+      { href: "/alerts", label: "Alerts", icon: AlertsIcon, badgeKey: null, permissionKey: "alerts" }
     ]
   },
   {
     label: "Lists",
     items: [
       { href: "/master-list", label: "Broker Dealers", icon: MasterListIcon, badgeKey: "total", permissionKey: "master_list" },
+      { href: "/banks" as Route, label: "Banks", icon: BanksIcon, badgeKey: null, permissionKey: "banks" },
       { href: "/advisor-list" as Route, label: "Investment Advisors", icon: AdvisorListIcon, badgeKey: null, permissionKey: "investment_advisors" },
       { href: "/investors" as Route, label: "Investors", icon: InvestorsIcon, badgeKey: null, permissionKey: "investors" }
     ]
@@ -424,8 +441,7 @@ export function AppShell({
   }, []);
 
   const badges: Record<Exclude<BadgeKey, null>, string | null> = {
-    total: stats ? stats.total_active_bds.toLocaleString() : null,
-    alerts: stats && stats.deficiency_alerts > 0 ? stats.deficiency_alerts.toString() : null
+    total: stats ? stats.total_active_bds.toLocaleString() : null
   };
 
   const initials = initialsFromName(session.user.name ?? session.user.email);
