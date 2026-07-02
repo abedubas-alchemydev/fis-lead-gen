@@ -522,6 +522,70 @@ jobs:
             --set-secrets=DATABASE_URL=DATABASE_URL_BACKEND:latest \
             --labels=commit-sha=${{ env.SHORT_SHA }},environment=production,kind=batch-job
 
+      # Cloud Run Job that runs scripts/watch_bank_charters.py against the
+      # staging Neon DB — the banks-vertical sibling of extract-new-bds.
+      # Ingests new bank charters from the two official public sources (FDIC
+      # BankFind ESTYMD window + /history CHANGECODE:110 corroboration; OCC
+      # CAS "New Bank Charter" filings/actions), reconciles opened OCC
+      # applications onto their FDIC identity via the OCC national-banks
+      # directory workbook, and tags digital-assets applications from the
+      # OCC digital-assets page (public-portion PDF URLs stored, never
+      # fetched). All writes are idempotent upserts over an overlapping
+      # trailing-30-day window, so re-runs are safe. Secrets: DATABASE_URL
+      # plus OCC_API_KEY (api.data.gov key for the official OCC Institutions
+      # API — the reconcile phase's PRIMARY directory; the job still works
+      # without it via the keyless national-by-name.xlsx fallback). Light
+      # (1Gi/1cpu/1h). This step only creates/updates the job resource — it
+      # stays INERT until its Cloud Scheduler cron is created out-of-band;
+      # one-time scheduler setup + backfill notes in
+      # docs/runbooks/bank-charter-watch.md.
+      - name: Deploy bank-charter-watch Cloud Run Job (staging)
+        if: env.ENV == 'staging'
+        run: |
+          gcloud run jobs deploy fis-bank-charter-watch-staging \
+            --image=${{ vars.GCP_REGISTRY }}/backend:${{ env.SHORT_SHA }} \
+            --region=${{ vars.GCP_REGION }} \
+            --project=${{ vars.GCP_PROJECT_ID }} \
+            --command=python \
+            --args=scripts/watch_bank_charters.py,--apply \
+            --task-timeout=3600 \
+            --memory=1Gi \
+            --cpu=1 \
+            --max-retries=0 \
+            --parallelism=1 \
+            --tasks=1 \
+            --set-secrets=DATABASE_URL=DATABASE_URL_BACKEND_STAGING:latest,OCC_API_KEY=OCC_API_KEY:latest \
+            --labels=commit-sha=${{ env.SHORT_SHA }},environment=staging,kind=batch-job
+
+      # Production sibling of the staging bank-charter-watch job above.
+      # Identical shape (watch_bank_charters.py --apply, 1Gi/1cpu/1h, the
+      # same DATABASE_URL + OCC_API_KEY secrets — OCC_API_KEY is shared
+      # across envs and optional at runtime: without it the reconcile phase
+      # falls back to the keyless XLSX directory); the only differences are
+      # the job name (fis-bank-charter-watch-prod), the prod DATABASE_URL
+      # secret (DATABASE_URL_BACKEND vs staging's
+      # DATABASE_URL_BACKEND_STAGING), and the env label. Gated to
+      # push-to-main (env.ENV == 'production'). Stays INERT until its prod
+      # Cloud Scheduler cron is created out-of-band — see
+      # docs/runbooks/bank-charter-watch.md.
+      - name: Deploy bank-charter-watch Cloud Run Job (production)
+        if: env.ENV == 'production'
+        run: |
+          gcloud run jobs deploy fis-bank-charter-watch-prod \
+            --image=${{ vars.GCP_REGISTRY }}/backend:${{ env.SHORT_SHA }} \
+            --region=${{ vars.GCP_REGION }} \
+            --project=${{ vars.GCP_PROJECT_ID }} \
+            --command=python \
+            --args=scripts/watch_bank_charters.py,--apply \
+            --task-timeout=3600 \
+            --memory=1Gi \
+            --cpu=1 \
+            --max-retries=0 \
+            --parallelism=1 \
+            --tasks=1 \
+            --set-secrets=DATABASE_URL=DATABASE_URL_BACKEND:latest,OCC_API_KEY=OCC_API_KEY:latest \
+            --labels=commit-sha=${{ env.SHORT_SHA }},environment=production,kind=batch-job
+
       - name: Deploy frontend to Cloud Run
         run: |
           # Re-establish SMTP env on every staging deploy so an accidental clear can't silently break better-auth emails.

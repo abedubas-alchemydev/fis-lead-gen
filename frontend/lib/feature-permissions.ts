@@ -2,6 +2,9 @@
 // Keep names character-identical so cross-stack grep matches.
 
 export const MASTER_LIST = "master_list" as const;
+// Bank-charter vertical (/banks list + /banks/{id} detail). Gates the
+// GET /api/v1/banks* endpoints on the BE side.
+export const BANKS = "banks" as const;
 export const INVESTMENT_ADVISORS = "investment_advisors" as const;
 export const INVESTORS = "investors" as const;
 // Mirrors backend ``INSTITUTIONAL_INVESTORS`` -- gates the
@@ -24,6 +27,7 @@ export const VAULT = "vault" as const;
 
 export const ALL_FEATURE_KEYS = [
   MASTER_LIST,
+  BANKS,
   INVESTMENT_ADVISORS,
   INVESTORS,
   INSTITUTIONAL_INVESTORS,
@@ -43,6 +47,7 @@ export type FeatureKey = (typeof ALL_FEATURE_KEYS)[number];
 
 export const FEATURE_LABELS: Record<FeatureKey, string> = {
   master_list: "Broker Dealers",
+  banks: "Banks",
   investment_advisors: "Investment Advisors",
   investors: "Investors",
   institutional_investors: "Institutional Investors",
@@ -60,6 +65,7 @@ export const FEATURE_LABELS: Record<FeatureKey, string> = {
 
 export const ENABLED_FEATURE_KEYS: ReadonlySet<FeatureKey> = new Set([
   MASTER_LIST,
+  BANKS,
   INVESTMENT_ADVISORS,
   INVESTORS,
   INSTITUTIONAL_INVESTORS,

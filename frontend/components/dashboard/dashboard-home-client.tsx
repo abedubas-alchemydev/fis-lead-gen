@@ -10,6 +10,7 @@ import { KpiCard } from "@/components/dashboard/kpi-card";
 import type { KpiIconProps } from "@/components/dashboard/kpi-card";
 import { KpiCardSkeleton } from "@/components/dashboard/kpi-card-skeleton";
 import { NewBdsModal } from "@/components/dashboard/new-bds-modal";
+import { PendingApprovalBdsModal } from "@/components/dashboard/pending-approval-bds-modal";
 import { ProspectVolumeTrendCard } from "@/components/dashboard/prospect-volume-trend-card";
 import { TopProspectsCard } from "@/components/dashboard/top-prospects-card";
 import { TopActions } from "@/components/layout/top-actions";
@@ -37,12 +38,14 @@ function KpiIconPulse({ className, strokeWidth = 2 }: KpiIconProps) {
   );
 }
 
-function KpiIconAlert({ className, strokeWidth = 2 }: KpiIconProps) {
+// Clock mark for the "Pending Approval BDs" KPI (filed, awaiting SEC
+// approval). Replaced the triangle-alert glyph when the Deficiency Alerts
+// tile was retired — same inline-SVG family as the other KPI icons.
+function KpiIconClock({ className, strokeWidth = 2 }: KpiIconProps) {
   return (
     <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={strokeWidth} className={className} aria-hidden>
-      <path d="M10.29 3.86L1.82 18a2 2 0 001.71 3h16.94a2 2 0 001.71-3L13.71 3.86a2 2 0 00-3.42 0z" />
-      <line x1="12" y1="9" x2="12" y2="13" />
-      <line x1="12" y1="17" x2="12.01" y2="17" />
+      <circle cx="12" cy="12" r="10" />
+      <path d="M12 6v6l4 2" />
     </svg>
   );
 }
@@ -64,7 +67,7 @@ export function DashboardHomeClient() {
   // but they remain initialized for the data-render branch.
   const [totalBds, setTotalBds] = useState<string>("-");
   const [newBds, setNewBds] = useState<string>("-");
-  const [deficiencyAlerts, setDeficiencyAlerts] = useState<string>("-");
+  const [pendingApprovalBds, setPendingApprovalBds] = useState<string>("-");
   const [highValueParticipants, setHighValueParticipants] = useState<string>("-");
   const [distribution, setDistribution] = useState<ClearingDistributionResponse["items"]>([]);
   const [alerts, setAlerts] = useState<AlertListItem[]>([]);
@@ -93,6 +96,7 @@ export function DashboardHomeClient() {
   const [alertsReloadKey, setAlertsReloadKey] = useState(0);
 
   const [showNewBdsModal, setShowNewBdsModal] = useState(false);
+  const [showPendingApprovalModal, setShowPendingApprovalModal] = useState(false);
 
   const handleStatsRetry = useCallback(() => {
     setStatsReloadKey((k) => k + 1);
@@ -114,7 +118,7 @@ export function DashboardHomeClient() {
         if (!active) return;
         setTotalBds(stats.total_active_bds.toLocaleString());
         setNewBds(stats.new_bds_90_days.toLocaleString());
-        setDeficiencyAlerts(stats.deficiency_alerts.toLocaleString());
+        setPendingApprovalBds(stats.pending_approval_bds.toLocaleString());
         setHighValueParticipants(stats.high_value_participants.toLocaleString());
       })
       .catch((err) => {
@@ -269,14 +273,17 @@ export function DashboardHomeClient() {
               onClick={() => setShowNewBdsModal(true)}
             />
           </div>
+          {/* Replaced the "Deficiency Alerts" tile (client ask): pending-
+              approval firms — filed with a CRD but no SEC approval date yet.
+              The /alerts page's Deficiency Notices tab is unchanged. */}
           <div className="animate-fade-in delay-150">
             <KpiCard
-              title="Deficiency Alerts"
-              value={deficiencyAlerts}
+              title="Pending Approval BDs"
+              value={pendingApprovalBds}
               tone="red"
-              icon={KpiIconAlert}
-              helper="Active Form 17a-11 notices"
-              href="/alerts?form_type=Form%2017a-11"
+              icon={KpiIconClock}
+              helper="Filed in the last 90 days, awaiting SEC approval"
+              onClick={() => setShowPendingApprovalModal(true)}
             />
           </div>
           <div className="animate-fade-in delay-200">
@@ -361,6 +368,9 @@ export function DashboardHomeClient() {
       </div>
 
       {showNewBdsModal ? <NewBdsModal onClose={() => setShowNewBdsModal(false)} /> : null}
+      {showPendingApprovalModal ? (
+        <PendingApprovalBdsModal onClose={() => setShowPendingApprovalModal(false)} />
+      ) : null}
     </div>
   );
 }

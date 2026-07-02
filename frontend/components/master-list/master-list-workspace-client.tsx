@@ -48,7 +48,6 @@ import { ThemeToggle } from "@/components/ui/theme-toggle";
 import type {
   BrokerDealerListItem,
   BrokerDealerListResponse,
-  DashboardStats,
   TypeOfBusinessOption,
 } from "@/lib/types";
 
@@ -267,10 +266,6 @@ export function MasterListWorkspaceClient() {
   const [bulkPickerOpen, setBulkPickerOpen] = useState(false);
   const headerCheckboxRef = useRef<HTMLInputElement | null>(null);
   const bulkActionTriggerRef = useRef<HTMLButtonElement | null>(null);
-  // Mirrors the sidebar's Alerts badge — drives the topbar bell's red pip
-  // when unread deficiency alerts exist. Same `/api/v1/stats` endpoint the
-  // sidebar hits; one extra GET per page-load, no per-render refetches.
-  const [unreadAlertsCount, setUnreadAlertsCount] = useState(0);
 
   // Query-string composition — byte-for-byte identical to the pre-redesign
   // contract. Tweaking a single param here would ripple through the
@@ -475,23 +470,11 @@ export function MasterListWorkspaceClient() {
     };
   }, []);
 
-  // Mirror the sidebar's Alerts badge so the topbar bell can show a pip.
-  // The sidebar owns its own copy of this fetch inside AppShell; exposing
-  // that state across the route boundary would require a provider/context,
-  // which is out of scope. One extra GET on mount is the simpler trade.
-  useEffect(() => {
-    let active = true;
-    apiRequest<DashboardStats>("/api/v1/stats")
-      .then((stats) => {
-        if (active) setUnreadAlertsCount(stats.deficiency_alerts);
-      })
-      .catch(() => {
-        /* silent — bell just won't show a pip */
-      });
-    return () => {
-      active = false;
-    };
-  }, []);
+  // The topbar bell used to show a red pip fed by ``stats.deficiency_alerts``
+  // (mirroring the sidebar's Alerts badge). That stat was retired when the
+  // dashboard's Deficiency Alerts KPI became "Pending Approval BDs" — the
+  // /alerts page is unchanged, but /api/v1/stats no longer carries the count,
+  // so the bell renders without a pip now.
 
   function toggleSort(columnKey: string) {
     if (sortBy === columnKey) {
@@ -598,8 +581,7 @@ export function MasterListWorkspaceClient() {
         {/* .topbar-actions — search + theme + notifications. The search
             form shares the searchInput / submitted-search contract with
             the toolbar-card search below, so both inputs drive the same
-            URL-backed filter. The bell pip lights up whenever there are
-            unread deficiency alerts. */}
+            URL-backed filter. */}
         <div className="ml-auto flex items-center gap-2.5">
           <form
             onSubmit={(event) => {
@@ -623,20 +605,10 @@ export function MasterListWorkspaceClient() {
           <ThemeToggle />
           <button
             type="button"
-            aria-label={
-              unreadAlertsCount > 0
-                ? `${unreadAlertsCount} unread deficiency alerts`
-                : "Notifications"
-            }
+            aria-label="Notifications"
             className="relative grid h-[38px] w-[38px] place-items-center rounded-[10px] border border-[var(--border,rgba(30,64,175,0.1))] bg-[var(--surface,#ffffff)] text-[var(--text-dim,#475569)] transition hover:bg-[var(--surface-2,#f1f6fd)] hover:text-[var(--text,#0f172a)]"
           >
             <Bell className="h-[18px] w-[18px]" strokeWidth={2} />
-            {unreadAlertsCount > 0 ? (
-              <span
-                aria-hidden
-                className="absolute right-1.5 top-1.5 h-2 w-2 rounded-full border-2 border-[var(--bg,#eaf3ff)] bg-[var(--red,#ef4444)]"
-              />
-            ) : null}
           </button>
         </div>
       </div>

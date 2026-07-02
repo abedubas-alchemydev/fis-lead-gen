@@ -64,6 +64,15 @@ pgvector>=0.3.0
 python-docx>=1.1.2
 python-pptx>=1.0.2
 openpyxl>=3.1.5
+# defusedxml (security review 2026-07-02): openpyxl parses untrusted
+# workbooks (the downloaded OCC national-by-name.xlsx directory in
+# app.services.occ_cas, plus user Vault uploads) and by default does NOT
+# guard its stdlib ``iterparse`` path — the one read_only=True loads go
+# through — against billion-laughs / quadratic-blowup XML entity attacks
+# (the lxml fast path only defuses ``fromstring``). openpyxl auto-detects
+# defusedxml at import time and swaps in the entity-safe parsers, so
+# installing it IS the upstream-recommended mitigation; no code changes.
+defusedxml>=0.7.1
 striprtf>=0.0.27
 # python-multipart is required by FastAPI for File(...) / UploadFile in the
 # vault_files upload endpoint. Without it, the app import itself crashes on

@@ -246,6 +246,17 @@ async def list_broker_dealers(
     max_net_capital: float | None = Query(default=None, ge=0),
     registered_after: date | None = Query(default=None),
     registered_before: date | None = Query(default=None),
+    # "Pending Approval BDs" card mode: firms that have FILED (a CRD is
+    # assigned at application and the nightly registration refresh has
+    # checked them) but show no SEC approval date yet — crd_number NOT NULL,
+    # registration_date IS NULL, registration_checked_at NOT NULL. Disjoint
+    # from the New BD window by construction (New BD filters
+    # registration_date >= cutoff; SQL NULL never satisfies it). In this
+    # mode registered_after/registered_before retarget to the filed-date
+    # proxy COALESCE(formation_date, created_at::date) so the card's
+    # 30/90-day filters keep working — every pending row's
+    # registration_date is NULL, so windowing on it would return zero rows.
+    pending_approval: bool = Query(default=False),
     # Named-segment preset. Resolves to an OR-predicate the per-field filters
     # can't express (net-capital band OR a business type) — see
     # ``high_value_participant_filter``. Strict pattern: unknown segments 422
@@ -297,6 +308,7 @@ async def list_broker_dealers(
         max_net_capital=max_net_capital,
         registered_after=registered_after,
         registered_before=registered_before,
+        pending_approval=pending_approval,
         segment=segment,
         ids=_parse_ids(ids),
         list_mode=list_mode,

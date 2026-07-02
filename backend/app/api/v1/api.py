@@ -3,6 +3,7 @@ from fastapi import APIRouter
 from app.api.v1.endpoints import (
     alerts,
     auth,
+    banks,
     broker_dealers,
     chatbot,
     clearing_memberships_admin,
@@ -32,6 +33,7 @@ api_router = APIRouter()
 api_router.include_router(health.router, tags=["health"])
 api_router.include_router(auth.router, prefix="/auth", tags=["auth"])
 api_router.include_router(broker_dealers.router, tags=["broker-dealers"])
+api_router.include_router(banks.router, tags=["banks"])
 api_router.include_router(investment_advisors.router, tags=["investment-advisors"])
 api_router.include_router(
     institutional_investors.router, tags=["institutional-investors"]
