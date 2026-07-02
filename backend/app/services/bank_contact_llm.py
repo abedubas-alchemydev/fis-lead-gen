@@ -66,6 +66,31 @@ from app.services.gemini_responses import (
 
 logger = logging.getLogger(__name__)
 
+
+def _env_int(name: str, default: int) -> int:
+    """Parse an int env override, degrading to ``default`` on anything bad.
+
+    L1 never-fail contract. These ceilings are parsed at IMPORT time, and this
+    module is imported lazily by ``bank_contact_extraction.collect_contacts``
+    (via ``_collect_llm_contacts``). A malformed override — ``FOO=abc`` or an
+    empty string — must therefore fall back here instead of raising
+    ``ValueError`` at import and taking the whole contact-collection phase down
+    with it. A missing var is silent (the default is expected); a *present but
+    unparseable* one is warned so ops can spot the typo.
+    """
+    raw = os.environ.get(name)
+    if raw is None:
+        return default
+    try:
+        return int(raw)
+    except (TypeError, ValueError):
+        logger.warning(
+            "bank_contacts[llm]: ignoring malformed %s=%r; using default %d.",
+            name, raw, default,
+        )
+        return default
+
+
 _ALLOWED_ROLES = frozenset(
     {ROLE_CONTACT_PERSON, ROLE_ORGANIZER, ROLE_PROPOSED_OFFICER, ROLE_COUNSEL}
 )
@@ -74,7 +99,28 @@ _ALLOWED_ROLES = frozenset(
 # — small enough that the model attends to every page, large enough that a
 # typical public portion (a few dozen sparse pages) fits in 1-3 calls. Pages
 # are NEVER split mid-page: grounding and page attribution are per page.
-_CHUNK_CHAR_BUDGET = int(os.environ.get("BANK_CONTACT_LLM_CHUNK_CHARS", "20000"))
+_CHUNK_CHAR_BUDGET = _env_int("BANK_CONTACT_LLM_CHUNK_CHARS", 20_000)
+
+# ── Gemini spend ceilings (M1) ───────────────────────────────────────────────
+# Two hard caps bound the paid cost of one PDF's recall pass so a pathological
+# filing can't become a cost-DoS. Both are Gemini-ONLY — the regex pass keeps
+# seeing each page's full text:
+#   * each page's text is truncated to _MAX_PAGE_CHARS before it enters a chunk,
+#     so one enormous page can't become a single near-context-limit prompt (the
+#     people this pass wants sit in the application narrative up front);
+#   * at most _MAX_CHUNKS_PER_PDF chunks are ever sent — beyond that, later
+#     pages degrade to regex-only coverage instead of ~40 paid calls/PDF.
+_MAX_PAGE_CHARS = _env_int("BANK_CONTACT_LLM_MAX_PAGE_CHARS", 20_000)
+_MAX_CHUNKS_PER_PDF = _env_int("BANK_CONTACT_LLM_MAX_CHUNKS", 8)
+
+# ── Same-page channel proximity (M2) ─────────────────────────────────────────
+# An email/phone/title is grounded only within this many characters of the
+# person's NAME match, on the SAME page. This stops the model from attaching
+# one person's channel (or an attacker-planted "attacker@evil.example" printed
+# anywhere in the filing) to a different person's name. Wide enough to span a
+# normal "Name / Title / Telephone / Email" contact stanza; far tighter than a
+# whole page, and page boundaries are never crossed.
+_CHANNEL_PROXIMITY_CHARS = _env_int("BANK_CONTACT_LLM_CHANNEL_PROXIMITY_CHARS", 500)
 
 # A "name" longer than this is a copied sentence, not a person — even if it
 # grounds verbatim. (The regex gate caps at 64; the LLM gate is looser on
@@ -125,6 +171,10 @@ def _chunk_pages(pages: Sequence[object]) -> list[list[tuple[int, str]]]:
     Splits only on page boundaries; a single page larger than the budget gets
     a chunk of its own. Pages without a usable number or without text are
     skipped (the regex pass still covers them — it tolerates ``page=None``).
+
+    M1 spend ceilings apply here (Gemini-only): each page's text is truncated
+    to ``_MAX_PAGE_CHARS`` before it enters a chunk, and at most
+    ``_MAX_CHUNKS_PER_PDF`` chunks are returned.
     """
     chunks: list[list[tuple[int, str]]] = []
     current: list[tuple[int, str]] = []
@@ -139,6 +189,10 @@ def _chunk_pages(pages: Sequence[object]) -> list[list[tuple[int, str]]]:
             number = int(page.get("page"))  # type: ignore[arg-type]
         except (TypeError, ValueError):
             continue
+        if len(text) > _MAX_PAGE_CHARS:
+            # Bound spend: an oversized page would otherwise become one
+            # near-context-limit prompt. Truncate for Gemini only.
+            text = text[:_MAX_PAGE_CHARS]
         if current and size + len(text) > _CHUNK_CHAR_BUDGET:
             chunks.append(current)
             current, size = [], 0
@@ -146,6 +200,13 @@ def _chunk_pages(pages: Sequence[object]) -> list[list[tuple[int, str]]]:
         size += len(text)
     if current:
         chunks.append(current)
+    if len(chunks) > _MAX_CHUNKS_PER_PDF:
+        logger.warning(
+            "bank_contacts[llm]: capping %d chunks to %d for this PDF "
+            "(bounding Gemini spend); later pages get regex-only coverage.",
+            len(chunks), _MAX_CHUNKS_PER_PDF,
+        )
+        chunks = chunks[:_MAX_CHUNKS_PER_PDF]
     return chunks
 
 
@@ -223,10 +284,12 @@ def _grounded_or_none(
         return None
     if _ground_on_pages(cleaned, chunk, preferred_page, joiner=joiner) is not None:
         return cleaned
+    # L3: never log the value itself — an ungrounded channel is untrusted
+    # (fabricated, third-party PII, or attacker-planted). Field + length only.
     logger.info(
-        "bank_contacts[llm]: nulling ungrounded %s %r for %r "
+        "bank_contacts[llm]: nulling ungrounded %s (len=%d) for %r "
         "(not printed on the source pages; never fabricate).",
-        field, cleaned[:80], name,
+        field, len(cleaned), name,
     )
     return None
 
@@ -296,20 +359,30 @@ def _gate(
         return None, "name not printed verbatim on the source pages"
     page_number, (start, end), page_text = ground
 
+    # M2: channels must ground on the SAME page as the name AND within a
+    # proximity window of the name match. Passing only this windowed slice into
+    # the grounding means an email/phone/title printed on a DIFFERENT page — or
+    # far from this name on the same page (another person's, or an
+    # attacker-planted value) — is treated as ungrounded and NULLed. The window
+    # still spans a normal contact stanza, so single-page recall is preserved.
+    lo = max(0, start - _CHANNEL_PROXIMITY_CHARS)
+    hi = min(len(page_text), end + _CHANNEL_PROXIMITY_CHARS)
+    channel_scope: list[tuple[int, str]] = [(page_number, page_text[lo:hi])]
+
     # Title grounds BEFORE role mapping so an 'other' role can only be
     # salvaged from verbatim source text, never from a fabricated title.
     title = _grounded_or_none(
-        person.title, chunk, page_number, joiner=r"\s+", field="title", name=name
+        person.title, channel_scope, page_number, joiner=r"\s+", field="title", name=name
     )
     role = _map_role(person.role, title)
     if role is None:
         return None, f"role {person.role!r} does not map to a known role_context"
 
     email = _grounded_or_none(
-        person.email, chunk, page_number, joiner=r"\s*", field="email", name=name
+        person.email, channel_scope, page_number, joiner=r"\s*", field="email", name=name
     )
     phone = _grounded_or_none(
-        person.phone, chunk, page_number, joiner=r"\s*", field="phone", name=name
+        person.phone, channel_scope, page_number, joiner=r"\s*", field="phone", name=name
     )
 
     return (
