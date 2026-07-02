@@ -22,7 +22,7 @@ import {
 } from "@/components/banks/bank-status-pill";
 import { Button } from "@/components/ui/button";
 import { DetailPageSkeleton } from "@/components/ui/detail-page-skeleton";
-import { Pill } from "@/components/ui/pill";
+import { Pill, type PillVariant } from "@/components/ui/pill";
 import { SectionPanel } from "@/components/ui/section-panel";
 import type { BankApplicationEventItem, BankDetail } from "@/lib/types";
 
@@ -57,6 +57,36 @@ function chronological(
     if (aDate !== bDate) return aDate < bDate ? -1 : 1;
     return a.id - b.id;
   });
+}
+
+// contacts.role_context → friendly chip label + tone. Vocabulary mirrors
+// the BE extractor (contact_person | organizer | proposed_officer |
+// counsel): WHY the filing names this person. Tones are categorical, not
+// a status scale — distinct hues purely for scanning. Unknown/future
+// values surface capitalized in the neutral tone rather than being hidden
+// (same fallback stance as charterStatusLabel).
+const CONTACT_ROLE_LABELS: Record<string, string> = {
+  contact_person: "Contact person",
+  organizer: "Organizer",
+  proposed_officer: "Proposed officer",
+  counsel: "Counsel",
+};
+
+const CONTACT_ROLE_VARIANTS: Record<string, PillVariant> = {
+  contact_person: "info",
+  organizer: "self",
+  proposed_officer: "member",
+  counsel: "noncarry",
+};
+
+function contactRoleLabel(roleContext: string): string {
+  return (
+    CONTACT_ROLE_LABELS[roleContext] ??
+    (roleContext.charAt(0).toUpperCase() + roleContext.slice(1)).replace(
+      /_/g,
+      " ",
+    )
+  );
 }
 
 // Detail view for /banks/{id}. Mirrors the design system used on
@@ -337,6 +367,12 @@ export function BankDetailClient({ bankId }: { bankId: string }) {
                 }
                 compact
               />
+              <MiniStat
+                label="Charter type"
+                value={bank.charter_type ?? "—"}
+                compact
+              />
+              <MiniStat label="LEI" value={bank.lei ?? "—"} compact />
             </div>
 
             <div className="mt-4">
@@ -362,6 +398,81 @@ export function BankDetailClient({ bankId }: { bankId: string }) {
                 <span>OCC checked {formatDate(bank.occ_checked_at)}</span>
               ) : null}
             </div>
+          </SectionPanel>
+
+          {/* Contacts — people extracted from the public portions of this
+              institution's application PDFs (the watcher's conservative
+              --extract-contacts phase). The banks sibling of the BD
+              detail's People panel: prominent name, role chip, muted
+              title, mailto/tel links, and the provenance receipt (filing
+              PDF + page, context snippet on hover) so every row is
+              verifiable at its government source. */}
+          <SectionPanel eyebrow="People" title="Contacts">
+            {bank.contacts.length === 0 ? (
+              <div className="rounded-2xl bg-[var(--surface-2,#f1f6fd)] px-4 py-6 text-sm text-[var(--text-muted,#94a3b8)]">
+                No contacts extracted from public filings yet.
+              </div>
+            ) : (
+              <ul className="space-y-2">
+                {bank.contacts.map((contact) => (
+                  <li
+                    key={contact.id}
+                    className="rounded-2xl border border-[var(--border,rgba(30,64,175,0.1))] px-4 py-3"
+                  >
+                    <div className="flex flex-wrap items-center gap-x-2.5 gap-y-1">
+                      <p className="text-[13.5px] font-semibold text-[var(--text,#0f172a)]">
+                        {contact.name}
+                      </p>
+                      <Pill
+                        variant={
+                          CONTACT_ROLE_VARIANTS[contact.role_context] ??
+                          "unknown"
+                        }
+                      >
+                        {contactRoleLabel(contact.role_context)}
+                      </Pill>
+                    </div>
+                    {contact.title ? (
+                      <p className="mt-0.5 text-[12px] text-[var(--text-dim,#475569)]">
+                        {contact.title}
+                      </p>
+                    ) : null}
+                    <div className="mt-2 flex flex-wrap items-center gap-x-3 gap-y-1 text-xs">
+                      {contact.email ? (
+                        <a
+                          href={`mailto:${contact.email}`}
+                          className="text-[var(--accent,#6366f1)] transition hover:underline"
+                        >
+                          {contact.email}
+                        </a>
+                      ) : null}
+                      {contact.phone ? (
+                        <a
+                          href={`tel:${contact.phone}`}
+                          className="text-[var(--text-dim,#475569)] transition hover:underline"
+                        >
+                          {contact.phone}
+                        </a>
+                      ) : null}
+                      <a
+                        href={contact.source_url}
+                        target="_blank"
+                        rel="noopener noreferrer"
+                        title={contact.context_snippet ?? undefined}
+                        className="inline-flex items-center gap-1 text-[var(--text-muted,#94a3b8)] transition hover:text-[var(--accent,#6366f1)] hover:underline"
+                      >
+                        <FileText className="h-3 w-3" strokeWidth={2} />
+                        <span>
+                          {contact.page_number !== null
+                            ? `Filing PDF · p. ${contact.page_number}`
+                            : "Filing PDF"}
+                        </span>
+                      </a>
+                    </div>
+                  </li>
+                ))}
+              </ul>
+            )}
           </SectionPanel>
 
           {/* Official sources — every row links back to its government

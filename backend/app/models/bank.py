@@ -7,12 +7,14 @@ from sqlalchemy import (
     Date,
     DateTime,
     ForeignKey,
+    Index,
     Integer,
     Numeric,
     String,
     Text,
     UniqueConstraint,
     func,
+    text,
 )
 from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.orm import Mapped, mapped_column, relationship
@@ -137,6 +139,11 @@ class Bank(Base):
         cascade="all, delete-orphan",
         order_by="BankApplicationEvent.action_date.desc(), BankApplicationEvent.id.desc()",
     )
+    contacts: Mapped[list["BankContact"]] = relationship(
+        back_populates="bank",
+        cascade="all, delete-orphan",
+        order_by="BankContact.id.asc()",
+    )
 
 
 class BankApplicationEvent(Base):
@@ -174,3 +181,69 @@ class BankApplicationEvent(Base):
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now(), nullable=False)
 
     bank: Mapped[Bank] = relationship(back_populates="application_events")
+
+
+class BankContact(Base):
+    """A person extracted from a bank's OCC charter-application PDF.
+
+    The banks-vertical sibling of ``executive_contacts`` on the BD side.
+    Rows are written exclusively by the conservative extractor
+    (``services/bank_contact_extraction.py``, wired into the watcher's
+    opt-in ``--extract-contacts`` phase): people are persisted only when
+    the surrounding pattern in the public-portion PDF is unambiguous —
+    the contact-person block, an organizers list, a "proposed <officer>"
+    sentence, or counsel-of-record. Ambiguous hits are logged and skipped,
+    never guessed.
+
+    ``role_context`` records WHY the person appears in the filing
+    ('contact_person' | 'organizer' | 'proposed_officer' | 'counsel');
+    ``page_number`` + ``context_snippet`` keep the receipt (the raw text
+    around the hit) so a user can verify any row against the source PDF
+    (``source_url``, always an https occ.gov link) in one click.
+
+    Dedupe key: ``(bank_id, name, coalesce(title,''), source)`` — a unique
+    expression index (``title`` is nullable and NULL != NULL in Postgres,
+    so the raw column can't participate in the key). The extractor upserts
+    on the same key, so overlapping re-runs are no-ops.
+    """
+
+    __tablename__ = "bank_contacts"
+    __table_args__ = (
+        Index(
+            "uq_bank_contacts_dedupe",
+            "bank_id",
+            "name",
+            text("coalesce(title, '')"),
+            "source",
+            unique=True,
+        ),
+    )
+
+    id: Mapped[int] = mapped_column(primary_key=True, autoincrement=True)
+    bank_id: Mapped[int] = mapped_column(
+        ForeignKey("banks.id", ondelete="CASCADE"), index=True, nullable=False
+    )
+    name: Mapped[str] = mapped_column(String(255), nullable=False)
+    # Verbatim from the filing when unambiguous (e.g. 'President and Chief
+    # Executive Officer'); NULL when the filing names the person without one.
+    title: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    # 'contact_person' | 'organizer' | 'proposed_officer' | 'counsel' —
+    # deliberately not an enum; new extraction patterns must land, not crash.
+    role_context: Mapped[str] = mapped_column(String(32), nullable=False)
+    email: Mapped[str | None] = mapped_column(String(320), nullable=True)
+    phone: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    source: Mapped[str] = mapped_column(String(64), nullable=False, default="application_pdf")
+    # The occ.gov public-portion PDF the person was extracted from.
+    source_url: Mapped[str] = mapped_column(Text, nullable=False)
+    # 1-based page of the hit inside that PDF; NULL if unknown.
+    page_number: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    # Short raw text around the hit — the audit trail for the extraction.
+    context_snippet: Mapped[str | None] = mapped_column(Text, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now(), nullable=False
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now(), onupdate=func.now(), nullable=False
+    )
+
+    bank: Mapped[Bank] = relationship(back_populates="contacts")

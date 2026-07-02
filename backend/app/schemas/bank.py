@@ -111,6 +111,32 @@ class BankSourceLink(BaseModel):
     url: str
 
 
+class BankContactItem(BaseModel):
+    """One person extracted from a charter-application public-portion PDF.
+
+    The banks sibling of the BD detail's ``ExecutiveContactItem``. Written
+    only by the conservative extractor (``--extract-contacts`` watcher
+    phase); ``role_context`` says WHY the filing names the person
+    ('contact_person' | 'organizer' | 'proposed_officer' | 'counsel'), and
+    ``source_url`` + ``page_number`` + ``context_snippet`` are the receipt
+    so the FE can link every row to its exact spot in the occ.gov PDF.
+    """
+
+    model_config = ConfigDict(from_attributes=True)
+
+    id: int
+    name: str
+    title: str | None
+    role_context: str
+    email: str | None
+    phone: str | None
+    source: str
+    source_url: str
+    page_number: int | None
+    context_snippet: str | None
+    created_at: datetime
+
+
 class BankDetail(BankListItem):
     # ── OCC Institutions API enrichment (reconcile phase; NULL for rows
     # reconciled via the keyless XLSX fallback and for state charters) ──
@@ -123,3 +149,6 @@ class BankDetail(BankListItem):
     application_events: list[BankApplicationEventItem] = []
     # Assembled by the endpoint from whatever identifiers the row carries.
     source_links: list[BankSourceLink] = []
+    # People from the application PDFs (empty until --extract-contacts has
+    # run for this bank; detail-only, the list payload is unchanged).
+    contacts: list[BankContactItem] = []

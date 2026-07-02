@@ -66,6 +66,12 @@ Usage::
     python scripts/watch_bank_charters.py --apply --skip-fdic --skip-occ \
         --backfill-digital-assets-history
 
+    # opt-in: extract PEOPLE (contact person / organizers / proposed
+    # officers / counsel) from the public-portion application PDFs into
+    # bank_contacts (dry-run first; --apply writes)
+    python scripts/watch_bank_charters.py --skip-fdic --skip-occ --extract-contacts
+    python scripts/watch_bank_charters.py --apply --skip-fdic --skip-occ --extract-contacts
+
     # override DB URL (defaults to the DATABASE_URL env var)
     python scripts/watch_bank_charters.py --db-url <URL>
 
@@ -203,6 +209,19 @@ async def main(argv: list[str] | None = None) -> int:
             "digital-assets machinery — it runs even under "
             "--skip-digital-assets (which then skips just the live page + "
             "seed); composes with --apply and the other --skip-* flags."
+        ),
+    )
+    parser.add_argument(
+        "--extract-contacts",
+        action="store_true",
+        help=(
+            "Opt-in: for banks whose digital_asset_pdfs carries public-"
+            "portion application PDF links, download each PDF (https "
+            "occ.gov only) and conservatively extract the PEOPLE it names "
+            "(contact person, organizers, proposed officers, counsel) into "
+            "bank_contacts. Runs after the digital-assets/history phases; "
+            "composes with --apply (dry-run logs what it WOULD write). "
+            "Ambiguous hits are logged and skipped, never guessed."
         ),
     )
     args = parser.parse_args(argv)
@@ -381,6 +400,26 @@ async def main(argv: list[str] | None = None) -> int:
                     await db.commit()
             summary["digital_assets_history_tagged"] = history_tagged
             summary["digital_assets_history_unmatched"] = history_unmatched
+
+        # ── Phase 5: people from the application PDFs (opt-in) ────────────
+        # The banks-vertical sibling of the FOCUS "PERSON TO CONTACT"
+        # extraction: contact person / organizers / proposed officers /
+        # counsel out of the public-portion PDFs already linked on
+        # digital_asset_pdfs. Conservative by construction — ambiguous hits
+        # are logged and skipped, never guessed. Runs after the
+        # digital-assets phases so a PDF link tagged tonight is extracted
+        # tonight.
+        if args.extract_contacts:
+            from app.services.bank_contact_extraction import BankContactExtractionService
+
+            summary.update(
+                await _extract_bank_contacts(
+                    session_maker,
+                    repository=repository,
+                    service=BankContactExtractionService(),
+                    apply=args.apply,
+                )
+            )
 
         logger.info(
             "summary (%s): %s", mode,
@@ -565,6 +604,83 @@ async def _apply_digital_asset_seed(
                 name, bank.id,
             )
     return tagged, unmatched
+
+
+async def _extract_bank_contacts(
+    session_maker,
+    *,
+    repository,
+    service,
+    apply: bool,
+) -> dict[str, int]:
+    """Phase 5 (opt-in ``--extract-contacts``): extract people from the
+    public-portion application PDFs into ``bank_contacts``.
+
+    Architecture mirrors the FOCUS batch: the slow work (occ.gov downloads +
+    the crash-isolated text subprocess + parsing) runs with NO database
+    session open; each bank's upsert is its own short write session/commit,
+    so a mid-run failure loses at most the in-flight bank. Idempotent — the
+    upsert keys on ``(bank_id, name, coalesce(title,''), source)``, so
+    re-running over the same PDFs is a no-op.
+
+    Returns the three summary keys:
+
+    - ``bank_contacts_pdfs_fetched``      — PDFs actually downloaded
+      (allowlist-passed, HTTP 200, under the 20MB cap) across all banks;
+    - ``bank_contacts_extracted``         — unambiguous people parsed
+      (would-write set in dry-run; upserted set under --apply — same number
+      on a re-run, with the DB unchanged);
+    - ``bank_contacts_skipped_ambiguous`` — pattern hits refused by the
+      conservative validators (logged, never written).
+    """
+    async with session_maker() as db:
+        eligible = await repository.list_banks_with_application_pdfs(db)
+        rows = [
+            (bank.id, bank.name, list(bank.digital_asset_pdfs or []))
+            for bank in eligible
+        ]
+    logger.info("contacts: %d bank(s) carry application PDF link(s)", len(rows))
+
+    fetched = extracted = ambiguous = 0
+    for bank_id, bank_name, pdf_entries in rows:
+        contacts, stats = await service.collect_contacts(
+            bank_id=bank_id, bank_name=bank_name, pdf_entries=pdf_entries
+        )
+        fetched += stats.pdfs_fetched
+        extracted += stats.contacts_extracted
+        ambiguous += stats.skipped_ambiguous
+        if not contacts:
+            logger.info(
+                "  contacts: bank id=%d %r -> none extracted "
+                "(pdfs_fetched=%d, ambiguous=%d)",
+                bank_id, bank_name, stats.pdfs_fetched, stats.skipped_ambiguous,
+            )
+            continue
+        if apply:
+            async with session_maker() as db:
+                inserted, updated = await service.upsert_contacts(db, bank_id, contacts)
+                await db.commit()
+            logger.info(
+                "  contacts: bank id=%d %r -> %d contact(s) "
+                "(inserted=%d, updated=%d, ambiguous=%d)",
+                bank_id, bank_name, len(contacts), inserted, updated,
+                stats.skipped_ambiguous,
+            )
+        else:
+            for contact in contacts:
+                logger.info(
+                    "  dry-run: would write bank_contact bank id=%d %r "
+                    "name=%r title=%r role=%s email=%s phone=%s page=%s",
+                    bank_id, bank_name, contact.name, contact.title,
+                    contact.role_context, contact.email or "-",
+                    contact.phone or "-", contact.page_number or "-",
+                )
+
+    return {
+        "bank_contacts_pdfs_fetched": fetched,
+        "bank_contacts_extracted": extracted,
+        "bank_contacts_skipped_ambiguous": ambiguous,
+    }
 
 
 async def _tag_digital_asset_history_entries(
