@@ -623,15 +623,25 @@ async def _extract_bank_contacts(
     upsert keys on ``(bank_id, name, coalesce(title,''), source)``, so
     re-running over the same PDFs is a no-op.
 
-    Returns the three summary keys:
+    Returns the five summary keys:
 
     - ``bank_contacts_pdfs_fetched``      — PDFs actually downloaded
       (allowlist-passed, HTTP 200, under the 20MB cap) across all banks;
-    - ``bank_contacts_extracted``         — unambiguous people parsed
-      (would-write set in dry-run; upserted set under --apply — same number
-      on a re-run, with the DB unchanged);
+    - ``bank_contacts_extracted``         — people in the final merged set
+      (regex + grounded Gemini, deduped; would-write set in dry-run;
+      upserted set under --apply — same number on a re-run, with the DB
+      unchanged);
     - ``bank_contacts_skipped_ambiguous`` — pattern hits refused by the
-      conservative validators (logged, never written).
+      conservative regex validators (logged, never written);
+    - ``bank_contacts_llm_extracted``     — people the Gemini recall pass
+      ADDED beyond regex (grounded + novel; ``source='application_pdf_llm'``);
+    - ``bank_contacts_llm_dropped_ungrounded`` — Gemini-returned records
+      refused by the grounding gate (not printed verbatim on the source
+      pages / org vocabulary / unmappable role — logged, never written).
+
+    The Gemini pass is best-effort: without GEMINI_API_KEY (or on any API
+    error) the service logs a warning and this phase behaves exactly as the
+    regex-only extractor — it never fails because Gemini is down.
     """
     async with session_maker() as db:
         eligible = await repository.list_banks_with_application_pdfs(db)
@@ -641,7 +651,7 @@ async def _extract_bank_contacts(
         ]
     logger.info("contacts: %d bank(s) carry application PDF link(s)", len(rows))
 
-    fetched = extracted = ambiguous = 0
+    fetched = extracted = ambiguous = llm_extracted = llm_dropped = 0
     for bank_id, bank_name, pdf_entries in rows:
         contacts, stats = await service.collect_contacts(
             bank_id=bank_id, bank_name=bank_name, pdf_entries=pdf_entries
@@ -649,6 +659,8 @@ async def _extract_bank_contacts(
         fetched += stats.pdfs_fetched
         extracted += stats.contacts_extracted
         ambiguous += stats.skipped_ambiguous
+        llm_extracted += stats.llm_extracted
+        llm_dropped += stats.llm_dropped_ungrounded
         if not contacts:
             logger.info(
                 "  contacts: bank id=%d %r -> none extracted "
@@ -670,16 +682,19 @@ async def _extract_bank_contacts(
             for contact in contacts:
                 logger.info(
                     "  dry-run: would write bank_contact bank id=%d %r "
-                    "name=%r title=%r role=%s email=%s phone=%s page=%s",
+                    "name=%r title=%r role=%s email=%s phone=%s page=%s source=%s",
                     bank_id, bank_name, contact.name, contact.title,
                     contact.role_context, contact.email or "-",
                     contact.phone or "-", contact.page_number or "-",
+                    contact.source,
                 )
 
     return {
         "bank_contacts_pdfs_fetched": fetched,
         "bank_contacts_extracted": extracted,
         "bank_contacts_skipped_ambiguous": ambiguous,
+        "bank_contacts_llm_extracted": llm_extracted,
+        "bank_contacts_llm_dropped_ungrounded": llm_dropped,
     }
 
 

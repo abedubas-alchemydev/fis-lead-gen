@@ -1,9 +1,25 @@
 from __future__ import annotations
 
+from dataclasses import replace
 from datetime import date, timedelta
 from math import ceil
 import logging
 import re
+
+
+def normalize_cik(cik: str | None) -> str | None:
+    """Canonical (unpadded) CIK — the form this book has always stored.
+
+    EDGAR surfaces zero-padded 10-digit CIKs ('0000351317'); the database
+    stores '351317'. Every write path must normalize, or ON CONFLICT (cik)
+    silently inserts duplicates (2026-07-02 prod incident: 2,674 dupes).
+    """
+    if cik is None:
+        return None
+    stripped = cik.strip()
+    if not stripped:
+        return None
+    return stripped.lstrip("0") or "0"
 
 from sqlalchemy import ARRAY, Date, String, and_, cast, delete, func, or_, select, update
 from sqlalchemy.dialects.postgresql import insert
@@ -310,6 +326,17 @@ class BrokerDealerRepository:
     async def upsert_many(self, db: AsyncSession, records: list[MergedBrokerDealerRecord]) -> int:
         if not records:
             return 0
+
+        # Canonicalize CIKs BEFORE any conflict matching: the book stores
+        # unpadded CIKs ('351317'), while EDGAR pages yield the zero-padded
+        # 10-digit form ('0000351317'). ON CONFLICT (cik) treats those as
+        # different values — on 2026-07-02 a prod initial-load run inserted
+        # 2,674 duplicate firms exactly this way. Normalizing here covers
+        # every writer (initial-load merge, extract-new-bds, backfills).
+        records = [
+            replace(r, cik=normalize_cik(r.cik)) if r.cik is not None else r
+            for r in records
+        ]
 
         # Split records: those with a CIK can use the CIK unique index for
         # upsert; FINRA-only records (cik=None) must use sec_file_number
