@@ -584,8 +584,10 @@ class OccCasService:
         (after ``strip_wayback_rewrites`` undoes any stray archive href
         rewriting so the occ.gov allowlist judges original URLs), then
         unioned oldest→newest. A failed capture logs a warning and is
-        skipped; a CDX failure raises — without the index there is no
-        backfill. Returns ``(snapshots_parsed, entries)``.
+        skipped; a CDX index failure also degrades — warning + empty
+        history — so a composed run still completes and a rerun converges
+        (the archive was observed dropping connections mid-run in
+        production, 2026-07-02). Returns ``(snapshots_parsed, entries)``.
         """
         params = {
             # The CDX capture key is scheme-/www-less; query with the same
@@ -596,11 +598,18 @@ class OccCasService:
         parsed_snapshots: list[tuple[str, list[OccDigitalAssetApplication]]] = []
         timeout = max(self._timeout, _WAYBACK_TIMEOUT_SECONDS)
         async with httpx.AsyncClient(timeout=timeout, follow_redirects=True) as client:
-            response = await client.get(
-                WAYBACK_CDX_URL, params=params, headers={"Accept": "application/json"}
-            )
-            response.raise_for_status()
-            timestamps = parse_cdx_timestamps(response.json())
+            try:
+                response = await client.get(
+                    WAYBACK_CDX_URL, params=params, headers={"Accept": "application/json"}
+                )
+                response.raise_for_status()
+                timestamps = parse_cdx_timestamps(response.json())
+            except (httpx.HTTPError, ValueError) as exc:
+                logger.warning(
+                    "occ_cas: wayback CDX index fetch failed (%s); skipping "
+                    "history backfill this run — rerun to converge", exc,
+                )
+                return 0, []
             logger.info("occ_cas: wayback CDX -> %d monthly capture(s)", len(timestamps))
             for index, timestamp in enumerate(timestamps):
                 if index and delay_seconds > 0:
