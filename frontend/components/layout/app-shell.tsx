@@ -10,6 +10,8 @@ import { GlobalBackButton } from "@/components/layout/global-back-button";
 import { apiRequest } from "@/lib/api";
 import { authClient } from "@/lib/auth-client";
 import { EMAIL_EXTRACTION_ENABLED } from "@/lib/feature-flags";
+import { ALERTS, hasFeature } from "@/lib/feature-permissions";
+import { useUnreadAlertsCount } from "@/lib/use-unread-alerts-count";
 
 // ─── Sidebar nav icons — verbatim SVG paths from dashboard-redesign.html ──
 // Each accepts className + strokeWidth so the SidebarNavLink can size + stroke
@@ -270,16 +272,17 @@ type SessionUser = {
   feature_permissions?: string[] | null;
 };
 
-// Subset of DashboardStats the sidebar reads. The Alerts badge used to
-// mirror ``deficiency_alerts``, but that stat was retired when the
-// dashboard's Deficiency Alerts KPI became "Pending Approval BDs" (the
-// /alerts page itself is unchanged) — so the Alerts nav entry no longer
-// renders a count.
+// Subset of DashboardStats the sidebar reads — only the Broker Dealers
+// total comes from /api/v1/stats. The Alerts badge used to mirror the
+// ``deficiency_alerts`` stat, but that stat was retired when the
+// dashboard's Deficiency Alerts KPI became "Pending Approval BDs"; the
+// badge is now fed by the /alerts API directly (useUnreadAlertsCount),
+// decoupled from the dashboard stats payload.
 type StatsLite = {
   total_active_bds: number;
 };
 
-type BadgeKey = "total" | null;
+type BadgeKey = "total" | "alerts" | null;
 
 type NavIconComponent = (props: IconProps) => JSX.Element;
 
@@ -307,7 +310,7 @@ const navSections: ReadonlyArray<NavSection> = [
     label: "Overview",
     items: [
       { href: "/dashboard", label: "Dashboard", icon: DashboardIcon, badgeKey: null, permissionKey: "dashboard" },
-      { href: "/alerts", label: "Alerts", icon: AlertsIcon, badgeKey: null, permissionKey: "alerts" }
+      { href: "/alerts", label: "Alerts", icon: AlertsIcon, badgeKey: "alerts", permissionKey: "alerts" }
     ]
   },
   {
@@ -440,8 +443,14 @@ export function AppShell({
     };
   }, []);
 
+  // Unread-alerts count for the Alerts nav badge — sourced from the /alerts
+  // API (see StatsLite note above). Skipped when the user can't see the
+  // Alerts entry anyway, so we never fire a guaranteed-403 probe.
+  const unreadAlerts = useUnreadAlertsCount(hasFeature(session.user, ALERTS));
+
   const badges: Record<Exclude<BadgeKey, null>, string | null> = {
-    total: stats ? stats.total_active_bds.toLocaleString() : null
+    total: stats ? stats.total_active_bds.toLocaleString() : null,
+    alerts: unreadAlerts > 0 ? unreadAlerts.toLocaleString() : null
   };
 
   const initials = initialsFromName(session.user.name ?? session.user.email);
