@@ -4,6 +4,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import Link from "next/link";
 import type { Route } from "next";
 import clsx from "clsx";
+import { ALERTS, hasFeature } from "@/lib/feature-permissions";
 import { useUnreadAlertsCount } from "@/lib/use-unread-alerts-count";
 import { useUrlSyncedState } from "@/lib/use-url-synced-state";
 
@@ -184,7 +185,13 @@ function paginationPages(current: number, total: number): PageToken[] {
   return pages;
 }
 
-export function MasterListWorkspaceClient() {
+export function MasterListWorkspaceClient({
+  user,
+}: {
+  // Only the fields hasFeature() reads, so the page passes session.user
+  // straight through to gate the Alerts probe (mirrors AppShell).
+  user: { role?: string | null; feature_permissions?: string[] | null };
+}) {
   // ── URL is the source of truth for filter / sort / page / limit ─────
   // The workspace state used to live in component-local useState, which
   // meant returning from a firm-detail page mounted a fresh component
@@ -475,8 +482,10 @@ export function MasterListWorkspaceClient() {
   // fed by ``stats.deficiency_alerts`` (retired with the "Pending Approval
   // BDs" KPI swap); now sourced from the /alerts API via the same
   // useUnreadAlertsCount probe that drives the sidebar's Alerts badge, so
-  // the affordance no longer depends on the dashboard stats payload.
-  const unreadAlertsCount = useUnreadAlertsCount();
+  // the affordance no longer depends on the dashboard stats payload. Gated
+  // behind hasFeature(user, ALERTS) — exactly as the sidebar badge is — so a
+  // user without the Alerts feature never fires the guaranteed-403 probe.
+  const unreadAlertsCount = useUnreadAlertsCount(hasFeature(user, ALERTS));
 
   function toggleSort(columnKey: string) {
     if (sortBy === columnKey) {

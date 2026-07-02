@@ -12,5 +12,5 @@ export default async function MasterListPage() {
   if (!hasFeature(session.user, MASTER_LIST)) {
     return <FeatureAccessDenied feature={MASTER_LIST} />;
   }
-  return <MasterListWorkspaceClient />;
+  return <MasterListWorkspaceClient user={session.user} />;
 }
