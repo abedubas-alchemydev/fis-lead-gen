@@ -52,6 +52,11 @@ class Bank(Base):
     # OCC CAS control number, e.g. '2026-Charter-344521'. Unique-nullable: the
     # stable key the watcher upserts OCC application rows on.
     occ_control_number: Mapped[str | None] = mapped_column(String(64), unique=True, index=True, nullable=True)
+    # ISO 17442 Legal Entity Identifier (20 chars) — stamped by the watcher's
+    # reconcile phase from the OCC Institutions API; NULL for rows reconciled
+    # via the keyless XLSX fallback (which doesn't carry it) and for
+    # state-chartered banks that never pass through the OCC.
+    lei: Mapped[str | None] = mapped_column(String(20), nullable=True)
 
     name: Mapped[str] = mapped_column(String(255), index=True)
     address: Mapped[str | None] = mapped_column(String(255), nullable=True)
@@ -68,6 +73,11 @@ class Bank(Base):
     bkclass: Mapped[str | None] = mapped_column(String(8), nullable=True)
     # Primary federal regulator — FDIC REGAGNT verbatim (FDIC/OCC/FED ...).
     regulator: Mapped[str | None] = mapped_column(String(16), nullable=True)
+    # OCC Institutions API CharterType verbatim, e.g. 'National' /
+    # 'TrustCo-National'. Descriptive only — deliberately NOT used to infer
+    # digital_assets (plenty of TrustCo-National institutions, e.g. Citicorp
+    # Trust Delaware, are not digital-asset businesses).
+    charter_type: Mapped[str | None] = mapped_column(String(64), nullable=True)
 
     # Lifecycle: pending | approved | opened | withdrawn | rescinded.
     # Derived from the latest OCC action (Receipt→pending, Approved→approved,

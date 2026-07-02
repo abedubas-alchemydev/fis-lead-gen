@@ -18,6 +18,7 @@ import {
 import {
   BankStatusPill,
   charterAuthorityLabel,
+  NO_OCC_TIMELINE_EXPLANATION,
 } from "@/components/banks/bank-status-pill";
 import { Button } from "@/components/ui/button";
 import { DetailPageSkeleton } from "@/components/ui/detail-page-skeleton";
@@ -421,10 +422,16 @@ export function BankDetailClient({ bankId }: { bankId: string }) {
             title="Application timeline"
           >
             {events.length === 0 ? (
+              // Quiet empty-state. For state charters this reuses the exact
+              // line the list's "Last Action" dash tooltip shows, so the two
+              // surfaces explain the gap with one voice. A non-STATE bank
+              // with zero events (edge: OCC match whose actions haven't
+              // parsed yet) gets a neutral line instead — the state-charter
+              // copy would be wrong for it.
               <div className="rounded-2xl bg-[var(--surface-2,#f1f6fd)] px-4 py-6 text-sm text-[var(--text-muted,#94a3b8)]">
-                No OCC application events on file. State-chartered banks
-                sourced from FDIC BankFind have no federal charter-application
-                trail.
+                {bank.charter_authority === "STATE"
+                  ? `${NO_OCC_TIMELINE_EXPLANATION}. This institution arrives via FDIC BankFind only.`
+                  : "No OCC application events on file yet."}
               </div>
             ) : (
               <ol className="relative ml-2 space-y-5 border-l border-[var(--border-2,rgba(30,64,175,0.16))] pl-5">

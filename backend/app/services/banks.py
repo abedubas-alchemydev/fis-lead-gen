@@ -412,6 +412,10 @@ class BankRepository:
         await db.flush()  # release the unique occ_control_number first
         fdic_bank.occ_control_number = moved_control_number
         fdic_bank.occ_charter_number = occ_bank.occ_charter_number or fdic_bank.occ_charter_number
+        # Institutions-API enrichment stamped on the application row moments
+        # before this merge must survive onto the FDIC row.
+        fdic_bank.lei = occ_bank.lei or fdic_bank.lei
+        fdic_bank.charter_type = occ_bank.charter_type or fdic_bank.charter_type
         fdic_bank.application_received_date = (
             occ_bank.application_received_date or fdic_bank.application_received_date
         )
@@ -462,6 +466,19 @@ class BankRepository:
             for bank in (await db.execute(stmt)).scalars().all()
             if normalize_bank_name(bank.name) == target
         ]
+
+    async def find_banks_by_occ_charter_number(
+        self, db: AsyncSession, charter_number: str
+    ) -> list[Bank]:
+        """All banks carrying this OCC charter number (exact match).
+
+        Strong key for the watcher's digital-assets SEED entries. The
+        column is not DB-unique (it is stamped by two independent paths:
+        reconciliation and the directory), so callers must require a
+        UNIQUE match before writing — same policy as the name matchers.
+        """
+        stmt = select(Bank).where(Bank.occ_charter_number == charter_number)
+        return list((await db.execute(stmt)).scalars().all())
 
     async def find_banks_by_normalized_name(
         self, db: AsyncSession, name: str

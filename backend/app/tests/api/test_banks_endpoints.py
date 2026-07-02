@@ -183,6 +183,9 @@ def _bank_fixture() -> Bank:
         charter_authority="OCC",
         bkclass="N",
         regulator="OCC",
+        # OCC Institutions API enrichment (stamped by the reconcile phase).
+        lei="549300EREBOR0000LE00",
+        charter_type="National",
         charter_status="opened",
         established_date=date(2026, 2, 6),
         insured_date=date(2026, 2, 6),
@@ -254,6 +257,9 @@ async def test_detail_shape_includes_timeline_and_source_links(monkeypatch) -> N
     assert body["name"] == "Erebor Bank, NA"
     assert body["charter_status"] == "opened"
     assert body["digital_assets"] is True
+    # Institutions-API enrichment surfaces on the detail response.
+    assert body["lei"] == "549300EREBOR0000LE00"
+    assert body["charter_type"] == "National"
     assert [e["action"] for e in body["application_events"]] == [
         "Consummated/Effective", "Receipt",
     ]

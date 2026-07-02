@@ -26,6 +26,8 @@ import {
   CHARTER_STATUS_OPTIONS,
   charterAuthorityLabel,
   charterStatusLabel,
+  DIGITAL_ASSETS_DASH_EXPLANATION,
+  NO_OCC_TIMELINE_EXPLANATION,
 } from "@/components/banks/bank-status-pill";
 import { EstablishedDateRangeFilter } from "@/components/banks/filters/established-date-range-filter";
 import { Button } from "@/components/ui/button";
@@ -806,6 +808,23 @@ export function BankListWorkspaceClient() {
   );
 }
 
+// Muted "—" for an absent value that carries its reason: a native hover
+// tooltip (the same title-attr pattern this table already uses on the
+// Digital Assets column header) plus sr-only text so screen readers hear
+// the explanation as cell content. Deliberately not focusable — a tab
+// stop per dash across a 100-row page would wreck keyboard navigation.
+function ExplainedDash({ explanation }: { explanation: string }) {
+  return (
+    <span
+      title={explanation}
+      className="cursor-help text-[12px] text-[var(--text-muted,#94a3b8)]"
+    >
+      <span aria-hidden>—</span>
+      <span className="sr-only">{explanation}</span>
+    </span>
+  );
+}
+
 function BankRow({ row, href }: { row: BankListItem; href: Route }) {
   const location = [row.city, row.state].filter(Boolean).join(", ");
 
@@ -845,14 +864,24 @@ function BankRow({ row, href }: { row: BankListItem; href: Route }) {
         {row.digital_assets ? (
           <Pill variant="self">Digital Assets</Pill>
         ) : (
-          <span className="text-[12px] text-[var(--text-muted,#94a3b8)]">—</span>
+          <ExplainedDash explanation={DIGITAL_ASSETS_DASH_EXPLANATION} />
         )}
       </td>
       <td className="px-5 py-3.5 text-[12px] text-[var(--text-muted,#94a3b8)]">
         {row.established_date ? formatDate(row.established_date) : "—"}
       </td>
       <td className="px-5 py-3.5 text-[12px] text-[var(--text-muted,#94a3b8)]">
-        {row.last_action_date ? formatDate(row.last_action_date) : "—"}
+        {/* Null last_action_date is the norm for state charters (they never
+            file with the OCC) — explain that case. A non-STATE row could
+            only get here via undated OCC actions, where the state-charter
+            copy would mislead, so it keeps the bare dash. */}
+        {row.last_action_date ? (
+          formatDate(row.last_action_date)
+        ) : row.charter_authority === "STATE" ? (
+          <ExplainedDash explanation={NO_OCC_TIMELINE_EXPLANATION} />
+        ) : (
+          "—"
+        )}
       </td>
     </tr>
   );
