@@ -30,6 +30,7 @@ import {
   DIGITAL_ASSETS_DASH_EXPLANATION,
   NO_OCC_TIMELINE_EXPLANATION,
 } from "@/components/banks/bank-status-pill";
+import { BankEnrichmentNotice } from "@/components/banks/bank-enrichment-notice";
 import { EstablishedDateRangeFilter } from "@/components/banks/filters/established-date-range-filter";
 import { Button } from "@/components/ui/button";
 import {
@@ -317,6 +318,8 @@ export function BankListWorkspaceClient() {
 
   return (
     <div className="px-4 sm:px-7 pb-12 pt-7 lg:px-9">
+      {/* Dismissible "enrichment in progress" notice (localStorage-remembered). */}
+      <BankEnrichmentNotice />
       {/* ── Topbar: breadcrumb + h1 + right rail ─────────────────────────── */}
       <div className="mb-6 flex flex-wrap items-start gap-4">
         <div className="min-w-0 flex-1">
