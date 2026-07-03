@@ -53,6 +53,17 @@ export function charterAuthorityLabel(authority: string | null): string {
   return authority ?? "—";
 }
 
+// charter_type display helper — distinct from charter_authority above. The
+// wire carries OCC's descriptive CharterType verbatim (e.g. 'National',
+// 'TrustCo-National'); it's already human-readable, so we surface it as-is
+// and only tidy the one hyphenated trust token. Drives the list's Charter
+// Type multi-select labels + its active-filter chips.
+export function charterTypeLabel(charterType: string | null): string {
+  if (!charterType) return "—";
+  if (charterType === "TrustCo-National") return "National Trust Co.";
+  return charterType;
+}
+
 // Why a bank shows "—" instead of a value. Shared verbatim between the
 // list's dash tooltips (bank-list-workspace-client.tsx) and the detail
 // page's timeline empty-state (bank-detail-client.tsx) so the two

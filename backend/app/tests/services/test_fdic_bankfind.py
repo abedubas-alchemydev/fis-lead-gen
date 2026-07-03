@@ -231,3 +231,36 @@ async def test_fetch_all_pages_stops_at_total(monkeypatch) -> None:
     records = await service.fetch_institutions_by_certs(["1", "2", "3", "4"])
     assert len(records) == 4
     assert calls == [0, 2]
+
+
+async def test_fetch_all_active_institutions_filters_active_and_drains_pages(monkeypatch) -> None:
+    """The full-directory fetch sends ``filters=ACTIVE:1`` with the stable
+    CERT-ascending sort and drains every page (short-page termination)."""
+    import app.services.fdic_bankfind as mod
+
+    monkeypatch.setattr(mod, "_PAGE_SIZE", 2)
+    requests: list[httpx.Request] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        requests.append(request)
+        offset = int(dict(request.url.params)["offset"])
+        # 3 active institutions across two pages of size 2: [2 rows][1 row].
+        certs = [c for c in (offset + 1, offset + 2) if c <= 3]
+        rows = [
+            {"data": {**LIVE_INSTITUTION_ROW, "CERT": c, "NAME": f"Active Bank {c}"}}
+            for c in certs
+        ]
+        return httpx.Response(200, json={"data": rows, "totals": {"count": 3}})
+
+    _patch_async_client(monkeypatch, handler)
+    service = FdicBankFindService()
+    records = await service.fetch_all_active_institutions()
+
+    # Drained both pages into the full set, parsed via parse_institution_row.
+    assert [r.cert for r in records] == ["1", "2", "3"]
+    assert len(requests) == 2  # offset 0 (full) then offset 2 (short -> stop)
+    params = dict(requests[0].url.params)
+    assert params["filters"] == "ACTIVE:1"
+    assert params["sort_by"] == "CERT"
+    assert params["sort_order"] == "ASC"
+    assert "NAME" in params["fields"] and "CHRTAGNT" in params["fields"]

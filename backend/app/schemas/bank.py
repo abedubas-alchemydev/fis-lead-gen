@@ -45,6 +45,12 @@ class BankListItem(BaseModel):
     charter_authority: str | None
     bkclass: str | None
     regulator: str | None
+    # OCC CharterType verbatim (e.g. 'National', 'TrustCo-National') — OCC
+    # Institutions API enrichment stamped by the reconcile phase; NULL for
+    # rows reconciled via the keyless XLSX fallback and for state charters.
+    # Descriptive only, NOT a digital-assets signal. Promoted onto the list
+    # item (was detail-only) so the list can show + filter on charter_type.
+    charter_type: str | None = None
     # pending | approved | opened | withdrawn | rescinded
     charter_status: str
     established_date: date | None
@@ -140,11 +146,9 @@ class BankContactItem(BaseModel):
 class BankDetail(BankListItem):
     # ── OCC Institutions API enrichment (reconcile phase; NULL for rows
     # reconciled via the keyless XLSX fallback and for state charters) ──
-    # ISO 17442 Legal Entity Identifier.
+    # ISO 17442 Legal Entity Identifier. (``charter_type`` lives on
+    # BankListItem now — the list filters on it — and is inherited here.)
     lei: str | None = None
-    # OCC CharterType verbatim (e.g. 'National', 'TrustCo-National').
-    # Descriptive only — NOT a digital-assets signal.
-    charter_type: str | None = None
     # Newest-first OCC action timeline (empty for FDIC-only state charters).
     application_events: list[BankApplicationEventItem] = []
     # Assembled by the endpoint from whatever identifiers the row carries.
