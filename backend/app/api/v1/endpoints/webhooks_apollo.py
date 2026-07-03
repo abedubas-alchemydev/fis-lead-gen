@@ -41,10 +41,11 @@ Payload (from Apollo's docs, verbatim shape):
       ]
     }
 
-The handler scans the three contact tables (``advisor_contacts``,
-``executive_contacts``, ``investor_contacts``) plus ``discovered_email``
-(email-extractor enrichment) and ``form4_transactions`` (Investors "Find
-contact") for rows whose ``apollo_person_id`` matches each person in the
+The handler scans the four contact tables (``advisor_contacts``,
+``executive_contacts``, ``investor_contacts``, ``bank_contacts``) plus
+``discovered_email`` (email-extractor enrichment) and ``form4_transactions``
+(Investors "Find contact") for rows whose ``apollo_person_id`` matches each
+person in the
 payload, then merges their phones in. Unknown person ids are logged and
 skipped (not an error — Apollo may send late callbacks for rows we've since
 deleted).
@@ -65,6 +66,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.core.config import settings
 from app.db.session import get_db_session
 from app.models.advisor_contact import AdvisorContact
+from app.models.bank import BankContact
 from app.models.discovered_email import DiscoveredEmail
 from app.models.executive_contact import ExecutiveContact
 from app.models.form4_transaction import Form4Transaction
@@ -147,7 +149,7 @@ def _to_hit(entry: dict[str, Any]) -> PhoneHit | None:
 
 
 def _merge_phones_into_row(
-    row: AdvisorContact | ExecutiveContact | InvestorContact,
+    row: AdvisorContact | ExecutiveContact | InvestorContact | BankContact,
     new_hits: list[PhoneHit],
 ) -> int:
     """Append new hits to the row's ``phones`` array (dedupe by sanitized
@@ -304,10 +306,10 @@ async def apollo_phone_reveal(
         if not hits:
             continue
 
-        # Look up by apollo_person_id across all three contact tables.
+        # Look up by apollo_person_id across all four contact tables.
         # The column is indexed on each so each SELECT is a single index
         # probe even with millions of rows.
-        for model in (AdvisorContact, ExecutiveContact, InvestorContact):
+        for model in (AdvisorContact, ExecutiveContact, InvestorContact, BankContact):
             stmt = select(model).where(model.apollo_person_id == person_id)
             rows = list((await db.execute(stmt)).scalars().all())
             for row in rows:

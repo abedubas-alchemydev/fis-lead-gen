@@ -6,20 +6,22 @@ import { Button } from "@/components/ui/button";
 import { OutreachModal } from "@/components/master-list/outreach-modal";
 import type {
   AdvisorContactItem,
+  BankContactItem,
   ExecutiveContactItem,
   InvestorContactItem,
 } from "@/lib/types";
 
 // Discriminates which BE endpoint pair the OutreachModal targets when the
-// user clicks Generate / Send. "broker_dealer" / "advisor" / "investor"
-// hit the per-firm draft+send endpoints (firm id + contact id). "adhoc"
-// hits the free-form /outreach/adhoc-* pair, addressing the recipient by
-// email alone — used by the /investors insider feed, whose rows are Form 4
+// user clicks Generate / Send. "broker_dealer" / "advisor" / "investor" /
+// "bank" hit the per-firm draft+send endpoints (firm id + contact id).
+// "adhoc" hits the free-form /outreach/adhoc-* pair, addressing the recipient
+// by email alone — used by the /investors insider feed, whose rows are Form 4
 // reporting persons with no firm/contact FK.
 export type OutreachEntityKind =
   | "broker_dealer"
   | "advisor"
   | "investor"
+  | "bank"
   | "adhoc";
 
 // Minimal recipient shape for the adhoc path. The Form 4 insider feed has
@@ -42,6 +44,7 @@ export type OutreachContact =
   | ExecutiveContactItem
   | AdvisorContactItem
   | InvestorContactItem
+  | BankContactItem
   | AdhocOutreachContact;
 
 interface OutreachButtonProps {

@@ -11,14 +11,18 @@ master list's ``master_list`` gate).
 
 from __future__ import annotations
 
-from datetime import date
+import json
+import logging
+from datetime import date, datetime, timedelta, timezone
 
-from fastapi import APIRouter, Depends, HTTPException, Query, status
+from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, Query, Response, status
+from sqlalchemy import or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.feature_permissions import BANKS
 from app.db.session import get_db_session
 from app.models.bank import Bank
+from app.models.pipeline_run import PipelineRun
 from app.schemas.auth import AuthenticatedUser
 from app.schemas.bank import (
     BankApplicationEventItem,
@@ -26,13 +30,36 @@ from app.schemas.bank import (
     BankDetail,
     BankListResponse,
     BankSourceLink,
+    GapFillBankResponse,
 )
 from app.services.auth import ensure_feature, get_current_user
+from app.services.bank_contact_gap_fill import (
+    GAP_FILL_BANK_CONTACTS_PIPELINE_NAME,
+    GAP_FILL_COOLDOWN_DAYS,
+    run_gap_fill_bank_contacts_background,
+)
 from app.services.banks import BankRepository
 from app.services.fdic_bankfind import bankfind_public_url
+from app.services.pipeline_reaper import STALE_REFRESH_RUN_AGE
+
+logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/banks")
 repository = BankRepository()
+
+
+def _is_recent_run(started_at: datetime | None) -> bool:
+    """True if a run started recently enough to still be considered alive.
+
+    Anything older than ``STALE_REFRESH_RUN_AGE`` is presumed orphaned (its
+    in-process BackgroundTask was killed by an instance swap) and must not be
+    treated as in-flight. Mirror of the advisor endpoint's helper.
+    """
+    if started_at is None:
+        return False
+    if started_at.tzinfo is None:
+        started_at = started_at.replace(tzinfo=timezone.utc)
+    return started_at >= datetime.now(timezone.utc) - STALE_REFRESH_RUN_AGE
 
 
 def _require_banks(
@@ -177,5 +204,155 @@ async def get_bank(
         BankApplicationEventItem.model_validate(event) for event in bank.application_events
     ]
     detail.source_links = _build_source_links(bank)
+    # BankContactItem synthesizes the emails/phones arrays from the scalar
+    # columns on read, so contacts[] carry the channel shape the FE renders.
     detail.contacts = [BankContactItem.model_validate(contact) for contact in bank.contacts]
     return detail
+
+
+# ─── Per-bank contact discovery + gap-fill ("Generate More Details") ──────────
+# Banks have no FINRA/ADV roster, so this both (1) org→people discovers a
+# public contact channel from the bank's website domain and (2) gap-fills any
+# existing bank_contacts rows (PDF-extracted people) missing LinkedIn/email/
+# phone. Async: returns a run_id the FE polls at GET /pipeline/run/{run_id}.
+# Mirror of investment_advisors.py::gap_fill_advisor_contacts.
+
+
+async def _run_gap_fill_bank_contacts_background(
+    run_id: int, bank_id: int, trigger_source: str
+) -> None:
+    """Defensive wrapper so an unhandled exception in the background task
+    doesn't leave the PipelineRun stuck on ``queued``."""
+    try:
+        await run_gap_fill_bank_contacts_background(run_id, bank_id, trigger_source)
+    except Exception:
+        logger.exception(
+            "bank gap-fill-contacts background task failed (run_id=%s bank_id=%s)",
+            run_id,
+            bank_id,
+        )
+
+
+@router.post("/{bank_id}/gap-fill-contacts", response_model=GapFillBankResponse)
+async def gap_fill_bank_contacts(
+    bank_id: int,
+    background_tasks: BackgroundTasks,
+    response: Response,
+    force: bool = False,
+    current_user: AuthenticatedUser = Depends(_require_banks),
+    db: AsyncSession = Depends(get_db_session),
+) -> GapFillBankResponse:
+    """Discover + gap-fill this bank's People panel.
+
+    Runs org→people discovery from the bank's website domain and gap-fills any
+    existing ``bank_contacts`` rows missing LinkedIn/email/phone, merging new
+    hits in place WITHOUT overwriting existing data. Works even for banks with
+    zero contacts (the org→domain discovery seeds a public channel).
+
+    Async: returns 202 with a ``run_id`` the FE polls at
+    ``GET /api/v1/pipeline/run/{run_id}``.
+
+    Guards (mirroring ``gap_fill_advisor_contacts``): attaches to an in-flight
+    run for this bank rather than queueing a second job, and applies a 30-day
+    cost cooldown that ``force`` (the user-facing "Generate More Details"
+    button) bypasses. Banks carry no ``last_gap_fill_attempt_at`` column, so
+    the cooldown reads the most recent gap-fill ``PipelineRun`` for this bank
+    instead.
+    """
+    bank = await db.get(Bank, bank_id)
+    if bank is None:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND, detail="Bank not found."
+        )
+
+    bank_marker = f'"bank_id": {bank_id}'
+    # Match the id as a COMPLETE JSON token — delimited by ',' or '}' — so one
+    # bank id can never prefix-match another (bank 12 must NOT match bank 123's
+    # run). ``notes`` is always ``json.dumps({"bank_id": id, ...})``, so the id
+    # is followed by ',' (another key after it) or '}' (last key).
+    bank_run_marker_match = or_(
+        PipelineRun.notes.ilike(f"%{bank_marker},%"),
+        PipelineRun.notes.ilike(f"%{bank_marker}" + "}%"),
+    )
+
+    # Attach to an in-flight gap-fill run for this bank rather than queueing a
+    # second concurrent job. A run only counts as in-flight if it started
+    # within STALE_REFRESH_RUN_AGE; an older running/queued row is an orphan
+    # (its BackgroundTask was killed by an instance swap) and is ignored.
+    in_flight_stmt = (
+        select(PipelineRun)
+        .where(PipelineRun.pipeline_name == GAP_FILL_BANK_CONTACTS_PIPELINE_NAME)
+        .where(PipelineRun.status.in_(("queued", "running")))
+        .where(bank_run_marker_match)
+        .order_by(PipelineRun.id.desc())
+        .limit(1)
+    )
+    in_flight = (await db.execute(in_flight_stmt)).scalar_one_or_none()
+    if in_flight is not None and _is_recent_run(in_flight.started_at):
+        response.status_code = status.HTTP_202_ACCEPTED
+        return GapFillBankResponse(
+            run_id=in_flight.id,
+            status="in_flight",
+            bank_id=bank_id,
+            reason="A gap-fill run is already in flight for this bank.",
+        )
+
+    # 30-day cost cooldown, bypassed by ``force``. Keyed on the most recent
+    # gap-fill run's start time for this bank (banks have no per-row attempt
+    # stamp). Automated / bare API callers omit ``force`` and keep the cooldown.
+    if not force:
+        cooldown_cutoff = datetime.now(timezone.utc) - timedelta(days=GAP_FILL_COOLDOWN_DAYS)
+        recent_stmt = (
+            select(PipelineRun)
+            .where(PipelineRun.pipeline_name == GAP_FILL_BANK_CONTACTS_PIPELINE_NAME)
+            .where(bank_run_marker_match)
+            .where(PipelineRun.started_at.isnot(None))
+            .order_by(PipelineRun.id.desc())
+            .limit(1)
+        )
+        recent = (await db.execute(recent_stmt)).scalar_one_or_none()
+        if recent is not None and recent.started_at is not None:
+            started_at = recent.started_at
+            if started_at.tzinfo is None:
+                started_at = started_at.replace(tzinfo=timezone.utc)
+            if started_at >= cooldown_cutoff:
+                days_remaining = max(
+                    1,
+                    GAP_FILL_COOLDOWN_DAYS
+                    - (datetime.now(timezone.utc) - started_at).days,
+                )
+                raise HTTPException(
+                    status_code=status.HTTP_429_TOO_MANY_REQUESTS,
+                    detail=f"Gap-fill cooldown active. Try again in {days_remaining} day(s).",
+                    headers={"Retry-After": str(days_remaining * 86400)},
+                )
+
+    trigger_source = f"manual_gap_fill:{current_user.email}"
+    run = PipelineRun(
+        pipeline_name=GAP_FILL_BANK_CONTACTS_PIPELINE_NAME,
+        trigger_source=trigger_source,
+        status="queued",
+        total_items=1,
+        processed_items=0,
+        success_count=0,
+        failure_count=0,
+        notes=json.dumps({"bank_id": bank_id, "stage": "queued"}),
+    )
+    db.add(run)
+    await db.commit()
+    await db.refresh(run)
+
+    background_tasks.add_task(
+        _run_gap_fill_bank_contacts_background,
+        run.id,
+        bank_id,
+        trigger_source,
+    )
+
+    response.status_code = status.HTTP_202_ACCEPTED
+    return GapFillBankResponse(
+        run_id=run.id,
+        status=run.status,
+        bank_id=bank_id,
+        reason=None,
+    )

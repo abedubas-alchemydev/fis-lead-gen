@@ -48,11 +48,12 @@ from datetime import datetime, timedelta, timezone
 from decimal import Decimal
 from typing import Any, Awaitable, Literal, Mapping
 
-from sqlalchemy import select
+from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.config import settings
 from app.models.advisor_contact import AdvisorContact
+from app.models.bank import BankContact
 from app.models.executive_contact import ExecutiveContact
 from app.models.investor_contact import InvestorContact
 from app.services.contact_discovery.apollo_match import ApolloMatchProvider
@@ -242,6 +243,71 @@ async def discover_advisor_contact(
         title=title or ("Executive" if entity_type == "person" else "Organization"),
         result=result,
     )
+    session.add(row)
+    return row
+
+
+async def discover_bank_contact(
+    entity: Mapping[str, Any],
+    *,
+    bank_id: int,
+    session: AsyncSession,
+) -> BankContact | None:
+    """Resolve a bank person/org into a persisted ``BankContact``.
+
+    Mirror of ``discover_advisor_contact`` for the banks side. Same chain
+    semantics, same caching pattern; written separately because the codebase
+    deliberately avoids polymorphism across the (now four) contact tables (see
+    ``AdvisorContact``'s class docstring). The bank gap-fill runner anchors the
+    org on the bank's website domain + the bank name, so ``org_name`` is the
+    bank name and ``domain`` the registrable host from ``banks.website``.
+    """
+    parsed = _parse_entity(entity)
+    if parsed is None:
+        return None
+    entity_type, first_name, last_name, org_name, domain, title, cache_name = parsed
+
+    cached = await _find_cached_bank(session, bank_id=bank_id, name=cache_name)
+    if cached is not None:
+        return cached
+
+    result = await _walk_chain(
+        entity_type,
+        first_name=first_name,
+        last_name=last_name,
+        org_name=org_name,
+        domain=domain,
+        cache_name=cache_name,
+    )
+    if result is None:
+        return None
+
+    row = _build_bank_row(
+        bank_id=bank_id,
+        name=cache_name,
+        title=title or ("Executive" if entity_type == "person" else "Organization"),
+        result=result,
+    )
+    # The cache lookup above is TTL-scoped, so a re-discovery past the 90-day
+    # window misses an older identical row and would collide on
+    # ``uq_bank_contacts_dedupe`` (bank_id, name, coalesce(title,''), source),
+    # failing the whole gap-fill run with an IntegrityError. Re-check the FULL
+    # dedupe key ignoring the TTL and reuse the pre-existing row instead of
+    # inserting a duplicate.
+    dedupe_stmt = (
+        select(BankContact)
+        .where(
+            BankContact.bank_id == bank_id,
+            BankContact.name == row.name,
+            func.coalesce(BankContact.title, "") == (row.title or ""),
+            BankContact.source == row.source,
+        )
+        .order_by(BankContact.id.desc())
+        .limit(1)
+    )
+    existing = (await session.execute(dedupe_stmt)).scalars().first()
+    if existing is not None:
+        return existing
     session.add(row)
     return row
 
@@ -557,6 +623,33 @@ async def _find_cached_advisor(
     return (await session.execute(stmt)).scalars().first()
 
 
+async def _find_cached_bank(
+    session: AsyncSession,
+    *,
+    bank_id: int,
+    name: str,
+) -> BankContact | None:
+    """Latest discovery-owned ``BankContact`` for ``(bank_id, name)`` within the
+    90-day cache window. Mirror of ``_find_cached_advisor``.
+
+    Discovery rows stamp ``enriched_at`` (NULL on PDF-extracted rows, which the
+    ``>=`` threshold naturally excludes), so a cache hit only ever returns a
+    prior discovery row — never a PDF row we'd then treat as a channel cache.
+    """
+    threshold = datetime.now(timezone.utc) - timedelta(days=_CACHE_TTL_DAYS)
+    stmt = (
+        select(BankContact)
+        .where(
+            BankContact.bank_id == bank_id,
+            BankContact.name == name,
+            BankContact.enriched_at >= threshold,
+        )
+        .order_by(BankContact.enriched_at.desc())
+        .limit(1)
+    )
+    return (await session.execute(stmt)).scalars().first()
+
+
 def _build_executive_row(
     *,
     bd_id: int,
@@ -653,6 +746,40 @@ def _build_advisor_row(
     source = "apollo" if result.provider.startswith("apollo") else result.provider
     return AdvisorContact(
         advisor_id=advisor_id,
+        name=name,
+        title=title[:255],
+        email=result.email,
+        phone=result.phone,
+        linkedin_url=result.linkedin_url,
+        emails=_array_or_none(result.emails),
+        phones=_array_or_none(result.phones),
+        source=source,
+        discovery_source=result.provider[:32],
+        discovery_confidence=Decimal(str(round(result.confidence, 2))),
+        apollo_person_id=result.apollo_person_id,
+        enriched_at=datetime.now(timezone.utc),
+    )
+
+
+def _build_bank_row(
+    *,
+    bank_id: int,
+    name: str,
+    title: str,
+    result: DiscoveryResult,
+) -> BankContact:
+    """Build a discovery-owned ``BankContact``. Mirror of ``_build_advisor_row``.
+
+    ``role_context`` and ``source_url`` are left NULL — those are filing-only
+    provenance that discovery rows don't have (both were relaxed to nullable in
+    migration 20260703_0002). ``source`` carries the human-meaningful category
+    ('apollo' / 'hunter' / ...) and doubles as the discriminator in the
+    ``uq_bank_contacts_dedupe`` key, so discovery rows never collide with the
+    ``application_pdf`` rows.
+    """
+    source = "apollo" if result.provider.startswith("apollo") else result.provider
+    return BankContact(
+        bank_id=bank_id,
         name=name,
         title=title[:255],
         email=result.email,

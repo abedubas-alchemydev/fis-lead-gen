@@ -16,7 +16,7 @@ import { FindEmailsButton } from "./find-emails-button";
 // router.replace effect on `?scanId=`. This component is purely presentational
 // so it stays trivially testable.
 export interface EmailScansSectionProps {
-  entityKind: "bd" | "advisor";
+  entityKind: "bd" | "advisor" | "bank";
   entityId: number;
   currentScanId: number | null;
   resolvedDomain: string | null;

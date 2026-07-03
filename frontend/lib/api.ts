@@ -107,6 +107,7 @@ import type {
   ClearingMembershipDecisionResponse,
   ClearingMembershipReviewListResponse,
   DoxieMemoryListResponse,
+  GapFillBankResponse,
   LinkedProvidersResponse,
   ContactSearchResponse,
   InstitutionalInvestorListResponse,
@@ -117,6 +118,8 @@ import type {
   OutreachAdhocSendRequest,
   OutreachAdvisorDraftRequest,
   OutreachAdvisorSendRequest,
+  OutreachBankDraftRequest,
+  OutreachBankSendRequest,
   OutreachComposeSendRequest,
   OptimizeInstructionsRequest,
   OptimizeInstructionsResponse,
@@ -526,6 +529,28 @@ export async function sendInvestorOutreach(
   });
 }
 
+// Bank parallel of the advisor/investor outreach pair. Targets
+// /outreach/bank-{draft,send}; the send writes one outreach_sends row keyed on
+// bank_id + bank_contact_id. 412 link/scope errors recover the same way as the
+// other kinds (the modal renders the "link a mailbox" CTA).
+export async function generateBankOutreachDraft(
+  payload: OutreachBankDraftRequest
+): Promise<OutreachDraft> {
+  return apiRequest<OutreachDraft>("/api/v1/outreach/bank-draft", {
+    method: "POST",
+    body: JSON.stringify(payload),
+  });
+}
+
+export async function sendBankOutreach(
+  payload: OutreachBankSendRequest
+): Promise<OutreachSendResponse> {
+  return apiRequest<OutreachSendResponse>("/api/v1/outreach/bank-send", {
+    method: "POST",
+    body: JSON.stringify(payload),
+  });
+}
+
 // ── Institutional Investors list + profile ─────────────────────────────
 // Mirrors the advisor-list helpers. Filters are query-string params; the
 // list endpoint defaults to total_aum-DESC ordering, the FE workspace
@@ -897,6 +922,23 @@ export async function gapFillAdvisorContacts(
   const query = force ? "?force=true" : "";
   return apiRequest<RefreshAdvisorResponse>(
     `/api/v1/investment-advisors/${advisorId}/gap-fill-contacts${query}`,
+    { method: "POST" }
+  );
+}
+
+// Banks "Generate More Details" trigger — the org→domain discovery + gap-fill
+// runner for a bank's contacts. Banks have no roster, so the BE discovers execs
+// from the website domain, then gap-fills any existing bank_contacts rows,
+// emitting a PipelineRun the FE polls via getPipelineRunStatus. Mirrors
+// gapFillAdvisorContacts; the in-flight guard returns 202 (status="in_flight")
+// so there's no 409 to normalize.
+export async function gapFillBankContacts(
+  bankId: number,
+  force = false,
+): Promise<GapFillBankResponse> {
+  const query = force ? "?force=true" : "";
+  return apiRequest<GapFillBankResponse>(
+    `/api/v1/banks/${bankId}/gap-fill-contacts${query}`,
     { method: "POST" }
   );
 }
