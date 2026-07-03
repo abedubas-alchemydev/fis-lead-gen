@@ -26,6 +26,7 @@ from __future__ import annotations
 from datetime import date
 from unittest.mock import MagicMock
 
+import pytest
 from sqlalchemy.dialects import postgresql
 
 from app.models.bank import Bank
@@ -115,6 +116,41 @@ async def test_fdic_upsert_dedupes_duplicate_certs_within_batch() -> None:
     params = session.statements[0].compile(dialect=_PG).params
     names = [v for v in params.values() if isinstance(v, str) and v.startswith("Portrait")]
     assert names == ["Portrait Bank"]
+
+
+async def test_fdic_upsert_chunks_large_batches_under_bind_param_cap(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A full-directory sync (~4.3k rows × ~20 cols) exceeds Postgres's
+    65535 bind-param ceiling in a single INSERT — the real failure the
+    laptop apply hit. The upsert must split the batch across statements with
+    every distinct cert still written. Force a tiny cap so a handful of rows
+    spans multiple chunks."""
+    monkeypatch.setattr("app.services.banks._PG_MAX_BIND_PARAMS", 40)
+    repo = BankRepository()
+    session = _CaptureSession()
+    certs = [str(90000 + i) for i in range(5)]
+    written = await repo.upsert_fdic_institutions(
+        session, [_fdic_record(cert=c) for c in certs]
+    )
+
+    assert written == 5
+    # Before the fix this was always exactly one statement (→ overflow at 4.3k).
+    assert len(session.statements) > 1
+    expected = set(certs)
+    seen: set[str] = set()
+    for stmt in session.statements:
+        sql = _pg_sql(stmt)
+        assert "insert into banks" in sql
+        assert "on conflict (fdic_cert) do update" in sql
+        params = stmt.compile(dialect=_PG).params
+        # Each chunk carries only its slice of rows (one fdic_cert bind per
+        # row), so rows × cols stays under the bind-param cap it was split for.
+        rows_in_chunk = sum(1 for k in params if k.startswith("fdic_cert"))
+        assert rows_in_chunk <= 2
+        seen.update(v for v in params.values() if isinstance(v, str) and v in expected)
+    # No row dropped at a chunk boundary — all five certs landed.
+    assert seen == expected
 
 
 async def test_fdic_upsert_empty_batch_is_a_noop() -> None:

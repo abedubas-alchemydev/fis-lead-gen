@@ -39,6 +39,12 @@ from app.services.occ_cas import (
 
 logger = logging.getLogger(__name__)
 
+# PostgreSQL caps a single parameterized statement at 65535 bind parameters.
+# A multi-row INSERT sends (rows × columns) params, so the full-directory
+# FDIC sync (~4.3k rows × ~21 cols ≈ 90k) overflows a one-shot statement and
+# must be chunked. Hold a margin under the hard limit.
+_PG_MAX_BIND_PARAMS = 60000
+
 ALLOWED_SORT_FIELDS = {
     "name": Bank.name,
     "state": Bank.state,
@@ -269,37 +275,44 @@ class BankRepository:
                     "fdic_checked_at": now,
                 }
             )
-        stmt = insert(Bank).values(values)
-        excluded = stmt.excluded
-        upsert = stmt.on_conflict_do_update(
-            index_elements=[Bank.fdic_cert],
-            set_={
-                "fed_rssd": func.coalesce(excluded.fed_rssd, Bank.fed_rssd),
-                "name": excluded.name,
-                "address": func.coalesce(excluded.address, Bank.address),
-                "city": func.coalesce(excluded.city, Bank.city),
-                "state": func.coalesce(excluded.state, Bank.state),
-                "zip": func.coalesce(excluded.zip, Bank.zip),
-                "website": func.coalesce(excluded.website, Bank.website),
-                "charter_authority": func.coalesce(excluded.charter_authority, Bank.charter_authority),
-                "regulator": func.coalesce(excluded.regulator, Bank.regulator),
-                "bkclass": func.coalesce(excluded.bkclass, Bank.bkclass),
-                "established_date": func.coalesce(excluded.established_date, Bank.established_date),
-                "insured_date": func.coalesce(excluded.insured_date, Bank.insured_date),
-                "asset": func.coalesce(excluded.asset, Bank.asset),
-                "deposits": func.coalesce(excluded.deposits, Bank.deposits),
-                "offices": func.coalesce(excluded.offices, Bank.offices),
-                "active": func.coalesce(excluded.active, Bank.active),
-                # Forward-only status: apply the incoming status only when
-                # its lifecycle rank is >= the stored one.
-                "charter_status": _status_advance_sql(excluded.charter_status),
-                # 'occ' + fdic -> 'fdic+occ'; plain fdic rows stay 'fdic'.
-                "source": _merge_source_sql("fdic"),
-                "fdic_checked_at": excluded.fdic_checked_at,
-                "updated_at": func.now(),
-            },
-        )
-        await db.execute(upsert)
+        # Chunk so (rows × columns) stays under Postgres's 65535 bind-param
+        # cap: the nightly window is a handful of rows (one chunk), but the
+        # full-directory sync passes thousands. by_cert de-dup above means a
+        # cert lands in exactly one chunk, so no row is touched twice.
+        chunk_size = max(1, _PG_MAX_BIND_PARAMS // len(values[0]))
+        for start in range(0, len(values), chunk_size):
+            chunk = values[start : start + chunk_size]
+            stmt = insert(Bank).values(chunk)
+            excluded = stmt.excluded
+            upsert = stmt.on_conflict_do_update(
+                index_elements=[Bank.fdic_cert],
+                set_={
+                    "fed_rssd": func.coalesce(excluded.fed_rssd, Bank.fed_rssd),
+                    "name": excluded.name,
+                    "address": func.coalesce(excluded.address, Bank.address),
+                    "city": func.coalesce(excluded.city, Bank.city),
+                    "state": func.coalesce(excluded.state, Bank.state),
+                    "zip": func.coalesce(excluded.zip, Bank.zip),
+                    "website": func.coalesce(excluded.website, Bank.website),
+                    "charter_authority": func.coalesce(excluded.charter_authority, Bank.charter_authority),
+                    "regulator": func.coalesce(excluded.regulator, Bank.regulator),
+                    "bkclass": func.coalesce(excluded.bkclass, Bank.bkclass),
+                    "established_date": func.coalesce(excluded.established_date, Bank.established_date),
+                    "insured_date": func.coalesce(excluded.insured_date, Bank.insured_date),
+                    "asset": func.coalesce(excluded.asset, Bank.asset),
+                    "deposits": func.coalesce(excluded.deposits, Bank.deposits),
+                    "offices": func.coalesce(excluded.offices, Bank.offices),
+                    "active": func.coalesce(excluded.active, Bank.active),
+                    # Forward-only status: apply the incoming status only when
+                    # its lifecycle rank is >= the stored one.
+                    "charter_status": _status_advance_sql(excluded.charter_status),
+                    # 'occ' + fdic -> 'fdic+occ'; plain fdic rows stay 'fdic'.
+                    "source": _merge_source_sql("fdic"),
+                    "fdic_checked_at": excluded.fdic_checked_at,
+                    "updated_at": func.now(),
+                },
+            )
+            await db.execute(upsert)
         return len(values)
 
     async def upsert_occ_filings(
