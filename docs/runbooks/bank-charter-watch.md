@@ -193,6 +193,40 @@ gcloud scheduler jobs create http fis-bank-charter-watch-prod-nightly \
   --oauth-service-account-email="136029935063-compute@developer.gserviceaccount.com"
 ```
 
+## Weekly full-directory sync (production)
+
+The nightly above only covers the trailing-30-day *new-charter* window. To keep
+the **full ~4,400-institution directory** fresh (name / asset / status changes
+across the whole FDIC+OCC list, not just brand-new charters), a separate
+**weekly** cron re-runs the watcher's full-directory phase. It reuses the same
+prod job with an **args override** on the **v2** `:run` endpoint — the v1
+Knative `:run` the nightly uses does not carry container overrides — running
+`--full-sync --skip-fdic --skip-occ --apply`: FDIC all-active fetch + OCC
+directory upsert only (the daily windowed FDIC-history / OCC-CAS phases stay on
+the nightly). Free (FDIC BankFind + OCC public APIs — no Apollo/Gemini) and
+fully idempotent (upsert, no deletes), so any overlap with the nightly is a
+no-op.
+
+```bash
+gcloud scheduler jobs create http fis-bank-charter-full-sync-prod-weekly \
+  --project=fis-lead-gen \
+  --location=us-central1 \
+  --schedule="0 3 * * 0" \
+  --time-zone="America/New_York" \
+  --uri="https://run.googleapis.com/v2/projects/fis-lead-gen/locations/us-central1/jobs/fis-bank-charter-watch-prod:run" \
+  --http-method=POST \
+  --oauth-service-account-email="136029935063-compute@developer.gserviceaccount.com" \
+  --headers="Content-Type=application/json" \
+  --message-body='{"overrides":{"containerOverrides":[{"args":["scripts/watch_bank_charters.py","--full-sync","--skip-fdic","--skip-occ","--apply"]}]}}'
+```
+
+Runs Sundays 03:00 ET (distinct from the 04:30 daily). Verify or trigger on
+demand:
+`gcloud scheduler jobs run fis-bank-charter-full-sync-prod-weekly --location=us-central1 --project=fis-lead-gen`.
+First populated both envs 2026-07-03 (59 → ~4,412 prod / 4,411 staging). The
+`--full-sync` flag stays **out** of the deployed job args on purpose (Bruce's
+design); only this weekly cron supplies it, via the override above.
+
 ## One-time backfill
 
 The nightly window only covers the trailing 30 days. To seed history, run the
