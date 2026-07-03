@@ -131,6 +131,45 @@ async def test_digital_assets_tri_state(repository: BankRepository) -> None:
     assert "banks.digital_assets is false" in _captured_where_sql(session)
 
 
+async def test_charter_types_filter_emits_in_predicate(repository: BankRepository) -> None:
+    # The full-directory CharterType facet: an IN filter like the other enums.
+    session = _StagedSession()
+    await repository.list_banks(
+        session, **_default_kwargs(), charter_types=["National", "TrustCo-National"]
+    )
+    where = _captured_where_sql(session)
+    assert "banks.charter_type in ('national', 'trustco-national')" in where
+
+
+async def test_charter_types_none_or_empty_emits_no_predicate(repository: BankRepository) -> None:
+    # Default (None) and an empty list both leave the full set intact —
+    # preserving the pre-full-directory behaviour.
+    session = _StagedSession()
+    await repository.list_banks(session, **_default_kwargs())
+    assert "charter_type" not in _captured_where_sql(session)
+    session = _StagedSession()
+    await repository.list_banks(session, **_default_kwargs(), charter_types=[])
+    assert "charter_type" not in _captured_where_sql(session)
+
+
+async def test_new_charters_only_emits_status_or_recent_window(repository: BankRepository) -> None:
+    # The "new / pending charters" view that reproduces the vertical's
+    # original ~59-row behaviour: pending/approved OR opened within a year.
+    session = _StagedSession()
+    await repository.list_banks(session, **_default_kwargs(), new_charters_only=True)
+    where = _captured_where_sql(session)
+    assert "banks.charter_status in ('pending', 'approved')" in where
+    # OR'd with a trailing-365-day establishment window.
+    assert "or banks.established_date >=" in where
+
+
+async def test_new_charters_only_default_off_emits_no_predicate(repository: BankRepository) -> None:
+    session = _StagedSession()
+    await repository.list_banks(session, **_default_kwargs())
+    where = _captured_where_sql(session)
+    assert "charter_status in ('pending', 'approved')" not in where
+
+
 async def test_find_banks_by_occ_charter_number_filters_on_the_column(
     repository: BankRepository,
 ) -> None:

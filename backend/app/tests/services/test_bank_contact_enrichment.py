@@ -686,7 +686,12 @@ def _script_directory() -> ScriptDirectory:
 
 
 def test_enrichment_migration_is_the_single_head() -> None:
-    assert _script_directory().get_heads() == ["20260702_0004"]
+    # The enrichment migration is no longer the head itself — the banks
+    # full-directory OCC charter-number index (20260703_0001) now sits
+    # directly on top of it — but the chain must stay single-headed.
+    script = _script_directory()
+    assert script.get_heads() == ["20260703_0001"]
+    assert script.get_revision("20260703_0001").down_revision == "20260702_0004"
 
 
 def test_enrichment_migration_is_an_additive_child_of_bank_contacts() -> None:
