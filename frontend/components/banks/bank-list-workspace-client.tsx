@@ -26,6 +26,7 @@ import {
   CHARTER_STATUS_OPTIONS,
   charterAuthorityLabel,
   charterStatusLabel,
+  charterTypeLabel,
   DIGITAL_ASSETS_DASH_EXPLANATION,
   NO_OCC_TIMELINE_EXPLANATION,
 } from "@/components/banks/bank-status-pill";
@@ -76,6 +77,22 @@ const DIGITAL_ASSETS_ITEMS: ReadonlyArray<SegmentedItem> = [
   { value: "tagged", label: "Digital assets only" },
 ];
 
+// "New & pending" quick-view preset — the recommended default landing view.
+// Maps to the BE new_charters_only param: "new" → true (new / pending
+// charters only), "all" → false (the full ~4,300-row FDIC + OCC directory).
+const NEW_CHARTERS_ITEMS: ReadonlyArray<SegmentedItem> = [
+  { value: "new", label: "New & pending" },
+  { value: "all", label: "All institutions" },
+];
+
+// Seed for the Charter Type multi-select. OCC's CharterType is a free-form,
+// "descriptive only" field with no distinct-values endpoint, so the live
+// option list is built at render time by unioning this seed with the values
+// actually present on the loaded page and the current selection (see
+// charterTypeOptions). Seeding the two confirmed OCC tokens keeps the control
+// usable before the BE promotes charter_type onto the list payload.
+const CHARTER_TYPE_SEED: ReadonlyArray<string> = ["National", "TrustCo-National"];
+
 // Sort options shown in the toolbar Combo. Backed by the BE-recognized
 // sort_by keys on /api/v1/banks.
 const SORT_OPTIONS = [
@@ -112,8 +129,10 @@ function paginationPages(current: number, total: number): PageToken[] {
 function countActiveFilters(state: BankListQueryState): number {
   let n = 0;
   if (state.search !== BANK_LIST_STATE_DEFAULTS.search) n += 1;
+  if (state.newChartersOnly !== BANK_LIST_STATE_DEFAULTS.newChartersOnly) n += 1;
   if (state.states.length > 0) n += 1;
   if (state.charterAuthority !== BANK_LIST_STATE_DEFAULTS.charterAuthority) n += 1;
+  if (state.charterTypes.length > 0) n += 1;
   if (state.charterStatuses.length > 0) n += 1;
   if (state.digitalAssets !== BANK_LIST_STATE_DEFAULTS.digitalAssets) n += 1;
   if (state.establishedAfter !== null || state.establishedBefore !== null) n += 1;
@@ -203,9 +222,15 @@ export function BankListWorkspaceClient() {
       limit: state.limit,
     };
     if (state.search) params.search = state.search;
+    // Sent explicitly in both directions: the BE default for this new param
+    // is unknown at build time, so we never rely on omission to mean "all".
+    params.new_charters_only = state.newChartersOnly ? "true" : "false";
     if (state.states.length > 0) params.state = state.states;
     if (state.charterAuthority !== "All") {
       params.charter_authority = [state.charterAuthority];
+    }
+    if (state.charterTypes.length > 0) {
+      params.charter_type = state.charterTypes;
     }
     if (state.charterStatuses.length > 0) {
       params.charter_status = state.charterStatuses;
@@ -234,8 +259,10 @@ export function BankListWorkspaceClient() {
     return () => controller.abort();
   }, [
     state.search,
+    state.newChartersOnly,
     state.states,
     state.charterAuthority,
+    state.charterTypes,
     state.charterStatuses,
     state.digitalAssets,
     state.establishedAfter,
@@ -250,6 +277,27 @@ export function BankListWorkspaceClient() {
   const meta = data?.meta;
   const filtersActive = hasActiveFilters(state);
   const activeFilterCount = countActiveFilters(state);
+
+  // Charter Type options: OCC CharterType has no distinct-values endpoint, so
+  // union the known-token seed with the values present on the loaded page
+  // (populated once the BE promotes charter_type onto the list item) and the
+  // current selection — the last keeps share-linked / off-page picks visible
+  // and labeled. Never surfaces an option that can't match a row.
+  const charterTypeOptions = useMemo<MultiSelectFilterOption[]>(() => {
+    const byValue = new Map<string, MultiSelectFilterOption>();
+    const add = (raw: string | null | undefined) => {
+      const value = (raw ?? "").trim();
+      if (value && !byValue.has(value)) {
+        byValue.set(value, { value, label: charterTypeLabel(value) });
+      }
+    };
+    CHARTER_TYPE_SEED.forEach(add);
+    items.forEach((row) => add(row.charter_type));
+    state.charterTypes.forEach(add);
+    return Array.from(byValue.values()).sort((a, b) =>
+      a.label.localeCompare(b.label),
+    );
+  }, [items, state.charterTypes]);
 
   function handleClearFilters() {
     setSearchInput("");
@@ -281,9 +329,10 @@ export function BankListWorkspaceClient() {
           </h1>
           {/* Data-source provenance line — mirrors the advisor list so users
               opening this for the first time understand the scope. */}
-          <p className="mt-1 max-w-[640px] text-[12px] text-[var(--text-muted,#94a3b8)]">
-            New national and state banking charters, including pending
-            applications. Sourced from FDIC BankFind and the OCC Corporate
+          <p className="mt-1 max-w-[680px] text-[12px] text-[var(--text-muted,#94a3b8)]">
+            Every FDIC-insured and OCC-chartered U.S. banking institution, with
+            newly filed, pending, and digital-asset charters available as
+            filtered views. Sourced from FDIC BankFind and the OCC Corporate
             Applications Search — both official public government sources.
           </p>
         </div>
@@ -359,6 +408,33 @@ export function BankListWorkspaceClient() {
           ) : null}
         </div>
 
+        {/* Quick view preset — the recommended landing view. "New & pending"
+            maps to new_charters_only=true so the lead-gen-relevant charters
+            lead the page instead of sinking below thousands of established
+            banks under the established_date-desc sort; "All institutions"
+            opens the full FDIC + OCC directory. */}
+        <div className="mb-4 flex flex-wrap items-center gap-x-4 gap-y-3 rounded-xl border border-[var(--border,rgba(30,64,175,0.1))] bg-[var(--surface-2,#f1f6fd)] px-4 py-3">
+          <div className="min-w-0">
+            <p className="text-[11px] font-semibold uppercase tracking-[0.08em] text-[var(--text-muted,#94a3b8)]">
+              Quick view
+            </p>
+            <p className="mt-0.5 text-[12px] text-[var(--text-dim,#475569)]">
+              Lead with newly filed &amp; pending charters, or browse every
+              tracked institution.
+            </p>
+          </div>
+          <div className="ml-auto">
+            <Segmented
+              value={state.newChartersOnly ? "new" : "all"}
+              onChange={(next) =>
+                updateState({ newChartersOnly: next === "new", page: 1 })
+              }
+              items={NEW_CHARTERS_ITEMS}
+              ariaLabel="Quick view: new and pending, or all institutions"
+            />
+          </div>
+        </div>
+
         <div className="grid gap-4 md:grid-cols-2 lg:grid-cols-3">
           <div>
             <label className="mb-1.5 block text-[11px] font-semibold uppercase tracking-[0.08em] text-[var(--text-muted,#94a3b8)]">
@@ -392,6 +468,24 @@ export function BankListWorkspaceClient() {
             />
           </div>
 
+          <div>
+            {/* charter_TYPE (descriptive OCC CharterType) — distinct from the
+                charter_AUTHORITY OCC/STATE segment further down. */}
+            <label className="mb-1.5 block text-[11px] font-semibold uppercase tracking-[0.08em] text-[var(--text-muted,#94a3b8)]">
+              Charter Type
+            </label>
+            <MultiSelectFilter
+              value={state.charterTypes}
+              onChange={(next) => updateState({ charterTypes: next, page: 1 })}
+              options={charterTypeOptions}
+              triggerLabel="All charter types"
+              placeholder="Search charter types…"
+              emptyLabel="No charter types match your search"
+              noOptionsLabel="No charter types tracked yet."
+              ariaLabel="Charter type"
+            />
+          </div>
+
           <EstablishedDateRangeFilter
             establishedAfter={state.establishedAfter}
             establishedBefore={state.establishedBefore}
@@ -410,12 +504,13 @@ export function BankListWorkspaceClient() {
         </div>
 
         {/* Segmented row — mirrors the advisor list's Status / Scope pair.
-            Charter Type maps to the BE's charter_authority filter; Digital
-            Assets flips the tri-state digital_assets param to true. */}
+            Charter Authority maps to the BE's charter_authority filter (OCC
+            national vs STATE — NOT the descriptive charter_type multi-select
+            above); Digital Assets flips the tri-state digital_assets param. */}
         <div className="mt-4 grid gap-4 lg:grid-cols-2">
           <div>
             <p className="mb-1.5 text-[11px] font-semibold uppercase tracking-[0.08em] text-[var(--text-muted,#94a3b8)]">
-              Charter Type
+              Charter Authority
             </p>
             <Segmented
               value={state.charterAuthority}
@@ -426,7 +521,7 @@ export function BankListWorkspaceClient() {
                 })
               }
               items={AUTHORITY_ITEMS}
-              ariaLabel="Charter type"
+              ariaLabel="Charter authority"
             />
           </div>
           <div>
@@ -464,6 +559,18 @@ export function BankListWorkspaceClient() {
                 Search: {state.search}
               </Tag>
             ) : null}
+            {state.newChartersOnly !== BANK_LIST_STATE_DEFAULTS.newChartersOnly ? (
+              <Tag
+                onDismiss={() =>
+                  updateState({
+                    newChartersOnly: BANK_LIST_STATE_DEFAULTS.newChartersOnly,
+                    page: 1,
+                  })
+                }
+              >
+                All institutions (incl. established)
+              </Tag>
+            ) : null}
             {state.states.map((code) => (
               <Tag
                 key={`state-${code}`}
@@ -481,9 +588,24 @@ export function BankListWorkspaceClient() {
               <Tag
                 onDismiss={() => updateState({ charterAuthority: "All", page: 1 })}
               >
-                Charter: {charterAuthorityLabel(state.charterAuthority)}
+                Charter authority: {charterAuthorityLabel(state.charterAuthority)}
               </Tag>
             ) : null}
+            {state.charterTypes.map((charterType) => (
+              <Tag
+                key={`charter-type-${charterType}`}
+                onDismiss={() =>
+                  updateState({
+                    charterTypes: state.charterTypes.filter(
+                      (value) => value !== charterType,
+                    ),
+                    page: 1,
+                  })
+                }
+              >
+                Charter type: {charterTypeLabel(charterType)}
+              </Tag>
+            ))}
             {state.charterStatuses.map((status) => (
               <Tag
                 key={`status-${status}`}
@@ -709,19 +831,22 @@ export function BankListWorkspaceClient() {
               ) : items.length === 0 ? (
                 <tr>
                   <td colSpan={COLUMNS.length} className="px-5 py-12">
-                    {/* Empty states matter here — new-charter volume is only
-                        a handful per half-year, so an empty result is the
-                        normal case for narrow windows, not an error. */}
+                    {/* Two empty cases. With no active filters the default
+                        "New & pending" preset is on, so an empty result just
+                        means no charters are in flight right now (the normal
+                        case — a handful per half-year nationally); point the
+                        user at the full directory rather than implying the
+                        whole dataset is empty. */}
                     <div className="mx-auto max-w-[460px] text-center">
                       <p className="text-sm font-semibold text-[var(--text,#0f172a)]">
                         {filtersActive
                           ? "No banks match the current filters"
-                          : "No bank charters tracked yet"}
+                          : "No new or pending charters right now"}
                       </p>
                       <p className="mt-1 text-sm text-[var(--text-muted,#94a3b8)]">
                         {filtersActive
-                          ? "New-charter volume is low (roughly a handful per half-year) — try widening the established-date window or clearing a filter."
-                          : "The nightly charter watcher populates this list from FDIC BankFind and the OCC Corporate Applications Search. Check back after the next run."}
+                          ? "Try widening the established-date window, or clear a filter to see more institutions."
+                          : "New and pending charters are rare — roughly a handful per half-year nationally. Switch to All institutions to browse every FDIC-insured and OCC-chartered bank, or check back after the nightly watcher run."}
                       </p>
                       {filtersActive ? (
                         <Button
@@ -734,7 +859,19 @@ export function BankListWorkspaceClient() {
                           <X aria-hidden className="h-3.5 w-3.5" strokeWidth={2} />
                           Clear filters
                         </Button>
-                      ) : null}
+                      ) : (
+                        <Button
+                          type="button"
+                          variant="outline"
+                          size="sm"
+                          className="mt-3"
+                          onClick={() =>
+                            updateState({ newChartersOnly: false, page: 1 })
+                          }
+                        >
+                          Show all institutions
+                        </Button>
+                      )}
                     </div>
                   </td>
                 </tr>
