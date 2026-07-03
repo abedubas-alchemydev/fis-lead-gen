@@ -7,10 +7,10 @@
 // and a hard reload doesn't lose filters.
 //
 // Param-key contract intentionally aligns with the BE filter vocabulary on
-// GET /api/v1/banks (search, state, charter_authority, charter_status,
-// digital_assets, established_after/established_before) so a debugging
-// session can copy-paste between the BE API URL and the FE URL without
-// translation.
+// GET /api/v1/banks (search, state, charter_authority, charter_type,
+// charter_status, digital_assets, new_charters_only,
+// established_after/established_before) so a debugging session can
+// copy-paste between the BE API URL and the FE URL without translation.
 
 export type SortDir = "asc" | "desc";
 
@@ -26,9 +26,19 @@ export type BankDigitalAssetsFilter = "all" | "tagged";
 
 export interface BankListQueryState {
   search: string;
+  // Recommended landing preset. true → new / pending charters only
+  // (new_charters_only=true on the wire); false → the full ~4,300-row
+  // all-banks directory. Defaults true so the lead-gen-relevant charters
+  // lead the page instead of sinking below thousands of long-established
+  // banks under the established_date-desc sort.
+  newChartersOnly: boolean;
   // 2-letter state codes, repeat-key `?state=TX&state=NY` on the wire.
   states: string[];
   charterAuthority: BankCharterAuthorityFilter;
+  // OCC CharterType values (e.g. 'National', 'TrustCo-National'), repeat-key
+  // `?charter_type=National&charter_type=TrustCo-National`. Descriptive
+  // charter KIND — orthogonal to charterAuthority's OCC-vs-STATE split.
+  charterTypes: string[];
   // pending | approved | opened | withdrawn | rescinded (multi).
   charterStatuses: string[];
   digitalAssets: BankDigitalAssetsFilter;
@@ -42,11 +52,17 @@ export interface BankListQueryState {
 }
 
 // Defaults mirror the BE endpoint defaults (established_date desc, 25/page)
-// so a filter-less load renders the same rows the raw API returns.
+// with ONE deliberate divergence: newChartersOnly defaults to true. After
+// full-directory ingestion the raw endpoint returns ~4,300 banks with the
+// new/pending charters (NULL established_date) sorted to the very bottom, so
+// the FE opens on the new_charters_only=true view to lead with the
+// lead-gen-relevant rows. Everything else matches the raw API.
 export const BANK_LIST_STATE_DEFAULTS: BankListQueryState = {
   search: "",
+  newChartersOnly: true,
   states: [],
   charterAuthority: "All",
+  charterTypes: [],
   charterStatuses: [],
   digitalAssets: "all",
   establishedAfter: null,
@@ -91,6 +107,16 @@ function parseIntInRange(
   return parsed;
 }
 
+// Explicit-only bool: "true"/"false" map to the obvious value; anything else
+// (absent, garbage) falls back. Used for the new_charters_only preset, whose
+// FE default is true — so a clean landing URL carries no param and only the
+// show-all deviation ever serializes as `new_charters_only=false`.
+function parseBool(raw: string | null, fallback: boolean): boolean {
+  if (raw === "true") return true;
+  if (raw === "false") return false;
+  return fallback;
+}
+
 export function fromSearchParams(sp: SearchParamsLike): BankListQueryState {
   const sortDir = sp.get("sort_dir");
   const authorityRaw = sp.get("charter_authority");
@@ -103,12 +129,17 @@ export function fromSearchParams(sp: SearchParamsLike): BankListQueryState {
 
   return {
     search: sp.get("search") ?? BANK_LIST_STATE_DEFAULTS.search,
+    newChartersOnly: parseBool(
+      sp.get("new_charters_only"),
+      BANK_LIST_STATE_DEFAULTS.newChartersOnly,
+    ),
     states: parseMultiParam(sp, "state"),
     charterAuthority:
       authorityRaw &&
       (CHARTER_AUTHORITY_VALUES as ReadonlyArray<string>).includes(authorityRaw)
         ? (authorityRaw as BankCharterAuthorityFilter)
         : BANK_LIST_STATE_DEFAULTS.charterAuthority,
+    charterTypes: parseMultiParam(sp, "charter_type"),
     charterStatuses: parseMultiParam(sp, "charter_status"),
     // URL carries the BE wire value (`digital_assets=true`); anything else
     // falls back to "no filter".
@@ -138,11 +169,19 @@ export function toSearchParams(state: BankListQueryState): URLSearchParams {
   if (state.search !== BANK_LIST_STATE_DEFAULTS.search) {
     sp.set("search", state.search);
   }
+  // FE default is true, so this only ever serializes the `false` (show-all)
+  // deviation — the recommended new-&-pending landing URL stays clean /banks.
+  if (state.newChartersOnly !== BANK_LIST_STATE_DEFAULTS.newChartersOnly) {
+    sp.set("new_charters_only", String(state.newChartersOnly));
+  }
   if (state.states.length > 0) {
     state.states.forEach((entry) => sp.append("state", entry));
   }
   if (state.charterAuthority !== BANK_LIST_STATE_DEFAULTS.charterAuthority) {
     sp.set("charter_authority", state.charterAuthority);
+  }
+  if (state.charterTypes.length > 0) {
+    state.charterTypes.forEach((entry) => sp.append("charter_type", entry));
   }
   if (state.charterStatuses.length > 0) {
     state.charterStatuses.forEach((entry) => sp.append("charter_status", entry));
@@ -205,8 +244,10 @@ export function encodeReturnParam(state: BankListQueryState): string {
 export function hasActiveFilters(state: BankListQueryState): boolean {
   return (
     state.search !== BANK_LIST_STATE_DEFAULTS.search ||
+    state.newChartersOnly !== BANK_LIST_STATE_DEFAULTS.newChartersOnly ||
     state.states.length > 0 ||
     state.charterAuthority !== BANK_LIST_STATE_DEFAULTS.charterAuthority ||
+    state.charterTypes.length > 0 ||
     state.charterStatuses.length > 0 ||
     state.digitalAssets !== BANK_LIST_STATE_DEFAULTS.digitalAssets ||
     state.establishedAfter !== null ||
@@ -218,8 +259,12 @@ export function clearAllFilters(state: BankListQueryState): BankListQueryState {
   return {
     ...state,
     search: BANK_LIST_STATE_DEFAULTS.search,
+    // Clearing returns to the recommended landing view (new & pending), not
+    // the raw all-banks dump — the pristine default, same as a fresh /banks.
+    newChartersOnly: BANK_LIST_STATE_DEFAULTS.newChartersOnly,
     states: [],
     charterAuthority: BANK_LIST_STATE_DEFAULTS.charterAuthority,
+    charterTypes: [],
     charterStatuses: [],
     digitalAssets: BANK_LIST_STATE_DEFAULTS.digitalAssets,
     establishedAfter: null,

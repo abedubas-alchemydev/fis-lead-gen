@@ -246,6 +246,35 @@ class FdicBankFindService:
         )
         return records
 
+    async def fetch_all_active_institutions(self) -> list[FdicInstitutionRecord]:
+        """Every ACTIVE FDIC-insured institution — the full base dataset.
+
+        Drains ``/institutions`` filtered on ``ACTIVE:1`` through the shared
+        limit/offset pagination (like ``fetch_institutions_established_between``),
+        with a stable ``CERT`` ascending sort so the page boundaries are
+        deterministic and a partial drain resumes on the same rows. Same
+        keyless request and absence-tolerant parsing as the window fetch.
+
+        ~4,300 rows today (~9 pages at ``_PAGE_SIZE`` 500). The
+        new/pending/digital-asset views are filtered subsets of this set,
+        so callers upsert the whole list and let ``list_banks`` narrow it.
+        """
+        params = {
+            "filters": "ACTIVE:1",
+            "fields": INSTITUTION_FIELDS,
+            # Stable ordering so limit/offset paging can't skip or repeat a
+            # row between page requests (ESTYMD is not unique; CERT is).
+            "sort_by": "CERT",
+            "sort_order": "ASC",
+        }
+        raw_rows = await self._fetch_all_pages(FDIC_INSTITUTIONS_URL, params)
+        records = [rec for row in raw_rows if (rec := parse_institution_row(row)) is not None]
+        logger.info(
+            "fdic: all active institutions -> %d row(s), %d parsed",
+            len(raw_rows), len(records),
+        )
+        return records
+
     async def fetch_institutions_by_certs(self, certs: list[str]) -> list[FdicInstitutionRecord]:
         """Targeted lookup for specific CERT numbers (reconciliation helper)."""
         clean = [c.strip() for c in certs if c and c.strip()]
