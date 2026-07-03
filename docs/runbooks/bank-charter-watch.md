@@ -138,7 +138,7 @@ permission).
 |---|---|---|
 | Staging job deploy (`fis-bank-charter-watch-staging`) | `.github/workflows/test.yml` → "Deploy bank-charter-watch Cloud Run Job (staging)", gated `env.ENV == 'staging'` | Re-run on every push to `develop`. |
 | Production job deploy (`fis-bank-charter-watch-prod`) | same file → "(production)", gated `env.ENV == 'production'` | Re-run on every push to `main`. |
-| Alembic migrations (`20260702_0001` — `banks` + `bank_application_events`; `20260702_0002` — additive `banks.lei` + `banks.charter_type`) | applied automatically by the deploy pipeline's "Apply Alembic migrations" step | Once per env. |
+| Alembic migrations (`20260702_0001` — `banks` + `bank_application_events`; `20260702_0002` — additive `banks.lei` + `banks.charter_type`; `20260702_0003` — `bank_contacts`) | applied automatically by the deploy pipeline's "Apply Alembic migrations" step | Once per env. |
 | `OCC_API_KEY` secret (api.data.gov key for the Institutions API) | GCP Secret Manager (exists, v1); wired into both jobs via the deploy steps' `--set-secrets` | One-time (rotate by adding a secret version). |
 | Cloud Scheduler triggers (staging + prod) | **Not in the repo** — created once with the gcloud commands below. The deployed jobs are inert until then. | One-time. |
 
@@ -330,6 +330,120 @@ fetched). The archive 503s freely under load (observed live: 6 of 13
 captures on one pass) — each failure is a logged warning, not an abort, and
 because the union tolerates gaps and tagging is sticky, simply re-running
 until `_snapshots` stops growing converges on the full history.
+
+## Extracting contacts from application PDFs
+
+The client asked for "contacts, everything we can grab" from the
+public-portion charter-application PDFs. The opt-in
+**`--extract-contacts`** phase (phase 5, after the digital-assets/history
+phases) is the banks sibling of the FOCUS "PERSON TO CONTACT" extraction on
+the BD side: for every bank whose `digital_asset_pdfs` carries PDF links, it
+downloads each PDF and conservatively extracts the PEOPLE the filing names
+into **`bank_contacts`**, surfaced on `GET /api/v1/banks/{id}` as the
+`contacts` array.
+
+What is extracted (`role_context` on each row):
+
+| `role_context` | Source pattern in the PDF |
+|---|---|
+| `contact_person` | The "Contact person" / "Primary contact" / "Person to contact" block, or a "please contact Jane Doe at …" sentence — plus any phone/email printed alongside. |
+| `organizer` | Names under an "Organizers" / "Organizing group" heading, or an "the organizers are …" sentence. |
+| `proposed_officer` | "proposed President / CEO / director / Chief \* Officer" sentences; the title is stored verbatim. |
+| `counsel` | Counsel-of-record ("Counsel: Jane Doe", "Attorney for the applicant: …", "Jane Doe, counsel to the organizers"). |
+
+**Conservative-extraction policy** (same never-guess rule as every matcher
+in this watcher): a person is stored ONLY when the pattern around the hit is
+unambiguous AND the candidate passes strict person-name validation (2-4
+title-cased words, no digits, no organization/form vocabulary). Everything
+else — a law firm where a person was expected, an ALL-CAPS header, a "TBD"
+— is **logged and counted, never written**. Every stored row keeps its
+receipt: `page_number` + `context_snippet` + `source_url` (the occ.gov PDF).
+
+Safety rails: PDF URLs are re-verified against the **https occ.gov
+allowlist** before fetching (and again after redirects), downloads are
+capped at **20MB** with a bounded timeout, and text extraction runs in a
+**crash-isolated subprocess** (`_pdf_text_worker.py`, the pdfminer sibling
+of `_pdf_render_worker.py`) — a corrupt PDF degrades to a parse-miss and can
+never kill the run. No paid APIs; occ.gov only.
+
+**Idempotent:** upserts key on `(bank_id, name, coalesce(title,''), source)`
+(`uq_bank_contacts_dedupe`), so re-running over the same PDFs is a no-op —
+safe to compose with any other phase, any night.
+
+### LLM-assisted extraction (Gemini recall pass)
+
+The regex extractor's strictness costs recall (its first production sweep
+stored 40 people while refusing ~290 ambiguous candidates), so the phase
+also sends each PDF's per-page text to **Gemini**
+(`services/bank_contact_llm.py`, the repo's structured-output client) and
+unions the results. The never-fabricate policy is enforced by **grounding
+validation**, not by trusting the model:
+
+- **Grounding rule** — an LLM-returned person is kept ONLY when their name
+  appears **verbatim in the source page text** (case-insensitive,
+  whitespace-flexible: name tokens in order, separated only by whitespace,
+  word-boundary guarded). Email/phone/title values pass the same check;
+  an ungrounded value is nulled, never stored. The stored `page_number` +
+  `context_snippet` are cut from where the name *actually* matched in the
+  source text. Everything the gate refuses is logged with its reason and
+  counted (`bank_contacts_llm_dropped_ungrounded`) — a dropped
+  hallucination can never reach the DB.
+- **Merge** — regex + Gemini results union per bank, deduped on the same
+  `(name, title)` key the upsert uses; **regex rows win on conflict** (they
+  carry the pattern-anchored snippet). LLM-only people are tagged
+  `source='application_pdf_llm'` so they stay distinguishable in the DB and
+  on the detail card; a later regex hit for the same person supersedes
+  (deletes) its LLM twin at upsert time.
+- **GEMINI_API_KEY is optional** — without it (or on any API error /
+  response-shape surprise) the service logs a warning and the phase behaves
+  **exactly like the regex-only extractor**: the watcher can never fail
+  because Gemini is down. No new flags; setting the key is the switch.
+
+One-off commands (DB URL via the environment, exactly like the other
+backfills — never on the command line; dry-run first):
+
+```bash
+# Staging
+export DATABASE_URL=$(gcloud secrets versions access latest --secret=DATABASE_URL_BACKEND_STAGING --project=fis-lead-gen)
+python scripts/watch_bank_charters.py --skip-fdic --skip-occ --extract-contacts          # dry-run: logs what it WOULD write
+python scripts/watch_bank_charters.py --skip-fdic --skip-occ --extract-contacts --apply  # write
+
+# Production
+export DATABASE_URL=$(gcloud secrets versions access latest --secret=DATABASE_URL_BACKEND --project=fis-lead-gen)
+python scripts/watch_bank_charters.py --skip-fdic --skip-occ --extract-contacts          # dry-run
+python scripts/watch_bank_charters.py --skip-fdic --skip-occ --extract-contacts --apply  # write
+```
+
+`--skip-fdic --skip-occ` leaves the digital-assets phase running alongside
+(so a PDF link tagged in the same run is extracted in the same run); add
+`--skip-digital-assets` to run contact extraction alone.
+
+**Nightly:** the phase is **opt-in by design** (the deployed jobs run plain
+`--apply` and are unaffected). To run it nightly, add `--extract-contacts`
+to the Cloud Run Job args in `.github/workflows/test.yml` (both deploy
+steps' `--args=scripts/watch_bank_charters.py,--apply,--extract-contacts`)
+— idempotency makes the nightly re-scan free; only new PDFs/people produce
+writes.
+
+The summary line reports five keys:
+
+- `bank_contacts_pdfs_fetched` — PDFs actually downloaded (allowlist-passed,
+  HTTP 200, under the size cap) across all banks;
+- `bank_contacts_extracted` — people in the final merged set (regex +
+  grounded Gemini, deduped per bank). Dry-run: the would-write set. Apply:
+  the upserted set — a re-run reports the same number with zero DB changes
+  (the per-bank log line breaks out `inserted=` vs `updated=`);
+- `bank_contacts_skipped_ambiguous` — pattern hits refused by the
+  conservative regex validators (logged with page + reason, never written).
+  A non-zero count is NORMAL — redacted public portions and law-firm counsel
+  lines land here by design;
+- `bank_contacts_llm_extracted` — people the Gemini recall pass ADDED beyond
+  regex (grounded + novel, `source='application_pdf_llm'`; the recall win).
+  Zero when GEMINI_API_KEY is unset;
+- `bank_contacts_llm_dropped_ungrounded` — Gemini-returned records refused
+  by the grounding gate (name/value not printed verbatim on the source
+  pages, org vocabulary, unmappable role — logged with reason, never
+  written). Non-zero is the gate WORKING, not a failure.
 
 ## Notes & gotchas
 

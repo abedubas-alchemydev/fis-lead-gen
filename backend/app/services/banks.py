@@ -146,9 +146,23 @@ class BankRepository:
         stmt = (
             select(Bank)
             .where(Bank.id == bank_id)
-            .options(selectinload(Bank.application_events))
+            .options(
+                selectinload(Bank.application_events),
+                selectinload(Bank.contacts),
+            )
         )
         return (await db.execute(stmt)).scalar_one_or_none()
+
+    async def list_banks_with_application_pdfs(self, db: AsyncSession) -> list[Bank]:
+        """Banks carrying at least one public-portion application PDF link
+        (``digital_asset_pdfs`` non-NULL). The eligible set for the watcher's
+        opt-in ``--extract-contacts`` phase; ordered for stable run logs."""
+        stmt = (
+            select(Bank)
+            .where(Bank.digital_asset_pdfs.is_not(None))
+            .order_by(Bank.id.asc())
+        )
+        return list((await db.execute(stmt)).scalars().all())
 
     async def list_states(self, db: AsyncSession) -> list[str]:
         stmt = (

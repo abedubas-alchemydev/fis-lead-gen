@@ -7,12 +7,14 @@ from sqlalchemy import (
     Date,
     DateTime,
     ForeignKey,
+    Index,
     Integer,
     Numeric,
     String,
     Text,
     UniqueConstraint,
     func,
+    text,
 )
 from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.orm import Mapped, mapped_column, relationship
@@ -137,6 +139,11 @@ class Bank(Base):
         cascade="all, delete-orphan",
         order_by="BankApplicationEvent.action_date.desc(), BankApplicationEvent.id.desc()",
     )
+    contacts: Mapped[list["BankContact"]] = relationship(
+        back_populates="bank",
+        cascade="all, delete-orphan",
+        order_by="BankContact.id.asc()",
+    )
 
 
 class BankApplicationEvent(Base):
@@ -174,3 +181,84 @@ class BankApplicationEvent(Base):
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now(), nullable=False)
 
     bank: Mapped[Bank] = relationship(back_populates="application_events")
+
+
+class BankContact(Base):
+    """A person extracted from a bank's OCC charter-application PDF.
+
+    The banks-vertical sibling of ``executive_contacts`` on the BD side.
+    Rows are written exclusively by the extraction service
+    (``services/bank_contact_extraction.py``, wired into the watcher's
+    opt-in ``--extract-contacts`` phase) via two never-guess passes:
+    the conservative regex extractor (``source='application_pdf'``) —
+    people persisted only when the surrounding pattern in the
+    public-portion PDF is unambiguous (contact-person block, organizers
+    list, "proposed <officer>" sentence, counsel-of-record) — and the
+    grounded Gemini recall pass (``source='application_pdf_llm'``,
+    ``services/bank_contact_llm.py``), whose rows survive only when the
+    name is printed verbatim on the source page. Ambiguous/ungrounded
+    hits are logged and skipped, never guessed or fabricated.
+
+    ``role_context`` records WHY the person appears in the filing
+    ('contact_person' | 'organizer' | 'proposed_officer' | 'counsel');
+    ``page_number`` + ``context_snippet`` keep the receipt (the raw text
+    around the hit) so a user can verify any row against the source PDF
+    (``source_url``, always an https occ.gov link) in one click.
+
+    Dedupe key: ``(bank_id, name, coalesce(title,''), source)`` — a unique
+    expression index (``title`` is nullable and NULL != NULL in Postgres,
+    so the raw column can't participate in the key). The extractor upserts
+    on the same key, so overlapping re-runs are no-ops.
+    """
+
+    __tablename__ = "bank_contacts"
+    __table_args__ = (
+        Index(
+            "uq_bank_contacts_dedupe",
+            "bank_id",
+            "name",
+            text("coalesce(title, '')"),
+            "source",
+            unique=True,
+        ),
+    )
+
+    id: Mapped[int] = mapped_column(primary_key=True, autoincrement=True)
+    bank_id: Mapped[int] = mapped_column(
+        ForeignKey("banks.id", ondelete="CASCADE"), index=True, nullable=False
+    )
+    name: Mapped[str] = mapped_column(String(255), nullable=False)
+    # Verbatim from the filing when unambiguous (e.g. 'President and Chief
+    # Executive Officer'); NULL when the filing names the person without one.
+    title: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    # 'contact_person' | 'organizer' | 'proposed_officer' | 'counsel' —
+    # deliberately not an enum; new extraction patterns must land, not crash.
+    role_context: Mapped[str] = mapped_column(String(32), nullable=False)
+    email: Mapped[str | None] = mapped_column(String(320), nullable=True)
+    phone: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    source: Mapped[str] = mapped_column(String(64), nullable=False, default="application_pdf")
+    # The occ.gov public-portion PDF the person was extracted from.
+    source_url: Mapped[str] = mapped_column(Text, nullable=False)
+    # 1-based page of the hit inside that PDF; NULL if unknown.
+    page_number: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    # Short raw text around the hit — the audit trail for the extraction.
+    context_snippet: Mapped[str | None] = mapped_column(Text, nullable=True)
+    # ── Tier-2 Apollo enrichment bookkeeping (services/bank_contact_enrichment.py) ──
+    # Stamped on every PAID lookup attempt that reached a decision (matched
+    # OR no-match) so re-runs skip the row and never re-spend the credit.
+    # NULL = never attempted. Provider errors (timeouts, 429/5xx exhaustion)
+    # deliberately do NOT stamp — a transient Apollo outage must not
+    # permanently mark the row as attempted.
+    enriched_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    # 'matched' | 'no_match' — outcome of the last Apollo lookup; NULL =
+    # never attempted. Deliberately not an enum (the vocabulary must be able
+    # to grow without a crash), mirroring role_context above.
+    enrich_status: Mapped[str | None] = mapped_column(String(32), nullable=True)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now(), nullable=False
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now(), onupdate=func.now(), nullable=False
+    )
+
+    bank: Mapped[Bank] = relationship(back_populates="contacts")

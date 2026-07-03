@@ -499,3 +499,127 @@ async def test_history_dry_run_counts_but_never_writes(caplog) -> None:
     assert bank.digital_assets is False
     assert bank.digital_asset_pdfs is None
     assert "would tag bank id=42" in caplog.text
+
+
+# ── Contacts phase summary (--extract-contacts): the five summary keys ────
+
+from scripts.watch_bank_charters import _extract_bank_contacts  # noqa: E402
+
+from app.services.bank_contact_extraction import (  # noqa: E402
+    LLM_SOURCE,
+    BankContactExtractionStats,
+    ExtractedBankContact,
+)
+
+_CONTACTS_PDF_URL = (
+    "https://www.occ.gov/topics/charters-and-licensing/"
+    "digital-assets-licensing-applications/erebor-public.pdf"
+)
+
+
+class _FakeContactSession:
+    def __init__(self) -> None:
+        self.commits = 0
+
+    async def __aenter__(self) -> "_FakeContactSession":
+        return self
+
+    async def __aexit__(self, *exc_info) -> bool:
+        return False
+
+    async def commit(self) -> None:
+        self.commits += 1
+
+
+class _FakeSessionMaker:
+    def __call__(self) -> _FakeContactSession:
+        return _FakeContactSession()
+
+
+class _ContactsStubRepository(BankRepository):
+    def __init__(self, banks) -> None:
+        self._banks = list(banks)
+
+    async def list_banks_with_application_pdfs(self, db):
+        return list(self._banks)
+
+
+class _StubContactService:
+    """Canned per-bank ``collect_contacts`` results; records upserts."""
+
+    def __init__(self, results) -> None:
+        self._results = results  # bank_id -> (contacts, stats)
+        self.upserts: list[tuple[int, list[str]]] = []
+
+    async def collect_contacts(self, *, bank_id, bank_name, pdf_entries):
+        return self._results[bank_id]
+
+    async def upsert_contacts(self, db, bank_id, contacts):
+        self.upserts.append((bank_id, [contact.name for contact in contacts]))
+        return len(contacts), 0
+
+
+def _contacts_fixture():
+    banks = [
+        _erebor_bank(id=1, digital_asset_pdfs=[{"url": _CONTACTS_PDF_URL}]),
+        _erebor_bank(id=2, name="Moria Trust Company, N.A.",
+                     digital_asset_pdfs=[{"url": _CONTACTS_PDF_URL}]),
+    ]
+    contacts = [
+        ExtractedBankContact(
+            name="Jane A. Doe", title="President",
+            role_context="contact_person", email=None, phone=None,
+            source_url=_CONTACTS_PDF_URL, page_number=1,
+            context_snippet="Contact person: Jane A. Doe, President",
+        ),
+        ExtractedBankContact(
+            name="Priya Krishnamurthy", title=None, role_context="organizer",
+            email=None, phone=None, source_url=_CONTACTS_PDF_URL,
+            page_number=3, context_snippet="PRIYA KRISHNAMURTHY",
+            source=LLM_SOURCE,
+        ),
+    ]
+    results = {
+        1: (contacts, BankContactExtractionStats(
+            pdfs_fetched=1, contacts_extracted=2, skipped_ambiguous=1,
+            llm_extracted=1, llm_dropped_ungrounded=3,
+        )),
+        2: ([], BankContactExtractionStats(
+            pdfs_fetched=1, contacts_extracted=0, skipped_ambiguous=0,
+            llm_extracted=0, llm_dropped_ungrounded=2,
+        )),
+    }
+    return banks, _StubContactService(results)
+
+
+async def test_extract_contacts_summary_reports_the_llm_keys() -> None:
+    banks, service = _contacts_fixture()
+    summary = await _extract_bank_contacts(
+        _FakeSessionMaker(),
+        repository=_ContactsStubRepository(banks),
+        service=service,
+        apply=False,
+    )
+    assert summary == {
+        "bank_contacts_pdfs_fetched": 2,
+        "bank_contacts_extracted": 2,
+        "bank_contacts_skipped_ambiguous": 1,
+        "bank_contacts_llm_extracted": 1,
+        "bank_contacts_llm_dropped_ungrounded": 5,
+    }
+    assert service.upserts == []  # dry-run writes nothing
+
+
+async def test_extract_contacts_apply_upserts_only_banks_with_contacts(caplog) -> None:
+    banks, service = _contacts_fixture()
+    with caplog.at_level(logging.INFO, logger=_SEED_LOGGER):
+        summary = await _extract_bank_contacts(
+            _FakeSessionMaker(),
+            repository=_ContactsStubRepository(banks),
+            service=service,
+            apply=True,
+        )
+    assert summary["bank_contacts_extracted"] == 2
+    assert summary["bank_contacts_llm_extracted"] == 1
+    assert service.upserts == [(1, ["Jane A. Doe", "Priya Krishnamurthy"])]
+    assert "2 contact(s)" in caplog.text

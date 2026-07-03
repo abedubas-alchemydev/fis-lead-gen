@@ -644,6 +644,39 @@ async def test_fetch_active_institutions_non_json_body_returns_none(monkeypatch)
     assert await OccCasService().fetch_active_institutions() is None
 
 
+async def test_fetch_digital_asset_application_history_cdx_failure_degrades(
+    monkeypatch,
+) -> None:
+    """A CDX index failure (archive flake) degrades to an empty history —
+    warning + (0, []) — instead of raising and killing a composed run
+    (observed in production 2026-07-02: httpx.ConnectError mid-backfill)."""
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path == "/cdx/search/cdx":
+            raise httpx.ConnectError("All connection attempts failed", request=request)
+        raise AssertionError(f"unexpected URL {request.url}")
+
+    _patch_async_client(monkeypatch, handler)
+    snapshots, entries = await OccCasService().fetch_digital_asset_application_history(
+        delay_seconds=0
+    )
+    assert snapshots == 0
+    assert entries == []
+
+
+async def test_fetch_digital_asset_application_history_cdx_503_degrades(
+    monkeypatch,
+) -> None:
+    _patch_async_client(
+        monkeypatch, lambda request: httpx.Response(503, text="unavailable")
+    )
+    snapshots, entries = await OccCasService().fetch_digital_asset_application_history(
+        delay_seconds=0
+    )
+    assert snapshots == 0
+    assert entries == []
+
+
 async def test_fetch_digital_asset_application_history_unions_monthly_snapshots(
     monkeypatch,
 ) -> None:

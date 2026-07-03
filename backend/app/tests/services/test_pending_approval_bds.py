@@ -9,9 +9,9 @@ is merely un-backfilled would pollute the card).
 Three layers, mirroring ``test_broker_dealers_range_filters.py``:
 
 1. SQL-shape: the repository emits the three-part predicate, retargets the
-   30/90-day window onto the filed-date proxy
-   ``COALESCE(formation_date, created_at::date)`` in pending mode, and
-   leaves normal mode untouched (registration_date windowing).
+   30/90-day window onto the filed-date proxy ``created_at::date`` in
+   pending mode, and leaves normal mode untouched (registration_date
+   windowing).
 2. Disjointness: the New BD predicate and the pending predicate can never
    both hold — proven structurally (registration_date >= cutoff vs
    registration_date IS NULL).
@@ -108,9 +108,10 @@ async def test_pending_mode_emits_three_part_predicate(
 async def test_pending_mode_windows_on_filed_date_proxy(
     repository: BrokerDealerRepository,
 ) -> None:
-    """In pending mode the 30/90-day params retarget to
-    COALESCE(formation_date, created_at::date) — every pending row's
-    registration_date is NULL, so windowing on it would return zero rows."""
+    """In pending mode the 30/90-day params retarget to created_at::date —
+    every pending row's registration_date is NULL, so windowing on it would
+    return zero rows; and formation_date is the wrong anchor (it predates
+    filing by years, which zeroed the card — see pending_filed_date_proxy)."""
     session = _StagedSession()
     await repository.list_broker_dealers(
         session,
@@ -120,16 +121,12 @@ async def test_pending_mode_windows_on_filed_date_proxy(
         registered_before=date(2026, 7, 2),
     )
     where = _captured_where_sql(session)
-    assert (
-        "coalesce(broker_dealers.formation_date, cast(broker_dealers.created_at as date)) "
-        ">= '2026-04-03'" in where
-    )
-    assert (
-        "coalesce(broker_dealers.formation_date, cast(broker_dealers.created_at as date)) "
-        "<= '2026-07-02'" in where
-    )
-    # And crucially NOT windowed on registration_date (which stays only in
-    # the IS NULL predicate).
+    assert "cast(broker_dealers.created_at as date) >= '2026-04-03'" in where
+    assert "cast(broker_dealers.created_at as date) <= '2026-07-02'" in where
+    # NOT anchored on formation_date (the bug that zeroed the card) ...
+    assert "formation_date" not in where
+    # ... and NOT windowed on registration_date (which stays only in the IS
+    # NULL predicate).
     assert "broker_dealers.registration_date >=" not in where
     assert "broker_dealers.registration_date <=" not in where
 
@@ -197,13 +194,14 @@ async def test_count_pending_approval_sql_shape() -> None:
     assert "broker_dealers.registration_date is null" in sql
     assert "broker_dealers.registration_checked_at is not null" in sql
     assert (
-        "coalesce(broker_dealers.formation_date, cast(broker_dealers.created_at as date)) "
-        ">= '2026-04-03'" in sql  # 2026-07-02 minus 90 days
-    )
+        "cast(broker_dealers.created_at as date) >= '2026-04-03'" in sql
+    )  # 2026-07-02 minus 90 days
+    assert "formation_date" not in sql
 
     session = _CountSession()
     await repository.count_pending_approval(session, filed_within_days=None)
-    assert "coalesce" not in _compile_sql(session.statements[0])
+    unwindowed = _compile_sql(session.statements[0])
+    assert "cast(broker_dealers.created_at as date) >=" not in unwindowed
 
 
 # ── Endpoint passthrough ────────────────────────────────────────────────────

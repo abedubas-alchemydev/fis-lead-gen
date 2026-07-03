@@ -1347,11 +1347,39 @@ export type BankSourceLink = {
   url: string;
 };
 
+// One person extracted from a charter-application public-portion PDF —
+// the banks sibling of the BD detail's ExecutiveContactItem. Written only
+// by the conservative extractor (the watcher's --extract-contacts phase);
+// role_context says WHY the filing names the person, and source_url +
+// page_number + context_snippet are the receipt so the FE can link every
+// row to its exact spot in the occ.gov PDF.
+export type BankContactItem = {
+  id: number;
+  name: string;
+  title: string | null;
+  // 'contact_person' | 'organizer' | 'proposed_officer' | 'counsel'
+  role_context: string;
+  email: string | null;
+  phone: string | null;
+  source: string;
+  source_url: string;
+  page_number: number | null;
+  context_snippet: string | null;
+  created_at: string;
+};
+
 export type BankDetail = BankListItem & {
   // Newest-first OCC action timeline (empty for FDIC-only state charters).
   application_events: BankApplicationEventItem[];
   // Assembled by the endpoint from whatever identifiers the row carries.
   source_links: BankSourceLink[];
+  // People from the application PDFs (empty until --extract-contacts has
+  // run for this bank; detail-only, the list payload is unchanged).
+  contacts: BankContactItem[];
+  // OCC Institutions API enrichment (detail-only; null when the row was
+  // reconciled via the XLSX fallback or predates the API adoption).
+  lei: string | null;
+  charter_type: string | null;
 };
 
 export type AdjacentResponse = {

@@ -124,12 +124,14 @@ async def test_upsert_dedupes_batch_sharing_cik(
     inserts = _inserts(session)
     assert len(inserts) == 1
     # Exactly one VALUES row reaches ON CONFLICT (cik) → no CardinalityViolation.
-    assert _insert_column_values(inserts[0], "cik") == ["0000012345"]
+    # The padded EDGAR form is canonicalized ('0000012345' → '12345') before
+    # any matching — see the 2026-07-02 duplicate-firms incident.
+    assert _insert_column_values(inserts[0], "cik") == ["12345"]
     # Last occurrence wins: the surviving row carries the second record's data.
     assert _insert_column_values(inserts[0], "crd_number") == ["222"]
     assert "on conflict (cik)" in _compile(inserts[0])
-    # Visibility: the drop is logged, not silent.
-    assert "0000012345" in caplog.text
+    # Visibility: the drop is logged, not silent (canonical key in the log).
+    assert "12345" in caplog.text
     assert "111" in caplog.text and "222" in caplog.text
 
 
@@ -192,3 +194,59 @@ def test_dedupe_helper_keeps_last_and_passes_through_key_null() -> None:
 
     kept_crds = {r.crd_number for r in result}
     assert kept_crds == {"b", "c"}  # 'a' (earlier dup) dropped; 'c' passes through
+
+
+# ── CIK normalization (2026-07-02 prod incident: 2,674 duplicate firms) ──────
+#
+# EDGAR pages yield zero-padded 10-digit CIKs ('0000351317'); the book stores
+# the unpadded form ('351317'). ON CONFLICT (cik) treats them as different
+# values, so an initial-load run against a populated database INSERTed a
+# duplicate for nearly every firm instead of updating it. upsert_many must
+# canonicalize before any conflict matching.
+
+def test_normalize_cik_cases() -> None:
+    from app.services.broker_dealers import normalize_cik
+
+    assert normalize_cik(None) is None
+    assert normalize_cik("") is None
+    assert normalize_cik("   ") is None
+    assert normalize_cik("351317") == "351317"
+    assert normalize_cik("0000351317") == "351317"
+    assert normalize_cik(" 0000123 ") == "123"
+    assert normalize_cik("0") == "0"
+    assert normalize_cik("0000000000") == "0"
+
+
+@pytest.mark.asyncio
+async def test_upsert_normalizes_padded_cik_before_conflict_matching(
+    repository: BrokerDealerRepository,
+) -> None:
+    """A padded EDGAR CIK is written in canonical unpadded form, so the
+    ON CONFLICT (cik) upsert matches the existing row instead of inserting a
+    duplicate."""
+    session = _RecordingSession()
+    await repository.upsert_many(
+        session,  # type: ignore[arg-type]
+        [_merged(cik="0000351317", crd="10012", sec="8-25936")],
+    )
+    (stmt,) = _inserts(session)
+    assert _insert_column_values(stmt, "cik") == ["351317"]
+
+
+@pytest.mark.asyncio
+async def test_upsert_padded_and_unpadded_same_cik_collapse_to_one_row(
+    repository: BrokerDealerRepository,
+) -> None:
+    """Post-normalization, '0000351317' and '351317' are the SAME conflict key,
+    so the in-batch dedupe collapses them to one VALUES row (last wins)."""
+    session = _RecordingSession()
+    await repository.upsert_many(
+        session,  # type: ignore[arg-type]
+        [
+            _merged(cik="0000351317", crd="10012", sec="8-25936"),
+            _merged(cik="351317", crd="10012", sec="8-25936", name="WALL STREET ACCESS"),
+        ],
+    )
+    (stmt,) = _inserts(session)
+    assert _insert_column_values(stmt, "cik") == ["351317"]
+    assert _insert_column_values(stmt, "name") == ["WALL STREET ACCESS"]

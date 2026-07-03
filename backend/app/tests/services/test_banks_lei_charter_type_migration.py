@@ -35,13 +35,21 @@ def _script_directory() -> ScriptDirectory:
     return ScriptDirectory.from_config(cfg)
 
 
-def test_chain_has_a_single_head_at_20260702_0002() -> None:
-    assert _script_directory().get_heads() == ["20260702_0002"]
+def test_chain_has_a_single_head() -> None:
+    # Single-headedness is the invariant (a second head silently breaks the
+    # deploy pipeline's ``alembic upgrade head``); the newest revision is
+    # currently the bank_contacts enrichment-bookkeeping migration.
+    assert _script_directory().get_heads() == ["20260702_0004"]
 
 
 def test_migration_is_an_additive_child_of_the_banks_migration() -> None:
     revision = _script_directory().get_revision("20260702_0002")
     assert revision.down_revision == "20260702_0001"
+
+
+def test_bank_contacts_migration_is_a_child_of_the_lei_migration() -> None:
+    revision = _script_directory().get_revision("20260702_0003")
+    assert revision.down_revision == "20260702_0002"
 
 
 def test_bank_model_columns_are_nullable_strings() -> None:

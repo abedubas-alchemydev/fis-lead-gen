@@ -253,7 +253,7 @@ async def list_broker_dealers(
     # from the New BD window by construction (New BD filters
     # registration_date >= cutoff; SQL NULL never satisfies it). In this
     # mode registered_after/registered_before retarget to the filed-date
-    # proxy COALESCE(formation_date, created_at::date) so the card's
+    # proxy created_at::date (see pending_filed_date_proxy) so the card's
     # 30/90-day filters keep working — every pending row's
     # registration_date is NULL, so windowing on it would return zero rows.
     pending_approval: bool = Query(default=False),
