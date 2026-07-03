@@ -26,6 +26,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.db.session import get_db_session
 from app.models.advisor_contact import AdvisorContact
 from app.models.auth import Account, AuthUser
+from app.models.bank import Bank, BankContact
 from app.models.broker_dealer import BrokerDealer
 from app.models.discovered_email import DiscoveredEmail
 from app.models.executive_contact import ExecutiveContact
@@ -64,6 +65,8 @@ from app.schemas.vault import (
     OutreachAdhocSendRequest,
     OutreachAdvisorDraftRequest,
     OutreachAdvisorSendRequest,
+    OutreachBankDraftRequest,
+    OutreachBankSendRequest,
     OutreachComposeSendRequest,
     OutreachDraftDetail,
     OutreachDraftItem,
@@ -514,6 +517,51 @@ async def _load_investor_outreach_inputs(
     return folder, investor, contact
 
 
+async def _load_bank_outreach_inputs(
+    *,
+    bank_id: int,
+    bank_contact_id: int,
+    folder_id: int,
+    current_user: AuthenticatedUser,
+    db: AsyncSession,
+) -> tuple[VaultFolder, Bank, BankContact]:
+    """Validate the (folder, bank, bank-contact) triple.
+
+    Same opaque ``outreach_inputs_not_found`` shape as the BD/advisor variants
+    so a leaked id can't confirm cross-user existence.
+    """
+
+    folder = (
+        await db.execute(
+            select(VaultFolder).where(
+                VaultFolder.id == folder_id,
+                VaultFolder.user_id == current_user.id,
+            )
+        )
+    ).scalar_one_or_none()
+    if folder is None:
+        raise HTTPException(status_code=404, detail="outreach_inputs_not_found")
+
+    bank = (
+        await db.execute(select(Bank).where(Bank.id == bank_id))
+    ).scalar_one_or_none()
+    if bank is None:
+        raise HTTPException(status_code=404, detail="outreach_inputs_not_found")
+
+    contact = (
+        await db.execute(
+            select(BankContact).where(
+                BankContact.id == bank_contact_id,
+                BankContact.bank_id == bank_id,
+            )
+        )
+    ).scalar_one_or_none()
+    if contact is None:
+        raise HTTPException(status_code=404, detail="outreach_inputs_not_found")
+
+    return folder, bank, contact
+
+
 async def _generate_polymorphic_draft(
     *,
     firm_ctx: FirmContext,
@@ -874,6 +922,87 @@ async def send_investor_outreach(
         user_id=current_user.id,
         institutional_investor_id=payload.institutional_investor_id,
         investor_contact_id=payload.investor_contact_id,
+        folder_id=folder.id,
+        subject=payload.subject,
+        body=payload.body,
+        status="failed",
+        provider=sender_account.provider_id,
+    )
+    return await provider_send_and_record(
+        db=db,
+        current_user=current_user,
+        audit=audit,
+        sender_account=sender_account,
+        to_emails=[contact.email],
+        subject=payload.subject,
+        body=payload.body,
+    )
+
+
+@router.post("/bank-draft", response_model=OutreachDraftResponse)
+async def create_bank_outreach_draft(
+    payload: OutreachBankDraftRequest,
+    current_user: AuthenticatedUser = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db_session),
+) -> OutreachDraftResponse:
+    """Generate a cold-email draft for (bank, bank-contact, folder)."""
+
+    folder, bank, contact = await _load_bank_outreach_inputs(
+        bank_id=payload.bank_id,
+        bank_contact_id=payload.bank_contact_id,
+        folder_id=payload.folder_id,
+        current_user=current_user,
+        db=db,
+    )
+    firm_ctx = FirmContext(
+        name=bank.name,
+        city=bank.city,
+        state=bank.state,
+        current_clearing_partner=None,
+        firm_operations_text=None,
+    )
+    contact_ctx = ContactContext(
+        name=contact.name, title=contact.title, email=contact.email
+    )
+    return await _generate_polymorphic_draft(
+        firm_ctx=firm_ctx, contact_ctx=contact_ctx, folder=folder, db=db
+    )
+
+
+@router.post("/bank-send", response_model=OutreachSendResponse)
+async def send_bank_outreach(
+    payload: OutreachBankSendRequest,
+    current_user: AuthenticatedUser = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db_session),
+) -> OutreachSendResponse:
+    """Send the (possibly edited) draft to a bank contact.
+
+    Same Gmail OAuth + Google scope handling as the BD/advisor ``/send``
+    endpoints — 412 + machine-readable detail when the user needs to grant
+    additional consent, 502 on Gmail API failure, 503 on misconfiguration.
+    Audit row uses ``bank_id`` + ``bank_contact_id`` FKs.
+    """
+
+    folder, _, contact = await _load_bank_outreach_inputs(
+        bank_id=payload.bank_id,
+        bank_contact_id=payload.bank_contact_id,
+        folder_id=payload.folder_id,
+        current_user=current_user,
+        db=db,
+    )
+    if not contact.email:
+        raise HTTPException(status_code=400, detail="recipient_no_email")
+
+    sender_account = await resolve_sender_account(
+        db=db,
+        current_user=current_user,
+        folder=folder,
+        explicit_account_id=payload.sender_account_id,
+    )
+    audit = OutreachSend(
+        user_id=current_user.id,
+        bank_id=payload.bank_id,
+        bank_contact_id=payload.bank_contact_id,
         folder_id=folder.id,
         subject=payload.subject,
         body=payload.body,

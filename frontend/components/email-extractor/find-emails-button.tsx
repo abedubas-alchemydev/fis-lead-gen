@@ -11,7 +11,7 @@ import { apiRequest } from "@/lib/api";
 // section header. Resolves the entity's domain (firm website preferred,
 // falling back to a contact-email domain), kicks off a scan via
 //   POST /api/v1/email-extractor/scans
-// with either `bd_id` or `advisor_id` depending on `entityKind`, and
+// with `bd_id`, `advisor_id`, or `bank_id` depending on `entityKind`, and
 // notifies the parent via `onScanCreated` so the inline scan-results
 // section on the same page can render the new scan in place. Disabled
 // when no domain can be resolved or while a scan creation is in flight.
@@ -21,7 +21,7 @@ export function FindEmailsButton({
   resolvedDomain,
   onScanCreated,
 }: {
-  entityKind: "bd" | "advisor";
+  entityKind: "bd" | "advisor" | "bank";
   entityId: number;
   resolvedDomain: string | null;
   onScanCreated: (scanId: number) => void;
@@ -38,7 +38,8 @@ export function FindEmailsButton({
     try {
       const body: Record<string, unknown> = { domain: resolvedDomain };
       if (entityKind === "bd") body.bd_id = entityId;
-      else body.advisor_id = entityId;
+      else if (entityKind === "advisor") body.advisor_id = entityId;
+      else body.bank_id = entityId;
       const created = await apiRequest<{ id: number }>(
         "/api/v1/email-extractor/scans",
         {

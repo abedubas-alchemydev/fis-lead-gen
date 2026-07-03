@@ -36,7 +36,9 @@ from alembic.config import Config
 from alembic.script import ScriptDirectory
 from sqlalchemy import String, select
 from sqlalchemy import text as sa_text
+from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
+from sqlalchemy.ext.compiler import compiles
 
 from app.db.base import Base
 from app.models.bank import BankContact
@@ -58,6 +60,16 @@ from app.services.bank_contact_extraction import (
     BankContactExtractionService,
     ExtractedBankContact,
 )
+
+
+# ``bank_contacts`` gained JSONB emails/phones columns for the People-parity
+# discovery path. Let SQLite CREATE TABLE the model by rendering JSONB as JSON
+# under the sqlite dialect — same @compiles shim convention as
+# test_chatbot_tools_analytics.py, registered here so this module stands alone.
+@compiles(JSONB, "sqlite")
+def _render_jsonb_as_json_on_sqlite(type_, compiler, **kw):  # noqa: ANN001, ANN201
+    return compiler.visit_JSON(type_, **kw)
+
 
 _APOLLO_MATCH_URL = "https://api.apollo.io/api/v1/people/match"
 _PDF_URL = "https://www.occ.gov/topics/digital-assets/apps/erebor-public.pdf"
@@ -687,10 +699,11 @@ def _script_directory() -> ScriptDirectory:
 
 def test_enrichment_migration_is_the_single_head() -> None:
     # The enrichment migration is no longer the head itself — the banks
-    # full-directory OCC charter-number index (20260703_0001) now sits
-    # directly on top of it — but the chain must stay single-headed.
+    # full-directory OCC charter-number index (20260703_0001) and the banks
+    # People-parity chain (20260703_0002→_0003→_0004) now sit on top of it —
+    # but the chain must stay single-headed.
     script = _script_directory()
-    assert script.get_heads() == ["20260703_0001"]
+    assert script.get_heads() == ["20260703_0004"]
     assert script.get_revision("20260703_0001").down_revision == "20260702_0004"
 
 

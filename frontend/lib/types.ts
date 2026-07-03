@@ -1363,15 +1363,26 @@ export type BankContactItem = {
   id: number;
   name: string;
   title: string | null;
-  // 'contact_person' | 'organizer' | 'proposed_officer' | 'counsel'
-  role_context: string;
+  // 'contact_person' | 'organizer' | 'proposed_officer' | 'counsel' — NULL on
+  // AI-discovery rows (Generate More Details), which carry channel data rather
+  // than filing provenance.
+  role_context: string | null;
   email: string | null;
   phone: string | null;
+  // Channel data populated by contact discovery / gap-fill. Mirror of
+  // AdvisorContactItem: linkedin_url + the multi-value emails/phones arrays
+  // (synthesized from the scalar email/phone when the JSONB columns are null).
+  linkedin_url: string | null;
+  discovery_source: string | null;
+  discovery_confidence: number | null;
   source: string;
-  source_url: string;
+  // NULL on discovery rows; PDF-extracted rows carry the occ.gov filing URL.
+  source_url: string | null;
   page_number: number | null;
   context_snippet: string | null;
   created_at: string;
+  emails: EmailHit[];
+  phones: PhoneHit[];
 };
 
 export type BankDetail = BankListItem & {
@@ -1386,6 +1397,18 @@ export type BankDetail = BankListItem & {
   // now lives on BankListItem (above). Both are null when the row was
   // reconciled via the XLSX fallback or predates the API adoption.
   lei: string | null;
+};
+
+// Response for POST /banks/{id}/gap-fill-contacts — the banks analog of
+// RefreshAdvisorResponse. The "Generate More Details" button polls
+// GET /pipeline/run/{run_id} for the run's terminal state. `run_id` is null
+// only on the (reserved) skipped path; `status` is "queued" | "in_flight" |
+// "skipped".
+export type GapFillBankResponse = {
+  run_id: number | null;
+  status: string;
+  bank_id: number;
+  reason?: string;
 };
 
 export type AdjacentResponse = {
@@ -1455,6 +1478,19 @@ export type OutreachInvestorDraftRequest = {
 };
 
 export type OutreachInvestorSendRequest = OutreachInvestorDraftRequest & {
+  subject: string;
+  body: string;
+  provider?: EmailProviderId;
+  sender_account_id?: string | null;
+};
+
+export type OutreachBankDraftRequest = {
+  bank_id: number;
+  bank_contact_id: number;
+  folder_id: number;
+};
+
+export type OutreachBankSendRequest = OutreachBankDraftRequest & {
   subject: string;
   body: string;
   provider?: EmailProviderId;

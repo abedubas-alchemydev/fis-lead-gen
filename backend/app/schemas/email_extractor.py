@@ -19,11 +19,17 @@ class ScanCreateRequest(BaseModel):
         default=None,
         description="Investment-advisor id this scan was triggered from (optional; populated when the scan is kicked off from an advisor detail page).",
     )
+    bank_id: int | None = Field(
+        default=None,
+        description="Bank id this scan was triggered from (optional; populated when the scan is kicked off from a bank detail page).",
+    )
 
     @model_validator(mode="after")
-    def _bd_and_advisor_mutually_exclusive(self) -> ScanCreateRequest:
-        if self.bd_id is not None and self.advisor_id is not None:
-            raise ValueError("bd_id and advisor_id are mutually exclusive")
+    def _entity_ids_mutually_exclusive(self) -> ScanCreateRequest:
+        # At most one owning entity per scan — the FE launches a scan from a
+        # single firm/advisor/bank detail page (or standalone with none).
+        if sum(x is not None for x in (self.bd_id, self.advisor_id, self.bank_id)) > 1:
+            raise ValueError("bd_id, advisor_id and bank_id are mutually exclusive")
         return self
 
 
@@ -47,6 +53,7 @@ class DiscoveredEmailResponse(BaseModel):
     attribution: str | None
     bd_id: int | None = None
     advisor_id: int | None = None
+    bank_id: int | None = None
     enriched_name: str | None = None
     enriched_title: str | None = None
     enriched_linkedin_url: str | None = None
@@ -164,6 +171,7 @@ class ScanListItem(BaseModel):
     person_name: str | None
     bd_id: int | None
     advisor_id: int | None
+    bank_id: int | None
     status: str
     total_items: int
     processed_items: int

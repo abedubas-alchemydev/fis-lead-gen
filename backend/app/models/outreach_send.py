@@ -37,9 +37,10 @@ class OutreachSend(Base):
         index=True,
     )
     # Polymorphic firm FKs: at most one of broker_dealer_id, advisor_id,
-    # institutional_investor_id is non-null per row. Enforced at the DB
-    # via ``ck_outreach_sends_at_most_one_firm`` (relaxed from = 1 to
-    # <= 1 in migration 0063 so adhoc rows can set zero firm FKs).
+    # institutional_investor_id, bank_id is non-null per row. Enforced at the
+    # DB via ``ck_outreach_sends_at_most_one_firm`` (relaxed from = 1 to
+    # <= 1 in migration 0063 so adhoc rows can set zero firm FKs; extended to
+    # include bank_id in migration 20260703_0003).
     broker_dealer_id: Mapped[int | None] = mapped_column(
         Integer,
         ForeignKey("broker_dealers.id", ondelete="CASCADE"),
@@ -58,11 +59,20 @@ class OutreachSend(Base):
         nullable=True,
         index=True,
     )
+    # Banks vertical (migration 20260703_0003). Same polymorphic firm slot as
+    # the three above; paired with ``bank_contact_id`` below.
+    bank_id: Mapped[int | None] = mapped_column(
+        Integer,
+        ForeignKey("banks.id", ondelete="CASCADE"),
+        nullable=True,
+        index=True,
+    )
     # Polymorphic contact FKs: at most one of contact_id (executive),
-    # advisor_contact_id, investor_contact_id is non-null per row.
-    # Enforced via ``ck_outreach_sends_at_most_one_contact`` (relaxed
+    # advisor_contact_id, investor_contact_id, bank_contact_id is non-null
+    # per row. Enforced via ``ck_outreach_sends_at_most_one_contact`` (relaxed
     # from = 1 to <= 1 in migration 0063 so adhoc rows can set zero
-    # contact FKs and carry ``recipient_email`` instead).
+    # contact FKs and carry ``recipient_email`` instead; extended to include
+    # bank_contact_id in migration 20260703_0003).
     contact_id: Mapped[int | None] = mapped_column(
         Integer,
         ForeignKey("executive_contacts.id", ondelete="CASCADE"),
@@ -78,6 +88,13 @@ class OutreachSend(Base):
     investor_contact_id: Mapped[int | None] = mapped_column(
         Integer,
         ForeignKey("investor_contacts.id", ondelete="CASCADE"),
+        nullable=True,
+        index=True,
+    )
+    # Banks vertical (migration 20260703_0003). Paired with ``bank_id`` above.
+    bank_contact_id: Mapped[int | None] = mapped_column(
+        Integer,
+        ForeignKey("bank_contacts.id", ondelete="CASCADE"),
         nullable=True,
         index=True,
     )

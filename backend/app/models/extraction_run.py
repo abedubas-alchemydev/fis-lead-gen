@@ -41,6 +41,9 @@ class ExtractionRun(Base):
     advisor_id: Mapped[int | None] = mapped_column(
         Integer, ForeignKey("investment_advisors.id", ondelete="SET NULL"), nullable=True, index=True
     )
+    bank_id: Mapped[int | None] = mapped_column(
+        Integer, ForeignKey("banks.id", ondelete="SET NULL"), nullable=True, index=True
+    )
     status: Mapped[str] = mapped_column(String(32), default=RunStatus.queued.value, nullable=False, index=True)
     total_items: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
     processed_items: Mapped[int] = mapped_column(Integer, default=0, nullable=False)

@@ -162,6 +162,22 @@ class OutreachInvestorSendRequest(BaseModel):
     sender_account_id: str | None = Field(default=None, max_length=255)
 
 
+class OutreachBankDraftRequest(BaseModel):
+    bank_id: int = Field(..., gt=0)
+    bank_contact_id: int = Field(..., gt=0)
+    folder_id: int = Field(..., gt=0)
+
+
+class OutreachBankSendRequest(BaseModel):
+    bank_id: int = Field(..., gt=0)
+    bank_contact_id: int = Field(..., gt=0)
+    folder_id: int = Field(..., gt=0)
+    subject: str = Field(..., min_length=1, max_length=998)
+    body: str = Field(..., min_length=1, max_length=100_000)
+    provider: EmailProviderId = "google"
+    sender_account_id: str | None = Field(default=None, max_length=255)
+
+
 class OutreachAdhocSendRequest(BaseModel):
     """Body for ``POST /outreach/adhoc-send``.
 
