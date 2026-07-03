@@ -26,14 +26,34 @@ def test_scan_create_request_accepts_advisor_id_only() -> None:
     assert req.bd_id is None
 
 
+def test_scan_create_request_accepts_bank_id_only() -> None:
+    req = ScanCreateRequest(domain="example.com", bank_id=13)
+    assert req.bank_id == 13
+    assert req.bd_id is None
+    assert req.advisor_id is None
+
+
 def test_scan_create_request_accepts_neither() -> None:
-    """Standalone /email-extractor scans omit both FKs — must remain valid."""
+    """Standalone /email-extractor scans omit all FKs — must remain valid."""
     req = ScanCreateRequest(domain="example.com")
     assert req.bd_id is None
     assert req.advisor_id is None
+    assert req.bank_id is None
 
 
 def test_scan_create_request_rejects_both_bd_and_advisor_id() -> None:
     with pytest.raises(ValidationError) as exc_info:
         ScanCreateRequest(domain="example.com", bd_id=1, advisor_id=2)
+    assert "mutually exclusive" in str(exc_info.value)
+
+
+def test_scan_create_request_rejects_bank_id_with_bd_id() -> None:
+    with pytest.raises(ValidationError) as exc_info:
+        ScanCreateRequest(domain="example.com", bd_id=1, bank_id=2)
+    assert "mutually exclusive" in str(exc_info.value)
+
+
+def test_scan_create_request_rejects_bank_id_with_advisor_id() -> None:
+    with pytest.raises(ValidationError) as exc_info:
+        ScanCreateRequest(domain="example.com", advisor_id=1, bank_id=2)
     assert "mutually exclusive" in str(exc_info.value)

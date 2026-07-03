@@ -12,6 +12,7 @@ from __future__ import annotations
 from datetime import datetime, timezone
 from typing import Any
 
+from app.schemas.bank import BankContactItem
 from app.schemas.broker_dealer import ExecutiveContactItem
 from app.schemas.contact_hits import EmailHit, PhoneHit
 from app.schemas.institutional_investor import InvestorContactItem
@@ -75,6 +76,30 @@ def _investor_payload(**overrides: Any) -> dict[str, Any]:
         "discovery_source": None,
         "discovery_confidence": None,
         "enriched_at": _NOW,
+        "emails": None,
+        "phones": None,
+    }
+    base.update(overrides)
+    return base
+
+
+def _bank_payload(**overrides: Any) -> dict[str, Any]:
+    base: dict[str, Any] = {
+        "id": 1,
+        "name": "Jane Doe",
+        "title": "President and Chief Executive Officer",
+        # PDF-provenance fields — NULL on discovery-created rows.
+        "role_context": None,
+        "source_url": None,
+        "page_number": None,
+        "context_snippet": None,
+        "email": None,
+        "phone": None,
+        "linkedin_url": None,
+        "source": "provider",
+        "discovery_source": None,
+        "discovery_confidence": None,
+        "created_at": _NOW,
         "emails": None,
         "phones": None,
     }
@@ -246,3 +271,62 @@ def test_advisor_no_scalar_no_array_returns_empty_lists() -> None:
     item = AdvisorContactItem.model_validate(_advisor_payload())
     assert item.emails == []
     assert item.phones == []
+
+
+# ── BankContactItem ──────────────────────────────────────────────────
+
+
+def test_bank_empty_array_synthesizes_from_scalar() -> None:
+    item = BankContactItem.model_validate(
+        _bank_payload(
+            email="ceo@statebank.com",
+            phone="+15556667777",
+            source="apollo",
+            discovery_source="apollo_match",
+            discovery_confidence=88.0,
+        )
+    )
+    assert item.emails[0] == EmailHit(
+        value="ceo@statebank.com", type="work", confidence=88.0, source="apollo_match"
+    )
+    assert item.phones[0] == PhoneHit(
+        value="+15556667777", type="work", confidence=88.0, source="apollo_match"
+    )
+
+
+def test_bank_populated_array_not_overwritten() -> None:
+    item = BankContactItem.model_validate(
+        _bank_payload(
+            emails=[
+                {"value": "ceo@statebank.com", "type": "work", "confidence": 90.0, "source": "pdl"},
+                {"value": "ceo@gmail.com", "type": "personal", "confidence": 90.0, "source": "pdl"},
+            ],
+        )
+    )
+    # Personal-first ordering, same read-time chokepoint as the other schemas.
+    assert [hit.type for hit in item.emails] == ["personal", "work"]
+
+
+def test_bank_no_scalar_no_array_returns_empty_lists() -> None:
+    """A names-only discovery row (or an un-enriched PDF row) yields empty
+    channel arrays rather than null."""
+    item = BankContactItem.model_validate(_bank_payload())
+    assert item.emails == []
+    assert item.phones == []
+
+
+def test_bank_pdf_row_keeps_filing_provenance() -> None:
+    """A PDF-extracted row still round-trips role_context + source_url (they are
+    NULL only on discovery rows)."""
+    item = BankContactItem.model_validate(
+        _bank_payload(
+            role_context="organizer",
+            source_url="https://occ.gov/pub/app.pdf",
+            page_number=3,
+            source="application_pdf",
+        )
+    )
+    assert item.role_context == "organizer"
+    assert item.source_url == "https://occ.gov/pub/app.pdf"
+    assert item.page_number == 3
+    assert item.emails == []

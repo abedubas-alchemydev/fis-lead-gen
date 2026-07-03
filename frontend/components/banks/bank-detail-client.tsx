@@ -1,13 +1,26 @@
 "use client";
 
-import { useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import clsx from "clsx";
 import Link from "next/link";
 import type { Route } from "next";
-import { useSearchParams } from "next/navigation";
+import { useRouter, useSearchParams } from "next/navigation";
 
-import { ExternalLink, FileText, Globe, Search, Sparkles } from "lucide-react";
+import {
+  ExternalLink,
+  FileText,
+  Globe,
+  Loader2,
+  Search,
+  Sparkles,
+} from "lucide-react";
 
-import { apiRequest, ApiError } from "@/lib/api";
+import {
+  apiRequest,
+  ApiError,
+  gapFillBankContacts,
+  getPipelineRunStatus,
+} from "@/lib/api";
 import { askDoxie } from "@/lib/doxie-events";
 import { formatCurrency, formatDate } from "@/lib/format";
 import {
@@ -16,11 +29,21 @@ import {
   parseReturnParam,
 } from "@/lib/bank-list-state";
 import {
+  listScansForEntity,
+  pickHydratableScan,
+  SCAN_HYDRATION_LIMIT,
+} from "@/lib/email-extractor";
+import { EMAIL_EXTRACTION_ENABLED } from "@/lib/feature-flags";
+import {
   BankStatusPill,
   charterAuthorityLabel,
   NO_OCC_TIMELINE_EXPLANATION,
 } from "@/components/banks/bank-status-pill";
-import { Button } from "@/components/ui/button";
+import { ChannelIconCell } from "@/components/advisor-list/channel-icon-cell";
+import { EmailScansSection } from "@/components/email-extractor/email-scans-section";
+import { OutreachButton } from "@/components/master-list/outreach-button";
+import { PeopleTable } from "@/components/master-list/detail/people-table";
+import { Button, buttonBase, buttonSizes } from "@/components/ui/button";
 import { DetailPageSkeleton } from "@/components/ui/detail-page-skeleton";
 import { Pill, type PillVariant } from "@/components/ui/pill";
 import { SectionPanel } from "@/components/ui/section-panel";
@@ -94,9 +117,38 @@ function contactRoleLabel(roleContext: string): string {
 // h1 + identifier meta line, KPI strip of MiniStat tiles, and SectionPanel
 // cards on a 2-column grid.
 export function BankDetailClient({ bankId }: { bankId: string }) {
+  const router = useRouter();
   const searchParams = useSearchParams();
   const [bank, setBank] = useState<BankDetail | null>(null);
   const [error, setError] = useState<string | null>(null);
+
+  // "Generate More Details" button state. Mirrors the advisor detail page:
+  // gap-fill discovers execs from the bank's website domain (banks carry no
+  // roster) + fills channel gaps on existing contacts. The 429/errors surface
+  // via gapFillError; the terminal-run summary via gapFillNotice.
+  const [isGapFilling, setIsGapFilling] = useState(false);
+  const [gapFillError, setGapFillError] = useState<string | null>(null);
+  const [gapFillNotice, setGapFillNotice] = useState<string | null>(null);
+  // Apollo phone reveals land asynchronously (~1-3 min after a gap-fill run);
+  // this timer drives a few extra reloads so they appear without a manual
+  // refresh. Cleared on unmount.
+  const latePhonePollRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+
+  // Inline "Discovered Emails" (Extract Email) section state. `currentScanId`
+  // is the single source of truth, seeded from `?scanId=` (deep-link /
+  // post-Find-Emails refresh) or the most-recent scan for this bank on first
+  // load. Mirrors the BD/IA detail pages.
+  const [currentScanId, setCurrentScanId] = useState<number | null>(null);
+  const [isHydratingScan, setIsHydratingScan] = useState(true);
+
+  // Re-fetch helper the gap-fill flow calls after a run completes; lets the
+  // caller decide how to treat any error (a transient failure keeps the stale
+  // view rather than blanking the page).
+  const reloadBank = useCallback(async () => {
+    const response = await apiRequest<BankDetail>(`/api/v1/banks/${bankId}`);
+    setBank(response);
+    setError(null);
+  }, [bankId]);
 
   useEffect(() => {
     let active = true;
@@ -121,6 +173,151 @@ export function BankDetailClient({ bankId }: { bankId: string }) {
       active = false;
     };
   }, [bankId]);
+
+  // Clear any gap-fill notice/error and tear down the late-phone poll when we
+  // navigate to another bank (the component instance may persist).
+  useEffect(() => {
+    setGapFillNotice(null);
+    setGapFillError(null);
+    return () => {
+      if (latePhonePollRef.current) {
+        clearTimeout(latePhonePollRef.current);
+        latePhonePollRef.current = null;
+      }
+    };
+  }, [bankId]);
+
+  // "Generate More Details" handler. POST /gap-fill-contacts with force (always
+  // re-run past the cost cooldown, matching the advisor button), poll the run
+  // until terminal (300s deadline), then reload so the new emails/phones/
+  // LinkedIn URLs land in the channel popovers, plus a short late-phone
+  // re-poll for the async Apollo reveals. Copied from advisor-detail-client.
+  const runGapFill = useCallback(async () => {
+    const numericId = Number(bankId);
+    if (!Number.isFinite(numericId)) return;
+    setIsGapFilling(true);
+    setGapFillError(null);
+    setGapFillNotice(null);
+    try {
+      const result = await gapFillBankContacts(numericId, true);
+      if (result.run_id !== null) {
+        const runId = result.run_id;
+        const deadline = Date.now() + 300_000;
+        const TERMINAL = new Set([
+          "completed",
+          "completed_with_errors",
+          "failed",
+        ]);
+        while (Date.now() < deadline) {
+          try {
+            const detail = await getPipelineRunStatus(runId);
+            if (TERMINAL.has(detail.status)) {
+              let summary = `Gap-fill ${detail.status}.`;
+              if (detail.notes) {
+                try {
+                  const parsed = JSON.parse(detail.notes) as {
+                    summary?: unknown;
+                  };
+                  if (typeof parsed.summary === "string") {
+                    summary = parsed.summary;
+                  }
+                } catch {
+                  /* notes wasn't JSON — fall back to the default. */
+                }
+              }
+              setGapFillNotice(summary);
+              break;
+            }
+          } catch {
+            /* transient poll error — keep waiting */
+          }
+          await new Promise<void>((resolve) => setTimeout(resolve, 2000));
+        }
+      } else {
+        setGapFillNotice(result.reason ?? "Gap-fill skipped.");
+      }
+      await reloadBank();
+      // Apollo phone reveals arrive async (~1-3 min) via the webhook; re-fetch
+      // a few more times so the numbers appear without a manual reload.
+      // Non-blocking — the button is already done at this point.
+      if (latePhonePollRef.current) clearTimeout(latePhonePollRef.current);
+      let phonePollAttempts = 0;
+      const pollLatePhones = () => {
+        latePhonePollRef.current = setTimeout(() => {
+          phonePollAttempts += 1;
+          void reloadBank().catch(() => {
+            /* transient — keep polling */
+          });
+          if (phonePollAttempts < 5) {
+            pollLatePhones();
+          } else {
+            latePhonePollRef.current = null;
+          }
+        }, 30_000);
+      };
+      pollLatePhones();
+    } catch (err) {
+      setGapFillError(err instanceof Error ? err.message : "Gap-fill failed.");
+    } finally {
+      setIsGapFilling(false);
+    }
+  }, [bankId, reloadBank]);
+
+  // Hydrate the inline "Discovered Emails" section: prefer `?scanId=` in the
+  // URL, else the most-recent scan *with emails* for this bank (so prior
+  // results show on first load and a newer empty/failed retry never masks an
+  // older run that surfaced emails). Reads window.location.search directly so
+  // this effect doesn't depend on the reactive searchParams.
+  useEffect(() => {
+    const numericId = Number(bankId);
+    if (!Number.isFinite(numericId)) {
+      setIsHydratingScan(false);
+      return;
+    }
+
+    const urlScanId = new URLSearchParams(window.location.search).get("scanId");
+    if (urlScanId) {
+      const parsed = Number(urlScanId);
+      if (Number.isFinite(parsed)) {
+        setCurrentScanId(parsed);
+        setIsHydratingScan(false);
+        return;
+      }
+    }
+
+    let active = true;
+    setIsHydratingScan(true);
+    setCurrentScanId(null);
+    listScansForEntity({ kind: "bank", id: numericId }, SCAN_HYDRATION_LIMIT)
+      .then((scans) => {
+        if (!active) return;
+        const preferred = pickHydratableScan(scans);
+        if (preferred) {
+          setCurrentScanId(preferred.id);
+        }
+      })
+      .catch(() => {
+        /* swallow — empty state will render */
+      })
+      .finally(() => {
+        if (active) setIsHydratingScan(false);
+      });
+
+    return () => {
+      active = false;
+    };
+  }, [bankId]);
+
+  // Persist the active scan in the URL so a refresh re-opens the same scan.
+  // Guards against a feedback loop by checking `?scanId=` before replacing.
+  useEffect(() => {
+    if (currentScanId === null) return;
+    const desired = String(currentScanId);
+    if (searchParams.get("scanId") === desired) return;
+    const params = new URLSearchParams(searchParams.toString());
+    params.set("scanId", desired);
+    router.replace(`/banks/${bankId}?${params.toString()}` as Route);
+  }, [currentScanId, bankId, searchParams, router]);
 
   // Restore the user's filter/sort state on back-nav, falling back to the
   // bare list URL if no return envelope was passed (deep link).
@@ -159,6 +356,26 @@ export function BankDetailClient({ bankId }: { bankId: string }) {
   const addressLine = [bank.address, bank.city, bank.state, bank.zip]
     .filter(Boolean)
     .join(", ");
+
+  // Resolve the bank domain for the inline Extract-Email section: prefer the
+  // bank's website, fall back to the first contact email's domain. Mirrors the
+  // advisor detail page — contacts carry a multi-value `emails[]` array
+  // (discovery rows) as well as the scalar `email` (PDF rows), so walk both.
+  const websiteDomain = bank.website
+    ? bank.website
+        .replace(/^https?:\/\//i, "")
+        .replace(/\/+$/, "")
+        .split("/")[0]
+        ?.toLowerCase() ?? null
+    : null;
+  const contactEmail =
+    bank.contacts.find((c) => (c.emails ?? [])[0]?.value)?.emails?.[0]?.value ??
+    bank.contacts.find((c) => c.email)?.email ??
+    null;
+  const emailDomain = contactEmail
+    ? contactEmail.split("@")[1]?.toLowerCase() ?? null
+    : null;
+  const resolvedDomain = websiteDomain || emailDomain;
 
   return (
     <div className="px-4 sm:px-7 pb-12 pt-7 animate-fade-in lg:px-9">
@@ -400,78 +617,121 @@ export function BankDetailClient({ bankId }: { bankId: string }) {
             </div>
           </SectionPanel>
 
-          {/* Contacts — people extracted from the public portions of this
-              institution's application PDFs (the watcher's conservative
-              --extract-contacts phase). The banks sibling of the BD
-              detail's People panel: prominent name, role chip, muted
-              title, mailto/tel links, and the provenance receipt (filing
-              PDF + page, context snippet on hover) so every row is
-              verifiable at its government source. */}
+          {/* Contacts — the banks sibling of the BD/IA People panel. PDF-
+              extracted rows keep their filing-PDF provenance receipt (role
+              chip + occ.gov link, context snippet on hover); AI-discovery rows
+              (Generate More Details) surface channel icons + a per-contact
+              Outreach button. Mirrors advisor-detail-client's People table. */}
           <SectionPanel eyebrow="People" title="Contacts">
+            <div className="mb-4 flex flex-wrap items-center justify-between gap-3">
+              <p className="text-xs text-[var(--text-muted,#94a3b8)]">
+                {isGapFilling
+                  ? "Discovering contacts across providers… this can take a moment."
+                  : "Discover additional executive contacts for this institution."}
+              </p>
+              <button
+                type="button"
+                onClick={() => void runGapFill()}
+                disabled={isGapFilling}
+                className={clsx(
+                  buttonBase,
+                  buttonSizes.md,
+                  "shrink-0 bg-gradient-to-br from-[#6366f1] to-[#8b5cf6] text-white shadow-[0_6px_16px_rgba(99,102,241,0.35)] hover:brightness-110",
+                )}
+              >
+                {isGapFilling ? (
+                  <Loader2 className="h-4 w-4 animate-spin" strokeWidth={2.5} />
+                ) : (
+                  <Sparkles className="h-4 w-4" strokeWidth={2} />
+                )}
+                {isGapFilling ? "Generating…" : "Generate More Details"}
+              </button>
+            </div>
+
+            {gapFillError ? (
+              <div className="mb-3 rounded-2xl border border-[rgba(245,158,11,0.25)] bg-[rgba(245,158,11,0.08)] px-4 py-3 text-sm text-[var(--pill-amber-text,#b45309)]">
+                {gapFillError}
+              </div>
+            ) : null}
+
+            {gapFillNotice ? (
+              <div className="mb-3 rounded-2xl border border-[rgba(59,130,246,0.25)] bg-[rgba(59,130,246,0.08)] px-4 py-3 text-sm text-[var(--pill-blue-text,#1d4ed8)]">
+                {gapFillNotice}
+              </div>
+            ) : null}
+
             {bank.contacts.length === 0 ? (
               <div className="rounded-2xl bg-[var(--surface-2,#f1f6fd)] px-4 py-6 text-sm text-[var(--text-muted,#94a3b8)]">
-                No contacts extracted from public filings yet.
+                No contacts on file yet. Use Generate More Details to discover
+                executives from the bank&apos;s domain, or Extract Email below to
+                scan for addresses.
               </div>
             ) : (
-              <ul className="space-y-2">
-                {bank.contacts.map((contact) => (
-                  <li
-                    key={contact.id}
-                    className="rounded-2xl border border-[var(--border,rgba(30,64,175,0.1))] px-4 py-3"
-                  >
-                    <div className="flex flex-wrap items-center gap-x-2.5 gap-y-1">
-                      <p className="text-[13.5px] font-semibold text-[var(--text,#0f172a)]">
-                        {contact.name}
-                      </p>
-                      <Pill
-                        variant={
-                          CONTACT_ROLE_VARIANTS[contact.role_context] ??
-                          "unknown"
-                        }
-                      >
-                        {contactRoleLabel(contact.role_context)}
-                      </Pill>
-                    </div>
-                    {contact.title ? (
-                      <p className="mt-0.5 text-[12px] text-[var(--text-dim,#475569)]">
-                        {contact.title}
-                      </p>
-                    ) : null}
-                    <div className="mt-2 flex flex-wrap items-center gap-x-3 gap-y-1 text-xs">
-                      {contact.email ? (
-                        <a
-                          href={`mailto:${contact.email}`}
-                          className="text-[var(--accent,#6366f1)] transition hover:underline"
-                        >
-                          {contact.email}
-                        </a>
-                      ) : null}
-                      {contact.phone ? (
-                        <a
-                          href={`tel:${contact.phone}`}
-                          className="text-[var(--text-dim,#475569)] transition hover:underline"
-                        >
-                          {contact.phone}
-                        </a>
-                      ) : null}
-                      <a
-                        href={contact.source_url}
-                        target="_blank"
-                        rel="noopener noreferrer"
-                        title={contact.context_snippet ?? undefined}
-                        className="inline-flex items-center gap-1 text-[var(--text-muted,#94a3b8)] transition hover:text-[var(--accent,#6366f1)] hover:underline"
-                      >
-                        <FileText className="h-3 w-3" strokeWidth={2} />
-                        <span>
-                          {contact.page_number !== null
-                            ? `Filing PDF · p. ${contact.page_number}`
-                            : "Filing PDF"}
-                        </span>
-                      </a>
-                    </div>
-                  </li>
-                ))}
-              </ul>
+              <PeopleTable
+                title="Contacts"
+                items={bank.contacts}
+                columns={[
+                  {
+                    header: "Name",
+                    cell: (c) => (
+                      <div className="flex flex-col gap-1">
+                        <div className="flex flex-wrap items-center gap-x-2 gap-y-1">
+                          <span className="font-semibold text-[var(--text,#0f172a)]">
+                            {c.name}
+                          </span>
+                          {c.role_context ? (
+                            <Pill
+                              variant={
+                                CONTACT_ROLE_VARIANTS[c.role_context] ??
+                                "unknown"
+                              }
+                            >
+                              {contactRoleLabel(c.role_context)}
+                            </Pill>
+                          ) : null}
+                        </div>
+                        {/* Filing-PDF provenance receipt — PDF-extracted rows
+                            only (discovery rows leave source_url NULL). */}
+                        {c.source_url ? (
+                          <a
+                            href={c.source_url}
+                            target="_blank"
+                            rel="noopener noreferrer"
+                            title={c.context_snippet ?? undefined}
+                            className="inline-flex w-fit items-center gap-1 text-[11px] text-[var(--text-muted,#94a3b8)] transition hover:text-[var(--accent,#6366f1)] hover:underline"
+                          >
+                            <FileText className="h-3 w-3" strokeWidth={2} />
+                            <span>
+                              {c.page_number !== null
+                                ? `Filing PDF · p. ${c.page_number}`
+                                : "Filing PDF"}
+                            </span>
+                          </a>
+                        ) : null}
+                      </div>
+                    ),
+                  },
+                  { header: "Title", cell: (c) => c.title ?? "—" },
+                  {
+                    header: "Channels",
+                    cell: (c) => <ChannelIconCell contact={c} />,
+                    className: "whitespace-nowrap",
+                  },
+                  {
+                    header: "Outreach",
+                    cell: (c) =>
+                      c.email || (c.emails?.length ?? 0) > 0 ? (
+                        <OutreachButton
+                          entityKind="bank"
+                          entityId={bank.id}
+                          entityName={bank.name}
+                          contact={c}
+                        />
+                      ) : null,
+                    className: "whitespace-nowrap",
+                  },
+                ]}
+              />
             )}
           </SectionPanel>
 
@@ -641,6 +901,23 @@ export function BankDetailClient({ bankId }: { bankId: string }) {
           ) : null}
         </div>
       </div>
+
+      {/* ── Extract Email (full width) — bank-scoped domain email scan,
+          mirroring the BD/IA "Discovered Emails" section. Off the bank's
+          website domain (or a contact-email fallback); covers state charters
+          too since it's a pure domain scan. ─────────────────────────────── */}
+      {EMAIL_EXTRACTION_ENABLED && (
+        <div className="mt-4">
+          <EmailScansSection
+            entityKind="bank"
+            entityId={bank.id}
+            currentScanId={currentScanId}
+            resolvedDomain={resolvedDomain}
+            isHydrating={isHydratingScan}
+            onScanCreated={setCurrentScanId}
+          />
+        </div>
+      )}
     </div>
   );
 }

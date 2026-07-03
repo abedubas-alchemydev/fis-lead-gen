@@ -28,6 +28,7 @@ from app.schemas.email_extractor import (
 )
 from app.services.auth import ensure_feature, get_current_user
 from app.services.email_extractor import aggregator
+from app.services.email_extractor.domain import bank_domain_from_website
 from app.services.email_extractor.enrichment import (
     NOT_CONFIGURED_MESSAGE,
     NOT_FOUND_MESSAGE,
@@ -55,11 +56,20 @@ async def create_scan(
     db: AsyncSession = Depends(get_db_session),
     current_user: AuthenticatedUser = Depends(_require_email_extractor),
 ) -> ExtractionRun:
+    # Bank-scoped scans normalize the (possibly raw website-derived) domain to
+    # the bank's registrable domain so the scan targets the apex. Idempotent
+    # for an already-clean domain; leaves bd/advisor/standalone scans untouched.
+    domain = payload.domain
+    if payload.bank_id is not None:
+        resolved = bank_domain_from_website(payload.domain)
+        if resolved:
+            domain = resolved
     scan = ExtractionRun(
-        domain=payload.domain,
+        domain=domain,
         person_name=payload.person_name,
         bd_id=payload.bd_id,
         advisor_id=payload.advisor_id,
+        bank_id=payload.bank_id,
         status=RunStatus.queued.value,
     )
     db.add(scan)
@@ -73,6 +83,7 @@ async def create_scan(
 async def list_scans(
     bd_id: int | None = Query(default=None, description="Filter scans tied to a specific broker-dealer."),
     advisor_id: int | None = Query(default=None, description="Filter scans tied to a specific investment advisor."),
+    bank_id: int | None = Query(default=None, description="Filter scans tied to a specific bank."),
     limit: int = Query(default=20, ge=1, le=100),
     offset: int = Query(default=0, ge=0),
     db: AsyncSession = Depends(get_db_session),
@@ -81,13 +92,15 @@ async def list_scans(
     """Recent scans across all users, sorted by created_at desc.
 
     Powers the 'Recent scans' list on /email-extractor and the per-firm
-    history section on broker-dealer and advisor detail pages.
+    history section on broker-dealer, advisor, and bank detail pages.
     """
     stmt = select(ExtractionRun).order_by(ExtractionRun.created_at.desc())
     if bd_id is not None:
         stmt = stmt.where(ExtractionRun.bd_id == bd_id)
     if advisor_id is not None:
         stmt = stmt.where(ExtractionRun.advisor_id == advisor_id)
+    if bank_id is not None:
+        stmt = stmt.where(ExtractionRun.bank_id == bank_id)
     stmt = stmt.offset(offset).limit(limit)
     return (await db.execute(stmt)).scalars().all()
 

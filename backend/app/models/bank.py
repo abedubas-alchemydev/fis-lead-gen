@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from datetime import date, datetime
+from decimal import Decimal
 
 from sqlalchemy import (
     Boolean,
@@ -233,12 +234,32 @@ class BankContact(Base):
     title: Mapped[str | None] = mapped_column(String(255), nullable=True)
     # 'contact_person' | 'organizer' | 'proposed_officer' | 'counsel' —
     # deliberately not an enum; new extraction patterns must land, not crash.
-    role_context: Mapped[str] = mapped_column(String(32), nullable=False)
+    # NULLABLE since PR "banks-people-parity": the PDF extractor always sets
+    # it, but discovery-created rows (org→people from the bank website) have
+    # no filing provenance and leave it NULL.
+    role_context: Mapped[str | None] = mapped_column(String(32), nullable=True)
     email: Mapped[str | None] = mapped_column(String(320), nullable=True)
     phone: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    # ── Discovery/channel columns — mirrored EXACTLY from ExecutiveContact so
+    # the shared discovery chain, gap-fill merge, channel-array synthesis, and
+    # Apollo phone-reveal webhook all treat a bank_contacts row like any other
+    # contact row. ──
+    linkedin_url: Mapped[str | None] = mapped_column(Text, nullable=True)
     source: Mapped[str] = mapped_column(String(64), nullable=False, default="application_pdf")
-    # The occ.gov public-portion PDF the person was extracted from.
-    source_url: Mapped[str] = mapped_column(Text, nullable=False)
+    discovery_source: Mapped[str | None] = mapped_column(String(32), nullable=True)
+    discovery_confidence: Mapped[Decimal | None] = mapped_column(Numeric(5, 2), nullable=True)
+    emails: Mapped[list | None] = mapped_column(JSONB, nullable=True)
+    phones: Mapped[list | None] = mapped_column(JSONB, nullable=True)
+    # Apollo's MongoDB-style person.id from the sync /people/match response.
+    # Same column on all four contact tables so the shared webhook handler can
+    # locate any row regardless of which list it belongs to.
+    apollo_person_id: Mapped[str | None] = mapped_column(
+        String(64), nullable=True, index=True
+    )
+    # The occ.gov public-portion PDF the person was extracted from. NULLABLE
+    # since "banks-people-parity" for the same reason as role_context: only
+    # PDF-extracted rows carry it; discovery rows leave it NULL.
+    source_url: Mapped[str | None] = mapped_column(Text, nullable=True)
     # 1-based page of the hit inside that PDF; NULL if unknown.
     page_number: Mapped[int | None] = mapped_column(Integer, nullable=True)
     # Short raw text around the hit — the audit trail for the extraction.

@@ -11,6 +11,7 @@ import {
   ApiError,
   generateAdhocOutreachDraft,
   generateAdvisorOutreachDraft,
+  generateBankOutreachDraft,
   generateInvestorOutreachDraft,
   generateOutreachDraft,
   getLinkedProviders,
@@ -18,6 +19,7 @@ import {
   listVaultFolders,
   sendAdhocOutreach,
   sendAdvisorOutreach,
+  sendBankOutreach,
   sendInvestorOutreach,
   sendOutreachEmail
 } from "@/lib/api";
@@ -350,6 +352,12 @@ export function OutreachModal({
           investor_contact_id: contact.id,
           folder_id: folderId
         });
+      } else if (entityKind === "bank") {
+        draft = await generateBankOutreachDraft({
+          bank_id: entityId,
+          bank_contact_id: contact.id,
+          folder_id: folderId
+        });
       } else {
         draft = await generateAdhocOutreachDraft({
           folder_id: folderId,
@@ -413,6 +421,16 @@ export function OutreachModal({
         await sendInvestorOutreach({
           institutional_investor_id: entityId,
           investor_contact_id: contact.id,
+          folder_id: folderId ?? 0,
+          subject,
+          body: outgoingBody,
+          provider: providerId,
+          sender_account_id: senderAccountId
+        });
+      } else if (entityKind === "bank") {
+        await sendBankOutreach({
+          bank_id: entityId,
+          bank_contact_id: contact.id,
           folder_id: folderId ?? 0,
           subject,
           body: outgoingBody,

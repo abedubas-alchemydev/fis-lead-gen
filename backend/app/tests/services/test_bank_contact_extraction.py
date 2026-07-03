@@ -32,8 +32,10 @@ from pathlib import Path
 import httpx
 import pytest
 from sqlalchemy import select
+from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
+from sqlalchemy.ext.compiler import compiles
 
 import app.services.bank_contact_extraction as extraction
 import app.services.bank_contact_llm as llm_extraction
@@ -60,6 +62,16 @@ from app.services.gemini_responses import (
     GeminiConfigurationError,
     GeminiExtractionError,
 )
+
+
+# ``bank_contacts`` gained JSONB emails/phones columns for the People-parity
+# discovery path. Let SQLite CREATE TABLE the model by rendering JSONB as JSON
+# under the sqlite dialect — same @compiles shim convention as
+# test_chatbot_tools_analytics.py, registered here so this module stands alone.
+@compiles(JSONB, "sqlite")
+def _render_jsonb_as_json_on_sqlite(type_, compiler, **kw):  # noqa: ANN001, ANN201
+    return compiler.visit_JSON(type_, **kw)
+
 
 _PDF_URL = "https://www.occ.gov/topics/digital-assets/apps/erebor-public.pdf"
 

@@ -9,8 +9,11 @@ official source links the FE renders on the detail page.
 from __future__ import annotations
 
 from datetime import date, datetime
+from typing import Self
 
-from pydantic import BaseModel, ConfigDict, field_validator
+from pydantic import BaseModel, ConfigDict, field_validator, model_validator
+
+from app.schemas.contact_hits import EmailHit, PhoneHit, synthesize_contact_arrays
 
 
 class BankPdfLink(BaseModel):
@@ -118,14 +121,18 @@ class BankSourceLink(BaseModel):
 
 
 class BankContactItem(BaseModel):
-    """One person extracted from a charter-application public-portion PDF.
+    """One person on a bank profile — either extracted from a charter
+    application PDF or surfaced by AI contact discovery.
 
-    The banks sibling of the BD detail's ``ExecutiveContactItem``. Written
-    only by the conservative extractor (``--extract-contacts`` watcher
-    phase); ``role_context`` says WHY the filing names the person
+    The banks sibling of the BD detail's ``ExecutiveContactItem``. PDF rows
+    (``source='application_pdf'`` / ``'application_pdf_llm'``) carry the
+    filing provenance: ``role_context`` says WHY the filing names the person
     ('contact_person' | 'organizer' | 'proposed_officer' | 'counsel'), and
-    ``source_url`` + ``page_number`` + ``context_snippet`` are the receipt
-    so the FE can link every row to its exact spot in the occ.gov PDF.
+    ``source_url`` + ``page_number`` + ``context_snippet`` link the row to its
+    exact spot in the occ.gov PDF. Discovery rows leave those NULL and instead
+    carry channel data: ``linkedin_url`` + the ``emails`` / ``phones`` arrays
+    (synthesized from the scalar ``email`` / ``phone`` for rows that only wrote
+    the scalars), exactly like ``AdvisorContactItem``.
     """
 
     model_config = ConfigDict(from_attributes=True)
@@ -133,14 +140,32 @@ class BankContactItem(BaseModel):
     id: int
     name: str
     title: str | None
-    role_context: str
+    role_context: str | None
     email: str | None
     phone: str | None
+    linkedin_url: str | None = None
     source: str
-    source_url: str
+    discovery_source: str | None = None
+    discovery_confidence: float | None = None
+    source_url: str | None
     page_number: int | None
     context_snippet: str | None
     created_at: datetime
+    emails: list[EmailHit] = []
+    phones: list[PhoneHit] = []
+
+    @field_validator("emails", "phones", mode="before")
+    @classmethod
+    def _coerce_contact_arrays_null_to_empty(cls, v: object) -> object:
+        return v if v is not None else []
+
+    @model_validator(mode="after")
+    def _synthesize_arrays(self) -> Self:
+        # Project scalar email/phone into 1-element arrays when the JSONB
+        # columns are NULL, ordering emails personal-first — the single
+        # read-time chokepoint shared with the BD/IA/II contact schemas.
+        self.emails, self.phones = synthesize_contact_arrays(self)
+        return self
 
 
 class BankDetail(BankListItem):
@@ -156,3 +181,25 @@ class BankDetail(BankListItem):
     # People from the application PDFs (empty until --extract-contacts has
     # run for this bank; detail-only, the list payload is unchanged).
     contacts: list[BankContactItem] = []
+
+
+class GapFillBankResponse(BaseModel):
+    """Response shape for ``POST /banks/{id}/gap-fill-contacts``.
+
+    The banks analog of ``RefreshAdvisorResponse`` — the FE polls
+    ``GET /pipeline/run/{run_id}`` for the run's terminal state exactly as it
+    does for the advisor "Generate More Details" button:
+
+    - ``run_id=int, status="queued"`` — a gap-fill run was queued.
+    - ``run_id=int, status="in_flight"`` — a run was already in flight for this
+      bank; the caller attaches to it (202, not 409, so the browser doesn't log
+      a cosmetic console error).
+    - ``run_id=None, status="skipped"`` — nothing to do (reserved; the endpoint
+      always queues today since discovery works even for banks with no
+      contacts).
+    """
+
+    run_id: int | None = None
+    status: str
+    bank_id: int
+    reason: str | None = None
