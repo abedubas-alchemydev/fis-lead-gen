@@ -161,24 +161,26 @@ def pending_approval_filter():
 
 
 def pending_filed_date_proxy():
-    """Filed-date proxy for windowing PENDING firms (their
-    ``registration_date`` is NULL by definition, so the New BD card's 30/90-
-    day window needs a different anchor).
+    """Recency anchor for windowing PENDING firms (their ``registration_date``
+    is NULL by definition, so the card's 30/90-day window needs a different
+    column).
 
-    ``COALESCE(formation_date, created_at::date)``: ``formation_date`` (the
-    firm's legal formation, parsed from the same Form BD PDF) is the real-
-    world signal — new broker-dealers are typically formed shortly before
-    filing. ``created_at`` (when our nightly extractor first saw the firm in
-    FINRA's active enumeration ≈ when the application surfaced) is the
-    fallback for rows missing a formation date. created_at is deliberately
-    NOT preferred: bulk loads stamp thousands of rows with one created_at,
-    which would flood the window with false "recent filers" after every
-    load, whereas formation_date can only err conservatively (a firm formed
-    years before filing drops out of the window). Staging-data distribution
-    check deferred to the post-merge staging pass (local DB is a fixture) —
-    documented in the PR.
+    ``created_at::date`` — when our nightly extractor first recorded the firm
+    (≈ when it surfaced as filed-but-unapproved). That is the right "how
+    recently did this become pending" signal. Bulk-load flooding is a
+    non-issue for THIS set: the pending predicate requires
+    ``registration_date IS NULL`` and every historical bulk load carries a
+    registration_date, so bulk rows are excluded — pending firms only ever
+    enter incrementally, one extract at a time.
+
+    NOT ``formation_date``: that is the firm's legal (LLC) formation, which
+    predates its Form BD filing by years. 2026-07-03 staging check (the
+    distribution check the prior revision deferred): all 12 pending firms had
+    formation dates 3–40 yrs old — e.g. THE CARNEY GROUP formed 1985 — so a
+    formation-anchored 90-day window dropped every one and the card read 0.
+    Formation is when the entity was born, not when it filed.
     """
-    return func.coalesce(BrokerDealer.formation_date, cast(BrokerDealer.created_at, Date))
+    return cast(BrokerDealer.created_at, Date)
 
 
 def high_value_participant_filter():
