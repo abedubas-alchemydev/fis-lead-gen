@@ -19,7 +19,7 @@ Status transitions only move FORWARD along the lifecycle
 from __future__ import annotations
 
 import logging
-from datetime import date, datetime, timezone
+from datetime import date, datetime, timedelta, timezone
 from math import ceil
 
 from sqlalchemy import String, cast, func, or_, select
@@ -33,6 +33,7 @@ from app.services.fdic_bankfind import FdicInstitutionRecord
 from app.services.occ_cas import (
     CHARTER_STATUS_RANK,
     OccCharterFiling,
+    OccNationalBankDirectoryRow,
     normalize_bank_name,
 )
 
@@ -65,6 +66,23 @@ def _advance_status(current: str | None, incoming: str | None) -> str | None:
     return None
 
 
+def _enrich_bank_from_directory(bank: Bank, row: OccNationalBankDirectoryRow) -> None:
+    """Additively fill the OCC-directory enrichment fields on an existing row.
+
+    Fills only NULL gaps — an existing non-null value is authoritative and is
+    never overwritten — and deliberately touches neither ``charter_status``
+    (FDIC-owned lifecycle) nor ``occ_charter_number`` (the caller stamps that
+    behind the unique-index guard). Pure ORM mutation; the caller owns the
+    transaction.
+    """
+    if bank.fed_rssd is None:
+        bank.fed_rssd = row.fed_rssd
+    if bank.lei is None:
+        bank.lei = row.lei
+    if bank.charter_type is None:
+        bank.charter_type = row.charter_type
+
+
 class BankRepository:
     # ── Read side (endpoints) ──────────────────────────────────────────
 
@@ -79,6 +97,8 @@ class BankRepository:
         established_after: date | None,
         established_before: date | None,
         digital_assets: bool | None = None,
+        charter_types: list[str] | None = None,
+        new_charters_only: bool = False,
         sort_by: str,
         sort_dir: str,
         page: int,
@@ -102,6 +122,10 @@ class BankRepository:
             filters.append(Bank.charter_authority.in_(charter_authorities))
         if charter_statuses:
             filters.append(Bank.charter_status.in_(charter_statuses))
+        # OCC CharterType facet (e.g. 'National', 'TrustCo-National') — an
+        # IN filter like the other enums; None/[] leaves the full set intact.
+        if charter_types:
+            filters.append(Bank.charter_type.in_(charter_types))
         # Tri-state: None = no filter; True = digital-assets-tagged only;
         # False = explicitly untagged only.
         if digital_assets is not None:
@@ -113,6 +137,20 @@ class BankRepository:
             filters.append(Bank.established_date >= established_after)
         if established_before is not None:
             filters.append(Bank.established_date <= established_before)
+        # The "new / pending charters" view that preserves the vertical's
+        # original ~59-row behaviour on top of the full directory: an
+        # in-flight application (pending/approved) OR an institution that
+        # opened within the trailing year. NULL established_date fails the
+        # range comparison, so a pending row qualifies only via its status
+        # — same convention as the established-window filter above.
+        if new_charters_only:
+            recent_cutoff = date.today() - timedelta(days=365)
+            filters.append(
+                or_(
+                    Bank.charter_status.in_(("pending", "approved")),
+                    Bank.established_date >= recent_cutoff,
+                )
+            )
 
         count_stmt = select(func.count(Bank.id))
         if filters:
@@ -372,6 +410,153 @@ class BankRepository:
             banks_touched.add(bank.id)
 
         return (len(banks_touched), events_inserted)
+
+    async def upsert_occ_institutions(
+        self, db: AsyncSession, rows: list[OccNationalBankDirectoryRow]
+    ) -> int:
+        """Sync the OCC active-institutions directory into ``banks``.
+
+        The full-directory companion to ``upsert_fdic_institutions``: the
+        FDIC list supplies the ~4,300 insured institutions; this folds in
+        the OCC directory so (a) the insured national banks gain their
+        OCC-side identifiers/enrichment and (b) the OCC-only *uninsured*
+        trust companies — which the FDIC BankFind list never carries (they
+        hold FDIC cert 0, parsed to NULL) — land as first-class rows.
+
+        Per row, in strongest-key-first order:
+
+        1. **fdic_cert** — the insured national banks already inserted by the
+           FDIC upsert. Enrich in place. If a *separate* cert-less row
+           already holds this row's charter number (the same institution
+           inserted before its cert appeared), fold it into the FDIC row via
+           ``merge_occ_bank_into_fdic_row`` so stamping the charter can't
+           trip the new partial unique index.
+        2. **occ_charter_number** — a prior directory sync's OCC-only row, or
+           a reconciled application row. Require a UNIQUE hit; >1 is a data
+           problem and skips (never guess).
+        3. **name + state** — the conservative FDIC fallback
+           (``find_fdic_candidates_by_name_state``), UNIQUE only.
+
+        Enrichment is additive: ``lei`` / ``charter_type`` /
+        ``occ_charter_number`` / ``fed_rssd`` fill only NULL gaps, existing
+        values are never overwritten, and ``charter_status`` is never
+        flipped (an FDIC row's lifecycle stays FDIC-owned). No match → INSERT
+        a ``source='occ'`` row (``charter_authority='OCC'``,
+        ``charter_status='opened'`` — a directory institution is operating)
+        via ``INSERT ... ON CONFLICT (occ_charter_number) DO UPDATE``, the
+        conflict target the migration's partial unique index provides.
+
+        Returns the number of directory rows applied (enriched + inserted).
+        Row-at-a-time on purpose: the directory is ~1k rows a night and the
+        match logic needs per-row lookups anyway.
+        """
+        if not rows:
+            return 0
+        now = datetime.now(timezone.utc)
+        applied = 0
+        for row in rows:
+            fdic_match = (
+                await self.find_by_cert(db, row.fdic_cert) if row.fdic_cert else None
+            )
+
+            # Only look up the charter number when it could matter: to find a
+            # match (no fdic hit) or to detect a foldable duplicate before
+            # stamping it onto an fdic hit that lacks one.
+            charter_match: Bank | None = None
+            if row.charter_number and (
+                fdic_match is None or fdic_match.occ_charter_number is None
+            ):
+                by_charter = await self.find_banks_by_occ_charter_number(
+                    db, row.charter_number
+                )
+                others = [
+                    b for b in by_charter
+                    if fdic_match is None or b.id != fdic_match.id
+                ]
+                if len(others) > 1:
+                    # The partial unique index forbids this post-migration; a
+                    # pre-existing dupe must not be silently mis-enriched.
+                    logger.warning(
+                        "banks: OCC directory row name=%r charter=%s -> %d existing "
+                        "rows share it; skipping",
+                        row.name, row.charter_number, len(others),
+                    )
+                    continue
+                charter_match = others[0] if others else None
+
+            bank = fdic_match
+            if bank is not None:
+                if charter_match is not None and charter_match.fdic_cert is None:
+                    # Same institution, two rows (cert landed on its own FDIC
+                    # row before this application/OCC-only row gained a cert).
+                    bank = await self.merge_occ_bank_into_fdic_row(db, charter_match, bank)
+                    charter_match = None  # its charter now lives on the survivor
+            elif charter_match is not None:
+                bank = charter_match
+            else:
+                candidates = await self.find_fdic_candidates_by_name_state(
+                    db, row.name, row.state
+                )
+                if len(candidates) == 1:
+                    bank = candidates[0]
+
+            if bank is not None:
+                # Stamp the charter number only when the row lacks one AND no
+                # other row already holds it (guard the unique index; a
+                # non-foldable holder means charter_match is still set).
+                if (
+                    bank.occ_charter_number is None
+                    and row.charter_number
+                    and charter_match is None
+                ):
+                    bank.occ_charter_number = row.charter_number
+                _enrich_bank_from_directory(bank, row)
+                bank.occ_checked_at = now
+                applied += 1
+                continue
+
+            await db.execute(self._occ_directory_insert_stmt(row, now))
+            applied += 1
+        return applied
+
+    @staticmethod
+    def _occ_directory_insert_stmt(row: OccNationalBankDirectoryRow, now: datetime):
+        """INSERT for an OCC-only directory row, upserting on
+        ``occ_charter_number`` (the migration's partial unique index). On
+        conflict the OCC-owned enrichment fills gaps only (existing non-null
+        values and ``charter_status`` are left untouched)."""
+        stmt = insert(Bank).values(
+            occ_charter_number=row.charter_number,
+            # Usually NULL (uninsured trust); a cert here means the FDIC list
+            # simply didn't carry it — real data, and step 1 proved no row
+            # already owns it, so the fdic_cert unique index can't trip.
+            fdic_cert=row.fdic_cert,
+            fed_rssd=row.fed_rssd,
+            lei=row.lei,
+            charter_type=row.charter_type,
+            name=row.name,
+            city=row.city,
+            state=row.state,
+            charter_authority="OCC",
+            # A directory institution is open and operating.
+            charter_status="opened",
+            source="occ",
+            occ_checked_at=now,
+        )
+        excluded = stmt.excluded
+        return stmt.on_conflict_do_update(
+            index_elements=[Bank.occ_charter_number],
+            index_where=Bank.occ_charter_number.isnot(None),
+            set_={
+                # Existing value wins (additive fill) — the mirror image of the
+                # FDIC upsert, where FDIC is authoritative and overwrites.
+                "fed_rssd": func.coalesce(Bank.fed_rssd, excluded.fed_rssd),
+                "lei": func.coalesce(Bank.lei, excluded.lei),
+                "charter_type": func.coalesce(Bank.charter_type, excluded.charter_type),
+                "occ_checked_at": excluded.occ_checked_at,
+                "updated_at": func.now(),
+            },
+        )
 
     async def list_unreconciled_occ_banks(self, db: AsyncSession) -> list[Bank]:
         """OCC application rows that still lack an FDIC identity.

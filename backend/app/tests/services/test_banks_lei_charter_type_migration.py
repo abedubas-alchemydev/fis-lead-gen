@@ -38,8 +38,8 @@ def _script_directory() -> ScriptDirectory:
 def test_chain_has_a_single_head() -> None:
     # Single-headedness is the invariant (a second head silently breaks the
     # deploy pipeline's ``alembic upgrade head``); the newest revision is
-    # currently the bank_contacts enrichment-bookkeeping migration.
-    assert _script_directory().get_heads() == ["20260702_0004"]
+    # currently the banks full-directory OCC charter-number unique index.
+    assert _script_directory().get_heads() == ["20260703_0001"]
 
 
 def test_migration_is_an_additive_child_of_the_banks_migration() -> None:
@@ -50,6 +50,14 @@ def test_migration_is_an_additive_child_of_the_banks_migration() -> None:
 def test_bank_contacts_migration_is_a_child_of_the_lei_migration() -> None:
     revision = _script_directory().get_revision("20260702_0003")
     assert revision.down_revision == "20260702_0002"
+
+
+def test_full_directory_index_migration_is_a_child_of_the_enrichment_migration() -> None:
+    # The banks full-directory work adds ONE migration: a partial unique
+    # index on occ_charter_number (the ON CONFLICT arbiter for
+    # upsert_occ_institutions), stacked directly on the current head.
+    revision = _script_directory().get_revision("20260703_0001")
+    assert revision.down_revision == "20260702_0004"
 
 
 def test_bank_model_columns_are_nullable_strings() -> None:
