@@ -1291,6 +1291,12 @@ export type BankListItem = {
   website: string | null;
   // 'OCC' (national charter) | 'STATE' (FDIC CHRTAGNT verbatim).
   charter_authority: string | null;
+  // OCC Institutions API CharterType verbatim (e.g. 'National',
+  // 'TrustCo-National'); null for state charters and rows not yet enriched.
+  // Descriptive charter KIND — orthogonal to charter_authority. Promoted from
+  // detail-only onto the list item for the full-directory charter_type
+  // filter; the list payload populates it once the BE ships that change.
+  charter_type: string | null;
   bkclass: string | null;
   regulator: string | null;
   // pending | approved | opened | withdrawn | rescinded
@@ -1376,10 +1382,10 @@ export type BankDetail = BankListItem & {
   // People from the application PDFs (empty until --extract-contacts has
   // run for this bank; detail-only, the list payload is unchanged).
   contacts: BankContactItem[];
-  // OCC Institutions API enrichment (detail-only; null when the row was
-  // reconciled via the XLSX fallback or predates the API adoption).
+  // OCC Institutions API enrichment. `lei` is detail-only; `charter_type`
+  // now lives on BankListItem (above). Both are null when the row was
+  // reconciled via the XLSX fallback or predates the API adoption.
   lei: string | null;
-  charter_type: string | null;
 };
 
 export type AdjacentResponse = {
