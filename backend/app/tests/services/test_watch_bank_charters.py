@@ -623,3 +623,283 @@ async def test_extract_contacts_apply_upserts_only_banks_with_contacts(caplog) -
     assert summary["bank_contacts_llm_extracted"] == 1
     assert service.upserts == [(1, ["Jane A. Doe", "Priya Krishnamurthy"])]
     assert "2 contact(s)" in caplog.text
+
+
+# ── Phase 0 full sync (--full-sync): both phases + opt-in gating ─────────
+#
+# Tony owns fdic.fetch_all_active_institutions and
+# repository.upsert_occ_institutions (they don't exist in this worktree yet),
+# so the doubles below stand in for them. Two layers:
+#   1. _run_full_sync in isolation — both phases fire (FDIC then OCC), the
+#      API->XLSX directory fallback, and dry-run vs --apply.
+#   2. main() driven end to end with every service/engine faked — the flag
+#      GATES the phase (off by default), full sync runs BEFORE the windowed
+#      phases, and every existing phase still runs regardless.
+
+import scripts.watch_bank_charters as watcher  # noqa: E402
+from scripts.watch_bank_charters import _run_full_sync  # noqa: E402
+
+
+class _FullSyncFdic:
+    """FDIC service double: logs every method main() touches into a shared
+    call list; returns the canned full-sync record set."""
+
+    def __init__(self, *, all_records, calls) -> None:
+        self._all_records = all_records
+        self.calls = calls
+
+    async def fetch_all_active_institutions(self):
+        self.calls.append("fdic.fetch_all_active_institutions")
+        return list(self._all_records)
+
+    # Windowed-phase surface (Phase 1) — empty so the phase no-ops but the
+    # call still proves it RAN.
+    async def fetch_institutions_established_between(self, start, end):
+        self.calls.append("fdic.fetch_institutions_established_between")
+        return []
+
+    async def fetch_new_institution_history(self, start, end):
+        self.calls.append("fdic.fetch_new_institution_history")
+        return []
+
+    async def fetch_institutions_by_certs(self, certs):
+        self.calls.append("fdic.fetch_institutions_by_certs")
+        return []
+
+
+class _FullSyncOcc:
+    """OCC service double. ``api_rows=None`` models the reconcile-style
+    Institutions-API bail-out (key unset / API down) that triggers the
+    keyless XLSX fallback."""
+
+    def __init__(self, *, api_rows, xlsx_rows=None, calls) -> None:
+        self._api_rows = api_rows
+        self._xlsx_rows = xlsx_rows or []
+        self.calls = calls
+
+    async def fetch_active_institutions(self):
+        self.calls.append("occ.fetch_active_institutions")
+        return None if self._api_rows is None else list(self._api_rows)
+
+    async def fetch_national_bank_directory(self):
+        self.calls.append("occ.fetch_national_bank_directory")
+        return list(self._xlsx_rows)
+
+    # Windowed-phase surface (Phase 2 / Phase 4).
+    async def fetch_new_charter_filings(self, start, end):
+        self.calls.append("occ.fetch_new_charter_filings")
+        return []
+
+    async def fetch_digital_asset_applications(self):
+        self.calls.append("occ.fetch_digital_asset_applications")
+        return []
+
+
+class _FullSyncRepo(BankRepository):
+    """Records the two full-sync upserts (upsert_occ_institutions is Tony's
+    new method, mocked here); every windowed-phase repo call returns empty so
+    those phases no-op."""
+
+    def __init__(self, calls) -> None:
+        self.calls = calls
+        self.fdic_upserts: list[list] = []
+        self.occ_upserts: list[list] = []
+
+    async def upsert_fdic_institutions(self, db, records):
+        self.calls.append("repo.upsert_fdic_institutions")
+        self.fdic_upserts.append(list(records))
+        return len(self.fdic_upserts[-1])
+
+    async def upsert_occ_institutions(self, db, rows):
+        self.calls.append("repo.upsert_occ_institutions")
+        self.occ_upserts.append(list(rows))
+        return len(self.occ_upserts[-1])
+
+    # Windowed-phase repo surface — all no-ops.
+    async def upsert_occ_filings(self, db, filings):
+        self.calls.append("repo.upsert_occ_filings")
+        return (0, 0)
+
+    async def list_unreconciled_occ_banks(self, db):
+        self.calls.append("repo.list_unreconciled_occ_banks")
+        return []
+
+    async def find_banks_by_occ_charter_number(self, db, charter_number):
+        return []
+
+    async def find_banks_by_normalized_name(self, db, name):
+        return []
+
+
+class _FakeAsyncEngine:
+    async def dispose(self) -> None:
+        pass
+
+
+# ── Layer 1: _run_full_sync in isolation ────────────────────────────────
+
+
+async def test_full_sync_helper_runs_both_phases_and_commits() -> None:
+    calls: list[str] = []
+    fdic = _FullSyncFdic(all_records=[object(), object(), object()], calls=calls)
+    occ = _FullSyncOcc(api_rows=[object(), object()], calls=calls)
+    repo = _FullSyncRepo(calls)
+    summary = await _run_full_sync(
+        _FakeSessionMaker(), fdic=fdic, occ=occ, repository=repo, apply=True
+    )
+    # Both phases fired, FDIC before OCC, each writing the fetched set.
+    assert calls == [
+        "fdic.fetch_all_active_institutions",
+        "repo.upsert_fdic_institutions",
+        "occ.fetch_active_institutions",
+        "repo.upsert_occ_institutions",
+    ]
+    assert [len(rows) for rows in repo.fdic_upserts] == [3]
+    assert [len(rows) for rows in repo.occ_upserts] == [2]
+    assert summary == {
+        "fdic_full_records": 3,
+        "fdic_full_upserted": 3,
+        "occ_full_rows": 2,
+        "occ_full_source": "api",
+        "occ_full_upserted": 2,
+    }
+
+
+async def test_full_sync_helper_dry_run_fetches_but_writes_nothing() -> None:
+    calls: list[str] = []
+    fdic = _FullSyncFdic(all_records=[object()], calls=calls)
+    occ = _FullSyncOcc(api_rows=[object()], calls=calls)
+    repo = _FullSyncRepo(calls)
+    summary = await _run_full_sync(
+        _FakeSessionMaker(), fdic=fdic, occ=occ, repository=repo, apply=False
+    )
+    # Both sources fetched; NEITHER upsert ran.
+    assert calls == [
+        "fdic.fetch_all_active_institutions",
+        "occ.fetch_active_institutions",
+    ]
+    assert repo.fdic_upserts == [] and repo.occ_upserts == []
+    assert summary == {
+        "fdic_full_records": 1,
+        "occ_full_rows": 1,
+        "occ_full_source": "api",
+    }
+
+
+async def test_full_sync_helper_occ_falls_back_to_xlsx_when_api_unavailable() -> None:
+    calls: list[str] = []
+    # api_rows=None == key unset / API down; the FDIC set is empty, so its
+    # upsert is skipped even under --apply (nothing to write).
+    fdic = _FullSyncFdic(all_records=[], calls=calls)
+    occ = _FullSyncOcc(api_rows=None, xlsx_rows=[object(), object()], calls=calls)
+    repo = _FullSyncRepo(calls)
+    summary = await _run_full_sync(
+        _FakeSessionMaker(), fdic=fdic, occ=occ, repository=repo, apply=True
+    )
+    assert calls == [
+        "fdic.fetch_all_active_institutions",
+        "occ.fetch_active_institutions",
+        "occ.fetch_national_bank_directory",
+        "repo.upsert_occ_institutions",
+    ]
+    assert summary["occ_full_source"] == "xlsx"
+    assert [len(rows) for rows in repo.occ_upserts] == [2]
+    # Empty FDIC set -> no upsert, no fdic_full_upserted key.
+    assert repo.fdic_upserts == []
+    assert summary["fdic_full_records"] == 0
+    assert "fdic_full_upserted" not in summary
+
+
+# ── Layer 2: main() gating (mock every service/engine) ──────────────────
+
+
+async def _drive_main(monkeypatch, argv, *, all_records, api_rows):
+    """Run watcher.main() with every lazily-imported dependency faked.
+
+    Returns ``(rc, calls, repo)`` — the exit code, the ordered cross-service
+    call log, and the repo double (for its recorded upserts).
+    """
+    calls: list[str] = []
+    fdic = _FullSyncFdic(all_records=all_records, calls=calls)
+    occ = _FullSyncOcc(api_rows=api_rows, calls=calls)
+    repo = _FullSyncRepo(calls)
+    monkeypatch.setattr("app.services.fdic_bankfind.FdicBankFindService", lambda: fdic)
+    monkeypatch.setattr("app.services.occ_cas.OccCasService", lambda: occ)
+    monkeypatch.setattr("app.services.banks.BankRepository", lambda: repo)
+    monkeypatch.setattr(
+        "sqlalchemy.ext.asyncio.create_async_engine", lambda *a, **k: _FakeAsyncEngine()
+    )
+    monkeypatch.setattr(
+        "sqlalchemy.ext.asyncio.async_sessionmaker", lambda *a, **k: _FakeSessionMaker()
+    )
+    rc = await watcher.main([*argv, "--db-url", "postgresql://u@localhost/db"])
+    return rc, calls, repo
+
+
+async def test_full_sync_flag_fires_both_phases_before_the_windowed_phases(monkeypatch) -> None:
+    rc, calls, repo = await _drive_main(
+        monkeypatch,
+        ["--full-sync", "--apply"],
+        all_records=[object(), object()],
+        api_rows=[object()],
+    )
+    assert rc == 0
+    # Both full-sync phases fired and wrote (via the mocked Tony methods).
+    assert "fdic.fetch_all_active_institutions" in calls
+    assert "repo.upsert_fdic_institutions" in calls
+    assert "occ.fetch_active_institutions" in calls
+    assert "repo.upsert_occ_institutions" in calls
+    assert [len(r) for r in repo.fdic_upserts] == [2]
+    assert [len(r) for r in repo.occ_upserts] == [1]
+    # Every existing windowed phase STILL ran (Phase 1 FDIC window, Phase 2
+    # OCC CAS, Phase 3 reconcile).
+    assert "fdic.fetch_institutions_established_between" in calls
+    assert "occ.fetch_new_charter_filings" in calls
+    assert "repo.list_unreconciled_occ_banks" in calls
+    # Ordering: the entire full sync precedes the windowed phases.
+    assert (
+        calls.index("repo.upsert_occ_institutions")
+        < calls.index("fdic.fetch_institutions_established_between")
+    )
+    assert (
+        calls.index("fdic.fetch_all_active_institutions")
+        < calls.index("occ.fetch_new_charter_filings")
+    )
+
+
+async def test_full_sync_is_off_by_default_but_windowed_phases_run(monkeypatch) -> None:
+    rc, calls, repo = await _drive_main(
+        monkeypatch,
+        ["--apply"],  # no --full-sync
+        all_records=[object()],
+        api_rows=[object()],
+    )
+    assert rc == 0
+    # The full-sync phase never touched: Tony's fns uncalled, nothing written.
+    assert "fdic.fetch_all_active_institutions" not in calls
+    assert "repo.upsert_occ_institutions" not in calls
+    assert repo.fdic_upserts == [] and repo.occ_upserts == []
+    # With an empty unreconciled set the reconcile phase never fetches the
+    # directory, so full sync would have been the ONLY caller of
+    # fetch_active_institutions — and it wasn't called.
+    assert "occ.fetch_active_institutions" not in calls
+    # Existing windowed phases still ran.
+    assert "fdic.fetch_institutions_established_between" in calls
+    assert "occ.fetch_new_charter_filings" in calls
+
+
+async def test_full_sync_dry_run_fetches_but_does_not_upsert(monkeypatch) -> None:
+    rc, calls, repo = await _drive_main(
+        monkeypatch,
+        ["--full-sync"],  # dry-run: --full-sync WITHOUT --apply
+        all_records=[object()],
+        api_rows=[object()],
+    )
+    assert rc == 0
+    # Fetches happened...
+    assert "fdic.fetch_all_active_institutions" in calls
+    assert "occ.fetch_active_institutions" in calls
+    # ...but nothing was written by full sync (dry-run).
+    assert "repo.upsert_fdic_institutions" not in calls
+    assert "repo.upsert_occ_institutions" not in calls
+    assert repo.fdic_upserts == [] and repo.occ_upserts == []

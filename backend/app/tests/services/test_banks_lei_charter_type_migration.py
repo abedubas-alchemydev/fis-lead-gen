@@ -9,8 +9,9 @@ DB-less pins on the three places the addition must agree with itself:
 2. the ORM model carries both columns, nullable + string-typed (the
    watcher writes them additively — a NOT NULL would break every
    XLSX-reconciled and state-charter row);
-3. the API surface exposes them on the DETAIL schema only (list payloads
-   are deliberately unchanged).
+3. the API surface: ``lei`` stays DETAIL-only, while ``charter_type`` is
+   promoted onto the list item (the full-directory feature filters + renders
+   the charter type, so the list payload carries it).
 """
 
 from __future__ import annotations
@@ -69,12 +70,15 @@ def test_bank_model_columns_are_nullable_strings() -> None:
     assert lei.type.length == 20
 
 
-def test_detail_schema_exposes_the_fields_and_list_schema_does_not() -> None:
+def test_lei_stays_detail_only_but_charter_type_is_promoted_to_the_list() -> None:
     assert "lei" in BankDetail.model_fields
     assert "charter_type" in BankDetail.model_fields
     # Nullable end-to-end: a pre-migration-shaped row must still validate.
     assert BankDetail.model_fields["lei"].default is None
     assert BankDetail.model_fields["charter_type"].default is None
-    # Deliberately detail-only — the list payload is unchanged.
+    # lei stays deliberately detail-only...
     assert "lei" not in BankListItem.model_fields
-    assert "charter_type" not in BankListItem.model_fields
+    # ...but charter_type is promoted onto the list item so the banks list
+    # (the full-directory feature) can render + filter on it — still nullable.
+    assert "charter_type" in BankListItem.model_fields
+    assert BankListItem.model_fields["charter_type"].default is None

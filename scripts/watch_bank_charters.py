@@ -61,6 +61,11 @@ Usage::
     # one-time backfill: widen the window (e.g. all of 2024-present)
     python scripts/watch_bank_charters.py --apply --from-date 2024-01-01
 
+    # opt-in one-off: seed the ENTIRE active bank universe (every active
+    # FDIC-insured institution + every OCC-only trust) before the windowed
+    # phases — backfills far beyond just new/pending charters
+    python scripts/watch_bank_charters.py --apply --full-sync
+
     # one-off: union the Wayback Machine's monthly captures of the OCC
     # digital-assets page (applicants that rolled off pre-scrape)
     python scripts/watch_bank_charters.py --apply --skip-fdic --skip-occ \
@@ -212,6 +217,21 @@ async def main(argv: list[str] | None = None) -> int:
         ),
     )
     parser.add_argument(
+        "--full-sync",
+        action="store_true",
+        help=(
+            "Opt-in: BEFORE the trailing-window phases, seed the ENTIRE "
+            "active bank universe — every active FDIC-insured institution "
+            "(~4,267) via fetch_all_active_institutions, plus the whole OCC "
+            "active-institutions directory (the ~50-150 OCC-only trusts that "
+            "carry no FDIC cert) — through the same idempotent upserts the "
+            "windowed phases use. NOT part of the nightly Cloud Run args "
+            "(kept opt-in like --extract-contacts): run it once, or "
+            "occasionally, to backfill beyond new/pending charters. Composes "
+            "with --apply (dry-run logs the counts, --apply commits)."
+        ),
+    )
+    parser.add_argument(
         "--extract-contacts",
         action="store_true",
         help=(
@@ -257,6 +277,21 @@ async def main(argv: list[str] | None = None) -> int:
 
     summary: dict[str, int | str] = {}
     try:
+        # ── Phase 0: opt-in FULL SYNC (the entire active bank universe) ────
+        # Runs BEFORE the windowed phases so the window / reconcile /
+        # digital-assets passes then refine the rows it seeded. Opt-in like
+        # --extract-contacts and deliberately NOT in the nightly args.
+        if args.full_sync:
+            summary.update(
+                await _run_full_sync(
+                    session_maker,
+                    fdic=fdic,
+                    occ=occ,
+                    repository=repository,
+                    apply=args.apply,
+                )
+            )
+
         # ── Phase 1: FDIC BankFind (opened insured institutions) ──────────
         if not args.skip_fdic:
             records = await fdic.fetch_institutions_established_between(window_start, window_end)
@@ -428,6 +463,79 @@ async def main(argv: list[str] | None = None) -> int:
         return 0
     finally:
         await engine.dispose()
+
+
+async def _run_full_sync(
+    session_maker,
+    *,
+    fdic,
+    occ,
+    repository,
+    apply: bool,
+) -> dict[str, int | str]:
+    """Phase 0 (opt-in ``--full-sync``): seed the ENTIRE active bank
+    universe, not just the trailing window.
+
+    Two phases, each its own short write session/commit (a Cloud Run
+    timeout can only lose the in-flight phase), both idempotent upserts so
+    re-running is a no-op:
+
+    - **FDIC full sync** — every active FDIC-insured institution
+      (``fetch_all_active_institutions``) through the SAME
+      ``upsert_fdic_institutions`` the windowed FDIC phase uses; picks up
+      the ~4,267 already-established banks a trailing-30-day window never
+      sees.
+    - **OCC full sync** — the entire OCC active-institutions directory
+      through ``upsert_occ_institutions``; picks up the OCC-only trusts that
+      carry no FDIC cert. Source selection is IDENTICAL to the reconcile
+      phase (official Institutions API primary, keyless
+      ``national-by-name.xlsx`` fallback when the key is unset / API down),
+      so a missing ``OCC_API_KEY`` degrades the same way here as there.
+
+    Dry-run logs the counts and writes nothing; ``--apply`` commits after
+    each phase. Returns the ``fdic_full_*`` / ``occ_full_*`` summary keys.
+    """
+    summary: dict[str, int | str] = {}
+
+    # ── FDIC full sync: every active insured institution ──────────────────
+    records = await fdic.fetch_all_active_institutions()
+    summary["fdic_full_records"] = len(records)
+    logger.info("full-sync fdic: %d active insured institution(s)", len(records))
+    if apply and records:
+        async with session_maker() as db:
+            written = await repository.upsert_fdic_institutions(db, records)
+            await db.commit()
+        summary["fdic_full_upserted"] = written
+        logger.info("full-sync fdic: upserted %d row(s)", written)
+    elif records:
+        logger.info("dry-run: would upsert %d FDIC full-sync row(s)", len(records))
+
+    # ── OCC full sync: the entire active-institutions directory ───────────
+    # Same source order the reconcile phase uses (API primary, XLSX fallback
+    # on None) so the two phases agree on which directory served.
+    directory = await occ.fetch_active_institutions()
+    occ_source = "api"
+    if directory is None:
+        occ_source = "xlsx"
+        directory = await occ.fetch_national_bank_directory()
+    summary["occ_full_rows"] = len(directory)
+    summary["occ_full_source"] = occ_source
+    logger.info(
+        "full-sync occ: %d directory row(s) (source=%s)", len(directory), occ_source
+    )
+    if apply and directory:
+        async with session_maker() as db:
+            written = await repository.upsert_occ_institutions(db, directory)
+            await db.commit()
+        summary["occ_full_upserted"] = written
+        logger.info("full-sync occ: upserted %d row(s)", written)
+    elif directory:
+        logger.info(
+            "dry-run: would upsert %d OCC full-sync row(s) (source=%s)",
+            len(directory), occ_source,
+        )
+
+    return summary
 
 
 async def _reconcile_occ_banks(

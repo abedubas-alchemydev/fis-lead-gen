@@ -60,12 +60,19 @@ async def list_banks(
     state: list[str] | None = Query(default=None),
     charter_authority: list[str] | None = Query(default=None),
     charter_status: list[str] | None = Query(default=None),
+    # OCC CharterType (e.g. 'National', 'TrustCo-National'); repeatable and
+    # comma-joinable like the other multi-selects.
+    charter_type: list[str] | None = Query(default=None),
     established_after: date | None = Query(default=None),
     established_before: date | None = Query(default=None),
     # Tri-state: omitted = all banks; true = digital-assets-tagged only
     # (OCC Digital Assets Licensing Applications page matches); false =
     # untagged only.
     digital_assets: bool | None = Query(default=None),
+    # New-charters-only: opt-in narrowing to newly opened / pending charters
+    # (the original 59-row new/pending/digital-asset set) even after the
+    # opt-in full sync has seeded the entire bank universe. Default off.
+    new_charters_only: bool = Query(default=False),
     sort_by: str = Query(default="established_date"),
     sort_dir: str = Query(default="desc", pattern="^(asc|desc)$"),
     page: int = Query(default=1, ge=1),
@@ -89,9 +96,11 @@ async def list_banks(
         states=_parse_multi(state),
         charter_authorities=_parse_multi(charter_authority),
         charter_statuses=_parse_multi(charter_status),
+        charter_types=_parse_multi(charter_type),
         established_after=established_after,
         established_before=established_before,
         digital_assets=digital_assets,
+        new_charters_only=new_charters_only,
         sort_by=sort_by,
         sort_dir=sort_dir,
         page=page,
