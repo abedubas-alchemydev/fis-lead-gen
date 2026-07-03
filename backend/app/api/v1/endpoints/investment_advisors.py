@@ -6,7 +6,7 @@ from datetime import date, datetime, timedelta, timezone
 
 from fastapi import APIRouter, BackgroundTasks, Body, Depends, HTTPException, Query, status
 from fastapi.responses import RedirectResponse, Response
-from sqlalchemy import exists, func, select
+from sqlalchemy import exists, func, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.db.session import get_db_session
@@ -470,6 +470,14 @@ async def refresh_advisor_all(
         )
 
     advisor_marker = f'"advisor_id": {advisor_id}'
+    # Match the id as a COMPLETE JSON token — delimited by ',' or '}' — so one
+    # advisor id can never prefix-match another (advisor 12 vs 123's run).
+    # ``notes`` is always ``json.dumps({"advisor_id": id, ...})``, so the id is
+    # followed by ',' (another key after it) or '}' (last key).
+    advisor_run_marker_match = or_(
+        PipelineRun.notes.ilike(f"%{advisor_marker},%"),
+        PipelineRun.notes.ilike(f"%{advisor_marker}" + "}%"),
+    )
 
     # A genuinely in-flight refresh-all already exists for this advisor.
     # Rather than 409 (which the browser surfaces as a red console error even
@@ -487,7 +495,7 @@ async def refresh_advisor_all(
         select(PipelineRun)
         .where(PipelineRun.pipeline_name == REFRESH_ADVISOR_ALL_PIPELINE_NAME)
         .where(PipelineRun.status.in_(("queued", "running")))
-        .where(PipelineRun.notes.ilike(f"%{advisor_marker}%"))
+        .where(advisor_run_marker_match)
         .order_by(PipelineRun.id.desc())
         .limit(1)
     )
@@ -509,7 +517,7 @@ async def refresh_advisor_all(
         select(PipelineRun)
         .where(PipelineRun.pipeline_name == REFRESH_ADVISOR_ALL_PIPELINE_NAME)
         .where(PipelineRun.trigger_source == user_marker)
-        .where(PipelineRun.notes.ilike(f"%{advisor_marker}%"))
+        .where(advisor_run_marker_match)
         .where(PipelineRun.started_at >= cooldown_cutoff)
         .order_by(PipelineRun.id.desc())
         .limit(1)
@@ -642,6 +650,14 @@ async def gap_fill_advisor_contacts(
         )
 
     advisor_marker = f'"advisor_id": {advisor_id}'
+    # Match the id as a COMPLETE JSON token — delimited by ',' or '}' — so one
+    # advisor id can never prefix-match another (advisor 12 vs 123's run).
+    # ``notes`` is always ``json.dumps({"advisor_id": id, ...})``, so the id is
+    # followed by ',' (another key after it) or '}' (last key).
+    advisor_run_marker_match = or_(
+        PipelineRun.notes.ilike(f"%{advisor_marker},%"),
+        PipelineRun.notes.ilike(f"%{advisor_marker}" + "}%"),
+    )
 
     # Attach to an in-flight gap-fill run for this advisor rather than queueing
     # a second concurrent job (same shape as refresh-all's in-flight guard).
@@ -649,7 +665,7 @@ async def gap_fill_advisor_contacts(
         select(PipelineRun)
         .where(PipelineRun.pipeline_name == GAP_FILL_ADVISOR_CONTACTS_PIPELINE_NAME)
         .where(PipelineRun.status.in_(("queued", "running")))
-        .where(PipelineRun.notes.ilike(f"%{advisor_marker}%"))
+        .where(advisor_run_marker_match)
         .order_by(PipelineRun.id.desc())
         .limit(1)
     )
