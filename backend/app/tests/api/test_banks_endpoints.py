@@ -121,6 +121,31 @@ async def test_multi_selects_accept_repeat_and_comma_forms(monkeypatch) -> None:
     assert captured["charter_statuses"] == ["pending", "approved"]
 
 
+async def test_charter_type_multi_select_and_new_charters_pass_through(monkeypatch) -> None:
+    captured = await _call_with_captured_kwargs(
+        monkeypatch,
+        [
+            ("charter_type", "National,TrustCo-National"),
+            ("charter_type", "State Savings Bank"),
+            ("new_charters_only", "true"),
+        ],
+    )
+    # repeat-key + comma forms both split, same convention as the other
+    # multi-selects; new_charters_only parses to a real bool.
+    assert captured["charter_types"] == [
+        "National", "TrustCo-National", "State Savings Bank",
+    ]
+    assert captured["new_charters_only"] is True
+
+
+async def test_charter_type_and_new_charters_default_off(monkeypatch) -> None:
+    captured = await _call_with_captured_kwargs(monkeypatch, {})
+    # Existing new/pending/digital-asset behaviour is preserved: no charter
+    # filter, and the new-charters narrowing is OFF unless asked for.
+    assert captured["charter_types"] == []
+    assert captured["new_charters_only"] is False
+
+
 async def test_defaults_reach_repository(monkeypatch) -> None:
     captured = await _call_with_captured_kwargs(monkeypatch, {})
     assert captured["sort_by"] == "established_date"
@@ -301,3 +326,6 @@ async def test_list_response_model_tolerates_null_pdfs(monkeypatch) -> None:
     item = response.json()["items"][0]
     assert item["digital_asset_pdfs"] == []
     assert item["fdic_cert"] == "59378"
+    # charter_type is promoted onto the list item (was detail-only) so the
+    # list can render + filter it.
+    assert item["charter_type"] == "National"
