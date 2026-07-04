@@ -275,6 +275,16 @@ async def gap_fill_bank_contacts(
         PipelineRun.notes.ilike(f"%{bank_marker}" + "}%"),
     )
 
+    # Guard ORDER note: unlike the advisor mirror (which checks its cooldown
+    # BEFORE the in-flight guard), banks MUST check in-flight FIRST. The advisor
+    # cooldown reads ``advisor.last_gap_fill_attempt_at`` — a column stamped only
+    # inside the background runner, so a just-queued in-flight run hasn't stamped
+    # it yet and never trips its own cooldown. Banks have no such column, so the
+    # cooldown below reads the most recent gap-fill *PipelineRun* start time,
+    # UNFILTERED by status — which includes the in-flight run itself. Checking
+    # cooldown first would therefore 429 a non-``force`` caller on a run that just
+    # started, instead of letting them attach to it. So this order is intentional.
+    #
     # Attach to an in-flight gap-fill run for this bank rather than queueing a
     # second concurrent job. A run only counts as in-flight if it started
     # within STALE_REFRESH_RUN_AGE; an older running/queued row is an orphan

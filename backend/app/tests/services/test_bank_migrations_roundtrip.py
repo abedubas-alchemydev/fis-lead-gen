@@ -19,11 +19,13 @@ from __future__ import annotations
 
 import secrets
 from pathlib import Path
+from textwrap import dedent
 
 import psycopg
 import pytest
 from alembic import command
 from alembic.config import Config
+from sqlalchemy import exc as sa_exc
 from sqlalchemy.engine import make_url
 
 from app.core.config import settings
@@ -149,3 +151,60 @@ def test_bank_people_parity_migrations_roundtrip(scratch_db: str) -> None:
     with psycopg.connect(inspect_dsn) as conn, conn.cursor() as cur:
         assert "apollo_person_id" in _columns(cur, "bank_contacts")
         assert "bank_id" in _columns(cur, "outreach_sends")
+
+
+def test_downgrade_0003_fails_by_design_on_bank_sends(scratch_db: str) -> None:
+    """Pins the documented 0003 downgrade contract: a real bank ``outreach_sends``
+    row (only ``bank_contact_id`` set — no ``recipient_email``) makes the
+    downgrade FAIL rather than silently discard the audit row. ``outreach_sends``
+    is a compliance trail, so reverting must be a conscious human step.
+
+    Postgres DDL is transactional, so the failed downgrade must roll back whole —
+    the bank columns/constraints stay intact, never left half-reverted.
+    """
+    cfg = _alembic_config()
+    inspect_dsn = _sync_dsn(scratch_db)
+
+    command.upgrade(cfg, "head")
+
+    # Seed a realistic bank send: user -> bank -> bank_contact -> outreach_sends
+    # carrying (bank_id, bank_contact_id) and NO recipient_email. Committed so
+    # Alembic's separate downgrade connection sees it.
+    uid = f"u_{secrets.token_hex(6)}"
+    with psycopg.connect(inspect_dsn, autocommit=True) as conn, conn.cursor() as cur:
+        cur.execute(
+            'INSERT INTO "user" (id, name, email) VALUES (%s, %s, %s)',
+            (uid, "Mig Test", f"{uid}@example.com"),
+        )
+        cur.execute(
+            "INSERT INTO banks (name) VALUES (%s) RETURNING id", ("Roundtrip Bank",)
+        )
+        bank_id = cur.fetchone()[0]
+        cur.execute(
+            "INSERT INTO bank_contacts (bank_id, name) VALUES (%s, %s) RETURNING id",
+            (bank_id, "Jane Officer"),
+        )
+        contact_id = cur.fetchone()[0]
+        cur.execute(
+            dedent(
+                """
+                INSERT INTO outreach_sends
+                    (user_id, bank_id, bank_contact_id, subject, body, provider, status)
+                VALUES (%s, %s, %s, %s, %s, %s, %s)
+                """
+            ),
+            (uid, bank_id, contact_id, "Hello", "Body", "google", "sent"),
+        )
+
+    # Downgrade only across 0003 (to its parent 20260703_0002), isolating the
+    # 0003 hazard. It must RAISE (the three-way CHECK rejects the bank send).
+    with pytest.raises(sa_exc.IntegrityError):
+        command.downgrade(cfg, "20260703_0002")
+
+    # Rolled back whole: the bank columns + audit row survive untouched.
+    with psycopg.connect(inspect_dsn) as conn, conn.cursor() as cur:
+        send_cols = _columns(cur, "outreach_sends")
+        assert "bank_id" in send_cols
+        assert "bank_contact_id" in send_cols
+        cur.execute("SELECT count(*) FROM outreach_sends WHERE bank_contact_id IS NOT NULL")
+        assert cur.fetchone()[0] == 1

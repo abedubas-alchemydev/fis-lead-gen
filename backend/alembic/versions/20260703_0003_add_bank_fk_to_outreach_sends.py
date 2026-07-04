@@ -26,6 +26,18 @@ the invariants still hold:
 Both FKs use ``ON DELETE CASCADE`` to match the sibling firm/contact FKs
 (migration 0046) — a send row must not outlive the bank / bank_contact it
 references. Indexed to match the sibling columns' read patterns.
+
+DOWNGRADE HAZARD (fail-by-design, mirroring migration 0002): once any bank
+outreach has been sent, ``outreach_sends`` holds rows whose only contact linkage
+is ``bank_contact_id`` (no ``recipient_email``, no other contact FK). The
+downgrade restores the pre-bank three-way ``ck_outreach_sends_adhoc_has_recipient``
+CHECK, which those rows violate — so the downgrade RAISES on existing bank sends
+rather than silently deleting them. ``outreach_sends`` is a compliance/audit trail
+(a record of emails actually sent), so a rollback must not discard it
+automatically. Postgres DDL is transactional, so a failed downgrade rolls back
+whole — no half-dropped constraint persists. To revert with bank sends on file,
+first consciously handle them (delete or re-home to ``recipient_email``), then
+re-run the downgrade.
 """
 from __future__ import annotations
 
@@ -105,7 +117,12 @@ def upgrade() -> None:
 
 
 def downgrade() -> None:
-    # Restore the pre-bank CHECK definitions (three-way).
+    # Restore the pre-bank CHECK definitions (three-way). A downgrade with bank
+    # sends on file (bank_contact_id set, no recipient_email) will FAIL here by
+    # design when the three-way ``adhoc_has_recipient`` CHECK is re-created on
+    # rows it doesn't admit — see the DOWNGRADE HAZARD note above. This is
+    # deliberate: outreach_sends is an audit trail, so reverting requires a
+    # human to consciously handle those rows first rather than lose them.
     op.drop_constraint("ck_outreach_sends_adhoc_has_recipient", "outreach_sends", type_="check")
     op.create_check_constraint(
         "ck_outreach_sends_adhoc_has_recipient",
