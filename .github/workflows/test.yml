@@ -596,7 +596,7 @@ jobs:
       # Moving it to a batch Job (no request timeout) fixes that and matches the
       # other pipelines. Env-driven, no CLI flags (initial_load.py reads
       # settings.*; initial_load_limit=None -> full harvest). 4Gi because the
-      # single-pass merge peaks ~2.1GiB (bump to 8Gi if it OOMs); 2h task-timeout
+      # single-pass merge peaks ~2.1GiB (bump to 8Gi if it OOMs); 24h task-timeout
       # gives headroom over the documented run. FINRA/SEC are free, so
       # DATABASE_URL is the only secret (add GEMINI_API_KEY only if
       # run_clearing_pipeline_on_initial_load is turned on).
@@ -609,7 +609,7 @@ jobs:
             --project=${{ vars.GCP_PROJECT_ID }} \
             --command=python \
             --args=scripts/initial_load.py \
-            --task-timeout=7200 \
+            --task-timeout=86400 \
             --memory=4Gi \
             --cpu=2 \
             --max-retries=0 \
@@ -619,7 +619,7 @@ jobs:
             --labels=commit-sha=${{ env.SHORT_SHA }},environment=staging,kind=batch-job
 
       # Production sibling of the staging initial-load job above. Identical shape
-      # (scripts/initial_load.py, 4Gi/2cpu, 2h task-timeout, DATABASE_URL only);
+      # (scripts/initial_load.py, 4Gi/2cpu, 24h task-timeout, DATABASE_URL only);
       # the only differences are the job name (fis-initial-load-prod), the prod
       # DATABASE_URL secret (DATABASE_URL_BACKEND vs staging's
       # DATABASE_URL_BACKEND_STAGING), and the env label. Gated to push-to-main
@@ -636,7 +636,7 @@ jobs:
             --project=${{ vars.GCP_PROJECT_ID }} \
             --command=python \
             --args=scripts/initial_load.py \
-            --task-timeout=7200 \
+            --task-timeout=86400 \
             --memory=4Gi \
             --cpu=2 \
             --max-retries=0 \

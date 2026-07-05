@@ -279,6 +279,24 @@ ALLOWED_SORT_FIELDS = {
 
 class BrokerDealerRepository:
     async def replace_dataset(self, db: AsyncSession, records: list[MergedBrokerDealerRecord]) -> int:
+        # Canonicalize CIKs and collapse duplicate conflict keys before the plain
+        # bulk INSERT below. ``broker_dealers`` is UNIQUE on both ``cik`` and
+        # ``sec_file_number``, and the merge can emit two firms that resolve to
+        # the same EDGAR CIK -- padded vs unpadded ('351317' vs '0000351317'), or
+        # two FINRA firms mapping to one entity -- which makes the raw
+        # ``insert().values(...)`` fail with a UniqueViolation and aborts the
+        # entire reload. Mirror upsert_many: normalize CIKs, then run each unique
+        # key through ``_dedupe_by_conflict_key`` (keeps the last occurrence and
+        # logs every drop, so a genuine two-firms-onto-one-CIK stays visible in
+        # the logs instead of silently failing the load). See the 2026-07-02
+        # dup-firms incident noted on that helper.
+        records = [
+            replace(r, cik=normalize_cik(r.cik)) if r.cik is not None else r
+            for r in records
+        ]
+        records = _dedupe_by_conflict_key(records, "cik")
+        records = _dedupe_by_conflict_key(records, "sec_file_number")
+
         await db.execute(delete(ClearingArrangement))
         await db.execute(delete(ExecutiveContact))
         await db.execute(delete(FilingAlert))
