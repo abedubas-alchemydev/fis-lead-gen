@@ -586,6 +586,65 @@ jobs:
             --set-secrets=DATABASE_URL=DATABASE_URL_BACKEND:latest,OCC_API_KEY=OCC_API_KEY:latest,GEMINI_API_KEY=GEMINI_API_KEY:latest \
             --labels=commit-sha=${{ env.SHORT_SHA }},environment=production,kind=batch-job
 
+      # Cloud Run Job that runs scripts/initial_load.py — the full FINRA + SEC
+      # EDGAR re-bootstrap of the broker_dealers table (harvest -> Form BD detail
+      # enrich -> EDGAR resolve -> merge+QA -> destructive replace_dataset ->
+      # classification -> FOCUS import + filing monitor -> lead-score refresh).
+      # Previously this ran via the SYNCHRONOUS HTTP endpoint
+      # POST /api/v1/pipeline/run/initial-load, which 504'd every week: the
+      # 15-30 min harvest can't fit inside Cloud Run's 60 min request ceiling.
+      # Moving it to a batch Job (no request timeout) fixes that and matches the
+      # other pipelines. Env-driven, no CLI flags (initial_load.py reads
+      # settings.*; initial_load_limit=None -> full harvest). 4Gi because the
+      # single-pass merge peaks ~2.1GiB (bump to 8Gi if it OOMs); 2h task-timeout
+      # gives headroom over the documented run. FINRA/SEC are free, so
+      # DATABASE_URL is the only secret (add GEMINI_API_KEY only if
+      # run_clearing_pipeline_on_initial_load is turned on).
+      - name: Deploy initial-load Cloud Run Job (staging)
+        if: env.ENV == 'staging'
+        run: |
+          gcloud run jobs deploy fis-initial-load-staging \
+            --image=${{ vars.GCP_REGISTRY }}/backend:${{ env.SHORT_SHA }} \
+            --region=${{ vars.GCP_REGION }} \
+            --project=${{ vars.GCP_PROJECT_ID }} \
+            --command=python \
+            --args=scripts/initial_load.py \
+            --task-timeout=7200 \
+            --memory=4Gi \
+            --cpu=2 \
+            --max-retries=0 \
+            --parallelism=1 \
+            --tasks=1 \
+            --set-secrets=DATABASE_URL=DATABASE_URL_BACKEND_STAGING:latest \
+            --labels=commit-sha=${{ env.SHORT_SHA }},environment=staging,kind=batch-job
+
+      # Production sibling of the staging initial-load job above. Identical shape
+      # (scripts/initial_load.py, 4Gi/2cpu, 2h task-timeout, DATABASE_URL only);
+      # the only differences are the job name (fis-initial-load-prod), the prod
+      # DATABASE_URL secret (DATABASE_URL_BACKEND vs staging's
+      # DATABASE_URL_BACKEND_STAGING), and the env label. Gated to push-to-main
+      # (env.ENV == 'production'). Stays INERT until its prod Cloud Scheduler cron
+      # (fis-initial-load-prod-weekly, 0 2 * * 6 America/New_York) is created
+      # out-of-band, replacing the old synchronous-HTTP initial-load-weekly. See
+      # docs/runbooks/initial-load.md.
+      - name: Deploy initial-load Cloud Run Job (production)
+        if: env.ENV == 'production'
+        run: |
+          gcloud run jobs deploy fis-initial-load-prod \
+            --image=${{ vars.GCP_REGISTRY }}/backend:${{ env.SHORT_SHA }} \
+            --region=${{ vars.GCP_REGION }} \
+            --project=${{ vars.GCP_PROJECT_ID }} \
+            --command=python \
+            --args=scripts/initial_load.py \
+            --task-timeout=7200 \
+            --memory=4Gi \
+            --cpu=2 \
+            --max-retries=0 \
+            --parallelism=1 \
+            --tasks=1 \
+            --set-secrets=DATABASE_URL=DATABASE_URL_BACKEND:latest \
+            --labels=commit-sha=${{ env.SHORT_SHA }},environment=production,kind=batch-job
+
       - name: Deploy frontend to Cloud Run
         run: |
           # Re-establish SMTP env on every staging deploy so an accidental clear can't silently break better-auth emails.
