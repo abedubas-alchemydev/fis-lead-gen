@@ -1,11 +1,12 @@
 "use client";
 
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import Link from "next/link";
 import type { Route } from "next";
+import clsx from "clsx";
 import { useUrlSyncedState } from "@/lib/use-url-synced-state";
 
-import { ArrowDown, ArrowUp, Search, X } from "lucide-react";
+import { ArrowDown, ArrowUp, ChevronDown, Heart, Search, X } from "lucide-react";
 
 import { apiRequest, buildApiPath } from "@/lib/api";
 import { formatDate } from "@/lib/format";
@@ -32,7 +33,9 @@ import {
 } from "@/components/banks/bank-status-pill";
 import { BankEnrichmentNotice } from "@/components/banks/bank-enrichment-notice";
 import { EstablishedDateRangeFilter } from "@/components/banks/filters/established-date-range-filter";
-import { Button } from "@/components/ui/button";
+import { BulkListPicker } from "@/components/list-picker/bulk-list-picker";
+import { ListPicker } from "@/components/list-picker/list-picker";
+import { Button, buttonBase, buttonSizes } from "@/components/ui/button";
 import {
   MultiSelectFilter,
   type MultiSelectFilterOption,
@@ -169,6 +172,17 @@ export function BankListWorkspaceClient() {
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
 
+  // ── Bulk-select state (page-scoped) ─────────────────────────────────────
+  // Mirrors the master-list workspace: selection is ephemeral (NOT URL-backed
+  // — every list refetch clears it) so a user never bulk-acts on off-page
+  // rows they can't see. Resolves on the bulk "Save to list" action.
+  const [selectedIds, setSelectedIds] = useState<ReadonlySet<number>>(
+    () => new Set(),
+  );
+  const [bulkPickerOpen, setBulkPickerOpen] = useState(false);
+  const headerCheckboxRef = useRef<HTMLInputElement | null>(null);
+  const bulkActionTriggerRef = useRef<HTMLButtonElement | null>(null);
+
   // Distinct states with at least one bank — fuels the state multi-select
   // so the dropdown only offers states that can actually match (bank
   // volume is low, so most states have zero rows).
@@ -278,6 +292,48 @@ export function BankListWorkspaceClient() {
   const meta = data?.meta;
   const filtersActive = hasActiveFilters(state);
   const activeFilterCount = countActiveFilters(state);
+
+  // ── Bulk-select effects ────────────────────────────────────────────────
+  // Selection scope is "current page only" — every items refetch (page,
+  // sort, filter, search) clears the set so the user never bulk-acts on
+  // off-page rows they can't see.
+  useEffect(() => {
+    setSelectedIds(new Set());
+  }, [items]);
+
+  // Auto-dismiss the bulk popover when there's nothing left to act on.
+  useEffect(() => {
+    if (selectedIds.size === 0) setBulkPickerOpen(false);
+  }, [selectedIds]);
+
+  const allOnPageSelected =
+    items.length > 0 && selectedIds.size === items.length;
+  const someOnPageSelected =
+    selectedIds.size > 0 && selectedIds.size < items.length;
+
+  // Indeterminate must be set imperatively — React doesn't expose it as a
+  // prop on <input>.
+  useEffect(() => {
+    if (headerCheckboxRef.current) {
+      headerCheckboxRef.current.indeterminate = someOnPageSelected;
+    }
+  }, [someOnPageSelected]);
+
+  const toggleRow = useCallback((id: number) => {
+    setSelectedIds((current) => {
+      const next = new Set(current);
+      if (next.has(id)) next.delete(id);
+      else next.add(id);
+      return next;
+    });
+  }, []);
+
+  const toggleAllOnPage = useCallback(() => {
+    setSelectedIds((current) => {
+      if (current.size === items.length) return new Set();
+      return new Set(items.map((item) => item.id));
+    });
+  }, [items]);
 
   // Charter Type options: OCC CharterType has no distinct-values endpoint, so
   // union the known-token seed with the values present on the loaded page
@@ -765,7 +821,55 @@ export function BankListWorkspaceClient() {
               Bank charter list
             </h3>
           </div>
-          {meta ? (
+          {selectedIds.size > 0 ? (
+            <div className="flex items-center gap-3">
+              <span
+                className="text-[12px] font-semibold text-[var(--text-dim,#475569)]"
+                aria-live="polite"
+              >
+                {selectedIds.size} selected
+              </span>
+              <button
+                type="button"
+                onClick={() => setSelectedIds(new Set())}
+                className="rounded-[6px] border border-[var(--border-2,rgba(30,64,175,0.16))] bg-transparent px-2.5 py-1 text-[11px] font-semibold text-[var(--text-dim,#475569)] transition hover:bg-[var(--surface-2,#f1f6fd)]"
+              >
+                Clear
+              </button>
+              <button
+                ref={bulkActionTriggerRef}
+                type="button"
+                onClick={() => setBulkPickerOpen((v) => !v)}
+                aria-haspopup="dialog"
+                aria-expanded={bulkPickerOpen}
+                className={clsx(
+                  buttonBase,
+                  buttonSizes.sm,
+                  "rounded-[8px] border border-[rgba(99,102,241,0.4)] bg-gradient-to-br from-[#6366f1] to-[#8b5cf6] text-[12px] text-white shadow-[0_6px_16px_rgba(99,102,241,0.35)]",
+                )}
+              >
+                <Heart className="h-3.5 w-3.5" strokeWidth={2.5} aria-hidden />
+                Save to list
+                <ChevronDown
+                  className="h-3.5 w-3.5"
+                  strokeWidth={2.5}
+                  aria-hidden
+                />
+              </button>
+              {bulkPickerOpen ? (
+                <BulkListPicker
+                  selectedIds={Array.from(selectedIds)}
+                  anchorRef={bulkActionTriggerRef}
+                  entityType="bank"
+                  onAdded={() => {
+                    setBulkPickerOpen(false);
+                    setSelectedIds(new Set());
+                  }}
+                  onDismiss={() => setBulkPickerOpen(false)}
+                />
+              ) : null}
+            </div>
+          ) : meta ? (
             <span className="text-[12px] text-[var(--text-muted,#94a3b8)]">
               {meta.total.toLocaleString()} institution
               {meta.total === 1 ? "" : "s"}
@@ -774,9 +878,27 @@ export function BankListWorkspaceClient() {
         </div>
 
         <div className="overflow-x-auto">
-          <table className="w-full min-w-[1000px] text-left">
+          <table className="w-full min-w-[1044px] text-left">
             <thead>
               <tr>
+                <th
+                  scope="col"
+                  className="w-[44px] whitespace-nowrap border-b border-[var(--border,rgba(30,64,175,0.1))] bg-[var(--surface-2,#f1f6fd)] px-5 py-3"
+                >
+                  <input
+                    ref={headerCheckboxRef}
+                    type="checkbox"
+                    aria-label={
+                      allOnPageSelected
+                        ? "Deselect all banks on this page"
+                        : "Select all banks on this page"
+                    }
+                    checked={allOnPageSelected}
+                    onChange={toggleAllOnPage}
+                    disabled={loading || items.length === 0}
+                    className="h-4 w-4 rounded border-[var(--border-2,rgba(30,64,175,0.16))] text-[var(--accent,#6366f1)] focus:ring-[var(--accent,#6366f1)]"
+                  />
+                </th>
                 {COLUMNS.map((column) => {
                   const isSorted = state.sortBy === column.key;
                   const columnTitle = (column as { title?: string }).title;
@@ -823,6 +945,9 @@ export function BankListWorkspaceClient() {
                       key={`loading-${index}`}
                       className="border-t border-[var(--border,rgba(30,64,175,0.1))]"
                     >
+                      <td className="w-[44px] px-5 py-3.5">
+                        <div className="h-4 w-4 animate-pulse rounded bg-[var(--surface-2,#f1f6fd)]" />
+                      </td>
                       {COLUMNS.map((column) => (
                         <td key={column.key} className="px-5 py-3.5">
                           <div className="h-4 w-full animate-pulse rounded bg-[var(--surface-2,#f1f6fd)]" />
@@ -833,7 +958,7 @@ export function BankListWorkspaceClient() {
                 )
               ) : items.length === 0 ? (
                 <tr>
-                  <td colSpan={COLUMNS.length} className="px-5 py-12">
+                  <td colSpan={COLUMNS.length + 1} className="px-5 py-12">
                     {/* Two empty cases. With no active filters the default
                         "New & pending" preset is on, so an empty result just
                         means no charters are in flight right now (the normal
@@ -880,7 +1005,13 @@ export function BankListWorkspaceClient() {
                 </tr>
               ) : (
                 items.map((row) => (
-                  <BankRow key={row.id} row={row} href={detailHref(row.id)} />
+                  <BankRow
+                    key={row.id}
+                    row={row}
+                    href={detailHref(row.id)}
+                    selected={selectedIds.has(row.id)}
+                    onToggle={toggleRow}
+                  />
                 ))
               )}
             </tbody>
@@ -965,23 +1096,48 @@ function ExplainedDash({ explanation }: { explanation: string }) {
   );
 }
 
-function BankRow({ row, href }: { row: BankListItem; href: Route }) {
+function BankRow({
+  row,
+  href,
+  selected,
+  onToggle,
+}: {
+  row: BankListItem;
+  href: Route;
+  selected: boolean;
+  onToggle: (id: number) => void;
+}) {
   const location = [row.city, row.state].filter(Boolean).join(", ");
 
   return (
     <tr className="border-t border-[var(--border,rgba(30,64,175,0.1))] align-top transition hover:bg-[var(--row-hover,rgba(99,102,241,0.04))]">
+      <td className="w-[44px] px-5 py-3.5 align-top">
+        <input
+          type="checkbox"
+          aria-label={`Select ${row.name}`}
+          checked={selected}
+          onChange={() => onToggle(row.id)}
+          onClick={(e) => e.stopPropagation()}
+          className="mt-0.5 h-4 w-4 rounded border-[var(--border-2,rgba(30,64,175,0.16))] text-[var(--accent,#6366f1)] focus:ring-[var(--accent,#6366f1)]"
+        />
+      </td>
       <td className="min-w-[220px] px-5 py-3.5">
-        <Link
-          href={href}
-          className="block font-semibold text-[var(--text,#0f172a)] transition hover:text-[var(--accent,#6366f1)]"
-        >
-          {row.name}
-        </Link>
-        {location ? (
-          <div className="mt-0.5 text-[12px] text-[var(--text-muted,#94a3b8)]">
-            {location}
+        <div className="flex items-start justify-between gap-3">
+          <div className="min-w-0 flex-1">
+            <Link
+              href={href}
+              className="block font-semibold text-[var(--text,#0f172a)] transition hover:text-[var(--accent,#6366f1)]"
+            >
+              {row.name}
+            </Link>
+            {location ? (
+              <div className="mt-0.5 text-[12px] text-[var(--text-muted,#94a3b8)]">
+                {location}
+              </div>
+            ) : null}
           </div>
-        ) : null}
+          <ListPicker firmId={row.id} variant="row" entityType="bank" />
+        </div>
       </td>
       <td className="px-5 py-3.5 font-mono text-[12px] text-[var(--text-dim,#475569)]">
         {row.fdic_cert ?? "—"}
