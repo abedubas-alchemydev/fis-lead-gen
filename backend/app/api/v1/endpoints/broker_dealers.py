@@ -1067,16 +1067,22 @@ async def visit_broker_dealer(
     await record_visit(db, current_user.id, broker_dealer_id)
 
 
-@router.get("/{broker_dealer_id}/profile", response_model=BrokerDealerProfileResponse)
-async def get_broker_dealer_profile(
-    broker_dealer_id: int,
-    current_user: AuthenticatedUser = Depends(_require_master_list),
-    db: AsyncSession = Depends(get_db_session),
+async def build_broker_dealer_profile(
+    db: AsyncSession,
+    broker_dealer: BrokerDealer,
+    *,
+    user_id: str | None,
 ) -> BrokerDealerProfileResponse:
-    broker_dealer = await repository.get_broker_dealer(db, broker_dealer_id)
-    if broker_dealer is None:
-        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Broker-dealer not found.")
+    """Assemble the full firm-profile envelope for an already-fetched firm.
 
+    Extracted verbatim from ``get_broker_dealer_profile`` so the same
+    assembly can serve both the authenticated detail page and the public
+    share surface (DOX Share). ``user_id=None`` is the public path: the
+    per-user favorites lookup is skipped entirely and the response carries
+    ``is_favorited=False`` / ``favorited_at=None``. Callers own the fetch +
+    404 handling for ``broker_dealer``.
+    """
+    broker_dealer_id = broker_dealer.id
     financials = await repository.get_financial_metrics(db, broker_dealer_id)
     clearing_arrangements = await repository.list_clearing_arrangements(db, broker_dealer_id)
     membership_rows = await repository.list_clearing_memberships(db, broker_dealer_id)
@@ -1102,7 +1108,10 @@ async def get_broker_dealer_profile(
     )
     filing_history.sort(key=lambda item: item.filed_at, reverse=True)
 
-    favorited, favorited_at = await is_favorited(db, current_user.id, broker_dealer_id)
+    if user_id is not None:
+        favorited, favorited_at = await is_favorited(db, user_id, broker_dealer_id)
+    else:
+        favorited, favorited_at = False, None
 
     detail = BrokerDealerDetail.model_validate(broker_dealer)
     detail.member_agencies = sorted({m.agency for m in membership_rows if m.status == "active"})
@@ -1176,6 +1185,19 @@ async def get_broker_dealer_profile(
             ),
         ),
     )
+
+
+@router.get("/{broker_dealer_id}/profile", response_model=BrokerDealerProfileResponse)
+async def get_broker_dealer_profile(
+    broker_dealer_id: int,
+    current_user: AuthenticatedUser = Depends(_require_master_list),
+    db: AsyncSession = Depends(get_db_session),
+) -> BrokerDealerProfileResponse:
+    broker_dealer = await repository.get_broker_dealer(db, broker_dealer_id)
+    if broker_dealer is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Broker-dealer not found.")
+
+    return await build_broker_dealer_profile(db, broker_dealer, user_id=current_user.id)
 
 
 @router.get("/{broker_dealer_id}/filing-history", response_model=FilingHistoryPage)
