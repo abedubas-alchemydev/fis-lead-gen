@@ -41,6 +41,7 @@ import {
 } from "@/components/banks/bank-status-pill";
 import { ChannelIconCell } from "@/components/advisor-list/channel-icon-cell";
 import { EmailScansSection } from "@/components/email-extractor/email-scans-section";
+import { ListPicker } from "@/components/list-picker/list-picker";
 import { OutreachButton } from "@/components/master-list/outreach-button";
 import { PeopleTable } from "@/components/master-list/detail/people-table";
 import { Button, buttonBase, buttonSizes } from "@/components/ui/button";
@@ -398,6 +399,11 @@ export function BankDetailClient({ bankId }: { bankId: string }) {
             <h1 className="text-[24px] font-bold tracking-[-0.02em] text-[var(--text,#0f172a)]">
               {bank.name}
             </h1>
+            {/* Favorite-list save control — mirrors the BD / advisor detail
+                headers. The bank payload has no is_favorited seed, so the
+                heart resolves its filled state from real membership on first
+                open (initialFavorited defaults to false). */}
+            <ListPicker firmId={bank.id} variant="detail" entityType="bank" />
             <BankStatusPill status={bank.charter_status} />
             {bank.charter_authority ? (
               <Pill variant="info">

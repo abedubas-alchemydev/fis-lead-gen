@@ -17,13 +17,16 @@ import { useToast } from "@/components/ui/use-toast";
 import {
   ApiError,
   addAdvisorToList,
+  addBankToList,
   addFirmToList,
   addReportingOwnerToList,
   createFavoriteList,
   getListsForAdvisor,
+  getListsForBank,
   getListsForFirm,
   getListsForReportingOwner,
   removeAdvisorFromList,
+  removeBankFromList,
   removeFirmFromList,
   removeReportingOwnerFromList,
 } from "@/lib/api";
@@ -68,7 +71,7 @@ export interface ListPickerProps {
   // first favorited — use ``reportingOwnerCik`` for the add path.
   firmId: number;
   variant: ListPickerVariant;
-  // Discriminates the four favoritable entity types. Defaults to
+  // Discriminates the five favoritable entity types. Defaults to
   // "broker_dealer" so master-list / firm-detail callers don't change.
   entityType?: FavoriteListEntityType;
   // Reporting-owner (insider) CIK. Required when
@@ -103,7 +106,9 @@ export function ListPicker({
         ? getListsForReportingOwner(reportingOwnerCik ?? "")
         : entityType === "advisor"
           ? getListsForAdvisor(firmId)
-          : getListsForFirm(firmId),
+          : entityType === "bank"
+            ? getListsForBank(firmId)
+            : getListsForFirm(firmId),
     [entityType, firmId, reportingOwnerCik],
   );
   const addToList = useCallback(
@@ -117,6 +122,10 @@ export function ListPicker({
         await addAdvisorToList(listId, firmId);
         return;
       }
+      if (entityType === "bank") {
+        await addBankToList(listId, firmId);
+        return;
+      }
       await addFirmToList(listId, firmId);
     },
     [entityType, firmId, reportingOwnerCik],
@@ -127,7 +136,9 @@ export function ListPicker({
         ? removeReportingOwnerFromList(listId, reportingOwnerIdRef.current)
         : entityType === "advisor"
           ? removeAdvisorFromList(listId, firmId)
-          : removeFirmFromList(listId, firmId),
+          : entityType === "bank"
+            ? removeBankFromList(listId, firmId)
+            : removeFirmFromList(listId, firmId),
     [entityType, firmId],
   );
   const [open, setOpen] = useState(false);

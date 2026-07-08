@@ -1,7 +1,17 @@
 import { TopActions } from "@/components/layout/top-actions";
 import { MyFavoritesClient } from "@/components/my-favorites/my-favorites-client";
+import { getRequiredSession } from "@/lib/auth-server";
 
-export default function MyFavoritesPage() {
+export const dynamic = "force-dynamic";
+
+// Admin-gated share export lives on this page: the session's role decides
+// whether the items pane shows the "Export share link" affordance. The BE
+// re-checks admin on every /shares call, so `isAdmin` is a UX signal, not
+// the security boundary.
+export default async function MyFavoritesPage() {
+  const session = await getRequiredSession();
+  const isAdmin = session.user.role === "admin";
+
   return (
     <div className="px-4 sm:px-7 pb-12 pt-7 lg:px-9">
       {/* ── Topbar ───────────────────────────────────────────────────────── */}
@@ -20,7 +30,7 @@ export default function MyFavoritesPage() {
         </div>
       </div>
 
-      <MyFavoritesClient />
+      <MyFavoritesClient isAdmin={isAdmin} />
     </div>
   );
 }

@@ -2,9 +2,10 @@
 
 import Link from "next/link";
 import type { Route } from "next";
-import { ArrowRight, ChevronLeft, ChevronRight } from "lucide-react";
+import { ArrowRight, ChevronLeft, ChevronRight, Share2 } from "lucide-react";
 import { useEffect, useMemo, useState } from "react";
 
+import { CreateShareModal } from "@/components/shares/create-share-modal";
 import { Button } from "@/components/ui/button";
 import { getFavoriteListItems } from "@/lib/api";
 import { formatRelativeTime } from "@/lib/format";
@@ -32,17 +33,25 @@ export function FavoriteListItemsPane({
   page,
   pageSize,
   onPageChange,
+  isAdmin,
 }: {
   activeList: FavoriteList;
   page: number;
   pageSize: number;
   onPageChange: (next: number) => void;
+  // Admins get the header "Export share link" action; everyone else sees a
+  // read-only pane. Server-resolved and threaded down from the page.
+  isAdmin: boolean;
 }) {
   const [items, setItems] = useState<FavoriteListItem[]>([]);
   const [total, setTotal] = useState(0);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [reloadKey, setReloadKey] = useState(0);
+  // Header-only "Export share link" affordance (admins). The modal is a
+  // fixed-position overlay, so it lives inside the header block and has no
+  // layout impact on the item rows below.
+  const [shareModalOpen, setShareModalOpen] = useState(false);
 
   useEffect(() => {
     let active = true;
@@ -102,6 +111,25 @@ export function FavoriteListItemsPane({
             {total.toLocaleString()} item{total === 1 ? "" : "s"} in this list
           </p>
         </div>
+        {isAdmin && total > 0 ? (
+          <Button
+            type="button"
+            variant="outline"
+            size="sm"
+            onClick={() => setShareModalOpen(true)}
+            className="shrink-0"
+          >
+            <Share2 className="h-3.5 w-3.5" strokeWidth={2} aria-hidden />
+            Export share link
+          </Button>
+        ) : null}
+        {shareModalOpen ? (
+          <CreateShareModal
+            listId={activeList.id}
+            listName={activeList.name}
+            onClose={() => setShareModalOpen(false)}
+          />
+        ) : null}
       </header>
 
       {loading ? (
@@ -119,34 +147,42 @@ export function FavoriteListItemsPane({
         <ul role="list" className="divide-y divide-[var(--border,rgba(30,64,175,0.1))]">
           {items.map((item) => {
             // Resolve target (id, name, route prefix, pill label) based on
-            // entity_type. The four pills (BD/RIA/INV/INSIDER) use the same
-            // styling family with different accent colors.
+            // entity_type. The five pills (BD/RIA/INV/INSIDER/Bank) use the
+            // same styling family with different accent colors.
             const isReportingOwner = item.entity_type === "reporting_owner";
             const isAdvisor = item.entity_type === "advisor";
             const isInvestor = item.entity_type === "institutional_investor";
+            const isBank = item.entity_type === "bank";
             const targetId = isReportingOwner
               ? item.reporting_owner_id
               : isInvestor
                 ? item.institutional_investor_id
                 : isAdvisor
                   ? item.advisor_id
-                  : item.broker_dealer_id;
+                  : isBank
+                    ? item.bank_id
+                    : item.broker_dealer_id;
             const targetName = isReportingOwner
               ? item.reporting_owner_name
               : isInvestor
                 ? item.institutional_investor_name
                 : isAdvisor
                   ? item.advisor_name
-                  : item.broker_dealer_name;
+                  : isBank
+                    ? item.bank_name
+                    : item.broker_dealer_name;
             // /investors is the Form 4 feed (no id-keyed detail), so both
             // insider and institutional-investor rows deep-link via the ``q``
             // name filter — same pattern, just with the investor's name.
+            // Banks have their own id-keyed detail page like BD / advisor.
             const detailHref = (
               isReportingOwner || isInvestor
                 ? `/investors?q=${encodeURIComponent(targetName ?? "")}`
                 : isAdvisor
                   ? `/advisor-list/${targetId}${advisorDetailHrefSuffix}`
-                  : `/master-list/${targetId}${bdDetailHrefSuffix}`
+                  : isBank
+                    ? `/banks/${targetId}`
+                    : `/master-list/${targetId}${bdDetailHrefSuffix}`
             ) as Route;
             const pillLabel = isReportingOwner
               ? "INSIDER"
@@ -154,14 +190,18 @@ export function FavoriteListItemsPane({
                 ? "INV"
                 : isAdvisor
                   ? "RIA"
-                  : "BD";
+                  : isBank
+                    ? "Bank"
+                    : "BD";
             const pillClass = isReportingOwner
               ? "bg-[rgba(139,92,246,0.12)] text-[#6d28d9]"
               : isInvestor
                 ? "bg-[rgba(245,158,11,0.12)] text-[#b45309]"
                 : isAdvisor
                   ? "bg-[rgba(16,185,129,0.12)] text-[#047857]"
-                  : "bg-[rgba(99,102,241,0.12)] text-[#4338ca]";
+                  : isBank
+                    ? "bg-[rgba(20,184,166,0.12)] text-[#0f766e]"
+                    : "bg-[rgba(99,102,241,0.12)] text-[#4338ca]";
             return (
               <li
                 key={`${item.entity_type}-${targetId}`}

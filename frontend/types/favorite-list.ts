@@ -25,8 +25,8 @@ export interface FavoriteListWithMembership extends FavoriteList {
   is_member: boolean;
 }
 
-// Polymorphic item across four entity types: broker_dealer, advisor,
-// institutional_investor, reporting_owner (Form 4 insider).
+// Polymorphic item across five entity types: broker_dealer, advisor,
+// institutional_investor, reporting_owner (Form 4 insider), bank.
 // ``entity_type`` discriminates; the unused id/name pairs are null.
 // Pre-existing callers can still read the typed fields directly but
 // should gate on ``entity_type``.
@@ -34,7 +34,8 @@ export type FavoriteListEntityType =
   | "broker_dealer"
   | "advisor"
   | "institutional_investor"
-  | "reporting_owner";
+  | "reporting_owner"
+  | "bank";
 
 export interface FavoriteListItem {
   entity_type: FavoriteListEntityType;
@@ -46,6 +47,13 @@ export interface FavoriteListItem {
   institutional_investor_name: string | null;
   reporting_owner_id: number | null;
   reporting_owner_name: string | null;
+  // Bank rows also hydrate city/state — banks have no richer per-row
+  // summary endpoint, and the lead-share export reads these off the
+  // same hydration.
+  bank_id: number | null;
+  bank_name: string | null;
+  bank_city: string | null;
+  bank_state: string | null;
   added_at: string;
 }
 

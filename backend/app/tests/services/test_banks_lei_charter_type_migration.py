@@ -39,9 +39,10 @@ def _script_directory() -> ScriptDirectory:
 def test_chain_has_a_single_head() -> None:
     # Single-headedness is the invariant (a second head silently breaks the
     # deploy pipeline's ``alembic upgrade head``); the newest revision is
-    # currently the banks People-parity email-extractor bank_id migration
-    # (20260703_0004), tail of the A→B→C chain added for the People panel.
-    assert _script_directory().get_heads() == ["20260703_0004"]
+    # currently the DOX Share migration (20260708_0002), an additive child of
+    # the favorites bank-target migration (20260708_0001), which chains off
+    # the banks People-parity email-extractor bank_id migration (20260703_0004).
+    assert _script_directory().get_heads() == ["20260708_0002"]
 
 
 def test_migration_is_an_additive_child_of_the_banks_migration() -> None:

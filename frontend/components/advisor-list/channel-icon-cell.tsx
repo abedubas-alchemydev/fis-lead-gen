@@ -55,6 +55,7 @@ type ChannelContact = {
 export function ChannelIconCell({
   contact,
   forceActiveLook = false,
+  allowCopy = false,
 }: {
   contact: ChannelContact | null | undefined;
   // Render every icon in the accent color even when the channel has no data
@@ -62,6 +63,12 @@ export function ChannelIconCell({
   // toggle; currently disabled everywhere, so absent channels grey out (the
   // default People-section style).
   forceActiveLook?: boolean;
+  // Stamp data-allow-copy / data-allow-select on the popover container so the
+  // security input guards (components/security/use-input-guards.ts) permit
+  // selecting + copying the revealed emails and phone numbers. Opt-in for the
+  // read-only share surface; the default keeps the authed detail pages'
+  // copy-block behaviour unchanged.
+  allowCopy?: boolean;
 }) {
   const [openChannel, setOpenChannel] = useState<Channel | null>(null);
   const linkedinRef = useRef<HTMLButtonElement>(null);
@@ -145,7 +152,7 @@ export function ChannelIconCell({
         buttonRef={phoneRef}
       />
       {openChannel && activeRef ? (
-        <ChannelPopover anchorRef={activeRef} onClose={close}>
+        <ChannelPopover anchorRef={activeRef} onClose={close} allowCopy={allowCopy}>
           {openChannel === "linkedin" && linkedinUrl ? (
             <LinkedInBody url={linkedinUrl} />
           ) : null}
@@ -209,9 +216,17 @@ interface ChannelPopoverProps {
   anchorRef: React.RefObject<HTMLButtonElement>;
   onClose: () => void;
   children: ReactNode;
+  // See ChannelIconCell — when true, the container opts in to the security
+  // layer's copy/select allowlist. Default off renders byte-identical DOM.
+  allowCopy?: boolean;
 }
 
-function ChannelPopover({ anchorRef, onClose, children }: ChannelPopoverProps) {
+function ChannelPopover({
+  anchorRef,
+  onClose,
+  children,
+  allowCopy = false,
+}: ChannelPopoverProps) {
   const popoverRef = useRef<HTMLDivElement | null>(null);
   const [coords, setCoords] = useState<PopoverCoords | null>(null);
   const [mounted, setMounted] = useState(false);
@@ -293,6 +308,7 @@ function ChannelPopover({ anchorRef, onClose, children }: ChannelPopoverProps) {
     <div
       ref={popoverRef}
       role="dialog"
+      {...(allowCopy ? { "data-allow-copy": true, "data-allow-select": true } : null)}
       style={{
         position: "fixed",
         top: coords?.top ?? -9999,
