@@ -2,9 +2,10 @@
 
 import Link from "next/link";
 import type { Route } from "next";
-import { ArrowRight, ChevronLeft, ChevronRight } from "lucide-react";
+import { ArrowRight, ChevronLeft, ChevronRight, Share2 } from "lucide-react";
 import { useEffect, useMemo, useState } from "react";
 
+import { CreateShareModal } from "@/components/shares/create-share-modal";
 import { Button } from "@/components/ui/button";
 import { getFavoriteListItems } from "@/lib/api";
 import { formatRelativeTime } from "@/lib/format";
@@ -32,17 +33,25 @@ export function FavoriteListItemsPane({
   page,
   pageSize,
   onPageChange,
+  isAdmin,
 }: {
   activeList: FavoriteList;
   page: number;
   pageSize: number;
   onPageChange: (next: number) => void;
+  // Admins get the header "Export share link" action; everyone else sees a
+  // read-only pane. Server-resolved and threaded down from the page.
+  isAdmin: boolean;
 }) {
   const [items, setItems] = useState<FavoriteListItem[]>([]);
   const [total, setTotal] = useState(0);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [reloadKey, setReloadKey] = useState(0);
+  // Header-only "Export share link" affordance (admins). The modal is a
+  // fixed-position overlay, so it lives inside the header block and has no
+  // layout impact on the item rows below.
+  const [shareModalOpen, setShareModalOpen] = useState(false);
 
   useEffect(() => {
     let active = true;
@@ -102,6 +111,25 @@ export function FavoriteListItemsPane({
             {total.toLocaleString()} item{total === 1 ? "" : "s"} in this list
           </p>
         </div>
+        {isAdmin && total > 0 ? (
+          <Button
+            type="button"
+            variant="outline"
+            size="sm"
+            onClick={() => setShareModalOpen(true)}
+            className="shrink-0"
+          >
+            <Share2 className="h-3.5 w-3.5" strokeWidth={2} aria-hidden />
+            Export share link
+          </Button>
+        ) : null}
+        {shareModalOpen ? (
+          <CreateShareModal
+            listId={activeList.id}
+            listName={activeList.name}
+            onClose={() => setShareModalOpen(false)}
+          />
+        ) : null}
       </header>
 
       {loading ? (
