@@ -132,6 +132,16 @@ function FavoritesIcon(props: IconProps) {
   );
 }
 
+// Bookmark glyph for the Saved Contacts page — matches lucide's Bookmark
+// outline, drawn via IconBase so it strokes/sizes like the other nav icons.
+function BookmarkIcon(props: IconProps) {
+  return (
+    <IconBase {...props}>
+      <path d="M19 21l-7-4-7 4V5a2 2 0 0 1 2-2h10a2 2 0 0 1 2 2v16z" />
+    </IconBase>
+  );
+}
+
 function VisitedFirmsIcon(props: IconProps) {
   return (
     <IconBase {...props}>
@@ -351,6 +361,9 @@ const navSections: ReadonlyArray<NavSection> = [
     label: "Personal",
     items: [
       { href: "/my-favorites", label: "My Favorites", icon: FavoritesIcon, badgeKey: null, permissionKey: "my_favorites" },
+      // Gated behind the same permission as the Email Extractor (its source),
+      // so a user who can extract emails can review what they've saved.
+      { href: "/saved-contacts" as Route, label: "Saved Contacts", icon: BookmarkIcon, badgeKey: null, permissionKey: "email_extractor" },
       { href: "/visited-firms", label: "Visited Firms", icon: VisitedFirmsIcon, badgeKey: null, permissionKey: "visited_firms" }
     ]
   },

@@ -2,6 +2,8 @@
 
 import {
   AlertCircle,
+  Bookmark,
+  BookmarkCheck,
   CheckCircle2,
   Loader2,
   MailPlus,
@@ -14,12 +16,21 @@ import { ChannelIconCell } from "@/components/advisor-list/channel-icon-cell";
 import { EmailExtractorErrorCard } from "@/components/email-extractor/email-extractor-error-card";
 import { EmptyScanResultsState } from "@/components/email-extractor/empty-scan-results-state";
 import { EnrichAllButton } from "@/components/email-extractor/enrich-all-button";
+import {
+  RowsPerPageSelect,
+  type RowsPerPageValue,
+} from "@/components/email-extractor/rows-per-page-select";
 import { ScanResultsLoading } from "@/components/email-extractor/scan-results-loading";
 import { OutreachModal } from "@/components/master-list/outreach-modal";
 import { Button } from "@/components/ui/button";
 import { Pill, type PillVariant } from "@/components/ui/pill";
 import { SectionPanel } from "@/components/ui/section-panel";
 import { ApiError } from "@/lib/api";
+import {
+  deleteSavedContact,
+  listSavedContacts,
+  saveContact,
+} from "@/lib/saved-contacts";
 import { formatDate, formatRelativeTime } from "@/lib/format";
 import {
   enrichEmail,
@@ -76,8 +87,40 @@ const SMTP_STATUS_STYLES: Record<
 
 // A scan can surface hundreds of discovered emails; page the results table so
 // the DOM stays bounded and the panel doesn't grow into an endless scroll.
-// Mirrors PEOPLE_TABLE_PAGE_SIZE's pager affordance on the detail pages.
-const RESULTS_PAGE_SIZE = 20;
+// The page size is now user-selectable (25 / 50 / 100 / All) and persisted to
+// localStorage so the choice survives reloads and applies to the next scan.
+const ROWS_PER_PAGE_STORAGE_KEY = "email-extractor:rows-per-page";
+const DEFAULT_ROWS_PER_PAGE = 100;
+
+// All discovered-email rows share this `source` when saved via the Save
+// Contact toggle, so saved-state hydration only pulls this slice of the
+// user's saved contacts.
+const SAVE_CONTACT_SOURCE = "discovered_email";
+
+// Read the persisted rows-per-page choice. Returns null (→ caller defaults to
+// 100) when unset, on a bad value, or during SSR where localStorage is absent.
+function readStoredPageSize(): RowsPerPageValue | null {
+  if (typeof window === "undefined") return null;
+  try {
+    const raw = window.localStorage.getItem(ROWS_PER_PAGE_STORAGE_KEY);
+    if (raw === null) return null;
+    if (raw === "all") return "all";
+    const parsed = Number(raw);
+    return Number.isFinite(parsed) && parsed > 0 ? parsed : null;
+  } catch {
+    return null;
+  }
+}
+
+// Persist the rows-per-page choice: the raw number, or the string "all".
+function writeStoredPageSize(value: RowsPerPageValue): void {
+  if (typeof window === "undefined") return;
+  try {
+    window.localStorage.setItem(ROWS_PER_PAGE_STORAGE_KEY, String(value));
+  } catch {
+    /* storage unavailable — non-fatal, choice simply won't persist */
+  }
+}
 
 // After a per-row Enrich that requested a phone reveal, poll for the async
 // number to land (Apollo calls our webhook seconds-to-minutes later). Bounded
@@ -437,6 +480,86 @@ function OutreachCell({
   );
 }
 
+// Per-row "Save Contact" toggle. Self-contained like OutreachCell: it owns its
+// in-flight + inline-error state, while the persisted saved-state (contact_id →
+// saved_id) lives in the parent map so it survives paging + re-render. Clicking
+// Save persists the row under the discovered_email source and stores the
+// returned saved_id; clicking Saved un-saves by that id. The un-save direction
+// is optimistic with rollback (we already hold the id); the save direction
+// awaits the server for the new id — matching the verify/enrich in-flight +
+// inline-error conventions used elsewhere in this file.
+function SaveContactCell({
+  row,
+  savedId,
+  onSavedChange,
+}: {
+  row: DiscoveredEmailResponse;
+  savedId: number | null;
+  onSavedChange: (contactId: number, savedId: number | null) => void;
+}): React.ReactElement {
+  const [inFlight, setInFlight] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  const isSaved = savedId !== null;
+
+  const handleClick = useCallback(async () => {
+    if (inFlight) return;
+    setError(null);
+    setInFlight(true);
+    if (savedId !== null) {
+      // Un-save — optimistically clear the map, roll back on failure.
+      onSavedChange(row.id, null);
+      try {
+        await deleteSavedContact(savedId);
+      } catch (err) {
+        onSavedChange(row.id, savedId);
+        setError(errorMessage(err, "Couldn't remove — try again."));
+      } finally {
+        setInFlight(false);
+      }
+      return;
+    }
+    // Save — await the server for the new saved_id, then commit it to the map.
+    try {
+      const created = await saveContact({
+        source: SAVE_CONTACT_SOURCE,
+        contact_id: row.id,
+      });
+      onSavedChange(row.id, created.id);
+    } catch (err) {
+      setError(errorMessage(err, "Couldn't save — try again."));
+    } finally {
+      setInFlight(false);
+    }
+  }, [inFlight, savedId, row.id, onSavedChange]);
+
+  return (
+    <div className="flex flex-col items-start gap-1">
+      <Button
+        type="button"
+        variant={isSaved ? "primary" : "outline"}
+        size="sm"
+        onClick={() => void handleClick()}
+        disabled={inFlight}
+        aria-pressed={isSaved}
+      >
+        {inFlight ? (
+          <Loader2 className="h-3.5 w-3.5 animate-spin" strokeWidth={2} />
+        ) : isSaved ? (
+          <BookmarkCheck className="h-3.5 w-3.5" strokeWidth={2} aria-hidden />
+        ) : (
+          <Bookmark className="h-3.5 w-3.5" strokeWidth={2} aria-hidden />
+        )}
+        {isSaved ? "Saved" : "Save"}
+      </Button>
+      {error ? (
+        <span className="text-[11px] text-[var(--pill-red-text,#b91c1c)]">
+          {error}
+        </span>
+      ) : null}
+    </div>
+  );
+}
+
 function ResultsTable({
   rows,
   localVerifications,
@@ -446,6 +569,8 @@ function ResultsTable({
   enrichInFlight,
   enrichErrors,
   onEnrich,
+  savedContactIds,
+  onSavedChange,
 }: {
   rows: DiscoveredEmailResponse[];
   localVerifications: Record<number, EmailVerificationResponse>;
@@ -455,6 +580,9 @@ function ResultsTable({
   enrichInFlight: Set<number>;
   enrichErrors: Record<number, string>;
   onEnrich: (emailId: number) => void;
+  // contact_id → saved_id for rows the user has saved. Absent key = not saved.
+  savedContactIds: Map<number, number>;
+  onSavedChange: (contactId: number, savedId: number | null) => void;
 }): React.ReactElement {
   return (
     <div className="overflow-x-auto rounded-xl border border-[var(--border,rgba(30,64,175,0.1))] bg-[var(--surface,#ffffff)]">
@@ -475,6 +603,9 @@ function ResultsTable({
             </th>
             <th className="px-4 py-2.5 text-[11px] font-semibold uppercase tracking-[0.08em] text-[var(--text-muted,#94a3b8)]">
               Outreach
+            </th>
+            <th className="px-4 py-2.5 text-[11px] font-semibold uppercase tracking-[0.08em] text-[var(--text-muted,#94a3b8)]">
+              Save
             </th>
           </tr>
         </thead>
@@ -506,6 +637,13 @@ function ResultsTable({
               </td>
               <td className="px-4 py-3">
                 <OutreachCell row={row} />
+              </td>
+              <td className="px-4 py-3">
+                <SaveContactCell
+                  row={row}
+                  savedId={savedContactIds.get(row.id) ?? null}
+                  onSavedChange={onSavedChange}
+                />
               </td>
             </tr>
           ))}
@@ -618,6 +756,19 @@ export function ScanDetailView({
   const [enrichErrors, setEnrichErrors] = useState<Record<number, string>>({});
   const [searchQuery, setSearchQuery] = useState("");
   const [page, setPage] = useState(0);
+  // User-selectable rows-per-page (persisted to localStorage). "all" resolves
+  // to the total row count below so the slice returns everything and the pager
+  // hides. Deliberately NOT reset on scanId change — it's a viewing preference
+  // that should carry across scans.
+  const [pageSize, setPageSize] = useState<RowsPerPageValue>(
+    () => readStoredPageSize() ?? DEFAULT_ROWS_PER_PAGE
+  );
+  // Saved-contact state: contact_id (a discovered-email id) → saved_id. Hydrated
+  // once on mount from the user's saved "discovered_email" contacts, then
+  // mutated optimistically by each SaveContactCell via handleSavedChange.
+  const [savedContactIds, setSavedContactIds] = useState<Map<number, number>>(
+    new Map()
+  );
 
   const pollRef = useRef<ReturnType<typeof setInterval> | null>(null);
   const startedAtRef = useRef<number>(0);
@@ -681,6 +832,45 @@ export function ScanDetailView({
   const updateScan = useCallback((next: ScanResponse) => {
     setScan(next);
     onScanLoadedRef.current?.(next);
+  }, []);
+
+  // Mutate the saved-state map. Passed down to every SaveContactCell so a
+  // save/un-save reflects immediately (and survives paging, since the map
+  // lives here, not in the cell). `null` un-saves (drops the key).
+  const handleSavedChange = useCallback(
+    (contactId: number, savedId: number | null) => {
+      setSavedContactIds((prev) => {
+        const next = new Map(prev);
+        if (savedId === null) next.delete(contactId);
+        else next.set(contactId, savedId);
+        return next;
+      });
+    },
+    []
+  );
+
+  // Hydrate initial saved-state once on mount. Saved "discovered_email"
+  // contacts are user-scoped (not scan-scoped) and keyed by the discovered-
+  // email id, which is unique across scans, so one fetch covers every row the
+  // view will ever render. Failure is swallowed — the Save toggles still work,
+  // they just start from an un-hydrated (all-unsaved) baseline.
+  useEffect(() => {
+    let active = true;
+    listSavedContacts(SAVE_CONTACT_SOURCE)
+      .then((contacts) => {
+        if (!active) return;
+        const map = new Map<number, number>();
+        for (const contact of contacts) {
+          map.set(contact.contact_id, contact.id);
+        }
+        setSavedContactIds(map);
+      })
+      .catch(() => {
+        /* swallow — saved-state simply stays un-hydrated */
+      });
+    return () => {
+      active = false;
+    };
   }, []);
 
   useEffect(() => {
@@ -986,14 +1176,18 @@ export function ScanDetailView({
   // range when the filtered set shrinks — e.g. the user types a query while on
   // a later page — so clamp before slicing rather than risk an empty render.
   const totalResults = filteredEmails.length;
-  const totalPages = Math.max(1, Math.ceil(totalResults / RESULTS_PAGE_SIZE));
+  // Resolve "all" to the total row count (min 1 so an empty result set doesn't
+  // divide by zero) — the slice then returns everything and the pager hides.
+  const effectivePageSize =
+    pageSize === "all" ? Math.max(1, totalResults) : pageSize;
+  const totalPages = Math.max(1, Math.ceil(totalResults / effectivePageSize));
   const safePage = Math.min(page, totalPages - 1);
-  const pageStart = safePage * RESULTS_PAGE_SIZE;
+  const pageStart = safePage * effectivePageSize;
   const pagedEmails = filteredEmails.slice(
     pageStart,
-    pageStart + RESULTS_PAGE_SIZE
+    pageStart + effectivePageSize
   );
-  const showPager = totalResults > RESULTS_PAGE_SIZE;
+  const showPager = pageSize !== "all" && totalResults > effectivePageSize;
 
   return (
     <div className="space-y-4">
@@ -1135,12 +1329,22 @@ export function ScanDetailView({
                   className="w-full rounded-md border border-[var(--border,rgba(30,64,175,0.1))] bg-[var(--surface,#ffffff)] py-1.5 pl-8 pr-3 text-[13px] text-[var(--text,#0f172a)] placeholder:text-[var(--text-muted,#94a3b8)] focus:border-[var(--blue,#3b82f6)] focus:outline-none focus:ring-2 focus:ring-[rgba(59,130,246,0.2)]"
                 />
               </div>
-              {searchQuery.trim() !== "" ? (
-                <p className="text-[12px] text-[var(--text-muted,#94a3b8)]">
-                  Showing {filteredEmails.length} of{" "}
-                  {scan.discovered_emails.length}
-                </p>
-              ) : null}
+              <div className="flex flex-wrap items-center gap-x-4 gap-y-2">
+                {searchQuery.trim() !== "" ? (
+                  <p className="text-[12px] text-[var(--text-muted,#94a3b8)]">
+                    Showing {filteredEmails.length} of{" "}
+                    {scan.discovered_emails.length}
+                  </p>
+                ) : null}
+                <RowsPerPageSelect
+                  value={pageSize}
+                  onChange={(next) => {
+                    setPageSize(next);
+                    setPage(0);
+                    writeStoredPageSize(next);
+                  }}
+                />
+              </div>
             </div>
             {filteredEmails.length === 0 ? (
               <div className="rounded-xl border border-dashed border-[var(--border,rgba(30,64,175,0.1))] bg-[var(--surface-2,#f1f6fd)] px-4 py-6 text-center text-[13px] text-[var(--text-muted,#94a3b8)]">
@@ -1157,11 +1361,13 @@ export function ScanDetailView({
                   enrichInFlight={enrichInFlight}
                   enrichErrors={enrichErrors}
                   onEnrich={handleEnrich}
+                  savedContactIds={savedContactIds}
+                  onSavedChange={handleSavedChange}
                 />
                 {showPager ? (
                   <ResultsPager
                     page={safePage}
-                    pageSize={RESULTS_PAGE_SIZE}
+                    pageSize={effectivePageSize}
                     total={totalResults}
                     onPrev={() => setPage(Math.max(0, safePage - 1))}
                     onNext={() =>
