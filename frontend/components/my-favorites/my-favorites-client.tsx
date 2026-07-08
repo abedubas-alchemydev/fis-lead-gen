@@ -34,7 +34,10 @@ const PAGE_SIZE = 20;
 // dialog disappears so there's nothing else to anchor feedback to).
 // Phase 3 will add per-firm "save to list" / "remove from list" pickers
 // from the master list and firm-detail pages.
-export function MyFavoritesClient() {
+//
+// `isAdmin` (server-resolved in the page) gates the items pane's "Export
+// share link" action — only admins can mint public DOX Share links.
+export function MyFavoritesClient({ isAdmin }: { isAdmin: boolean }) {
   const router = useRouter();
   const searchParams = useSearchParams();
   const toast = useToast();
@@ -249,6 +252,7 @@ export function MyFavoritesClient() {
                 page={page}
                 pageSize={PAGE_SIZE}
                 onPageChange={handlePageChange}
+                isAdmin={isAdmin}
               />
             ) : loadingLists ? (
               <div className="space-y-2" aria-busy>
