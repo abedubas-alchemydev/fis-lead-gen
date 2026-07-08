@@ -161,6 +161,13 @@ class Settings(BaseSettings):
     # unset, Apollo phone-reveal is skipped — provider falls back to the
     # current sync-only behaviour.
     public_base_url: str | None = None
+    # Absolute base URL of the FRONTEND (e.g. https://fis.alchemydev.io), used
+    # to compose copy-pasteable DOX Share links (``f"{base}/share/{token}"``)
+    # in the admin ShareSummary payload. Distinct from ``public_base_url``,
+    # which is the BACKEND Cloud Run URL used for the Apollo webhook. When
+    # unset, ``ShareSummary.url`` is null and the frontend composes the link
+    # from its own ``window.location.origin``.
+    share_frontend_base_url: str | None = None
     zoominfo_api_key: str | None = None
     # People Data Labs — the first provider in the discovery chain that
     # actually returns person phones via API (PR #419's audit showed Apollo
