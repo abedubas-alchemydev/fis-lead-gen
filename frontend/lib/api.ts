@@ -441,6 +441,55 @@ export async function removeReportingOwnerFromList(
   );
 }
 
+// ── Bank variants (favorites for /banks) ──────────────────────────────────
+// Parallel to BD + advisor + investor helpers; the BE has /bank-items
+// endpoints that satisfy the 5-way XOR on favorite_list_item by writing
+// bank_id and leaving the other four FKs NULL.
+
+export async function getListsForBank(
+  bankId: number
+): Promise<FavoriteListWithMembership[]> {
+  return apiRequest<FavoriteListWithMembership[]>(
+    `/api/v1/banks/${bankId}/favorite-lists`
+  );
+}
+
+export async function addBankToList(
+  listId: number,
+  bankId: number
+): Promise<void> {
+  await apiRequest<void>(
+    `/api/v1/favorite-lists/${listId}/bank-items`,
+    {
+      method: "POST",
+      body: JSON.stringify({ bank_id: bankId }),
+    }
+  );
+}
+
+export async function removeBankFromList(
+  listId: number,
+  bankId: number
+): Promise<void> {
+  await apiRequest<void>(
+    `/api/v1/favorite-lists/${listId}/bank-items/${bankId}`,
+    { method: "DELETE" }
+  );
+}
+
+export async function addBanksToListBatch(
+  listId: number,
+  bankIds: number[]
+): Promise<AddFirmsToListBatchResponse> {
+  return apiRequest<AddFirmsToListBatchResponse>(
+    `/api/v1/favorite-lists/${listId}/bank-items/batch`,
+    {
+      method: "POST",
+      body: JSON.stringify({ bank_ids: bankIds }),
+    }
+  );
+}
+
 // ── Cross-entity contact search ────────────────────────────────────────
 // Both POST endpoints accept JSON bodies. find-by-email optionally
 // triggers an Apollo /people/match fallback when ``enrich_via_apollo``
