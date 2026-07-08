@@ -297,6 +297,9 @@ async def create_share_from_favorite_list(
             item.bank_id = entity_id
         db.add(item)
     await db.flush()
+    # Load DB-side server defaults (created_at, view_count, generation) onto
+    # the object so the caller can build a ShareSummary without a round-trip.
+    await db.refresh(share)
 
     return share, password, skipped
 
