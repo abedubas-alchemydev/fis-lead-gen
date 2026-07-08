@@ -187,6 +187,26 @@ def _build_source_links(bank: Bank) -> list[BankSourceLink]:
     return links
 
 
+def build_bank_detail(bank: Bank) -> BankDetail:
+    """Assemble the bank detail envelope for an already-fetched bank.
+
+    Extracted verbatim from ``get_bank`` so the same assembly can serve both
+    the authenticated detail page and the public share surface (DOX Share).
+    Pure sync mapping — no per-user state on this response. Callers must pass
+    a ``Bank`` with ``application_events`` and ``contacts`` loaded (the
+    repository's ``get_bank`` selectinloads both) plus own the fetch + 404.
+    """
+    detail = BankDetail.model_validate(bank)
+    detail.application_events = [
+        BankApplicationEventItem.model_validate(event) for event in bank.application_events
+    ]
+    detail.source_links = _build_source_links(bank)
+    # BankContactItem synthesizes the emails/phones arrays from the scalar
+    # columns on read, so contacts[] carry the channel shape the FE renders.
+    detail.contacts = [BankContactItem.model_validate(contact) for contact in bank.contacts]
+    return detail
+
+
 @router.get("/{bank_id}", response_model=BankDetail)
 async def get_bank(
     bank_id: int,
@@ -201,15 +221,7 @@ async def get_bank(
     if bank is None:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Bank not found.")
 
-    detail = BankDetail.model_validate(bank)
-    detail.application_events = [
-        BankApplicationEventItem.model_validate(event) for event in bank.application_events
-    ]
-    detail.source_links = _build_source_links(bank)
-    # BankContactItem synthesizes the emails/phones arrays from the scalar
-    # columns on read, so contacts[] carry the channel shape the FE renders.
-    detail.contacts = [BankContactItem.model_validate(contact) for contact in bank.contacts]
-    return detail
+    return build_bank_detail(bank)
 
 
 # ─── Per-bank contact discovery + gap-fill ("Generate More Details") ──────────

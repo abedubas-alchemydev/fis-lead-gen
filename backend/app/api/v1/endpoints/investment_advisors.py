@@ -351,6 +351,43 @@ async def get_investment_advisor(
     return detail
 
 
+async def build_investment_advisor_profile(
+    db: AsyncSession,
+    advisor: InvestmentAdvisor,
+    *,
+    user_id: str | None,
+) -> InvestmentAdvisorProfileResponse:
+    """Assemble the aggregate detail-page envelope for an already-fetched advisor.
+
+    Extracted verbatim from ``get_investment_advisor_profile`` so the same
+    assembly can serve both the authenticated detail page and the public
+    share surface (DOX Share). ``user_id=None`` is the public path: the
+    per-user favorites lookup is skipped entirely and the response carries
+    ``is_favorited=False``. Callers own the fetch + 404 handling for
+    ``advisor``.
+    """
+    advisor_id = advisor.id
+    contacts = await repository.list_advisor_contacts(db, advisor_id)
+    filings = await repository.list_advisor_filings(db, advisor_id)
+    membership_rows = await repository.list_clearing_memberships(db, advisor_id)
+
+    detail = InvestmentAdvisorDetail.model_validate(advisor)
+    detail.member_agencies = sorted({m.agency for m in membership_rows if m.status == "active"})
+
+    if user_id is not None:
+        favorited = await is_advisor_favorited(db, user_id, advisor_id)
+    else:
+        favorited = False
+
+    return InvestmentAdvisorProfileResponse(
+        advisor=detail,
+        contacts=contacts,
+        filings=filings,
+        clearing_memberships=[ClearingMembershipItem.model_validate(m) for m in membership_rows],
+        is_favorited=favorited,
+    )
+
+
 @router.get("/{advisor_id}/profile", response_model=InvestmentAdvisorProfileResponse)
 async def get_investment_advisor_profile(
     advisor_id: int,
@@ -371,20 +408,7 @@ async def get_investment_advisor_profile(
             detail=f"Investment advisor {advisor_id} not found.",
         )
 
-    contacts = await repository.list_advisor_contacts(db, advisor_id)
-    filings = await repository.list_advisor_filings(db, advisor_id)
-    membership_rows = await repository.list_clearing_memberships(db, advisor_id)
-
-    detail = InvestmentAdvisorDetail.model_validate(advisor)
-    detail.member_agencies = sorted({m.agency for m in membership_rows if m.status == "active"})
-
-    return InvestmentAdvisorProfileResponse(
-        advisor=detail,
-        contacts=contacts,
-        filings=filings,
-        clearing_memberships=[ClearingMembershipItem.model_validate(m) for m in membership_rows],
-        is_favorited=await is_advisor_favorited(db, current_user.id, advisor_id),
-    )
+    return await build_investment_advisor_profile(db, advisor, user_id=current_user.id)
 
 
 # ─── Per-advisor refresh-all orchestrator ─────────────────────────────────────

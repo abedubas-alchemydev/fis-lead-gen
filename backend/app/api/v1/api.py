@@ -22,6 +22,7 @@ from app.api.v1.endpoints import (
     pipeline,
     settings,
     shares_admin,
+    shares_public,
     stats,
     users_admin,
     vault,
@@ -47,6 +48,7 @@ api_router.include_router(pipeline.admin_destructive_router, tags=["pipeline"])
 api_router.include_router(pipeline.status_router, tags=["pipeline"])
 api_router.include_router(settings.router, tags=["settings"])
 api_router.include_router(shares_admin.router, tags=["lead-shares-admin"])
+api_router.include_router(shares_public.router, tags=["lead-shares-public"])
 api_router.include_router(stats.router, tags=["stats"])
 api_router.include_router(
     extraction_analytics.router, tags=["extraction-analytics"]
