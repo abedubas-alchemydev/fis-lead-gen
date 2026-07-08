@@ -208,13 +208,6 @@ export function CreateShareModal({
                 Skipped: {skippedParts.join(", ")} — not shareable.
               </p>
             ) : null}
-            {result.warnings.length > 0 ? (
-              <ul className="mt-3 space-y-1 rounded-md border border-amber-500/25 bg-amber-500/12 px-3 py-2 text-[12px] leading-5 text-amber-700">
-                {result.warnings.map((warning) => (
-                  <li key={warning}>{warning}</li>
-                ))}
-              </ul>
-            ) : null}
             <div className="mt-5 flex items-center justify-between gap-3">
               <Link
                 href={"/settings/shared-links" as Route}

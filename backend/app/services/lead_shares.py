@@ -170,8 +170,14 @@ def verify_share_cookie(
         return False
     if exp <= int(now.timestamp()):
         return False
-    expected = _cookie_sig(share.id, share.password_generation, exp)
-    return hmac.compare_digest(sig, expected)
+    # ``sig`` comes straight off the (latin-1 decoded) cookie header; a
+    # non-ASCII byte would make str/str compare_digest raise TypeError. Fail
+    # closed on any such crafted value rather than 500 on the auth path.
+    try:
+        expected = _cookie_sig(share.id, share.password_generation, exp)
+        return hmac.compare_digest(sig, expected)
+    except (TypeError, ValueError):
+        return False
 
 
 def build_share_url(token: str) -> str | None:

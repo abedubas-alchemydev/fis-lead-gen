@@ -36,7 +36,6 @@ from app.schemas.broker_dealer import (
     IntroducingArrangementItem,
     RegistrationComplianceSummary,
 )
-from app.schemas.contact_hits import EmailHit, PhoneHit
 from app.schemas.investment_advisor import InvestmentAdvisorProfileResponse
 
 ShareItemKind = Literal["broker_dealer", "bank", "advisor"]
@@ -77,6 +76,9 @@ class ShareSummary(BaseModel):
     # Absolute share link when ``settings.share_frontend_base_url`` is set,
     # else None (the frontend composes it from window.location.origin).
     url: str | None = None
+    # Admin-facing raw snapshot row count. NOTE: this can exceed the public
+    # list length — the public surface (``list_share_items``) skips items
+    # whose entity was deleted since the snapshot, this count does not.
     item_count: int
     created_by: str | None = None
     created_by_email: str | None = None
@@ -168,13 +170,41 @@ class PublicShareListResponse(BaseModel):
 # ══════════════════════════════════════════════════════════════════════════
 
 
+class PublicEmailHit(BaseModel):
+    """A contact email on the public surface — value + kind only. The internal
+    ``EmailHit`` also carries ``source`` (the discovery provider) and
+    ``confidence``; both are stripped here so the client never sees our vendor
+    stack or internal quality scores (security review M1)."""
+
+    value: str
+    type: Literal["work", "personal"]
+
+    @classmethod
+    def from_hit(cls, hit: object) -> Self:
+        return cls(value=getattr(hit, "value", ""), type=getattr(hit, "type", "work"))
+
+
+class PublicPhoneHit(BaseModel):
+    """A contact phone on the public surface — value + kind only (``source`` /
+    ``confidence`` stripped, as PublicEmailHit)."""
+
+    value: str
+    type: Literal["mobile", "work", "hq"]
+
+    @classmethod
+    def from_hit(cls, hit: object) -> Self:
+        return cls(value=getattr(hit, "value", ""), type=getattr(hit, "type", "work"))
+
+
 class PublicContactItem(BaseModel):
     """A person on a shared profile — every email/phone we hold (already
     synthesized + personal-first ordered by the source item's validator).
 
     Stripped vs the internal ``*ContactItem``: row ids, entity FKs,
-    discovery source/confidence, Apollo ids, enrichment timestamps, and the
-    PDF-provenance columns (source_url / page_number / context_snippet)."""
+    discovery source/confidence (both the scalar columns AND the per-hit
+    ``source``/``confidence`` inside emails[]/phones[]), Apollo ids,
+    enrichment timestamps, and the PDF-provenance columns (source_url /
+    page_number / context_snippet)."""
 
     name: str
     title: str | None = None
@@ -182,8 +212,8 @@ class PublicContactItem(BaseModel):
     email: str | None = None
     phone: str | None = None
     linkedin_url: str | None = None
-    emails: list[EmailHit] = []
-    phones: list[PhoneHit] = []
+    emails: list[PublicEmailHit] = []
+    phones: list[PublicPhoneHit] = []
 
     @classmethod
     def from_contact(cls, item: object) -> Self:
@@ -194,8 +224,8 @@ class PublicContactItem(BaseModel):
             email=getattr(item, "email", None),
             phone=getattr(item, "phone", None),
             linkedin_url=getattr(item, "linkedin_url", None),
-            emails=list(getattr(item, "emails", None) or []),
-            phones=list(getattr(item, "phones", None) or []),
+            emails=[PublicEmailHit.from_hit(h) for h in getattr(item, "emails", None) or []],
+            phones=[PublicPhoneHit.from_hit(h) for h in getattr(item, "phones", None) or []],
         )
 
 

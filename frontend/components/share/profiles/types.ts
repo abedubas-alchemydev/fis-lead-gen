@@ -129,6 +129,7 @@ export interface BdSharePayload {
   three_year_cagr: number | null;
   health_status: string | null;
   is_deficient: boolean;
+  latest_deficiency_filed_at: string | null;
   financials: PublicFinancialRow[];
   clearing_arrangements: ClearingArrangementItem[];
   clearing_memberships: ClearingMembershipItem[];

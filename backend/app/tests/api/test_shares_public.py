@@ -123,6 +123,18 @@ def _fake_internal_bd_profile():
         is_favorited=True,
         unknown_reason={"code": "SHOULD_NOT_LEAK"},
     )
+    # A populated contact whose emails[]/phones[] carry the internal per-hit
+    # ``source`` (vendor) + ``confidence`` — these MUST be dropped (M1).
+    contact = SimpleNamespace(
+        name="Jane Scout",
+        title="COO",
+        role_context=None,
+        email="scout@acme.example",
+        phone="+15550000",
+        linkedin_url=None,
+        emails=[SimpleNamespace(value="scout@acme.example", type="work", source="apollo", confidence=0.9)],
+        phones=[SimpleNamespace(value="+15550000", type="mobile", source="pdl", confidence=0.8)],
+    )
     return SimpleNamespace(
         broker_dealer=broker_dealer,
         financials=[],
@@ -132,7 +144,7 @@ def _fake_internal_bd_profile():
         industry_arrangements=[],
         registration_compliance=None,
         deficiency_status=None,
-        executive_contacts=[],
+        executive_contacts=[contact],
     )
 
 
@@ -444,3 +456,9 @@ async def test_profile_public_bd_projection_drops_internal_fields(monkeypatch) -
     for forbidden in ("lead_score", "is_favorited", "unknown_reason"):
         assert forbidden not in resp.text
         assert forbidden not in body["broker_dealer"]
+    # M1: per-hit vendor/source + confidence dropped, but the value survives.
+    contact = body["broker_dealer"]["executive_contacts"][0]
+    assert contact["emails"][0] == {"value": "scout@acme.example", "type": "work"}
+    assert contact["phones"][0] == {"value": "+15550000", "type": "mobile"}
+    assert "confidence" not in contact["emails"][0]
+    assert "apollo" not in resp.text and "pdl" not in resp.text
