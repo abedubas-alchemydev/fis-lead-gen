@@ -27,6 +27,7 @@ from app.models.institutional_investor import InstitutionalInvestor
 from app.models.investment_advisor import InvestmentAdvisor
 from app.models.investor_contact import InvestorContact
 from app.models.investor_filing import InvestorFiling
+from app.models.lead_share import LeadShare, LeadShareItem
 from app.models.outreach_draft import OutreachDraft
 from app.models.outreach_send import OutreachSend
 from app.models.pipeline_run import PipelineRun
@@ -75,6 +76,8 @@ __all__ = [
     "InvestmentAdvisor",
     "InvestorContact",
     "InvestorFiling",
+    "LeadShare",
+    "LeadShareItem",
     "OutreachDraft",
     "OutreachSend",
     "PipelineRun",

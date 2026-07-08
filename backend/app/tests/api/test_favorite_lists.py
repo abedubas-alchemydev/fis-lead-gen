@@ -18,6 +18,7 @@ from sqlalchemy import delete, select
 from app.db.session import SessionLocal
 from app.main import app
 from app.models.auth import AuthUser
+from app.models.bank import Bank
 from app.models.broker_dealer import BrokerDealer
 from app.models.favorite_list import FavoriteList, FavoriteListItem
 from app.models.investment_advisor import InvestmentAdvisor
@@ -51,6 +52,22 @@ def _override_user_with_advisors_feature(user_id: str) -> AuthenticatedUser:
         email=f"{user_id}@example.com",
         role="viewer",
         feature_permissions=["investment_advisors"],
+        session_expires_at=datetime(2099, 1, 1),
+    )
+
+
+def _override_user_with_banks_feature(user_id: str) -> AuthenticatedUser:
+    """Override variant for /banks/{bank_id}/favorite-lists.
+
+    That endpoint goes through ensure_feature(BANKS) — same reasoning as
+    the advisors override above.
+    """
+    return AuthenticatedUser(
+        id=user_id,
+        name="Test User",
+        email=f"{user_id}@example.com",
+        role="viewer",
+        feature_permissions=["banks"],
         session_expires_at=datetime(2099, 1, 1),
     )
 
@@ -100,6 +117,7 @@ async def _cleanup(
     user_ids: list[str],
     bd_ids: list[int],
     advisor_ids: list[int] | None = None,
+    bank_ids: list[int] | None = None,
 ) -> None:
     async with SessionLocal() as session:
         if user_ids:
@@ -112,6 +130,8 @@ async def _cleanup(
             await session.execute(
                 delete(InvestmentAdvisor).where(InvestmentAdvisor.id.in_(advisor_ids))
             )
+        if bank_ids:
+            await session.execute(delete(Bank).where(Bank.id.in_(bank_ids)))
         await session.commit()
 
 
@@ -127,6 +147,25 @@ async def _seed_advisor(name: str = "Test Advisor") -> int:
 async def _seed_list_advisor_item(list_id: int, advisor_id: int) -> None:
     async with SessionLocal() as session:
         session.add(FavoriteListItem(list_id=list_id, advisor_id=advisor_id))
+        await session.commit()
+
+
+async def _seed_bank(
+    name: str = "Test Bank",
+    city: str | None = "Testville",
+    state: str | None = "TX",
+) -> int:
+    async with SessionLocal() as session:
+        bank = Bank(name=name, city=city, state=state)
+        session.add(bank)
+        await session.commit()
+        await session.refresh(bank)
+        return bank.id
+
+
+async def _seed_list_bank_item(list_id: int, bank_id: int) -> None:
+    async with SessionLocal() as session:
+        session.add(FavoriteListItem(list_id=list_id, bank_id=bank_id))
         await session.commit()
 
 
@@ -1225,6 +1264,339 @@ async def test_get_advisor_favorite_lists_404_for_unknown_advisor() -> None:
             response = await client.get(
                 "/api/v1/investment-advisors/99999999/favorite-lists"
             )
+        assert response.status_code == 404
+    finally:
+        app.dependency_overrides.clear()
+        await _cleanup([user_id], [])
+
+
+# ── Bank parallels ─────────────────────────────────────────────────────────
+
+
+async def test_add_bank_item_401_without_session_cookie() -> None:
+    async with _client() as client:
+        response = await client.post(
+            "/api/v1/favorite-lists/1/bank-items", json={"bank_id": 1}
+        )
+    assert response.status_code == 401
+
+
+async def test_add_bank_item_inserts_and_is_idempotent() -> None:
+    user_id = await _seed_user()
+    list_id = await _seed_default_list(user_id)
+    bank_id = await _seed_bank(name="Bank-Add")
+    app.dependency_overrides[get_current_user] = lambda: _override_user(user_id)
+    try:
+        async with _client() as client:
+            first = await client.post(
+                f"/api/v1/favorite-lists/{list_id}/bank-items",
+                json={"bank_id": bank_id},
+            )
+        assert first.status_code == 200
+        first_body = first.json()
+        assert first_body["bank_id"] == bank_id
+        assert first_body["bank_name"] == "Bank-Add"
+        first_added_at = first_body["added_at"]
+
+        async with _client() as client:
+            second = await client.post(
+                f"/api/v1/favorite-lists/{list_id}/bank-items",
+                json={"bank_id": bank_id},
+            )
+        assert second.status_code == 200
+        assert second.json()["added_at"] == first_added_at
+
+        async with SessionLocal() as session:
+            count_result = await session.execute(
+                select(FavoriteListItem).where(
+                    FavoriteListItem.list_id == list_id,
+                    FavoriteListItem.bank_id == bank_id,
+                )
+            )
+            rows = count_result.scalars().all()
+            assert len(rows) == 1
+            assert rows[0].broker_dealer_id is None
+            assert rows[0].advisor_id is None
+    finally:
+        app.dependency_overrides.clear()
+        await _cleanup([user_id], [], bank_ids=[bank_id])
+
+
+async def test_add_bank_item_404_for_unknown_bank() -> None:
+    user_id = await _seed_user()
+    list_id = await _seed_default_list(user_id)
+    app.dependency_overrides[get_current_user] = lambda: _override_user(user_id)
+    try:
+        async with _client() as client:
+            response = await client.post(
+                f"/api/v1/favorite-lists/{list_id}/bank-items",
+                json={"bank_id": 99999999},
+            )
+        assert response.status_code == 404
+        assert response.json()["detail"] == "Bank not found"
+    finally:
+        app.dependency_overrides.clear()
+        await _cleanup([user_id], [])
+
+
+async def test_add_bank_item_404_for_foreign_list() -> None:
+    owner = await _seed_user()
+    intruder = await _seed_user()
+    list_id = await _seed_default_list(owner)
+    bank_id = await _seed_bank(name="Bank-Foreign")
+    app.dependency_overrides[get_current_user] = lambda: _override_user(intruder)
+    try:
+        async with _client() as client:
+            response = await client.post(
+                f"/api/v1/favorite-lists/{list_id}/bank-items",
+                json={"bank_id": bank_id},
+            )
+        assert response.status_code == 404
+    finally:
+        app.dependency_overrides.clear()
+        await _cleanup([owner, intruder], [], bank_ids=[bank_id])
+
+
+async def test_remove_bank_item_401_without_session_cookie() -> None:
+    async with _client() as client:
+        response = await client.delete("/api/v1/favorite-lists/1/bank-items/1")
+    assert response.status_code == 401
+
+
+async def test_remove_bank_item_removes_present_row() -> None:
+    user_id = await _seed_user()
+    list_id = await _seed_default_list(user_id)
+    bank_id = await _seed_bank(name="Bank-Remove")
+    await _seed_list_bank_item(list_id, bank_id)
+
+    app.dependency_overrides[get_current_user] = lambda: _override_user(user_id)
+    try:
+        async with _client() as client:
+            response = await client.delete(
+                f"/api/v1/favorite-lists/{list_id}/bank-items/{bank_id}"
+            )
+        assert response.status_code == 204
+
+        async with SessionLocal() as session:
+            remaining = await session.execute(
+                select(FavoriteListItem).where(
+                    FavoriteListItem.list_id == list_id,
+                    FavoriteListItem.bank_id == bank_id,
+                )
+            )
+            assert remaining.scalar_one_or_none() is None
+    finally:
+        app.dependency_overrides.clear()
+        await _cleanup([user_id], [], bank_ids=[bank_id])
+
+
+async def test_remove_bank_item_404_when_absent() -> None:
+    user_id = await _seed_user()
+    list_id = await _seed_default_list(user_id)
+    bank_id = await _seed_bank(name="Bank-Absent")
+
+    app.dependency_overrides[get_current_user] = lambda: _override_user(user_id)
+    try:
+        async with _client() as client:
+            response = await client.delete(
+                f"/api/v1/favorite-lists/{list_id}/bank-items/{bank_id}"
+            )
+        assert response.status_code == 404
+    finally:
+        app.dependency_overrides.clear()
+        await _cleanup([user_id], [], bank_ids=[bank_id])
+
+
+async def test_bank_batch_add_401_without_session_cookie() -> None:
+    async with _client() as client:
+        response = await client.post(
+            "/api/v1/favorite-lists/1/bank-items/batch",
+            json={"bank_ids": [1]},
+        )
+    assert response.status_code == 401
+
+
+async def test_bank_batch_add_inserts_all_when_none_existing() -> None:
+    user_id = await _seed_user()
+    list_id = await _seed_default_list(user_id)
+    a = await _seed_bank(name="Bank-Batch-A")
+    b = await _seed_bank(name="Bank-Batch-B")
+    c = await _seed_bank(name="Bank-Batch-C")
+
+    app.dependency_overrides[get_current_user] = lambda: _override_user(user_id)
+    try:
+        async with _client() as client:
+            response = await client.post(
+                f"/api/v1/favorite-lists/{list_id}/bank-items/batch",
+                json={"bank_ids": [a, b, c]},
+            )
+        assert response.status_code == 200
+        body = response.json()
+        assert body == {
+            "added": 3,
+            "skipped_existing": 0,
+            "skipped_unknown": [],
+        }
+        assert await _count_items(list_id) == 3
+    finally:
+        app.dependency_overrides.clear()
+        await _cleanup([user_id], [], bank_ids=[a, b, c])
+
+
+async def test_bank_batch_add_skips_existing_and_unknown() -> None:
+    user_id = await _seed_user()
+    list_id = await _seed_default_list(user_id)
+    a = await _seed_bank(name="Bank-Batch-Skip-A")
+    b = await _seed_bank(name="Bank-Batch-Skip-B")
+    await _seed_list_bank_item(list_id, a)
+    fake = 9_999_999
+
+    app.dependency_overrides[get_current_user] = lambda: _override_user(user_id)
+    try:
+        async with _client() as client:
+            response = await client.post(
+                f"/api/v1/favorite-lists/{list_id}/bank-items/batch",
+                json={"bank_ids": [a, b, fake]},
+            )
+        assert response.status_code == 200
+        body = response.json()
+        assert body["added"] == 1
+        assert body["skipped_existing"] == 1
+        assert body["skipped_unknown"] == [fake]
+        assert await _count_items(list_id) == 2
+    finally:
+        app.dependency_overrides.clear()
+        await _cleanup([user_id], [], bank_ids=[a, b])
+
+
+async def test_bank_batch_add_dedupes_request() -> None:
+    user_id = await _seed_user()
+    list_id = await _seed_default_list(user_id)
+    a = await _seed_bank(name="Bank-Batch-Dedupe-A")
+    b = await _seed_bank(name="Bank-Batch-Dedupe-B")
+
+    app.dependency_overrides[get_current_user] = lambda: _override_user(user_id)
+    try:
+        async with _client() as client:
+            response = await client.post(
+                f"/api/v1/favorite-lists/{list_id}/bank-items/batch",
+                json={"bank_ids": [a, a, b, b, a]},
+            )
+        assert response.status_code == 200
+        body = response.json()
+        assert body["added"] == 2
+        assert body["skipped_existing"] == 0
+        assert body["skipped_unknown"] == []
+        assert await _count_items(list_id) == 2
+    finally:
+        app.dependency_overrides.clear()
+        await _cleanup([user_id], [], bank_ids=[a, b])
+
+
+async def test_bank_batch_add_404_for_foreign_list() -> None:
+    owner = await _seed_user()
+    intruder = await _seed_user()
+    list_id = await _seed_default_list(owner)
+    bank_id = await _seed_bank(name="Bank-Batch-Foreign")
+
+    app.dependency_overrides[get_current_user] = lambda: _override_user(intruder)
+    try:
+        async with _client() as client:
+            response = await client.post(
+                f"/api/v1/favorite-lists/{list_id}/bank-items/batch",
+                json={"bank_ids": [bank_id]},
+            )
+        assert response.status_code == 404
+    finally:
+        app.dependency_overrides.clear()
+        await _cleanup([owner, intruder], [], bank_ids=[bank_id])
+
+
+async def test_bank_batch_add_422_for_oversize_payload() -> None:
+    user_id = await _seed_user()
+    list_id = await _seed_default_list(user_id)
+
+    app.dependency_overrides[get_current_user] = lambda: _override_user(user_id)
+    try:
+        async with _client() as client:
+            response = await client.post(
+                f"/api/v1/favorite-lists/{list_id}/bank-items/batch",
+                json={"bank_ids": list(range(1, 202))},
+            )
+        assert response.status_code == 422
+    finally:
+        app.dependency_overrides.clear()
+        await _cleanup([user_id], [])
+
+
+async def test_get_items_returns_mixed_items_including_bank() -> None:
+    """Bank rows join the polymorphic GET stream with city/state hydration."""
+    user_id = await _seed_user()
+    list_id = await _seed_default_list(user_id)
+    bd_id = await _seed_bd(name="Mixed-BD-2")
+    bank_id = await _seed_bank(name="Mixed-Bank", city="Austin", state="TX")
+    await _seed_list_item(list_id, bd_id)
+    await _seed_list_bank_item(list_id, bank_id)
+
+    app.dependency_overrides[get_current_user] = lambda: _override_user(user_id)
+    try:
+        async with _client() as client:
+            response = await client.get(f"/api/v1/favorite-lists/{list_id}/items")
+        assert response.status_code == 200
+        body = response.json()
+        assert body["total"] == 2
+        kinds = {item["entity_type"] for item in body["items"]}
+        assert kinds == {"broker_dealer", "bank"}
+        for item in body["items"]:
+            if item["entity_type"] == "bank":
+                assert item["bank_id"] == bank_id
+                assert item["bank_name"] == "Mixed-Bank"
+                assert item["bank_city"] == "Austin"
+                assert item["bank_state"] == "TX"
+                assert item["broker_dealer_id"] is None
+                assert item["broker_dealer_name"] is None
+            else:
+                assert item["broker_dealer_id"] == bd_id
+                assert item["broker_dealer_name"] == "Mixed-BD-2"
+                assert item["bank_id"] is None
+                assert item["bank_name"] is None
+    finally:
+        app.dependency_overrides.clear()
+        await _cleanup([user_id], [bd_id], bank_ids=[bank_id])
+
+
+async def test_get_bank_favorite_lists_returns_membership() -> None:
+    user_id = await _seed_user()
+    list_id = await _seed_default_list(user_id)
+    bank_id = await _seed_bank(name="Membership-Bank")
+    await _seed_list_bank_item(list_id, bank_id)
+
+    app.dependency_overrides[get_current_user] = (
+        lambda: _override_user_with_banks_feature(user_id)
+    )
+    try:
+        async with _client() as client:
+            response = await client.get(f"/api/v1/banks/{bank_id}/favorite-lists")
+        assert response.status_code == 200
+        body = response.json()
+        assert len(body) == 1
+        assert body[0]["is_member"] is True
+        assert body[0]["is_default"] is True
+        assert body[0]["item_count"] == 1
+    finally:
+        app.dependency_overrides.clear()
+        await _cleanup([user_id], [], bank_ids=[bank_id])
+
+
+async def test_get_bank_favorite_lists_404_for_unknown_bank() -> None:
+    user_id = await _seed_user()
+    await _seed_default_list(user_id)
+    app.dependency_overrides[get_current_user] = (
+        lambda: _override_user_with_banks_feature(user_id)
+    )
+    try:
+        async with _client() as client:
+            response = await client.get("/api/v1/banks/99999999/favorite-lists")
         assert response.status_code == 404
     finally:
         app.dependency_overrides.clear()

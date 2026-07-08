@@ -161,6 +161,19 @@ function UsersIcon(props: IconProps) {
   );
 }
 
+// Chain-link glyph for the admin Shared Links page (public DOX Share links).
+// Two interlocking loops + a connecting bar read as "link" next to the
+// Users people-glyph in the Account section.
+function SharedLinksIcon(props: IconProps) {
+  return (
+    <IconBase {...props}>
+      <path d="M9 17H7A5 5 0 0 1 7 7h2" />
+      <path d="M15 7h2a5 5 0 0 1 0 10h-2" />
+      <path d="M8 12h8" />
+    </IconBase>
+  );
+}
+
 // Bar-chart glyph for the admin per-provider extraction analytics page.
 function ExtractionAnalyticsIcon(props: IconProps) {
   return (
@@ -349,6 +362,7 @@ const navSections: ReadonlyArray<NavSection> = [
       { href: "/settings/doxie-memory" as Route, label: "Doxie Memory", icon: DoxieMemoryIcon, badgeKey: null },
       { href: "/settings/email-accounts" as Route, label: "Email Accounts", icon: MailAtIcon, badgeKey: null },
       { href: "/settings/users" as Route, label: "Users", icon: UsersIcon, badgeKey: null, adminOnly: true, permissionKey: "users" },
+      { href: "/settings/shared-links" as Route, label: "Shared Links", icon: SharedLinksIcon, badgeKey: null, adminOnly: true },
       { href: "/settings/extractions" as Route, label: "Extraction Analytics", icon: ExtractionAnalyticsIcon, badgeKey: null, adminOnly: true },
       { href: "/settings/doxie-usage" as Route, label: "Doxie Usage", icon: DoxieUsageIcon, badgeKey: null, adminOnly: true }
       // Memberships nav item intentionally hidden (2026-05-30) — route/page kept:

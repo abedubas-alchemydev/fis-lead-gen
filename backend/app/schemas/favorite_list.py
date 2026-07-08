@@ -27,18 +27,25 @@ class FavoriteListResponse(BaseModel):
 class FavoriteListItemResponse(BaseModel):
     """One row in ``GET /api/v1/favorite-lists/{list_id}/items``.
 
-    Polymorphic shape across four entity types: broker_dealer, advisor,
-    institutional_investor, reporting_owner (Form 4 insider). Each row
-    sets exactly one id/name pair matching its ``entity_type``
+    Polymorphic shape across five entity types: broker_dealer, advisor,
+    institutional_investor, reporting_owner (Form 4 insider), bank. Each
+    row sets exactly one id/name pair matching its ``entity_type``
     discriminator; the other pairs are ``None``. Keeping legacy field
     names populated preserves backwards compatibility with the FE
-    contracts shipped before each entity type landed.
+    contracts shipped before each entity type landed. Bank rows also
+    carry ``bank_city`` / ``bank_state`` — the lead-share export reads
+    them off this hydration, and banks (unlike the other kinds) have no
+    richer per-row summary endpoint to fall back to.
     """
 
     model_config = ConfigDict(from_attributes=True)
 
     entity_type: Literal[
-        "broker_dealer", "advisor", "institutional_investor", "reporting_owner"
+        "broker_dealer",
+        "advisor",
+        "institutional_investor",
+        "reporting_owner",
+        "bank",
     ]
     broker_dealer_id: int | None = None
     broker_dealer_name: str | None = None
@@ -48,6 +55,10 @@ class FavoriteListItemResponse(BaseModel):
     institutional_investor_name: str | None = None
     reporting_owner_id: int | None = None
     reporting_owner_name: str | None = None
+    bank_id: int | None = None
+    bank_name: str | None = None
+    bank_city: str | None = None
+    bank_state: str | None = None
     added_at: datetime
 
 
@@ -185,6 +196,37 @@ class FavoriteListInvestorItemResponse(BaseModel):
 
     institutional_investor_id: int
     institutional_investor_name: str
+    added_at: datetime
+
+
+class FavoriteListBankItemCreate(BaseModel):
+    """Request body for ``POST /api/v1/favorite-lists/{list_id}/bank-items``."""
+
+    bank_id: int = Field(ge=1)
+
+
+class FavoriteListBankItemBatchCreate(BaseModel):
+    """Request body for ``POST /api/v1/favorite-lists/{list_id}/bank-items/batch``."""
+
+    bank_ids: list[int] = Field(min_length=1, max_length=200)
+
+    @field_validator("bank_ids")
+    @classmethod
+    def _dedupe_and_validate(cls, value: list[int]) -> list[int]:
+        deduped = list(dict.fromkeys(value))
+        for bank_id in deduped:
+            if bank_id < 1:
+                raise ValueError("bank_ids must be positive integers")
+        return deduped
+
+
+class FavoriteListBankItemResponse(BaseModel):
+    """Response shape for single-bank add to a favorite list."""
+
+    model_config = ConfigDict(from_attributes=True)
+
+    bank_id: int
+    bank_name: str
     added_at: datetime
 
 

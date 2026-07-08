@@ -19,6 +19,7 @@ import {
   ApiError,
   type AddFirmsToListBatchResponse,
   addAdvisorsToListBatch,
+  addBanksToListBatch,
   addFirmsToListBatch,
   createFavoriteList,
   getFavoriteLists,
@@ -43,8 +44,8 @@ export interface BulkListPickerProps {
   anchorRef: RefObject<HTMLButtonElement | null>;
   onAdded: (listName: string, response: AddFirmsToListBatchResponse) => void;
   onDismiss: () => void;
-  // BD vs advisor. Defaults to "broker_dealer" so the master-list call
-  // site doesn't need to change.
+  // BD vs advisor vs bank. Defaults to "broker_dealer" so the master-list
+  // call site doesn't need to change.
   entityType?: FavoriteListEntityType;
 }
 
@@ -59,10 +60,13 @@ export function BulkListPicker({
     (listId: number) =>
       entityType === "advisor"
         ? addAdvisorsToListBatch(listId, selectedIds)
-        : addFirmsToListBatch(listId, selectedIds),
+        : entityType === "bank"
+          ? addBanksToListBatch(listId, selectedIds)
+          : addFirmsToListBatch(listId, selectedIds),
     [entityType, selectedIds],
   );
-  const itemNoun = entityType === "advisor" ? "advisor" : "firm";
+  const itemNoun =
+    entityType === "advisor" ? "advisor" : entityType === "bank" ? "bank" : "firm";
   const [lists, setLists] = useState<FavoriteList[] | null>(null);
   const [fetchError, setFetchError] = useState<string | null>(null);
   const [pendingListId, setPendingListId] = useState<number | null>(null);

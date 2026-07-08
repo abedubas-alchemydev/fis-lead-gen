@@ -18,6 +18,7 @@ from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.db.session import get_db_session
+from app.models.bank import Bank
 from app.models.broker_dealer import BrokerDealer
 from app.models.favorite_list import FavoriteList, FavoriteListItem
 from app.models.form4_transaction import Form4Transaction
@@ -29,6 +30,9 @@ from app.schemas.favorite_list import (
     FavoriteListAdvisorItemBatchCreate,
     FavoriteListAdvisorItemCreate,
     FavoriteListAdvisorItemResponse,
+    FavoriteListBankItemBatchCreate,
+    FavoriteListBankItemCreate,
+    FavoriteListBankItemResponse,
     FavoriteListCreate,
     FavoriteListInvestorItemBatchCreate,
     FavoriteListInvestorItemCreate,
@@ -97,11 +101,12 @@ async def list_favorite_list_items(
 ) -> PaginatedFavoriteListItems:
     """Return a page of items in a list owned by the calling user.
 
-    Returns broker-dealer, advisor, institutional-investor, and Form 4
-    reporting-owner items in one stream, ordered by ``created_at desc``
-    then ``id desc``. Each row carries an ``entity_type`` discriminator
-    plus the populated id/name pair for its kind (the other kinds'
-    columns are ``None``).
+    Returns broker-dealer, advisor, institutional-investor, Form 4
+    reporting-owner, and bank items in one stream, ordered by
+    ``created_at desc`` then ``id desc``. Each row carries an
+    ``entity_type`` discriminator plus the populated id/name pair for its
+    kind (the other kinds' columns are ``None``); bank rows additionally
+    carry city/state (see the schema docstring).
 
     404 if the list doesn't exist or belongs to another user — same shape so
     a leaked list_id doesn't reveal whether it's "missing" vs. "yours".
@@ -132,6 +137,10 @@ async def list_favorite_list_items(
             InstitutionalInvestor.name.label("institutional_investor_name"),
             FavoriteListItem.reporting_owner_id,
             ReportingOwner.name.label("reporting_owner_name"),
+            FavoriteListItem.bank_id,
+            Bank.name.label("bank_name"),
+            Bank.city.label("bank_city"),
+            Bank.state.label("bank_state"),
             FavoriteListItem.created_at,
         )
         .outerjoin(
@@ -148,6 +157,10 @@ async def list_favorite_list_items(
         .outerjoin(
             ReportingOwner,
             ReportingOwner.id == FavoriteListItem.reporting_owner_id,
+        )
+        .outerjoin(
+            Bank,
+            Bank.id == FavoriteListItem.bank_id,
         )
         .where(FavoriteListItem.list_id == list_id)
         .order_by(FavoriteListItem.created_at.desc(), FavoriteListItem.id.desc())
@@ -167,6 +180,10 @@ async def list_favorite_list_items(
         investor_name,
         reporting_owner_id,
         reporting_owner_name,
+        bank_id,
+        bank_name,
+        bank_city,
+        bank_state,
         added_at,
     ) in rows:
         if bd_id is not None:
@@ -193,6 +210,17 @@ async def list_favorite_list_items(
                     entity_type="institutional_investor",
                     institutional_investor_id=investor_id,
                     institutional_investor_name=investor_name,
+                    added_at=added_at,
+                )
+            )
+        elif bank_id is not None:
+            items.append(
+                FavoriteListItemResponse(
+                    entity_type="bank",
+                    bank_id=bank_id,
+                    bank_name=bank_name,
+                    bank_city=bank_city,
+                    bank_state=bank_state,
                     added_at=added_at,
                 )
             )
@@ -864,6 +892,163 @@ async def remove_reporting_owner_from_favorite_list(
         delete(FavoriteListItem).where(
             FavoriteListItem.list_id == list_id,
             FavoriteListItem.reporting_owner_id == reporting_owner_id,
+        )
+    )
+    if result.rowcount == 0:
+        raise HTTPException(status_code=404, detail="favorite_list_item_not_found")
+    await db.commit()
+    return Response(status_code=status.HTTP_204_NO_CONTENT)
+
+
+# ── Bank parallels ─────────────────────────────────────────────────────────
+# Same shape as the BD + advisor + investor endpoints above, but they
+# write/delete rows where ``bank_id`` is set and the other four FK columns
+# are NULL. The 5-way XOR check constraint
+# (``ck_favorite_list_item_exactly_one_target``, rewritten in migration
+# 20260708_0001) is the DB-side backstop; the explicit ``None`` on the
+# sibling FKs on inserts satisfies it.
+
+
+@router.post(
+    "/{list_id}/bank-items",
+    response_model=FavoriteListBankItemResponse,
+)
+async def add_bank_to_favorite_list(
+    payload: FavoriteListBankItemCreate,
+    list_id: int = Path(..., ge=1),
+    current_user: AuthenticatedUser = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db_session),
+) -> FavoriteListBankItemResponse:
+    """Add a bank to a list owned by the calling user.
+
+    Idempotent — re-POSTing the same ``bank_id`` returns the existing
+    row's ``added_at`` instead of raising on the partial unique index.
+    """
+    await _get_owned_list(db, list_id, current_user.id)
+
+    bank_check = await db.execute(
+        select(Bank.id, Bank.name).where(Bank.id == payload.bank_id)
+    )
+    bank_row = bank_check.first()
+    if bank_row is None:
+        raise HTTPException(status_code=404, detail="Bank not found")
+    bank_id, bank_name = bank_row
+
+    # uq_favorite_list_item_list_bank is a PARTIAL unique index
+    # (WHERE bank_id IS NOT NULL) from migration 20260708_0001. ON CONFLICT
+    # needs the matching index_where predicate to bind to the right index.
+    upsert = (
+        pg_insert(FavoriteListItem)
+        .values(
+            list_id=list_id,
+            bank_id=bank_id,
+            broker_dealer_id=None,
+            advisor_id=None,
+            institutional_investor_id=None,
+            reporting_owner_id=None,
+        )
+        .on_conflict_do_nothing(
+            index_elements=["list_id", "bank_id"],
+            index_where=text("bank_id IS NOT NULL"),
+        )
+        .returning(FavoriteListItem.id, FavoriteListItem.created_at)
+    )
+    inserted = (await db.execute(upsert)).first()
+    if inserted is None:
+        existing = await db.execute(
+            select(FavoriteListItem.created_at).where(
+                FavoriteListItem.list_id == list_id,
+                FavoriteListItem.bank_id == bank_id,
+            )
+        )
+        added_at = existing.scalar_one()
+    else:
+        added_at = inserted[1]
+    await db.commit()
+
+    return FavoriteListBankItemResponse(
+        bank_id=bank_id,
+        bank_name=bank_name,
+        added_at=added_at,
+    )
+
+
+@router.post(
+    "/{list_id}/bank-items/batch",
+    response_model=FavoriteListItemBatchResponse,
+)
+async def batch_add_banks_to_favorite_list(
+    payload: FavoriteListBankItemBatchCreate,
+    list_id: int = Path(..., ge=1),
+    current_user: AuthenticatedUser = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db_session),
+) -> FavoriteListItemBatchResponse:
+    """Add many banks to a list in one transaction.
+
+    Mirrors the BD + advisor + investor batch endpoints: idempotent, with
+    ``skipped_existing`` / ``skipped_unknown`` accounting.
+    """
+    await _get_owned_list(db, list_id, current_user.id)
+
+    requested_ids = payload.bank_ids
+    known_rows = await db.execute(
+        select(Bank.id).where(Bank.id.in_(requested_ids))
+    )
+    known_ids = {row[0] for row in known_rows}
+    skipped_unknown = [bank_id for bank_id in requested_ids if bank_id not in known_ids]
+
+    added_count = 0
+    if known_ids:
+        # See comment on the single-bank upsert above re: partial index.
+        upsert = (
+            pg_insert(FavoriteListItem)
+            .values(
+                [
+                    {
+                        "list_id": list_id,
+                        "broker_dealer_id": None,
+                        "advisor_id": None,
+                        "institutional_investor_id": None,
+                        "reporting_owner_id": None,
+                        "bank_id": bank_id,
+                    }
+                    for bank_id in known_ids
+                ]
+            )
+            .on_conflict_do_nothing(
+                index_elements=["list_id", "bank_id"],
+                index_where=text("bank_id IS NOT NULL"),
+            )
+            .returning(FavoriteListItem.id)
+        )
+        result = await db.execute(upsert)
+        added_count = len(result.fetchall())
+
+    await db.commit()
+    return FavoriteListItemBatchResponse(
+        added=added_count,
+        skipped_existing=len(known_ids) - added_count,
+        skipped_unknown=skipped_unknown,
+    )
+
+
+@router.delete(
+    "/{list_id}/bank-items/{bank_id}",
+    status_code=204,
+)
+async def remove_bank_from_favorite_list(
+    list_id: int = Path(..., ge=1),
+    bank_id: int = Path(..., ge=1),
+    current_user: AuthenticatedUser = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db_session),
+) -> Response:
+    """Remove a bank from the list. 404 if it wasn't in the list."""
+    await _get_owned_list(db, list_id, current_user.id)
+
+    result = await db.execute(
+        delete(FavoriteListItem).where(
+            FavoriteListItem.list_id == list_id,
+            FavoriteListItem.bank_id == bank_id,
         )
     )
     if result.rowcount == 0:
