@@ -20,6 +20,7 @@ from app.api.v1.endpoints import (
     investors,
     outreach,
     pipeline,
+    saved_contacts,
     settings,
     shares_admin,
     shares_public,
@@ -57,6 +58,7 @@ api_router.include_router(doxie_usage.router, tags=["doxie-usage"])
 api_router.include_router(email_extractor.router, tags=["email-extractor"])
 api_router.include_router(favorites.router, tags=["favorites"])
 api_router.include_router(favorite_lists.router, tags=["favorite-lists"])
+api_router.include_router(saved_contacts.router, tags=["saved-contacts"])
 api_router.include_router(visits.router, tags=["visits"])
 api_router.include_router(vault.router, tags=["vault"])
 api_router.include_router(vault_files.router, tags=["vault-files"])

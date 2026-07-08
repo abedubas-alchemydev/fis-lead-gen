@@ -32,6 +32,7 @@ from app.models.outreach_draft import OutreachDraft
 from app.models.outreach_send import OutreachSend
 from app.models.pipeline_run import PipelineRun
 from app.models.reporting_owner import ReportingOwner
+from app.models.saved_contact import SavedContact
 from app.models.scoring_setting import ScoringSetting
 from app.models.user_activity import UserActivity
 from app.models.user_outreach_settings import UserOutreachSettings
@@ -82,6 +83,7 @@ __all__ = [
     "OutreachSend",
     "PipelineRun",
     "ReportingOwner",
+    "SavedContact",
     "ScoringSetting",
     "UserActivity",
     "UserOutreachSettings",
