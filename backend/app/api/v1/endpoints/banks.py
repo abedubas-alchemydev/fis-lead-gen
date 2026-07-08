@@ -16,12 +16,13 @@ import logging
 from datetime import date, datetime, timedelta, timezone
 
 from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, Query, Response, status
-from sqlalchemy import or_, select
+from sqlalchemy import exists, func, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.feature_permissions import BANKS
 from app.db.session import get_db_session
 from app.models.bank import Bank
+from app.models.favorite_list import FavoriteList, FavoriteListItem
 from app.models.pipeline_run import PipelineRun
 from app.schemas.auth import AuthenticatedUser
 from app.schemas.bank import (
@@ -32,6 +33,7 @@ from app.schemas.bank import (
     BankSourceLink,
     GapFillBankResponse,
 )
+from app.schemas.favorite_list import FavoriteListWithMembership
 from app.services.auth import ensure_feature, get_current_user
 from app.services.bank_contact_gap_fill import (
     GAP_FILL_BANK_CONTACTS_PIPELINE_NAME,
@@ -366,3 +368,65 @@ async def gap_fill_bank_contacts(
         bank_id=bank_id,
         reason=None,
     )
+
+
+@router.get(
+    "/{bank_id}/favorite-lists",
+    response_model=list[FavoriteListWithMembership],
+)
+async def get_bank_favorite_lists(
+    bank_id: int,
+    current_user: AuthenticatedUser = Depends(_require_banks),
+    db: AsyncSession = Depends(get_db_session),
+) -> list[FavoriteListWithMembership]:
+    """Return the calling user's lists with an ``is_member`` flag for ``bank_id``.
+
+    Mirror of ``GET /investment-advisors/{advisor_id}/favorite-lists`` — same
+    query shape, just keyed on ``bank_id`` instead of ``advisor_id``. Powers
+    the FE list-picker on bank-list rows + the bank-detail page.
+    """
+
+    bank_check = await db.execute(select(Bank.id).where(Bank.id == bank_id))
+    if bank_check.scalar_one_or_none() is None:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND, detail="Bank not found."
+        )
+
+    item_count_sq = (
+        select(
+            FavoriteListItem.list_id.label("list_id"),
+            func.count(FavoriteListItem.id).label("count"),
+        )
+        .group_by(FavoriteListItem.list_id)
+        .subquery()
+    )
+    is_member_expr = (
+        exists()
+        .where(
+            FavoriteListItem.list_id == FavoriteList.id,
+            FavoriteListItem.bank_id == bank_id,
+        )
+        .label("is_member")
+    )
+    stmt = (
+        select(
+            FavoriteList,
+            func.coalesce(item_count_sq.c.count, 0).label("item_count"),
+            is_member_expr,
+        )
+        .outerjoin(item_count_sq, FavoriteList.id == item_count_sq.c.list_id)
+        .where(FavoriteList.user_id == current_user.id)
+        .order_by(FavoriteList.is_default.desc(), FavoriteList.created_at.asc())
+    )
+    rows = (await db.execute(stmt)).all()
+    return [
+        FavoriteListWithMembership(
+            id=fl.id,
+            name=fl.name,
+            is_default=fl.is_default,
+            item_count=int(count),
+            created_at=fl.created_at,
+            is_member=bool(is_member),
+        )
+        for fl, count, is_member in rows
+    ]
