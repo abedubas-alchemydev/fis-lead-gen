@@ -31,6 +31,7 @@ import {
   listSavedContacts,
   saveContact,
 } from "@/lib/saved-contacts";
+import type { SavedContact } from "@/types/saved-contact";
 import { formatDate, formatRelativeTime } from "@/lib/format";
 import {
   enrichEmail,
@@ -106,7 +107,10 @@ function readStoredPageSize(): RowsPerPageValue | null {
     if (raw === null) return null;
     if (raw === "all") return "all";
     const parsed = Number(raw);
-    return Number.isFinite(parsed) && parsed > 0 ? parsed : null;
+    // Number.isInteger also rejects NaN/Infinity, so it subsumes the old
+    // isFinite guard while additionally rejecting a tampered fractional value
+    // like "50.5" (which isFinite would have wrongly accepted).
+    return Number.isInteger(parsed) && parsed > 0 ? parsed : null;
   } catch {
     return null;
   }
@@ -157,6 +161,36 @@ function latestVerification(
 
 function errorMessage(err: unknown, fallback: string): string {
   return err instanceof Error ? err.message : fallback;
+}
+
+// Merge a one-shot saved-contacts fetch into the live saved-state map WITHOUT
+// clobbering rows the user has already saved/un-saved this session. The fetch
+// is a mount-time snapshot that can resolve AFTER an in-flight Save/un-save,
+// so for every contact_id the user has touched (tracked in touchedContactIds)
+// we keep the current local value — present ⇒ its saved_id wins, absent ⇒ the
+// un-save wins — and only take server state for untouched rows. Untouched rows
+// therefore behave exactly as the old full-replace did.
+function mergeFetchedPreservingTouched(
+  fetched: SavedContact[],
+  current: Map<number, number>,
+  touchedContactIds: Set<number>
+): Map<number, number> {
+  const next = new Map<number, number>();
+  // Server snapshot drives every contact the user hasn't locally touched.
+  for (const contact of fetched) {
+    if (!touchedContactIds.has(contact.contact_id)) {
+      next.set(contact.contact_id, contact.id);
+    }
+  }
+  // Local state wins for touched contacts: re-apply a just-saved id, and leave
+  // a just-un-saved contact absent (delete wins) by simply not setting it.
+  for (const contactId of touchedContactIds) {
+    const localValue = current.get(contactId);
+    if (localValue !== undefined) {
+      next.set(contactId, localValue);
+    }
+  }
+  return next;
 }
 
 // Per-cause copy for a failed per-row enrich. Mirrors the outreach modal's
@@ -511,8 +545,14 @@ function SaveContactCell({
       try {
         await deleteSavedContact(savedId);
       } catch (err) {
-        onSavedChange(row.id, savedId);
-        setError(errorMessage(err, "Couldn't remove — try again."));
+        // A 404 means the row is already gone server-side (e.g. it was removed
+        // from the Saved Contacts page in another tab). Our desired end state —
+        // not saved — already holds, so treat it as success: keep the optimistic
+        // clear, no rollback, no error. Roll back + surface only real failures.
+        if (!(err instanceof ApiError && err.status === 404)) {
+          onSavedChange(row.id, savedId);
+          setError(errorMessage(err, "Couldn't remove — try again."));
+        }
       } finally {
         setInFlight(false);
       }
@@ -769,6 +809,12 @@ export function ScanDetailView({
   const [savedContactIds, setSavedContactIds] = useState<Map<number, number>>(
     new Map()
   );
+  // contact_ids the user has saved/un-saved locally this session. The one-shot
+  // mount hydration merges against this set (local wins) so a Save/un-save that
+  // resolves BEFORE the initial GET isn't clobbered by the older server
+  // snapshot. A ref (not state) because it's a write-log the hydration reads
+  // synchronously, not something that should trigger a re-render.
+  const touchedContactIdsRef = useRef<Set<number>>(new Set());
 
   const pollRef = useRef<ReturnType<typeof setInterval> | null>(null);
   const startedAtRef = useRef<number>(0);
@@ -839,6 +885,11 @@ export function ScanDetailView({
   // lives here, not in the cell). `null` un-saves (drops the key).
   const handleSavedChange = useCallback(
     (contactId: number, savedId: number | null) => {
+      // Record the local mutation so the mount hydration won't overwrite this
+      // contact with an older server snapshot (see mergeFetchedPreservingTouched
+      // + the hydration effect below). Covers both directions — save and
+      // un-save both flow through here.
+      touchedContactIdsRef.current.add(contactId);
       setSavedContactIds((prev) => {
         const next = new Map(prev);
         if (savedId === null) next.delete(contactId);
@@ -859,11 +910,17 @@ export function ScanDetailView({
     listSavedContacts(SAVE_CONTACT_SOURCE)
       .then((contacts) => {
         if (!active) return;
-        const map = new Map<number, number>();
-        for (const contact of contacts) {
-          map.set(contact.contact_id, contact.id);
-        }
-        setSavedContactIds(map);
+        // MERGE, don't replace: the functional updater composes against the
+        // latest map, and mergeFetchedPreservingTouched keeps any row the user
+        // has already toggled this session (local wins) so a Save/un-save that
+        // beat this GET to resolve isn't dropped by the stale snapshot.
+        setSavedContactIds((prev) =>
+          mergeFetchedPreservingTouched(
+            contacts,
+            prev,
+            touchedContactIdsRef.current
+          )
+        );
       })
       .catch(() => {
         /* swallow — saved-state simply stays un-hydrated */

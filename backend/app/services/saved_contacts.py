@@ -10,8 +10,9 @@ Writes go through ``INSERT ... ON CONFLICT DO NOTHING`` on the
 ``(user_id, source, contact_id)`` unique key so the UI can fire the same save
 twice (double-click, retry) without a 500; the endpoint layer needs no
 idempotency guard of its own. The service raises ``HTTPException`` directly
-(404 for a missing/foreign row, 400 for an unsupported source) so every caller
-gets identical, correctly-shaped errors.
+(404 for a missing/foreign row, 400 for an unsupported source, 409 for the
+rare same-user concurrent-delete self-race) so every caller gets identical,
+correctly-shaped errors.
 """
 
 from __future__ import annotations
@@ -52,7 +53,9 @@ async def save_contact(
 
     Raises:
         HTTPException: 400 if ``source`` is unsupported; 404 if the referenced
-            source row does not exist.
+            source row does not exist; 409 if the row is concurrently deleted
+            by the same user between the insert-commit and the canonical
+            re-select (retryable self-race).
     """
     if source != SOURCE_DISCOVERED_EMAIL:
         raise HTTPException(
@@ -103,7 +106,16 @@ async def save_contact(
                 SavedContact.contact_id == contact_id,
             )
         )
-    ).scalar_one()
+    ).scalar_one_or_none()
+    if row is None:
+        # Self-race: the same user concurrently DELETEd this contact between
+        # our insert-commit above and this re-select, so the canonical row is
+        # already gone. Surface a retryable client error rather than letting
+        # the missing row bubble up as an unhandled 500.
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail="save race, please retry",
+        )
     return row
 
 

@@ -12,8 +12,10 @@ Contract:
 * ``DELETE /api/v1/saved-contacts/{saved_id}`` -> 204 (scoped to the caller;
   404 if the row isn't theirs).
 
-Every route is owner-scoped via ``current_user.id``; there is no cross-user
-read or delete path.
+Every route is owner-scoped via ``current_user.id`` and gated behind the
+``email_extractor`` feature permission (admins bypass); a viewer without it
+gets 403, matching the nav entry's declared ``permissionKey``. There is no
+cross-user read or delete path.
 """
 
 from __future__ import annotations
@@ -21,10 +23,11 @@ from __future__ import annotations
 from fastapi import APIRouter, Depends, Query, Response, status
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.core.feature_permissions import EMAIL_EXTRACTOR
 from app.db.session import get_db_session
 from app.schemas.auth import AuthenticatedUser
 from app.schemas.saved_contact import SavedContactCreate, SavedContactResponse
-from app.services.auth import get_current_user
+from app.services.auth import ensure_feature, get_current_user
 from app.services.saved_contacts import (
     delete_saved_contact,
     list_saved_contacts,
@@ -34,10 +37,26 @@ from app.services.saved_contacts import (
 router = APIRouter(prefix="/saved-contacts", tags=["saved-contacts"])
 
 
+def _require_email_extractor(
+    user: AuthenticatedUser = Depends(get_current_user),
+) -> AuthenticatedUser:
+    """Gate the whole saved-contacts surface behind the ``email_extractor``
+    feature.
+
+    Saved contacts are pinned ``discovered_email`` snapshots -- the same
+    feature-gated PII the email extractor exposes -- and the frontend nav
+    declares ``permissionKey: "email_extractor"`` for this route. Mirror the
+    email-extractor endpoints so a viewer without the permission can't read or
+    write these rows. Admins bypass automatically via ``ensure_feature``.
+    """
+    ensure_feature(user, EMAIL_EXTRACTOR)
+    return user
+
+
 @router.get("", response_model=list[SavedContactResponse])
 async def get_saved_contacts(
     source: str | None = Query(default=None),
-    current_user: AuthenticatedUser = Depends(get_current_user),
+    current_user: AuthenticatedUser = Depends(_require_email_extractor),
     db: AsyncSession = Depends(get_db_session),
 ) -> list[SavedContactResponse]:
     """Return the calling user's saved contacts, newest first.
@@ -51,7 +70,7 @@ async def get_saved_contacts(
 @router.post("", response_model=SavedContactResponse)
 async def create_saved_contact(
     payload: SavedContactCreate,
-    current_user: AuthenticatedUser = Depends(get_current_user),
+    current_user: AuthenticatedUser = Depends(_require_email_extractor),
     db: AsyncSession = Depends(get_db_session),
 ) -> SavedContactResponse:
     """Snapshot and save a contact for the calling user.
@@ -69,7 +88,7 @@ async def create_saved_contact(
 @router.delete("/{saved_id}", status_code=204)
 async def remove_saved_contact(
     saved_id: int,
-    current_user: AuthenticatedUser = Depends(get_current_user),
+    current_user: AuthenticatedUser = Depends(_require_email_extractor),
     db: AsyncSession = Depends(get_db_session),
 ) -> Response:
     """Delete one of the caller's saved contacts. 404 if it isn't theirs."""

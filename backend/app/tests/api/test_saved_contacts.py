@@ -28,11 +28,39 @@ pytestmark = pytest.mark.integration
 
 
 def _override_user(user_id: str) -> AuthenticatedUser:
+    """An entitled viewer -- has the ``email_extractor`` feature the whole
+    saved-contacts surface is gated behind."""
     return AuthenticatedUser(
         id=user_id,
         name="Test User",
         email=f"{user_id}@example.com",
         role="viewer",
+        feature_permissions=["email_extractor"],
+        session_expires_at=datetime(2099, 1, 1),
+    )
+
+
+def _override_admin(user_id: str) -> AuthenticatedUser:
+    """An admin with NO explicit feature grants -- proves the gate's
+    admin-bypass in ``ensure_feature``."""
+    return AuthenticatedUser(
+        id=user_id,
+        name="Admin User",
+        email=f"{user_id}@example.com",
+        role="admin",
+        session_expires_at=datetime(2099, 1, 1),
+    )
+
+
+def _override_ungated(user_id: str) -> AuthenticatedUser:
+    """A viewer WITHOUT ``email_extractor`` -- has an unrelated feature only,
+    so the gate must reject it with 403."""
+    return AuthenticatedUser(
+        id=user_id,
+        name="Ungated Viewer",
+        email=f"{user_id}@example.com",
+        role="viewer",
+        feature_permissions=["master_list"],
         session_expires_at=datetime(2099, 1, 1),
     )
 
@@ -132,6 +160,71 @@ async def test_delete_401_without_session_cookie() -> None:
     async with _client() as client:
         response = await client.delete("/api/v1/saved-contacts/1")
     assert response.status_code == 401
+
+
+# ── Feature gate (email_extractor) ───────────────────────────────────────────
+
+
+async def test_gate_403_without_email_extractor_feature() -> None:
+    """A viewer lacking the ``email_extractor`` permission is rejected across
+    the whole surface. The gate is a dependency that runs before any handler,
+    so no row PII ever reaches the response body."""
+    user_id = f"test-viewer-{secrets.token_hex(6)}"
+    app.dependency_overrides[get_current_user] = lambda: _override_ungated(user_id)
+    try:
+        async with _client() as client:
+            get_resp = await client.get("/api/v1/saved-contacts")
+            post_resp = await client.post(
+                "/api/v1/saved-contacts",
+                json={"source": "discovered_email", "contact_id": 1},
+            )
+            delete_resp = await client.delete("/api/v1/saved-contacts/1")
+        assert get_resp.status_code == 403
+        assert post_resp.status_code == 403
+        assert delete_resp.status_code == 403
+    finally:
+        app.dependency_overrides.clear()
+
+
+async def test_admin_without_feature_permission_can_save_and_list() -> None:
+    """An admin bypasses the gate (``ensure_feature`` short-circuits on role)
+    and can save + list normally, even with no explicit feature grants."""
+    user_id = await _seed_user()
+    run_id, email_id = await _seed_discovered_email()
+    app.dependency_overrides[get_current_user] = lambda: _override_admin(user_id)
+    try:
+        async with _client() as client:
+            saved = await client.post(
+                "/api/v1/saved-contacts",
+                json={"source": "discovered_email", "contact_id": email_id},
+            )
+            listing = await client.get("/api/v1/saved-contacts")
+        assert saved.status_code == 200
+        assert saved.json()["contact_id"] == email_id
+        assert listing.status_code == 200
+        assert [row["contact_id"] for row in listing.json()] == [email_id]
+    finally:
+        app.dependency_overrides.clear()
+        await _cleanup([user_id], [run_id])
+
+
+async def test_entitled_viewer_can_save() -> None:
+    """A viewer WITH the ``email_extractor`` permission passes the gate -- the
+    positive counterpart to the 403 case above."""
+    user_id = await _seed_user()
+    run_id, email_id = await _seed_discovered_email()
+    app.dependency_overrides[get_current_user] = lambda: _override_user(user_id)
+    try:
+        async with _client() as client:
+            saved = await client.post(
+                "/api/v1/saved-contacts",
+                json={"source": "discovered_email", "contact_id": email_id},
+            )
+        assert saved.status_code == 200
+        assert saved.json()["contact_id"] == email_id
+    finally:
+        app.dependency_overrides.clear()
+        await _cleanup([user_id], [run_id])
 
 
 # ── POST (save) ──────────────────────────────────────────────────────────────
