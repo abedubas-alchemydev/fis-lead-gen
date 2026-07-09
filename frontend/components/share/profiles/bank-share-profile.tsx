@@ -184,7 +184,7 @@ export function BankShareProfile({ data }: BankShareProfileProps) {
         />
       </div>
 
-      <div className="flex flex-col gap-4 xl:flex-row">
+      <div className="flex flex-col gap-4">
         <div className="flex min-w-0 flex-1 flex-col gap-4">
           {/* ── Institution profile ── */}
           <SectionPanel eyebrow="Profile" title="Institution profile">
