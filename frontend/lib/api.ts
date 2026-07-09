@@ -222,6 +222,40 @@ export async function deleteFavoriteList(listId: number): Promise<void> {
   });
 }
 
+// ── Bulk-enrich a favorite list (server-side background job) ──────────────
+// Backs POST /api/v1/favorite-lists/{list_id}/enrich. The BE owner-scopes the
+// list, enumerates every item across all five entity types, and dispatches
+// ONE resilient FastAPI BackgroundTask that gap-fills each firm and always
+// runs email DISCOVERY (never SMTP-verify). Returns a parent PipelineRun id
+// the FE polls via getPipelineRunStatus; the run's `notes` JSON carries the
+// live "which firm are we on" pointer so the loader survives a tab close.
+//
+// Terminal response shapes (see FavoriteListEnrichResponse on the BE):
+//   • run_id:int,  status:"queued"     — job dispatched; poll run_id.
+//   • run_id:int,  status:"in_flight"  — a run for this (user,list) is already
+//                                        running; attach + poll the same id
+//                                        instead of queueing a duplicate.
+//   • run_id:null, status:"skipped"    — empty list; no run, no provider cost.
+export type BulkEnrichListStatus = "queued" | "in_flight" | "skipped";
+
+export type BulkEnrichListResponse = {
+  // null only when status === "skipped" (no PipelineRun created).
+  run_id: number | null;
+  status: BulkEnrichListStatus;
+  list_id: number;
+  total: number;
+  reason: string | null;
+};
+
+export async function bulkEnrichFavoriteList(
+  listId: number
+): Promise<BulkEnrichListResponse> {
+  return apiRequest<BulkEnrichListResponse>(
+    `/api/v1/favorite-lists/${listId}/enrich`,
+    { method: "POST" }
+  );
+}
+
 // ── Doxie private per-user memory ─────────────────────────────────────────
 // Facts/preferences Doxie saved about the caller via the remember_fact tool.
 // Listed + deletable on /settings/doxie-memory. Strictly per-user — the BE

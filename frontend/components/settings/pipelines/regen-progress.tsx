@@ -1,15 +1,18 @@
 "use client";
 
-import { CheckCircle2, Circle, Loader2, XCircle } from "lucide-react";
+import { CheckCircle2, Circle, Loader2, MinusCircle, XCircle } from "lucide-react";
 
-// Three-phase progress display rendered inside the Fresh Regen modal.
-// Kept generic over the array of phases so the modal can drive state
-// transitions and this component stays a pure render concern. Status
-// values mirror the FE state machine (idle/pending stay as "pending"
-// here — the modal swaps them to "running" / "done" / "failed" as the
-// chained calls progress).
+// Generic per-item progress display. Originally built for the Fresh Regen
+// modal's three chained phases; also reused by the favorite-list Bulk-Enrich
+// modal, where each "phase" is a firm in the list. Kept a pure render concern
+// so callers drive the state transitions. Status values mirror the FE state
+// machine (idle/pending stay as "pending" here — callers swap them to
+// "running" / "done" / "failed" / "skipped" as work progresses).
+//
+// "skipped" was added for Bulk-Enrich (a firm the BE gap-gated or couldn't
+// enrich); Fresh Regen never emits it, so the addition is backward-compatible.
 
-export type PhaseStatus = "pending" | "running" | "done" | "failed";
+export type PhaseStatus = "pending" | "running" | "done" | "failed" | "skipped";
 
 export interface PhaseSnapshot {
   id: string;
@@ -70,6 +73,9 @@ function PhaseIcon({ status }: { status: PhaseStatus }) {
   if (status === "failed") {
     return <XCircle {...props} />;
   }
+  if (status === "skipped") {
+    return <MinusCircle {...props} />;
+  }
   return <Circle {...props} />;
 }
 
@@ -81,6 +87,8 @@ function labelFor(status: PhaseStatus): string {
       return "Done";
     case "failed":
       return "Failed";
+    case "skipped":
+      return "Skipped";
     default:
       return "Pending";
   }
@@ -111,6 +119,14 @@ function paletteFor(status: PhaseStatus) {
         label: "text-[var(--text,#0f172a)]",
         detail: "text-danger",
         badge: "border-red-200 bg-red-50 text-danger"
+      };
+    case "skipped":
+      return {
+        surface: "border-amber-200 bg-amber-50/70",
+        icon: "text-amber-500",
+        label: "text-[var(--text,#0f172a)]",
+        detail: "text-amber-700",
+        badge: "border-amber-200 bg-amber-50 text-amber-700"
       };
     default:
       return {

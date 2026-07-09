@@ -11,8 +11,21 @@ rewired onto ``favorite_list_item`` in PR #172.
 
 from __future__ import annotations
 
-from fastapi import APIRouter, Depends, HTTPException, Path, Query, Response, status
-from sqlalchemy import delete, func, select, text
+import json
+import logging
+from datetime import datetime, timezone
+
+from fastapi import (
+    APIRouter,
+    BackgroundTasks,
+    Depends,
+    HTTPException,
+    Path,
+    Query,
+    Response,
+    status,
+)
+from sqlalchemy import delete, func, or_, select, text
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -24,6 +37,7 @@ from app.models.favorite_list import FavoriteList, FavoriteListItem
 from app.models.form4_transaction import Form4Transaction
 from app.models.institutional_investor import InstitutionalInvestor
 from app.models.investment_advisor import InvestmentAdvisor
+from app.models.pipeline_run import PipelineRun
 from app.models.reporting_owner import ReportingOwner
 from app.schemas.auth import AuthenticatedUser
 from app.schemas.favorite_list import (
@@ -34,6 +48,7 @@ from app.schemas.favorite_list import (
     FavoriteListBankItemCreate,
     FavoriteListBankItemResponse,
     FavoriteListCreate,
+    FavoriteListEnrichResponse,
     FavoriteListInvestorItemBatchCreate,
     FavoriteListInvestorItemCreate,
     FavoriteListInvestorItemResponse,
@@ -48,6 +63,14 @@ from app.schemas.favorite_list import (
     PaginatedFavoriteListItems,
 )
 from app.services.auth import get_current_user
+from app.services.favorite_list_enrich_orchestrator import (
+    FAVORITE_LIST_ENRICH_PIPELINE_NAME,
+    EnrichItem,
+    run_favorite_list_enrich_background,
+)
+from app.services.pipeline_reaper import is_run_stale
+
+logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/favorite-lists")
 
@@ -256,6 +279,237 @@ async def _get_owned_list(
     if favorite_list is None:
         raise HTTPException(status_code=404, detail="favorite_list_not_found")
     return favorite_list
+
+
+async def _load_all_items(db: AsyncSession, list_id: int) -> list[EnrichItem]:
+    """Enumerate every item in a list across all five entity types.
+
+    Unlike ``GET /{list_id}/items`` this is unpaginated: the bulk-enrich
+    worker needs the whole membership up front. Uses the same outer-join
+    hydration so each row carries its firm's display name, and preserves the
+    ``created_at desc, id desc`` order the FE renders so the loader's per-row
+    order matches the list the user sees.
+    """
+    stmt = (
+        select(
+            FavoriteListItem.id,
+            FavoriteListItem.broker_dealer_id,
+            BrokerDealer.name.label("broker_dealer_name"),
+            FavoriteListItem.advisor_id,
+            InvestmentAdvisor.name.label("advisor_name"),
+            FavoriteListItem.institutional_investor_id,
+            InstitutionalInvestor.name.label("institutional_investor_name"),
+            FavoriteListItem.reporting_owner_id,
+            ReportingOwner.name.label("reporting_owner_name"),
+            FavoriteListItem.bank_id,
+            Bank.name.label("bank_name"),
+        )
+        .outerjoin(BrokerDealer, BrokerDealer.id == FavoriteListItem.broker_dealer_id)
+        .outerjoin(InvestmentAdvisor, InvestmentAdvisor.id == FavoriteListItem.advisor_id)
+        .outerjoin(
+            InstitutionalInvestor,
+            InstitutionalInvestor.id == FavoriteListItem.institutional_investor_id,
+        )
+        .outerjoin(ReportingOwner, ReportingOwner.id == FavoriteListItem.reporting_owner_id)
+        .outerjoin(Bank, Bank.id == FavoriteListItem.bank_id)
+        .where(FavoriteListItem.list_id == list_id)
+        .order_by(FavoriteListItem.created_at.desc(), FavoriteListItem.id.desc())
+    )
+    rows = (await db.execute(stmt)).all()
+
+    items: list[EnrichItem] = []
+    for (
+        item_id,
+        bd_id,
+        bd_name,
+        advisor_id,
+        advisor_name,
+        investor_id,
+        investor_name,
+        reporting_owner_id,
+        reporting_owner_name,
+        bank_id,
+        bank_name,
+    ) in rows:
+        if bd_id is not None:
+            entity_type, entity_id, name = "broker_dealer", bd_id, bd_name
+        elif advisor_id is not None:
+            entity_type, entity_id, name = "advisor", advisor_id, advisor_name
+        elif investor_id is not None:
+            entity_type, entity_id, name = (
+                "institutional_investor",
+                investor_id,
+                investor_name,
+            )
+        elif bank_id is not None:
+            entity_type, entity_id, name = "bank", bank_id, bank_name
+        else:
+            entity_type, entity_id, name = (
+                "reporting_owner",
+                reporting_owner_id,
+                reporting_owner_name,
+            )
+        items.append(
+            EnrichItem(
+                item_id=item_id,
+                entity_type=entity_type,
+                entity_id=entity_id,
+                name=name or f"{entity_type} #{entity_id}",
+            )
+        )
+    return items
+
+
+# Namespace int4 for the per-(user, list) bulk-enrich dispatch advisory lock,
+# so its key space can't collide with any other advisory lock the app might add.
+_ENRICH_DISPATCH_LOCK_NS = 0x464C454E  # "FLEN" (favorite-list-enrich)
+
+
+async def _acquire_enrich_dispatch_lock(
+    db: AsyncSession, user_id: str, list_id: int
+) -> None:
+    """Serialize concurrent bulk-enrich dispatches for one (user, list).
+
+    A transaction-scoped Postgres advisory lock closes the check-then-insert
+    TOCTOU: without it, two simultaneous clicks both pass the in-flight SELECT
+    (each seeing no run yet) and each INSERT a parent run, spawning two workers
+    that double-bill every provider. With it, the second dispatch blocks until
+    the first commits, then its in-flight SELECT sees the just-created run
+    (READ COMMITTED) and attaches instead of duplicating. Auto-released at
+    transaction end (the commit/rollback below). No-op on non-Postgres, where
+    the concurrency path isn't exercised.
+    """
+    if db.bind is None or db.bind.dialect.name != "postgresql":
+        return
+    await db.execute(
+        text("SELECT pg_advisory_xact_lock(:ns, hashtext(:key))").bindparams(
+            ns=_ENRICH_DISPATCH_LOCK_NS,
+            key=f"{user_id}:{list_id}",
+        )
+    )
+
+
+@router.post("/{list_id}/enrich", response_model=FavoriteListEnrichResponse)
+async def enrich_favorite_list(
+    background_tasks: BackgroundTasks,
+    response: Response,
+    list_id: int = Path(..., ge=1),
+    current_user: AuthenticatedUser = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db_session),
+) -> FavoriteListEnrichResponse:
+    """Bulk-enrich every firm in a list owned by the calling user.
+
+    Owner-scoped (404 if the list is missing or belongs to another user, same
+    opaque shape as the rest of this router). Enumerates all items across the
+    five entity types and dispatches ONE resilient background job that
+    enriches each firm sequentially — gap-filling per entity type and always
+    ending with email DISCOVERY (never SMTP-verify). Returns 202 with a
+    ``run_id`` the FE polls at ``GET /api/v1/pipeline/run/{run_id}``; the run's
+    ``notes`` JSON carries the live "which firm are we on" pointer so the
+    loader survives a tab close.
+
+    Per-item feature gates (admin bypass): MASTER_LIST for broker-dealers,
+    INVESTMENT_ADVISORS for advisors, BANKS for banks, EMAIL_EXTRACTOR for the
+    email step — a blocked gate skips just that item/step with a noted reason
+    rather than 403-ing the whole run. ``institutional_investor`` and
+    ``reporting_owner`` items are skipped with a reason (no enrichment flow
+    yet). Attaches to an in-flight run for this (user, list) rather than
+    queueing a duplicate.
+    """
+    await _get_owned_list(db, list_id, current_user.id)
+
+    items = await _load_all_items(db, list_id)
+    if not items:
+        return FavoriteListEnrichResponse(
+            run_id=None,
+            status="skipped",
+            list_id=list_id,
+            total=0,
+            reason="List is empty.",
+        )
+
+    # Close the dispatch TOCTOU: hold a per-(user, list) advisory lock across
+    # the in-flight check + parent-run insert so two concurrent clicks can't
+    # both start a run (double-spend). Released when this request commits below.
+    await _acquire_enrich_dispatch_lock(db, current_user.id, list_id)
+
+    trigger_source = f"favorite_list_enrich:{current_user.email}"
+    # Match the id as a COMPLETE JSON token — delimited by ',' or '}' — so one
+    # list id can never prefix-match another (list 12 vs list 123's run).
+    list_marker = f'"list_id": {list_id}'
+    list_run_marker_match = or_(
+        PipelineRun.notes.ilike(f"%{list_marker},%"),
+        PipelineRun.notes.ilike(f"%{list_marker}" + "}%"),
+    )
+    in_flight_stmt = (
+        select(PipelineRun)
+        .where(PipelineRun.pipeline_name == FAVORITE_LIST_ENRICH_PIPELINE_NAME)
+        .where(PipelineRun.trigger_source == trigger_source)
+        .where(PipelineRun.status.in_(("queued", "running")))
+        .where(list_run_marker_match)
+        .order_by(PipelineRun.id.desc())
+        .limit(1)
+    )
+    in_flight = (await db.execute(in_flight_stmt)).scalar_one_or_none()
+    # Heartbeat-based liveness (NOT started_at): a bulk run legitimately runs
+    # past STALE_REFRESH_RUN_AGE, so it must keep reading as in-flight as long
+    # as its worker is still advancing (fresh notes.last_progress_at). Only a
+    # run whose heartbeat has gone quiet for the threshold is treated as an
+    # orphan and superseded by a fresh run.
+    if in_flight is not None and not is_run_stale(in_flight):
+        response.status_code = status.HTTP_202_ACCEPTED
+        return FavoriteListEnrichResponse(
+            run_id=in_flight.id,
+            status="in_flight",
+            list_id=list_id,
+            total=len(items),
+            reason="A bulk-enrich run is already in flight for this list.",
+        )
+
+    parent_run = PipelineRun(
+        pipeline_name=FAVORITE_LIST_ENRICH_PIPELINE_NAME,
+        trigger_source=trigger_source,
+        status="queued",
+        total_items=len(items),
+        processed_items=0,
+        success_count=0,
+        failure_count=0,
+        notes=json.dumps(
+            {
+                "list_id": list_id,
+                "stage": "queued",
+                "total": len(items),
+                "current_index": None,
+                "current_name": None,
+                "current_entity_type": None,
+                # Seed the heartbeat at queue time so the in-flight guard and
+                # reaper have a liveness signal even before the worker's first
+                # progress write lands.
+                "last_progress_at": datetime.now(timezone.utc).isoformat(),
+                "items": [],
+            }
+        ),
+    )
+    db.add(parent_run)
+    await db.commit()
+    await db.refresh(parent_run)
+
+    background_tasks.add_task(
+        run_favorite_list_enrich_background,
+        parent_run.id,
+        list_id,
+        items,
+        user=current_user,
+    )
+
+    response.status_code = status.HTTP_202_ACCEPTED
+    return FavoriteListEnrichResponse(
+        run_id=parent_run.id,
+        status=parent_run.status,
+        list_id=list_id,
+        total=len(items),
+        reason=None,
+    )
 
 
 @router.post("", response_model=FavoriteListResponse, status_code=201)
