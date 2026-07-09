@@ -23,10 +23,12 @@ from __future__ import annotations
 
 from typing import Any
 from unittest.mock import patch
+from urllib.parse import parse_qs
 
 import httpx
 import respx
 
+from app.core.config import settings
 from app.services.brokercheck_pdf import (
     FinraPdfFetchError,
     FormBdDetail,
@@ -368,3 +370,102 @@ async def test_enrich_with_detail_does_not_overwrite_with_empty_lists() -> None:
 
     assert record.types_of_business == ["Pre-existing type"]
     assert record.executive_officers == [{"name": "PRE, EXISTING"}]
+
+
+# ----- Enumeration completeness: adaptive query-splitting recovers the tail -----
+#
+# BrokerCheck's /search/firm silently truncates deep pagination (``start>=9000``
+# returns ``hits: null``) on a MIXED broker-dealer + investment-adviser pool, so
+# any base query whose reported ``total`` exceeds the safe pagination window can
+# only surface its first ~window rows. ``_harvest_query`` recovers the tail by
+# appending each ``finra_query_refine_charset`` char to an overflowing query and
+# recursing up to ``finra_query_refine_max_depth`` levels, unioning + de-duping
+# by CRD. These tests lock that behavior end-to-end (via a mocked ``_search``):
+# an overflowing query MUST spawn refined sub-queries (bounded by max depth and
+# deduped), and an under-window query MUST NOT.
+
+def _active_source(crd: str) -> dict[str, str]:
+    """Minimal /search/firm ``_source`` that ``_build_record`` accepts as an
+    active broker-dealer (id + name + normalizable SEC number + active scope)."""
+    return {
+        "firm_source_id": crd,
+        "firm_name": f"Firm {crd} LLC",
+        "firm_bd_full_sec_number": "8-12345",
+        "firm_scope": "Active",
+    }
+
+
+def _harvest_handler(plan: dict[str, tuple[int, list[str]]], seen: set[str]):
+    """respx side-effect answering each query per ``plan`` (query ->
+    (reported_total, first_page_crds)) and recording every distinct query
+    string seen. Only the first page (start=0) carries hits; later pages return
+    empty so paging terminates quickly while the first-page ``total`` still
+    drives the refine/no-refine decision."""
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        params = parse_qs(request.url.query.decode("ascii"))
+        query = params.get("query", [""])[0]
+        start = int(params.get("start", ["0"])[0])
+        seen.add(query)
+        total, crds = plan.get(query, (0, []))
+        hits = [{"_source": _active_source(c)} for c in crds] if start == 0 else []
+        return httpx.Response(200, json={"hits": {"hits": hits, "total": total}})
+
+    return handler
+
+
+@respx.mock
+async def test_overflowing_query_refines_and_dedupes_by_crd() -> None:
+    """A base query whose total exceeds the safe window spawns refined
+    sub-queries (base + each charset char), recursion stops at the configured
+    max depth, and CRDs are unioned + de-duped across parent/child."""
+    seen: set[str] = set()
+    plan = {
+        # base "a" overflows the (patched) 250-row window -> must refine
+        "a": (1000, ["100", "101"]),
+        # depth-2 children also "overflow", but max_depth=2 must stop them from
+        # spawning grandchildren; "ax" re-emits 101 (dup) + a tail-only CRD
+        "ax": (1000, ["101", "200"]),
+        "ay": (1000, ["201"]),
+    }
+    respx.get(url__startswith="https://api.brokercheck.finra.org/search/firm").mock(
+        side_effect=_harvest_handler(plan, seen),
+    )
+
+    with patch.object(FinraService, "_ALPHA_PREFIXES", ["a"]), \
+            patch.object(settings, "finra_harvest_queries", ""), \
+            patch.object(settings, "finra_pagination_safe_window", 250), \
+            patch.object(settings, "finra_query_refine_max_depth", 2), \
+            patch.object(settings, "finra_query_refine_charset", "xy"), \
+            patch.object(settings, "finra_rate_limit_per_second", 1000), \
+            patch.object(settings, "finra_request_delay_seconds", 0.0):
+        records = await FinraService().fetch_broker_dealers()
+
+    # Exactly the base query + its two depth-2 refinements — no grandchildren
+    # ("axx"/"ayx"/...), proving the max-depth cap holds.
+    assert seen == {"a", "ax", "ay"}, seen
+    # Union of {100,101} ∪ {101,200} ∪ {201}, de-duped by CRD -> 4 unique firms.
+    assert {r.crd_number for r in records} == {"100", "101", "200", "201"}
+
+
+@respx.mock
+async def test_query_under_window_does_not_refine() -> None:
+    """A base query whose total is within the safe window is fully paged as-is
+    and MUST NOT spawn refined sub-queries — refinement is targeted, so the
+    common case (most single-char queries) stays a single base query."""
+    seen: set[str] = set()
+    plan = {"a": (100, ["100"])}
+    respx.get(url__startswith="https://api.brokercheck.finra.org/search/firm").mock(
+        side_effect=_harvest_handler(plan, seen),
+    )
+
+    with patch.object(FinraService, "_ALPHA_PREFIXES", ["a"]), \
+            patch.object(settings, "finra_harvest_queries", ""), \
+            patch.object(settings, "finra_pagination_safe_window", 250), \
+            patch.object(settings, "finra_query_refine_charset", "xy"), \
+            patch.object(settings, "finra_rate_limit_per_second", 1000), \
+            patch.object(settings, "finra_request_delay_seconds", 0.0):
+        records = await FinraService().fetch_broker_dealers()
+
+    assert seen == {"a"}, f"under-window query must not refine, got {seen}"
+    assert {r.crd_number for r in records} == {"100"}
