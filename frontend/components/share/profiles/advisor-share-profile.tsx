@@ -17,6 +17,7 @@ import { agencyLabel } from "@/components/master-list/detail/clearing-membership
 import { formatCurrency, formatDate } from "@/lib/format";
 
 import { Copyable } from "@/components/share/profiles/shared/copyable";
+import { DiscoveredEmailsSection } from "@/components/share/profiles/shared/discovered-emails-section";
 import { MiniStat } from "@/components/share/profiles/shared/mini-stat";
 import { ProfileHeader } from "@/components/share/profiles/shared/profile-header";
 import type {
@@ -62,12 +63,13 @@ export function AdvisorShareProfile({ data }: AdvisorShareProfileProps) {
     }),
   );
 
+  // Discovered emails render in their own full-width section below the grid,
+  // so they no longer count toward the People panel's empty state.
   const hasPeople =
     directOwners.length > 0 ||
     executiveOfficers.length > 0 ||
     indirectOwners.length > 0 ||
-    contactRows.length > 0 ||
-    discoveredRows.length > 0;
+    contactRows.length > 0;
 
   return (
     <div className="min-w-0 animate-fade-in">
@@ -244,28 +246,6 @@ export function AdvisorShareProfile({ data }: AdvisorShareProfileProps) {
               />
             ) : null}
 
-            {discoveredRows.length > 0 ? (
-              <PeopleTable
-                title="Discovered emails"
-                items={discoveredRows}
-                columns={[
-                  {
-                    header: "Name",
-                    cell: (c) => (
-                      <Copyable className="font-semibold text-[var(--text,#0f172a)]">
-                        {c.name}
-                      </Copyable>
-                    ),
-                  },
-                  { header: "Title", cell: (c) => c.title ?? "—" },
-                  {
-                    header: "Channels",
-                    cell: (c) => <ChannelIconCell contact={c} allowCopy />,
-                    className: "whitespace-nowrap",
-                  },
-                ]}
-              />
-            ) : null}
           </SectionPanel>
         </div>
 
@@ -367,6 +347,10 @@ export function AdvisorShareProfile({ data }: AdvisorShareProfileProps) {
             ) : null}
           </SectionPanel>
         </div>
+      </div>
+
+      <div className="mt-4">
+        <DiscoveredEmailsSection rows={discoveredRows} />
       </div>
     </div>
   );
