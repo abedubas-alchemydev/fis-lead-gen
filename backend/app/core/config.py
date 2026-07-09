@@ -98,6 +98,27 @@ class Settings(BaseSettings):
     finra_harvest_queries: str = (
         "llc,inc,lp,corp,company,securities,capital,markets,financial,broker,dealer,investment"
     )
+    # ── FINRA BrokerCheck adaptive query-splitting (enumeration completeness) ──
+    # BrokerCheck's /search/firm has no "list all" endpoint and silently
+    # truncates deep pagination: rows are served up to ~start=8000 but
+    # ``start>=9000`` returns ``hits: null``. Because /search/firm returns a
+    # MIXED broker-dealer + investment-adviser pool, single-token queries blow
+    # past that window (query "a" reports total ~18,048), so any base query
+    # whose reported total exceeds ``finra_pagination_safe_window`` is silently
+    # cut off and BDs in the tail are missed.
+    #
+    # Fix (strictly additive to the existing keyword + single-char base
+    # queries): read ``total`` off a query's first page; when it exceeds the
+    # safe window, page it up to the window AND ALSO enumerate refined
+    # sub-queries by appending each ``finra_query_refine_charset`` char to the
+    # query string ("a" -> "aa","ab",...,"a9"), recursing on any sub-query that
+    # itself still exceeds the window, up to ``finra_query_refine_max_depth``
+    # levels. Everything is unioned and deduped by CRD, so heavy parent/child
+    # overlap is harmless and coverage only ever increases. The safe window
+    # doubles as the max ``start`` we page a single query to.
+    finra_pagination_safe_window: int = 8000
+    finra_query_refine_max_depth: int = 3
+    finra_query_refine_charset: str = "abcdefghijklmnopqrstuvwxyz0123456789"
     focus_reports_csv_path: str | None = None
     initial_load_limit: int | None = None
     minimum_initial_load_records: int = 500
