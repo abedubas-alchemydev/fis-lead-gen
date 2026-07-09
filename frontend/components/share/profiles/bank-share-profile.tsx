@@ -21,6 +21,7 @@ import { formatCurrency, formatDate } from "@/lib/format";
 import type { BankApplicationEventItem } from "@/lib/types";
 
 import { Copyable } from "@/components/share/profiles/shared/copyable";
+import { DiscoveredEmailsSection } from "@/components/share/profiles/shared/discovered-emails-section";
 import { MiniStat } from "@/components/share/profiles/shared/mini-stat";
 import { ProfileHeader } from "@/components/share/profiles/shared/profile-header";
 import type {
@@ -265,7 +266,7 @@ export function BankShareProfile({ data }: BankShareProfileProps) {
 
           {/* ── People ── */}
           <SectionPanel eyebrow="People" title="Contacts">
-            {contactRows.length === 0 && discoveredRows.length === 0 ? (
+            {contactRows.length === 0 ? (
               <div className="rounded-2xl bg-[var(--surface-2,#f1f6fd)] px-4 py-6 text-sm text-[var(--text-muted,#94a3b8)]">
                 No contacts on file yet.
               </div>
@@ -305,28 +306,6 @@ export function BankShareProfile({ data }: BankShareProfileProps) {
               />
             ) : null}
 
-            {discoveredRows.length > 0 ? (
-              <PeopleTable
-                title="Discovered emails"
-                items={discoveredRows}
-                columns={[
-                  {
-                    header: "Name",
-                    cell: (c) => (
-                      <Copyable className="font-semibold text-[var(--text,#0f172a)]">
-                        {c.name}
-                      </Copyable>
-                    ),
-                  },
-                  { header: "Title", cell: (c) => c.title ?? "—" },
-                  {
-                    header: "Channels",
-                    cell: (c) => <ChannelIconCell contact={c} allowCopy />,
-                    className: "whitespace-nowrap",
-                  },
-                ]}
-              />
-            ) : null}
           </SectionPanel>
         </div>
 
@@ -378,6 +357,10 @@ export function BankShareProfile({ data }: BankShareProfileProps) {
             )}
           </SectionPanel>
         </div>
+      </div>
+
+      <div className="mt-4">
+        <DiscoveredEmailsSection rows={discoveredRows} />
       </div>
     </div>
   );

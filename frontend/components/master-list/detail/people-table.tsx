@@ -21,11 +21,23 @@ export function PeopleTable<T>({
   items,
   columns,
   pageSize = PEOPLE_TABLE_PAGE_SIZE,
+  showTitle = true,
+  scrollX = false,
 }: {
   title: string;
   items: readonly T[];
   columns: readonly PeopleColumn<T>[];
   pageSize?: number;
+  // When false, the in-table "{title} ({total})" label is suppressed and only
+  // the pager renders (right-aligned) — used when a surrounding panel already
+  // supplies the heading (e.g. the standalone Discovered emails share section).
+  // Defaults true so every existing call site renders unchanged.
+  showTitle?: boolean;
+  // When true, the table wrapper scrolls horizontally instead of clipping its
+  // overflow — keeps wide tables (e.g. the 4-column Discovered emails section)
+  // fully reachable on narrow screens rather than cutting off the right
+  // columns. Defaults false so every existing call site keeps overflow-hidden.
+  scrollX?: boolean;
 }) {
   const [page, setPage] = useState(0);
   const total = items.length;
@@ -39,11 +51,18 @@ export function PeopleTable<T>({
 
   return (
     <div className="mb-5 last:mb-0">
-      <div className="mb-2 flex flex-wrap items-center justify-between gap-3">
-        <p className="text-[13px] font-semibold text-[var(--text,#0f172a)]">
-          {total > 0 ? `${title} (${total})` : title}
-        </p>
-        {showPager ? (
+      {showTitle || showPager ? (
+        <div
+          className={`mb-2 flex flex-wrap items-center gap-3 ${
+            showTitle ? "justify-between" : "justify-end"
+          }`}
+        >
+          {showTitle ? (
+            <p className="text-[13px] font-semibold text-[var(--text,#0f172a)]">
+              {total > 0 ? `${title} (${total})` : title}
+            </p>
+          ) : null}
+          {showPager ? (
           <div className="flex items-center gap-2 text-xs text-[var(--text-muted,#94a3b8)]">
             <button
               type="button"
@@ -67,9 +86,14 @@ export function PeopleTable<T>({
               Next
             </button>
           </div>
-        ) : null}
-      </div>
-      <div className="overflow-hidden rounded-2xl border border-[var(--border,rgba(30,64,175,0.1))]">
+          ) : null}
+        </div>
+      ) : null}
+      <div
+        className={`rounded-2xl border border-[var(--border,rgba(30,64,175,0.1))] ${
+          scrollX ? "overflow-x-auto" : "overflow-hidden"
+        }`}
+      >
         <table className="w-full text-sm">
           <thead className="bg-[var(--surface-2,#f1f6fd)] text-left text-xs uppercase tracking-wide text-[var(--text-muted,#94a3b8)]">
             <tr>

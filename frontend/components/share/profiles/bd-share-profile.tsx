@@ -27,6 +27,7 @@ import { formatCurrency, formatDate, formatPercent } from "@/lib/format";
 import type { ExecutiveContactItem } from "@/lib/types";
 
 import { Copyable } from "@/components/share/profiles/shared/copyable";
+import { DiscoveredEmailsSection } from "@/components/share/profiles/shared/discovered-emails-section";
 import { MiniStat } from "@/components/share/profiles/shared/mini-stat";
 import { ProfileHeader } from "@/components/share/profiles/shared/profile-header";
 import type { BdShareProfileProps, PublicContactItem } from "@/components/share/profiles/types";
@@ -96,7 +97,9 @@ export function BdShareProfile({ data }: BdShareProfileProps) {
     (row) => !matchedContactIds.has(row.id),
   );
 
-  // Discovered-email scan hits join the Additional contacts table as rows.
+  // Discovered-email scan hits render in their own full-width section below
+  // the grid (see DiscoveredEmailsSection) rather than being folded into the
+  // Additional contacts table, where 100+ hits crowd out the real contacts.
   const discoveredRows: DiscoveredRow[] = data.discovered_emails.map(
     (row, index) => ({
       id: contactRows.length + index,
@@ -107,15 +110,11 @@ export function BdShareProfile({ data }: BdShareProfileProps) {
       linkedin_url: row.linkedin_url,
     }),
   );
-  const additionalRows: Array<ContactRow | DiscoveredRow> = [
-    ...additionalContacts,
-    ...discoveredRows,
-  ];
 
   const hasPeople =
     (data.direct_owners?.length ?? 0) > 0 ||
     (data.executive_officers?.length ?? 0) > 0 ||
-    additionalRows.length > 0;
+    additionalContacts.length > 0;
 
   // Net-capital trend points, oldest → newest. Mirrors the chartPoints
   // memo in broker-dealer-detail-client.tsx.
@@ -261,10 +260,10 @@ export function BdShareProfile({ data }: BdShareProfileProps) {
               />
             ) : null}
 
-            {additionalRows.length > 0 ? (
+            {additionalContacts.length > 0 ? (
               <PeopleTable
                 title="Additional contacts"
-                items={additionalRows}
+                items={additionalContacts}
                 columns={[
                   {
                     header: "Name",
@@ -577,6 +576,10 @@ export function BdShareProfile({ data }: BdShareProfileProps) {
             </div>
           </SectionPanel>
         </div>
+      </div>
+
+      <div className="mt-4">
+        <DiscoveredEmailsSection rows={discoveredRows} />
       </div>
     </div>
   );
