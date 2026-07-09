@@ -126,7 +126,7 @@ export function AdvisorShareProfile({ data }: AdvisorShareProfileProps) {
         />
       </div>
 
-      <div className="flex flex-col gap-4 xl:flex-row">
+      <div className="flex flex-col gap-4">
         <div className="flex min-w-0 flex-1 flex-col gap-4">
           {/* ── Form ADV financials ── */}
           <SectionPanel

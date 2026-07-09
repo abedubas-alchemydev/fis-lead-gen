@@ -154,7 +154,7 @@ export function BdShareProfile({ data }: BdShareProfileProps) {
         ]}
       />
 
-      <div className="flex flex-col gap-4 xl:flex-row">
+      <div className="flex flex-col gap-4">
         <div className="flex min-w-0 flex-1 flex-col gap-4">
           {/* ── Financials ── */}
           <SectionPanel eyebrow="Financials" title="Net capital and trend">
