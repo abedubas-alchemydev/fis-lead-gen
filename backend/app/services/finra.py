@@ -77,7 +77,10 @@ class FinraService:
 
         # Phase 1: keyword queries (broad coverage of common firm name patterns)
         keyword_terms = [query.strip() for query in settings.finra_harvest_queries.split(",") if query.strip()]
-        # Phase 2: alphabetical prefix queries (catch firms missed by keywords)
+        # Phase 2: alphabetical prefix queries (catch firms missed by keywords).
+        # Both phases stay as base queries; adaptive refinement (below) only ever
+        # ADDS sub-queries, so single-char coverage — the only signal for firms
+        # whose sole matching token is one character — is never dropped.
         all_queries = keyword_terms + self._ALPHA_PREFIXES
 
         delay = max(1.0 / settings.finra_rate_limit_per_second, settings.finra_request_delay_seconds)
@@ -88,43 +91,147 @@ class FinraService:
             headers=BROKERCHECK_HEADERS,
         ) as client:
             for query_index, query in enumerate(all_queries):
-                start = 0
-                page_size = 100
-
-                while True:
-                    hits, total = await self._search(client, query=query, start=start, rows=page_size)
-                    if not hits:
-                        break
-
-                    for hit in hits:
-                        source = hit.get("_source") or hit.get("source")
-                        if not isinstance(source, dict):
-                            continue
-
-                        record = self._build_record(source)
-                        if record is None:
-                            continue
-                        if record.registration_status.lower() != "active":
-                            continue
-                        if record.crd_number in seen_crd_numbers:
-                            continue
-
-                        records.append(record)
-                        seen_crd_numbers.add(record.crd_number)
-
-                        if limit is not None and len(records) >= limit:
-                            return records
-
-                    start += page_size
-                    if total is None or start >= total:
-                        break
-                    if delay > 0:
-                        await asyncio.sleep(delay)
+                limit_reached = await self._harvest_query(
+                    client,
+                    query=query,
+                    depth=1,
+                    delay=delay,
+                    limit=limit,
+                    records=records,
+                    seen_crd_numbers=seen_crd_numbers,
+                )
+                if limit_reached:
+                    return records
 
                 if query_index < len(all_queries) - 1 and delay > 0:
                     await asyncio.sleep(delay)
 
         return records
+
+    async def _harvest_query(
+        self,
+        client: httpx.AsyncClient,
+        *,
+        query: str,
+        depth: int,
+        delay: float,
+        limit: int | None,
+        records: list[FinraBrokerDealerRecord],
+        seen_crd_numbers: set[str],
+    ) -> bool:
+        """Page a single query (bounded by the safe pagination window) and,
+        when its reported ``total`` exceeds that window, recurse into refined
+        sub-queries to recover the truncated tail.
+
+        BrokerCheck silently caps deep pagination (``start>=9000`` returns
+        ``hits: null``), so any query whose total exceeds
+        ``finra_pagination_safe_window`` can only surface its first ~8k rows.
+        For those we append each ``finra_query_refine_charset`` character to
+        the query string ("a" -> "aa".."a9") and recurse, up to
+        ``finra_query_refine_max_depth`` levels (single -> double -> triple
+        char, then stop). This is strictly additive: the base query is always
+        fully paged first, and refined sub-queries only union in extra CRDs —
+        the shared ``seen_crd_numbers`` set absorbs the heavy parent/child
+        overlap.
+
+        Returns ``True`` when the caller-supplied ``limit`` was reached, which
+        unwinds the whole enumeration (preserving the original early-return).
+        """
+        total, limit_reached = await self._page_query(
+            client,
+            query=query,
+            delay=delay,
+            limit=limit,
+            records=records,
+            seen_crd_numbers=seen_crd_numbers,
+        )
+        if limit_reached:
+            return True
+
+        # Only refine queries that actually overflow the window, and only while
+        # we still have recursion budget. Most queries fall well under the cap
+        # (e.g. "e" ~= 4,139) and never spawn sub-queries.
+        if (
+            total is not None
+            and total > settings.finra_pagination_safe_window
+            and depth < settings.finra_query_refine_max_depth
+        ):
+            for char in settings.finra_query_refine_charset:
+                if delay > 0:
+                    await asyncio.sleep(delay)
+                limit_reached = await self._harvest_query(
+                    client,
+                    query=query + char,
+                    depth=depth + 1,
+                    delay=delay,
+                    limit=limit,
+                    records=records,
+                    seen_crd_numbers=seen_crd_numbers,
+                )
+                if limit_reached:
+                    return True
+
+        return False
+
+    async def _page_query(
+        self,
+        client: httpx.AsyncClient,
+        *,
+        query: str,
+        delay: float,
+        limit: int | None,
+        records: list[FinraBrokerDealerRecord],
+        seen_crd_numbers: set[str],
+    ) -> tuple[int | None, bool]:
+        """Page one query from ``start=0`` up to the safe pagination window,
+        appending new active broker-dealers (deduped by CRD) into ``records``.
+
+        Returns ``(total, limit_reached)`` where ``total`` is the hit total
+        reported on the query's first page (the caller uses it to decide
+        whether to refine) and ``limit_reached`` is ``True`` when the
+        caller-supplied ``limit`` was hit mid-page.
+        """
+        start = 0
+        page_size = 100
+        query_total: int | None = None
+
+        while True:
+            hits, total = await self._search(client, query=query, start=start, rows=page_size)
+            if query_total is None:
+                query_total = total
+            if not hits:
+                break
+
+            for hit in hits:
+                source = hit.get("_source") or hit.get("source")
+                if not isinstance(source, dict):
+                    continue
+
+                record = self._build_record(source)
+                if record is None:
+                    continue
+                if record.registration_status.lower() != "active":
+                    continue
+                if record.crd_number in seen_crd_numbers:
+                    continue
+
+                records.append(record)
+                seen_crd_numbers.add(record.crd_number)
+
+                if limit is not None and len(records) >= limit:
+                    return query_total, True
+
+            start += page_size
+            if total is None or start >= total:
+                break
+            # BrokerCheck truncates deep pagination beyond ~8-9k hits; stop at
+            # the safe window and let refined sub-queries recover the tail.
+            if start > settings.finra_pagination_safe_window:
+                break
+            if delay > 0:
+                await asyncio.sleep(delay)
+
+        return query_total, False
 
     async def enrich_with_detail(
         self,
