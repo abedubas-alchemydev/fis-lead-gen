@@ -2,9 +2,10 @@
 
 import Link from "next/link";
 import type { Route } from "next";
-import { ArrowRight, ChevronLeft, ChevronRight, Share2 } from "lucide-react";
+import { ArrowRight, ChevronLeft, ChevronRight, Share2, Sparkles } from "lucide-react";
 import { useEffect, useMemo, useState } from "react";
 
+import { BulkEnrichModal } from "@/components/my-favorites/bulk-enrich-modal";
 import { CreateShareModal } from "@/components/shares/create-share-modal";
 import { Button } from "@/components/ui/button";
 import { getFavoriteListItems } from "@/lib/api";
@@ -52,6 +53,10 @@ export function FavoriteListItemsPane({
   // fixed-position overlay, so it lives inside the header block and has no
   // layout impact on the item rows below.
   const [shareModalOpen, setShareModalOpen] = useState(false);
+  // Header-only "Bulk enrich" affordance (admins). Kicks a server-side
+  // background job that gap-fills + email-discovers every firm in the list;
+  // its own modal owns the confirm → poll → summary lifecycle.
+  const [enrichModalOpen, setEnrichModalOpen] = useState(false);
 
   useEffect(() => {
     let active = true;
@@ -112,22 +117,40 @@ export function FavoriteListItemsPane({
           </p>
         </div>
         {isAdmin && total > 0 ? (
-          <Button
-            type="button"
-            variant="outline"
-            size="sm"
-            onClick={() => setShareModalOpen(true)}
-            className="shrink-0"
-          >
-            <Share2 className="h-3.5 w-3.5" strokeWidth={2} aria-hidden />
-            Export share link
-          </Button>
+          <div className="flex shrink-0 items-center gap-2">
+            <Button
+              type="button"
+              variant="outline"
+              size="sm"
+              onClick={() => setEnrichModalOpen(true)}
+            >
+              <Sparkles className="h-3.5 w-3.5" strokeWidth={2} aria-hidden />
+              Bulk enrich
+            </Button>
+            <Button
+              type="button"
+              variant="outline"
+              size="sm"
+              onClick={() => setShareModalOpen(true)}
+            >
+              <Share2 className="h-3.5 w-3.5" strokeWidth={2} aria-hidden />
+              Export share link
+            </Button>
+          </div>
         ) : null}
         {shareModalOpen ? (
           <CreateShareModal
             listId={activeList.id}
             listName={activeList.name}
             onClose={() => setShareModalOpen(false)}
+          />
+        ) : null}
+        {enrichModalOpen ? (
+          <BulkEnrichModal
+            listId={activeList.id}
+            listName={activeList.name}
+            total={total}
+            onClose={() => setEnrichModalOpen(false)}
           />
         ) : null}
       </header>

@@ -8,8 +8,9 @@ prove it rejects pre-DB.
 
 from __future__ import annotations
 
+import json
 import secrets
-from datetime import datetime
+from datetime import datetime, timedelta, timezone
 
 import httpx
 import pytest
@@ -22,7 +23,9 @@ from app.models.bank import Bank
 from app.models.broker_dealer import BrokerDealer
 from app.models.favorite_list import FavoriteList, FavoriteListItem
 from app.models.investment_advisor import InvestmentAdvisor
+from app.models.pipeline_run import PipelineRun
 from app.schemas.auth import AuthenticatedUser
+from app.services import favorite_list_enrich_orchestrator as fl_enrich
 from app.services.auth import get_current_user
 
 pytestmark = pytest.mark.integration
@@ -1601,3 +1604,434 @@ async def test_get_bank_favorite_lists_404_for_unknown_bank() -> None:
     finally:
         app.dependency_overrides.clear()
         await _cleanup([user_id], [])
+
+
+# ── POST /favorite-lists/{list_id}/enrich (bulk-enrich dispatch) ──────────────
+# These stub the background runner so no providers are hit: the endpoint's job
+# is owner-scope + enumerate + dispatch, which is what we assert here.
+
+
+async def _cleanup_runs(run_ids: list[int]) -> None:
+    if not run_ids:
+        return
+    async with SessionLocal() as session:
+        await session.execute(delete(PipelineRun).where(PipelineRun.id.in_(run_ids)))
+        await session.commit()
+
+
+async def test_enrich_favorite_list_401_without_session_cookie() -> None:
+    async with _client() as client:
+        response = await client.post("/api/v1/favorite-lists/1/enrich")
+    assert response.status_code == 401
+
+
+async def test_enrich_favorite_list_404_when_not_owner() -> None:
+    owner_id = await _seed_user()
+    other_id = await _seed_user()
+    list_id = await _seed_default_list(owner_id)
+
+    # Authenticated as ``other_id`` — must not be able to enrich owner's list.
+    app.dependency_overrides[get_current_user] = lambda: _override_user(other_id)
+    try:
+        async with _client() as client:
+            response = await client.post(f"/api/v1/favorite-lists/{list_id}/enrich")
+        assert response.status_code == 404
+        assert response.json()["detail"] == "favorite_list_not_found"
+    finally:
+        app.dependency_overrides.clear()
+        await _cleanup([owner_id, other_id], [])
+
+
+async def test_enrich_empty_list_returns_skipped_no_run() -> None:
+    user_id = await _seed_user()
+    list_id = await _seed_default_list(user_id)
+
+    app.dependency_overrides[get_current_user] = lambda: _override_user(user_id)
+    try:
+        async with _client() as client:
+            response = await client.post(f"/api/v1/favorite-lists/{list_id}/enrich")
+        assert response.status_code == 200
+        body = response.json()
+        assert body == {
+            "run_id": None,
+            "status": "skipped",
+            "list_id": list_id,
+            "total": 0,
+            "reason": "List is empty.",
+        }
+    finally:
+        app.dependency_overrides.clear()
+        await _cleanup([user_id], [])
+
+
+async def test_enrich_dispatches_job_and_creates_parent_run(monkeypatch) -> None:
+    user_id = await _seed_user()
+    list_id = await _seed_default_list(user_id)
+    bd_id = await _seed_bd(name="Enrich BD")
+    await _seed_list_item(list_id, bd_id)
+
+    dispatched: dict = {}
+
+    async def _stub_runner(parent_run_id, lid, items, *, user):  # noqa: ANN001
+        dispatched["parent_run_id"] = parent_run_id
+        dispatched["list_id"] = lid
+        dispatched["item_count"] = len(items)
+        dispatched["entity_types"] = [it.entity_type for it in items]
+
+    # Stub the module-level name the endpoint dispatches so no providers run.
+    monkeypatch.setattr(fl_enrich, "run_favorite_list_enrich_background", _stub_runner)
+    import app.api.v1.endpoints.favorite_lists as fl_endpoint
+
+    monkeypatch.setattr(fl_endpoint, "run_favorite_list_enrich_background", _stub_runner)
+
+    app.dependency_overrides[get_current_user] = lambda: _override_user(user_id)
+    run_id = None
+    try:
+        async with _client() as client:
+            response = await client.post(f"/api/v1/favorite-lists/{list_id}/enrich")
+        assert response.status_code == 202
+        body = response.json()
+        run_id = body["run_id"]
+        assert run_id is not None
+        assert body["status"] == "queued"
+        assert body["total"] == 1
+
+        # The background job was scheduled with the enumerated item.
+        assert dispatched["item_count"] == 1
+        assert dispatched["entity_types"] == ["broker_dealer"]
+        assert dispatched["parent_run_id"] == run_id
+
+        # A parent PipelineRun row was persisted with the progress skeleton.
+        async with SessionLocal() as session:
+            run = await session.get(PipelineRun, run_id)
+            assert run is not None
+            assert run.pipeline_name == fl_enrich.FAVORITE_LIST_ENRICH_PIPELINE_NAME
+            assert run.status == "queued"
+            assert run.total_items == 1
+            notes = json.loads(run.notes)
+            assert notes["list_id"] == list_id
+            assert notes["total"] == 1
+            assert notes["items"] == []
+    finally:
+        app.dependency_overrides.clear()
+        await _cleanup_runs([run_id] if run_id else [])
+        await _cleanup([user_id], [bd_id])
+
+
+async def test_enrich_attaches_to_in_flight_run(monkeypatch) -> None:
+    user_id = await _seed_user()
+    list_id = await _seed_default_list(user_id)
+    bd_id = await _seed_bd(name="In-flight BD")
+    await _seed_list_item(list_id, bd_id)
+
+    async def _stub_runner(*args, **kwargs):  # noqa: ANN001, ANN002, ANN003
+        return None
+
+    monkeypatch.setattr(fl_enrich, "run_favorite_list_enrich_background", _stub_runner)
+    import app.api.v1.endpoints.favorite_lists as fl_endpoint
+
+    monkeypatch.setattr(fl_endpoint, "run_favorite_list_enrich_background", _stub_runner)
+
+    # Pre-seed a running bulk-enrich run for THIS (user, list): same trigger
+    # source + notes marker the endpoint writes, started just now.
+    trigger = f"favorite_list_enrich:{user_id}@example.com"
+    seeded_run_id = None
+    async with SessionLocal() as session:
+        run = PipelineRun(
+            pipeline_name=fl_enrich.FAVORITE_LIST_ENRICH_PIPELINE_NAME,
+            trigger_source=trigger,
+            status="running",
+            total_items=1,
+            notes=json.dumps({"list_id": list_id, "stage": "running", "items": []}),
+        )
+        session.add(run)
+        await session.commit()
+        await session.refresh(run)
+        seeded_run_id = run.id
+
+    app.dependency_overrides[get_current_user] = lambda: _override_user(user_id)
+    try:
+        async with _client() as client:
+            response = await client.post(f"/api/v1/favorite-lists/{list_id}/enrich")
+        assert response.status_code == 202
+        body = response.json()
+        assert body["status"] == "in_flight"
+        assert body["run_id"] == seeded_run_id  # attached, no duplicate queued
+    finally:
+        app.dependency_overrides.clear()
+        await _cleanup_runs([seeded_run_id] if seeded_run_id else [])
+        await _cleanup([user_id], [bd_id])
+
+
+async def test_enrich_attaches_to_long_run_with_fresh_heartbeat(monkeypatch) -> None:
+    """The double-spend fix: a bulk run whose ``started_at`` is well past the
+    10-min staleness threshold but whose heartbeat (notes.last_progress_at) is
+    fresh must still read as in-flight — so the FE's re-attach POST attaches
+    instead of spawning a SECOND worker that re-bills every provider."""
+    user_id = await _seed_user()
+    list_id = await _seed_default_list(user_id)
+    bd_id = await _seed_bd(name="Heartbeat BD")
+    await _seed_list_item(list_id, bd_id)
+
+    async def _stub_runner(*args, **kwargs):  # noqa: ANN001, ANN002, ANN003
+        return None
+
+    monkeypatch.setattr(fl_enrich, "run_favorite_list_enrich_background", _stub_runner)
+    import app.api.v1.endpoints.favorite_lists as fl_endpoint
+
+    monkeypatch.setattr(fl_endpoint, "run_favorite_list_enrich_background", _stub_runner)
+
+    trigger = f"favorite_list_enrich:{user_id}@example.com"
+    seeded_run_id = None
+    async with SessionLocal() as session:
+        run = PipelineRun(
+            pipeline_name=fl_enrich.FAVORITE_LIST_ENRICH_PIPELINE_NAME,
+            trigger_source=trigger,
+            status="running",
+            total_items=1,
+            notes=json.dumps(
+                {
+                    "list_id": list_id,
+                    "stage": "running",
+                    # Started 30 min ago (>> 10 min stale threshold) …
+                    "last_progress_at": datetime.now(timezone.utc).isoformat(),  # … but advancing NOW.
+                    "items": [],
+                }
+            ),
+            # started_at ancient — a started_at-based guard would wrongly treat
+            # this as an orphan and start a duplicate run.
+            started_at=datetime.now(timezone.utc) - timedelta(minutes=30),
+        )
+        session.add(run)
+        await session.commit()
+        await session.refresh(run)
+        seeded_run_id = run.id
+
+    app.dependency_overrides[get_current_user] = lambda: _override_user(user_id)
+    try:
+        async with _client() as client:
+            response = await client.post(f"/api/v1/favorite-lists/{list_id}/enrich")
+        assert response.status_code == 202
+        body = response.json()
+        assert body["status"] == "in_flight"
+        assert body["run_id"] == seeded_run_id  # attached, not duplicated
+
+        # No second parent run was created for this (user, list).
+        async with SessionLocal() as session:
+            runs = (
+                (
+                    await session.execute(
+                        select(PipelineRun).where(
+                            PipelineRun.trigger_source == trigger,
+                            PipelineRun.pipeline_name
+                            == fl_enrich.FAVORITE_LIST_ENRICH_PIPELINE_NAME,
+                        )
+                    )
+                )
+                .scalars()
+                .all()
+            )
+        assert len(runs) == 1
+    finally:
+        app.dependency_overrides.clear()
+        await _cleanup_runs([seeded_run_id] if seeded_run_id else [])
+        await _cleanup([user_id], [bd_id])
+
+
+async def test_enrich_attaches_when_per_firm_progress_quiet_but_lifetime_beat_fresh(
+    monkeypatch,
+) -> None:
+    """Core double-spend fix (finding M1) at the endpoint: a run whose per-firm
+    pointer has been QUIET for >10 min (a firm stuck mid-dispatch) but whose
+    LIFETIME heartbeat is fresh must still read in-flight, so the FE re-click
+    ("Close and click Bulk enrich again") ATTACHES instead of spawning a second
+    worker that re-bills every provider for the overlapping firms."""
+    user_id = await _seed_user()
+    list_id = await _seed_default_list(user_id)
+    bd_id = await _seed_bd(name="Stuck-Firm BD")
+    await _seed_list_item(list_id, bd_id)
+
+    async def _stub_runner(*args, **kwargs):  # noqa: ANN001, ANN002, ANN003
+        return None
+
+    monkeypatch.setattr(fl_enrich, "run_favorite_list_enrich_background", _stub_runner)
+    import app.api.v1.endpoints.favorite_lists as fl_endpoint
+
+    monkeypatch.setattr(fl_endpoint, "run_favorite_list_enrich_background", _stub_runner)
+
+    trigger = f"favorite_list_enrich:{user_id}@example.com"
+    seeded_run_id = None
+    async with SessionLocal() as session:
+        run = PipelineRun(
+            pipeline_name=fl_enrich.FAVORITE_LIST_ENRICH_PIPELINE_NAME,
+            trigger_source=trigger,
+            status="running",
+            total_items=9,
+            notes=json.dumps(
+                {
+                    "list_id": list_id,
+                    "stage": "running",
+                    "total": 9,
+                    # Per-firm pointer FROZEN (firm #3 stuck mid-chain); no per-firm
+                    # write has landed in 20 min …
+                    "current_index": 2,
+                    "current_name": "Stuck-Firm BD",
+                    "items": [],
+                    # … but the lifetime beat re-stamped liveness just now, which is
+                    # the only signal is_run_stale reads.
+                    "last_progress_at": datetime.now(timezone.utc).isoformat(),
+                }
+            ),
+            started_at=datetime.now(timezone.utc) - timedelta(minutes=40),
+        )
+        session.add(run)
+        await session.commit()
+        await session.refresh(run)
+        seeded_run_id = run.id
+
+    app.dependency_overrides[get_current_user] = lambda: _override_user(user_id)
+    try:
+        async with _client() as client:
+            response = await client.post(f"/api/v1/favorite-lists/{list_id}/enrich")
+        assert response.status_code == 202
+        body = response.json()
+        assert body["status"] == "in_flight"
+        assert body["run_id"] == seeded_run_id  # attached, not duplicated
+
+        async with SessionLocal() as session:
+            runs = (
+                (
+                    await session.execute(
+                        select(PipelineRun).where(
+                            PipelineRun.trigger_source == trigger,
+                            PipelineRun.pipeline_name
+                            == fl_enrich.FAVORITE_LIST_ENRICH_PIPELINE_NAME,
+                        )
+                    )
+                )
+                .scalars()
+                .all()
+            )
+        assert len(runs) == 1  # no second worker spawned
+    finally:
+        app.dependency_overrides.clear()
+        await _cleanup_runs([seeded_run_id] if seeded_run_id else [])
+        await _cleanup([user_id], [bd_id])
+
+
+async def test_enrich_starts_fresh_when_prior_run_heartbeat_is_stale(monkeypatch) -> None:
+    """Conversely, a prior run whose heartbeat has gone quiet past the threshold
+    is a genuine orphan: the endpoint ignores it and queues a fresh run."""
+    user_id = await _seed_user()
+    list_id = await _seed_default_list(user_id)
+    bd_id = await _seed_bd(name="Orphan BD")
+    await _seed_list_item(list_id, bd_id)
+
+    async def _stub_runner(*args, **kwargs):  # noqa: ANN001, ANN002, ANN003
+        return None
+
+    monkeypatch.setattr(fl_enrich, "run_favorite_list_enrich_background", _stub_runner)
+    import app.api.v1.endpoints.favorite_lists as fl_endpoint
+
+    monkeypatch.setattr(fl_endpoint, "run_favorite_list_enrich_background", _stub_runner)
+
+    trigger = f"favorite_list_enrich:{user_id}@example.com"
+    orphan_id = None
+    async with SessionLocal() as session:
+        run = PipelineRun(
+            pipeline_name=fl_enrich.FAVORITE_LIST_ENRICH_PIPELINE_NAME,
+            trigger_source=trigger,
+            status="running",
+            total_items=1,
+            notes=json.dumps(
+                {
+                    "list_id": list_id,
+                    "stage": "running",
+                    # Heartbeat 25 min old → worker is dead.
+                    "last_progress_at": (
+                        datetime.now(timezone.utc) - timedelta(minutes=25)
+                    ).isoformat(),
+                    "items": [],
+                }
+            ),
+            started_at=datetime.now(timezone.utc) - timedelta(minutes=30),
+        )
+        session.add(run)
+        await session.commit()
+        await session.refresh(run)
+        orphan_id = run.id
+
+    app.dependency_overrides[get_current_user] = lambda: _override_user(user_id)
+    new_run_id = None
+    try:
+        async with _client() as client:
+            response = await client.post(f"/api/v1/favorite-lists/{list_id}/enrich")
+        assert response.status_code == 202
+        body = response.json()
+        assert body["status"] == "queued"
+        new_run_id = body["run_id"]
+        assert new_run_id != orphan_id  # a fresh run, not the orphan
+    finally:
+        app.dependency_overrides.clear()
+        await _cleanup_runs([r for r in (orphan_id, new_run_id) if r])
+        await _cleanup([user_id], [bd_id])
+
+
+async def test_enrich_concurrent_dispatch_attaches_instead_of_duplicating(
+    monkeypatch,
+) -> None:
+    """Dispatch-race guard: two simultaneous clicks must yield exactly ONE
+    parent run. The advisory lock serializes them so the second sees the first's
+    committed run and attaches (in_flight) rather than double-spending."""
+    import asyncio
+
+    user_id = await _seed_user()
+    list_id = await _seed_default_list(user_id)
+    bd_id = await _seed_bd(name="Race BD")
+    await _seed_list_item(list_id, bd_id)
+
+    async def _stub_runner(*args, **kwargs):  # noqa: ANN001, ANN002, ANN003
+        return None
+
+    monkeypatch.setattr(fl_enrich, "run_favorite_list_enrich_background", _stub_runner)
+    import app.api.v1.endpoints.favorite_lists as fl_endpoint
+
+    monkeypatch.setattr(fl_endpoint, "run_favorite_list_enrich_background", _stub_runner)
+
+    app.dependency_overrides[get_current_user] = lambda: _override_user(user_id)
+    trigger = f"favorite_list_enrich:{user_id}@example.com"
+    run_ids: list[int] = []
+    try:
+        # Two independent clients so each request gets its own connection —
+        # required for the advisory lock to actually serialize them.
+        async with _client() as c1, _client() as c2:
+            r1, r2 = await asyncio.gather(
+                c1.post(f"/api/v1/favorite-lists/{list_id}/enrich"),
+                c2.post(f"/api/v1/favorite-lists/{list_id}/enrich"),
+            )
+        assert r1.status_code == 202 and r2.status_code == 202
+        statuses = {r1.json()["status"], r2.json()["status"]}
+        # One queued the run, the other attached to it.
+        assert statuses == {"queued", "in_flight"}
+        assert r1.json()["run_id"] == r2.json()["run_id"]
+
+        async with SessionLocal() as session:
+            rows = (
+                (
+                    await session.execute(
+                        select(PipelineRun).where(
+                            PipelineRun.trigger_source == trigger,
+                            PipelineRun.pipeline_name
+                            == fl_enrich.FAVORITE_LIST_ENRICH_PIPELINE_NAME,
+                        )
+                    )
+                )
+                .scalars()
+                .all()
+            )
+        run_ids = [r.id for r in rows]
+        assert len(run_ids) == 1  # no duplicate parent run
+    finally:
+        app.dependency_overrides.clear()
+        await _cleanup_runs(run_ids)
+        await _cleanup([user_id], [bd_id])

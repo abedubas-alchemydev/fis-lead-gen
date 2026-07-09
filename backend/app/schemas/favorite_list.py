@@ -275,3 +275,25 @@ class FavoriteListWithMembership(FavoriteListResponse):
     """
 
     is_member: bool
+
+
+class FavoriteListEnrichResponse(BaseModel):
+    """Response shape for ``POST /api/v1/favorite-lists/{list_id}/enrich``.
+
+    Terminal shapes:
+
+    - ``run_id=int, status="queued"`` — the bulk-enrich job was dispatched;
+      the FE polls ``GET /pipeline/run/{run_id}`` for the live "which firm"
+      pointer (in the run's ``notes`` JSON) and the end-of-run summary.
+    - ``run_id=int, status="in_flight"`` — a bulk-enrich run for this
+      (user, list) is already running; the FE attaches to it and polls the
+      same ``run_id`` rather than queueing a duplicate.
+    - ``run_id=None, status="skipped", reason="List is empty."`` — nothing
+      to enrich; no PipelineRun row, no provider cost.
+    """
+
+    run_id: int | None
+    status: str
+    list_id: int
+    total: int
+    reason: str | None = None
