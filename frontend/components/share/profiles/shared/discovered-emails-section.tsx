@@ -44,6 +44,7 @@ export function DiscoveredEmailsSection({
       <PeopleTable
         title="Discovered emails"
         showTitle={false}
+        scrollX
         items={rows}
         columns={[
           {

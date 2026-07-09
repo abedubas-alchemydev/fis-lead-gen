@@ -22,6 +22,7 @@ export function PeopleTable<T>({
   columns,
   pageSize = PEOPLE_TABLE_PAGE_SIZE,
   showTitle = true,
+  scrollX = false,
 }: {
   title: string;
   items: readonly T[];
@@ -32,6 +33,11 @@ export function PeopleTable<T>({
   // supplies the heading (e.g. the standalone Discovered emails share section).
   // Defaults true so every existing call site renders unchanged.
   showTitle?: boolean;
+  // When true, the table wrapper scrolls horizontally instead of clipping its
+  // overflow — keeps wide tables (e.g. the 4-column Discovered emails section)
+  // fully reachable on narrow screens rather than cutting off the right
+  // columns. Defaults false so every existing call site keeps overflow-hidden.
+  scrollX?: boolean;
 }) {
   const [page, setPage] = useState(0);
   const total = items.length;
@@ -83,7 +89,11 @@ export function PeopleTable<T>({
           ) : null}
         </div>
       ) : null}
-      <div className="overflow-hidden rounded-2xl border border-[var(--border,rgba(30,64,175,0.1))]">
+      <div
+        className={`rounded-2xl border border-[var(--border,rgba(30,64,175,0.1))] ${
+          scrollX ? "overflow-x-auto" : "overflow-hidden"
+        }`}
+      >
         <table className="w-full text-sm">
           <thead className="bg-[var(--surface-2,#f1f6fd)] text-left text-xs uppercase tracking-wide text-[var(--text-muted,#94a3b8)]">
             <tr>
