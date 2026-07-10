@@ -14,6 +14,11 @@ Coverage:
     is ``run_id``; this test pins that mapping).
   - 401 when unauthenticated.
   - 404 when the run id doesn't exist.
+  - Owner-scope for ``favorite_list_enrich`` runs (whose ``notes`` carry
+    a whole favorite list's firm names + membership): 404 to an authed
+    non-owner non-admin, 200 to the owner, 200 to an admin with a
+    different email; every OTHER pipeline type stays readable by any
+    authenticated user (regression guard).
 """
 
 from __future__ import annotations
@@ -38,6 +43,44 @@ def _viewer_user() -> AuthenticatedUser:
         email="viewer@example.com",
         role="viewer",
         session_expires_at=datetime(2099, 1, 1, tzinfo=timezone.utc),
+    )
+
+
+def _admin_user() -> AuthenticatedUser:
+    """Admin whose email deliberately differs from any run's owner — pins
+    that the admin bypass is role-based, not email-based."""
+    return AuthenticatedUser(
+        id="admin-1",
+        name="Admin User",
+        email="admin@example.com",
+        role="admin",
+        session_expires_at=datetime(2099, 1, 1, tzinfo=timezone.utc),
+    )
+
+
+# A favorite_list_enrich parent run's ``notes`` carry the whole list's firm
+# names + membership — exactly the payload the owner-scope check protects.
+_ENRICH_NOTES = (
+    '{"list_name": "Q3 Targets", '
+    '"firms": ["Acme Securities LLC", "Globex Brokerage Inc"]}'
+)
+
+
+def _favorite_list_enrich_run(owner_email: str) -> PipelineRun:
+    """Bulk-enrich parent run owned by ``owner_email`` (stamped into
+    ``trigger_source`` as ``favorite_list_enrich:<email>``)."""
+    return PipelineRun(
+        id=7001,
+        pipeline_name="favorite_list_enrich",
+        trigger_source=f"favorite_list_enrich:{owner_email}",
+        status="running",
+        total_items=2,
+        processed_items=1,
+        success_count=1,
+        failure_count=0,
+        notes=_ENRICH_NOTES,
+        started_at=datetime(2026, 6, 1, 9, 0, 0, tzinfo=timezone.utc),
+        completed_at=None,
     )
 
 
@@ -141,3 +184,103 @@ async def test_get_run_status_returns_401_when_unauthenticated(
         response = await client.get("/api/v1/pipeline/run/4321")
 
     assert response.status_code == 401
+
+
+async def test_favorite_list_enrich_run_hidden_from_non_owner(
+    override_db: _FakeAsyncSession,
+) -> None:
+    """favorite_list_enrich run + authed NON-owner NON-admin → 404.
+
+    The viewer (viewer@example.com) is not the owner stamped into
+    ``trigger_source``, so the list's firm names + membership in ``notes``
+    must not leak. 404 (not 403) so the run's existence isn't confirmed.
+    """
+    override_db.run = _favorite_list_enrich_run("owner@example.com")
+
+    app.dependency_overrides[get_current_user] = _viewer_user
+    try:
+        async with _client() as client:
+            response = await client.get("/api/v1/pipeline/run/7001")
+    finally:
+        app.dependency_overrides.pop(get_current_user, None)
+
+    assert response.status_code == 404
+    # The protected list contents must not appear anywhere in the response.
+    assert "Acme Securities" not in response.text
+
+
+async def test_favorite_list_enrich_run_visible_to_owner(
+    override_db: _FakeAsyncSession,
+) -> None:
+    """favorite_list_enrich run + the OWNER (caller email matches the
+    ``favorite_list_enrich:<email>`` trigger) → 200 with notes present."""
+    override_db.run = _favorite_list_enrich_run("viewer@example.com")
+
+    app.dependency_overrides[get_current_user] = _viewer_user
+    try:
+        async with _client() as client:
+            response = await client.get("/api/v1/pipeline/run/7001")
+    finally:
+        app.dependency_overrides.pop(get_current_user, None)
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["run_id"] == 7001
+    assert body["pipeline_name"] == "favorite_list_enrich"
+    assert body["notes"] == _ENRICH_NOTES
+
+
+async def test_favorite_list_enrich_run_visible_to_admin(
+    override_db: _FakeAsyncSession,
+) -> None:
+    """favorite_list_enrich run + an ADMIN with a DIFFERENT email → 200.
+
+    admin@example.com is not the owner (owner@example.com) yet still reads
+    the run — the bypass is role-based, not email-based."""
+    override_db.run = _favorite_list_enrich_run("owner@example.com")
+
+    app.dependency_overrides[get_current_user] = _admin_user
+    try:
+        async with _client() as client:
+            response = await client.get("/api/v1/pipeline/run/7001")
+    finally:
+        app.dependency_overrides.pop(get_current_user, None)
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["run_id"] == 7001
+    assert body["notes"] == _ENRICH_NOTES
+
+
+async def test_non_enrich_run_readable_by_any_authenticated_user(
+    override_db: _FakeAsyncSession,
+) -> None:
+    """Regression guard: a NON-enrich run stays readable by any authed
+    user even when the trigger email doesn't match the caller. Proves the
+    owner-scope check is confined to favorite_list_enrich and leaves every
+    other pipeline type's polling untouched."""
+    override_db.run = PipelineRun(
+        id=7002,
+        pipeline_name="broker_dealer_refresh_all",
+        trigger_source="manual_single:someone@example.com",
+        status="running",
+        total_items=5,
+        processed_items=2,
+        success_count=2,
+        failure_count=0,
+        notes='{"summary": "refreshing"}',
+        started_at=datetime(2026, 6, 1, 9, 0, 0, tzinfo=timezone.utc),
+        completed_at=None,
+    )
+
+    app.dependency_overrides[get_current_user] = _viewer_user
+    try:
+        async with _client() as client:
+            response = await client.get("/api/v1/pipeline/run/7002")
+    finally:
+        app.dependency_overrides.pop(get_current_user, None)
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["run_id"] == 7002
+    assert body["pipeline_name"] == "broker_dealer_refresh_all"

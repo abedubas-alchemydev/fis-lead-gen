@@ -36,6 +36,7 @@ from app.services.deficiency_watcher import DeficiencyWatcherService
 from app.services.filing_monitor import FilingMonitorService
 from app.services.form4_watcher import Form4WatcherService
 from app.services.pipeline import ClearingPipelineService
+from app.services.pipeline_names import FAVORITE_LIST_ENRICH_PIPELINE
 from app.services.registration_watcher import RegistrationWatcherService
 
 logger = logging.getLogger(__name__)
@@ -560,10 +561,27 @@ async def get_pipeline_run_status(
     detail to render the now-populated financial fields.
 
     Auth: any authenticated user — the run row only exposes status
-    counters and notes, no broker-dealer PII or filing payloads.
+    counters and notes, no broker-dealer PII or filing payloads. The
+    one exception is ``favorite_list_enrich`` runs, whose notes carry a
+    whole favorite list's firm names + membership: those are readable
+    only by the owner (whose email is stamped into ``trigger_source``)
+    or an admin, and 404 to anyone else. All other pipeline types stay
+    readable by any authenticated user.
     """
     run = await db.get(PipelineRun, run_id)
     if run is None:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Pipeline run not found.",
+        )
+    if (
+        run.pipeline_name == FAVORITE_LIST_ENRICH_PIPELINE
+        and current_user.role != "admin"
+        and run.trigger_source != f"favorite_list_enrich:{current_user.email}"
+    ):
+        # Owner-scope bulk-enrich runs: their notes carry the whole list's
+        # firm names + membership. 404 (not 403) so a non-owner can't even
+        # confirm the run exists. All other pipeline types are unchanged.
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
             detail="Pipeline run not found.",
