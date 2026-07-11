@@ -325,7 +325,7 @@ export function BankShareProfile({ data }: BankShareProfileProps) {
                 {events.map((event, idx) => {
                   const isLatest = idx === events.length - 1;
                   return (
-                    <li key={event.id} className="relative">
+                    <li key={idx} className="relative">
                       {/* Timeline dot — latest action gets the accent fill. */}
                       <span
                         aria-hidden
