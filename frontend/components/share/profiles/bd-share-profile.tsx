@@ -429,7 +429,7 @@ export function BdShareProfile({ data }: BdShareProfileProps) {
                   Introducing Arrangements
                 </p>
                 <div className="mt-2 space-y-2">
-                  {data.introducing_arrangements.map((arr) => {
+                  {data.introducing_arrangements.map((arr, idx) => {
                     const parsed = parseArrangementBlob(
                       [arr.statement, arr.description].filter(Boolean).join(" "),
                     );
@@ -439,7 +439,7 @@ export function BdShareProfile({ data }: BdShareProfileProps) {
                       : parsed.effectiveDate;
                     return (
                       <div
-                        key={arr.id}
+                        key={idx}
                         className="rounded-2xl border border-[var(--border,rgba(30,64,175,0.1))] px-4 py-3"
                       >
                         {name ? (
@@ -470,7 +470,7 @@ export function BdShareProfile({ data }: BdShareProfileProps) {
                   third party.
                 </p>
                 <div className="mt-2 space-y-2">
-                  {data.industry_arrangements.map((arr) => {
+                  {data.industry_arrangements.map((arr, idx) => {
                     const kindLabel =
                       arr.kind === "books_records"
                         ? "Books / records"
@@ -482,7 +482,7 @@ export function BdShareProfile({ data }: BdShareProfileProps) {
                       : null;
                     return (
                       <div
-                        key={arr.id}
+                        key={idx}
                         className="rounded-2xl border border-[var(--border,rgba(30,64,175,0.1))] px-4 py-3"
                       >
                         <div className="flex flex-wrap items-center justify-between gap-2">
@@ -544,9 +544,9 @@ export function BdShareProfile({ data }: BdShareProfileProps) {
                   No clearing history available yet.
                 </div>
               ) : (
-                data.clearing_arrangements.map((item) => (
+                data.clearing_arrangements.map((item, idx) => (
                   <div
-                    key={item.id}
+                    key={idx}
                     className="rounded-2xl border border-[var(--border,rgba(30,64,175,0.1))] px-4 py-3"
                   >
                     <div className="flex flex-wrap items-center justify-between gap-3">
