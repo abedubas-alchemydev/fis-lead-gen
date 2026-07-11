@@ -135,16 +135,83 @@ def _fake_internal_bd_profile():
         emails=[SimpleNamespace(value="scout@acme.example", type="work", source="apollo", confidence=0.9)],
         phones=[SimpleNamespace(value="+15550000", type="mobile", source="pdl", confidence=0.8)],
     )
+    # Introducing / industry arrangements carry internal surrogate keys
+    # (id, bd_id) that must NOT survive the public projection; the as-filed
+    # facts (incl. the partner's public FINRA CRD) must.
+    introducing = SimpleNamespace(
+        id=501,
+        bd_id=7,
+        statement="Introduces on a fully-disclosed basis",
+        business_name="Pershing LLC",
+        effective_date=None,
+        description=None,
+    )
+    industry = SimpleNamespace(
+        id=502,
+        bd_id=7,
+        kind="customer_accounts",
+        has_arrangement=True,
+        partner_name="Pershing LLC",
+        partner_crd="7560",
+        partner_address="One Pershing Plaza",
+        effective_date=None,
+        description=None,
+    )
     return SimpleNamespace(
         broker_dealer=broker_dealer,
         financials=[],
         clearing_arrangements=[],
         clearing_memberships=[],
-        introducing_arrangements=[],
-        industry_arrangements=[],
+        introducing_arrangements=[introducing],
+        industry_arrangements=[industry],
         registration_compliance=None,
         deficiency_status=None,
         executive_contacts=[contact],
+    )
+
+
+def _fake_internal_bank_detail():
+    """Stand-in for the internal ``BankDetail`` whose ``application_events``
+    carry the internal row id + ``created_at`` bookkeeping timestamp that must
+    NOT survive the public projection."""
+    event = SimpleNamespace(
+        id=88,
+        action="Approved",
+        action_date=None,
+        filing_type="Charter",
+        source_url="https://occ.example/app/88",
+        created_at=datetime(2026, 1, 2, tzinfo=timezone.utc),
+    )
+    return SimpleNamespace(
+        name="Vault National Bank",
+        fdic_cert=None,
+        fed_rssd=None,
+        occ_charter_number=None,
+        occ_control_number=None,
+        address=None,
+        city=None,
+        state=None,
+        zip=None,
+        website=None,
+        charter_authority=None,
+        charter_type=None,
+        charter_status=None,
+        bkclass=None,
+        regulator=None,
+        lei=None,
+        established_date=None,
+        insured_date=None,
+        application_received_date=None,
+        last_action_date=None,
+        asset=None,
+        deposits=None,
+        offices=None,
+        active=None,
+        digital_assets=False,
+        digital_asset_pdfs=[],
+        application_events=[event],
+        source_links=[],
+        contacts=[],
     )
 
 
@@ -462,3 +529,38 @@ async def test_profile_public_bd_projection_drops_internal_fields(monkeypatch) -
     assert contact["phones"][0] == {"value": "+15550000", "type": "mobile"}
     assert "confidence" not in contact["emails"][0]
     assert "apollo" not in resp.text and "pdl" not in resp.text
+    # Introducing arrangement: internal id/bd_id stripped (exact-match proves
+    # no extra keys leaked), as-filed facts preserved.
+    intro = body["broker_dealer"]["introducing_arrangements"][0]
+    assert intro == {
+        "statement": "Introduces on a fully-disclosed basis",
+        "business_name": "Pershing LLC",
+        "effective_date": None,
+        "description": None,
+    }
+    # Industry arrangement: id/bd_id stripped; the partner's public FINRA CRD
+    # survives (consistent with crd_number elsewhere on the public surface).
+    industry = body["broker_dealer"]["industry_arrangements"][0]
+    assert "id" not in industry and "bd_id" not in industry
+    assert industry["kind"] == "customer_accounts"
+    assert industry["has_arrangement"] is True
+    assert industry["partner_crd"] == "7560"
+    # The internal broker_dealer PK must not appear anywhere in the payload.
+    assert "bd_id" not in resp.text
+
+
+def test_public_bank_projection_drops_event_internal_fields() -> None:
+    """``PublicBankProfile.from_internal`` allowlists application_events: the
+    internal row id and created_at bookkeeping timestamp are dropped, the
+    as-filed OCC action facts preserved."""
+    from app.schemas.lead_share import PublicBankProfile
+
+    public = PublicBankProfile.from_internal(_fake_internal_bank_detail())
+    event = public.model_dump()["application_events"][0]
+    assert event == {
+        "action": "Approved",
+        "action_date": None,
+        "filing_type": "Charter",
+        "source_url": "https://occ.example/app/88",
+    }
+    assert "id" not in event and "created_at" not in event

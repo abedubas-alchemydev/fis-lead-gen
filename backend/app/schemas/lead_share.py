@@ -21,10 +21,9 @@ from __future__ import annotations
 from datetime import date, datetime
 from typing import Literal, Self
 
-from pydantic import BaseModel, ConfigDict, Field, field_validator
+from pydantic import BaseModel, Field, field_validator
 
 from app.schemas.bank import (
-    BankApplicationEventItem,
     BankDetail,
     BankPdfLink,
     BankSourceLink,
@@ -32,8 +31,6 @@ from app.schemas.bank import (
 from app.schemas.broker_dealer import (
     BrokerDealerProfileResponse,
     DeficiencyStatusSummary,
-    IndustryArrangementItem,
-    IntroducingArrangementItem,
     RegistrationComplianceSummary,
 )
 from app.schemas.investment_advisor import InvestmentAdvisorProfileResponse
@@ -335,6 +332,73 @@ class PublicAdvisorFilingRow(BaseModel):
         )
 
 
+class PublicIntroducingArrangementRow(BaseModel):
+    """A FINRA introducing arrangement on a shared BD profile. Strips the
+    internal row id and bd_id — the public surface never exposes internal
+    entity keys — and keeps only the as-filed facts."""
+
+    statement: str | None = None
+    business_name: str | None = None
+    effective_date: date | None = None
+    description: str | None = None
+
+    @classmethod
+    def from_internal(cls, item: object) -> Self:
+        return cls(
+            statement=getattr(item, "statement", None),
+            business_name=getattr(item, "business_name", None),
+            effective_date=getattr(item, "effective_date", None),
+            description=getattr(item, "description", None),
+        )
+
+
+class PublicIndustryArrangementRow(BaseModel):
+    """A FINRA 'Firm Operations → Industry Arrangements' row (self-clearing vs
+    third-party signal). Strips the internal row id and bd_id; keeps the
+    arrangement kind, the yes/no, and the partner block. ``partner_crd`` is a
+    public FINRA identifier (like ``crd_number`` elsewhere), so it is kept."""
+
+    kind: str
+    has_arrangement: bool
+    partner_name: str | None = None
+    partner_crd: str | None = None
+    partner_address: str | None = None
+    effective_date: date | None = None
+    description: str | None = None
+
+    @classmethod
+    def from_internal(cls, item: object) -> Self:
+        return cls(
+            kind=getattr(item, "kind", "") or "",
+            has_arrangement=bool(getattr(item, "has_arrangement", False)),
+            partner_name=getattr(item, "partner_name", None),
+            partner_crd=getattr(item, "partner_crd", None),
+            partner_address=getattr(item, "partner_address", None),
+            effective_date=getattr(item, "effective_date", None),
+            description=getattr(item, "description", None),
+        )
+
+
+class PublicBankApplicationEventRow(BaseModel):
+    """One OCC charter-application action on a shared bank profile. Strips the
+    internal row id and the ``created_at`` bookkeeping timestamp; keeps the
+    filed action, its date, the filing type, and the public source URL."""
+
+    action: str
+    action_date: date | None = None
+    filing_type: str | None = None
+    source_url: str | None = None
+
+    @classmethod
+    def from_internal(cls, item: object) -> Self:
+        return cls(
+            action=getattr(item, "action", "") or "",
+            action_date=getattr(item, "action_date", None),
+            filing_type=getattr(item, "filing_type", None),
+            source_url=getattr(item, "source_url", None),
+        )
+
+
 # ══════════════════════════════════════════════════════════════════════════
 # Public section — per-vertical profiles
 # ══════════════════════════════════════════════════════════════════════════
@@ -381,8 +445,8 @@ class PublicBrokerDealerProfile(BaseModel):
     financials: list[PublicFinancialRow] = []
     clearing_arrangements: list[PublicClearingArrangementRow] = []
     clearing_memberships: list[PublicClearingMembershipRow] = []
-    introducing_arrangements: list[IntroducingArrangementItem] = []
-    industry_arrangements: list[IndustryArrangementItem] = []
+    introducing_arrangements: list[PublicIntroducingArrangementRow] = []
+    industry_arrangements: list[PublicIndustryArrangementRow] = []
     registration_compliance: RegistrationComplianceSummary | None = None
     deficiency_status: DeficiencyStatusSummary | None = None
     executive_contacts: list[PublicContactItem] = []
@@ -439,8 +503,14 @@ class PublicBrokerDealerProfile(BaseModel):
                 PublicClearingMembershipRow.from_internal(m)
                 for m in profile.clearing_memberships
             ],
-            introducing_arrangements=list(profile.introducing_arrangements),
-            industry_arrangements=list(profile.industry_arrangements),
+            introducing_arrangements=[
+                PublicIntroducingArrangementRow.from_internal(a)
+                for a in profile.introducing_arrangements
+            ],
+            industry_arrangements=[
+                PublicIndustryArrangementRow.from_internal(a)
+                for a in profile.industry_arrangements
+            ],
             registration_compliance=profile.registration_compliance,
             deficiency_status=profile.deficiency_status,
             executive_contacts=[
@@ -553,7 +623,7 @@ class PublicBankProfile(BaseModel):
     active: bool | None = None
     digital_assets: bool = False
     digital_asset_pdfs: list[BankPdfLink] = []
-    application_events: list[BankApplicationEventItem] = []
+    application_events: list[PublicBankApplicationEventRow] = []
     source_links: list[BankSourceLink] = []
     contacts: list[PublicContactItem] = []
     discovered_emails: list[PublicDiscoveredEmailRow] = []
@@ -592,7 +662,10 @@ class PublicBankProfile(BaseModel):
             active=detail.active,
             digital_assets=detail.digital_assets,
             digital_asset_pdfs=list(detail.digital_asset_pdfs or []),
-            application_events=list(detail.application_events or []),
+            application_events=[
+                PublicBankApplicationEventRow.from_internal(e)
+                for e in (detail.application_events or [])
+            ],
             source_links=list(detail.source_links or []),
             contacts=[PublicContactItem.from_contact(c) for c in detail.contacts],
             discovered_emails=list(discovered_emails or []),
