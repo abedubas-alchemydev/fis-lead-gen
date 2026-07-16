@@ -6,6 +6,7 @@ import type { ReactNode } from "react";
 import { Fragment, useEffect, useMemo, useState } from "react";
 import { usePathname, useRouter, useSearchParams } from "next/navigation";
 
+import { SiteCredit } from "@/components/brand/site-credit";
 import { GlobalBackButton } from "@/components/layout/global-back-button";
 import { apiRequest } from "@/lib/api";
 import { authClient } from "@/lib/auth-client";
@@ -700,8 +701,9 @@ export function AppShell({
           <main className="min-w-0 flex-1 overflow-auto">
             <GlobalBackButton />
             {children}
-            <footer className="border-t border-[var(--border,rgba(30,64,175,0.1))] px-6 py-4 text-center text-[11px] text-[var(--text-muted,#94a3b8)]">
-              Data provided by FINRA, SEC EDGAR, and DTCC/OCC directories.
+            <footer className="flex flex-col gap-1 border-t border-[var(--border,rgba(30,64,175,0.1))] px-6 py-4 text-center text-[11px] text-[var(--text-muted,#94a3b8)]">
+              <p>Data provided by FINRA, SEC EDGAR, and DTCC/OCC directories.</p>
+              <SiteCredit />
             </footer>
           </main>
         </div>
