@@ -1,7 +1,7 @@
-// Single source of truth for the site-wide credit line: product copyright +
-// developer attribution. Dropped into every footer surface (authenticated app
-// shell, auth screens, public share viewer, marketing landing) so the year and
-// wording can never drift between them.
+// Single source of truth for the site-wide credit line: the AlchemyDev.io
+// copyright shown on every page. Dropped into every footer surface
+// (authenticated app shell, auth screens, public share viewer, marketing
+// landing) so the year and wording can never drift between them.
 //
 // SERVER component (no "use client"): pure static markup that ships no JS.
 // `new Date().getFullYear()` is evaluated at request time, so the year rolls
@@ -21,7 +21,7 @@ export function SiteCredit({ className }: SiteCreditProps) {
 
   return (
     <span className={className}>
-      &copy; {year} DOX. All rights reserved. &middot; Developed by{" "}
+      &copy; {year}{" "}
       <a
         href="https://alchemydev.io"
         target="_blank"
@@ -30,6 +30,7 @@ export function SiteCredit({ className }: SiteCreditProps) {
       >
         AlchemyDev.io
       </a>
+      . All rights reserved.
     </span>
   );
 }
