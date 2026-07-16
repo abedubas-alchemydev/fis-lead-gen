@@ -2,6 +2,7 @@ import type { Route } from "next";
 import Link from "next/link";
 
 import { BrandMark } from "@/components/brand/brand-mark";
+import { SiteCredit } from "@/components/brand/site-credit";
 
 // Page footer — the 9th and final owned section of the landing redo. Composed
 // last, outside <main>, it closes the dark -> light -> dark descent on a calm,
@@ -56,9 +57,7 @@ export function RedoFooter() {
               DOX — Institutional Finance Intelligence
             </span>
           </div>
-          <p className="text-xs text-[var(--text-dim,#475569)]">
-            &copy; {new Date().getFullYear()} Alchemy Dev. All rights reserved. Confidential.
-          </p>
+          <SiteCredit className="text-xs text-[var(--text-dim,#475569)]" />
         </div>
       </div>
     </footer>
