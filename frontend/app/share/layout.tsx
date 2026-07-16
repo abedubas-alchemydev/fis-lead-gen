@@ -1,5 +1,6 @@
 import type { ReactNode } from "react";
 
+import { SiteCredit } from "@/components/brand/site-credit";
 import { Toaster } from "@/components/ui/toaster";
 
 // Public chrome for /share/{token} — the DOX Share viewer surface. No app
@@ -55,9 +56,10 @@ export default function ShareLayout({ children }: { children: ReactNode }) {
       <main className="flex-1">{children}</main>
 
       <footer className="border-t border-[var(--border,rgba(30,64,175,0.1))] py-5">
-        <p className="mx-auto w-full max-w-5xl px-4 text-center text-xs text-[var(--text-muted,#94a3b8)] sm:px-6">
-          Confidential — prepared for the intended recipient only.
-        </p>
+        <div className="mx-auto flex w-full max-w-5xl flex-col items-center gap-1 px-4 text-center text-xs text-[var(--text-muted,#94a3b8)] sm:px-6">
+          <p>Confidential — prepared for the intended recipient only.</p>
+          <SiteCredit />
+        </div>
       </footer>
 
       <Toaster />
