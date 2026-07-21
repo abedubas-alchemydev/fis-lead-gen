@@ -35,3 +35,18 @@ class SavedContactResponse(BaseModel):
     phone: str | None = None
     linkedin_url: str | None = None
     created_at: datetime
+
+
+class SavedContactWithOwner(SavedContactResponse):
+    """One row in ``GET /api/v1/integrations/saved-contacts``.
+
+    A saved contact PLUS the id / name / email of the user who saved it, so the
+    sibling CRM can attribute each contact to its owner across ALL users --
+    unlike the owner-scoped ``SavedContactResponse`` served to end users. Owner
+    name/email are typed optional to stay forgiving of sparse ``user`` rows even
+    though the inner join guarantees an owner id.
+    """
+
+    saved_by_id: str
+    saved_by_name: str | None = None
+    saved_by_email: str | None = None
