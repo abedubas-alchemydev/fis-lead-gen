@@ -20,10 +20,11 @@ from __future__ import annotations
 from collections.abc import Sequence
 
 from fastapi import HTTPException, status
-from sqlalchemy import delete, select
+from sqlalchemy import Row, delete, select
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.models.auth import AuthUser
 from app.models.discovered_email import DiscoveredEmail
 from app.models.saved_contact import SavedContact
 
@@ -140,6 +141,51 @@ async def list_saved_contacts(
         stmt = stmt.where(SavedContact.source == source)
     stmt = stmt.order_by(SavedContact.created_at.desc(), SavedContact.id.desc())
     return list((await db.execute(stmt)).scalars().all())
+
+
+async def list_all_saved_contacts(
+    db: AsyncSession, source: str | None = None, limit: int = 1000
+) -> Sequence[Row[tuple[SavedContact, str, str | None, str | None]]]:
+    """Return EVERY user's saved contacts joined to their owner, newest first.
+
+    The cross-user counterpart to :func:`list_saved_contacts`: it is NOT scoped
+    to a single ``user_id`` and inner-joins ``user`` so each row carries the
+    owner's id / name / email. Reserved for the service-to-service CRM
+    integration endpoint, which gates the read on a shared key rather than a
+    per-user session -- never expose this to an end-user surface.
+
+    Ordered ``created_at DESC`` with an ``id DESC`` tiebreak, matching
+    :func:`list_saved_contacts` so both surfaces agree on ordering.
+
+    Args:
+        db: Async DB session.
+        source: Optional origin filter (e.g. ``"discovered_email"``).
+        limit: Max rows to return. Hard-clamped to ``1..1000`` so an unbounded
+            (or hostile) value can never pull the entire cross-user table; the
+            cap applies AFTER ordering, so callers get the newest ``limit`` rows.
+
+    Returns:
+        Rows of ``(SavedContact, owner_id, owner_name, owner_email)`` across all
+        users, newest-first. The inner join drops any orphaned save whose owner
+        row is gone (the ``user`` FK makes that unreachable in practice).
+    """
+    limit = min(max(limit, 1), 1000)
+    stmt = (
+        select(
+            SavedContact,
+            AuthUser.id.label("owner_id"),
+            AuthUser.name.label("owner_name"),
+            AuthUser.email.label("owner_email"),
+        )
+        .join(AuthUser, AuthUser.id == SavedContact.user_id)
+    )
+    if source is not None:
+        stmt = stmt.where(SavedContact.source == source)
+    stmt = (
+        stmt.order_by(SavedContact.created_at.desc(), SavedContact.id.desc())
+        .limit(limit)
+    )
+    return list((await db.execute(stmt)).all())
 
 
 async def delete_saved_contact(

@@ -427,6 +427,15 @@ class Settings(BaseSettings):
     # domain — because Cloud Scheduler signs tokens against the *.run.app URL.
     backend_audience: str = "https://fis-backend-136029935063.us-central1.run.app"
 
+    # Shared bearer key the sibling CRM presents to
+    # ``GET /api/v1/integrations/saved-contacts`` to read every user's saved
+    # contacts service-to-service (no BetterAuth session, no feature grant).
+    # Optional like the other ``*_api_key`` fields: when unset/empty the
+    # integration endpoint fails CLOSED with 503, so the cross-user read can
+    # never be reached without a configured key rather than matching an empty
+    # string. Reads env ``CRM_INTEGRATION_API_KEY``.
+    crm_integration_api_key: str | None = None
+
     @computed_field
     @property
     def cors_origins(self) -> list[str]:
