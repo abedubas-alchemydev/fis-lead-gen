@@ -3,7 +3,7 @@
 Integration-marked -- touches a real Postgres so the cross-user join to
 ``user`` and the newest-first ordering actually exercise. Unlike the
 owner-scoped ``test_saved_contacts.py`` (which overrides ``get_current_user``),
-auth here is a shared bearer key set via ``monkeypatch`` on
+auth here is a shared API key (``X-API-Key`` header) set via ``monkeypatch`` on
 ``settings.crm_integration_api_key`` -- there is no session/feature override.
 
 Because the endpoint returns EVERY user's saved contacts, the shared dev DB may
@@ -116,7 +116,7 @@ async def test_valid_key_returns_all_users_contacts_with_owner(
         async with _client() as client:
             resp = await client.get(
                 "/api/v1/integrations/saved-contacts",
-                headers={"Authorization": f"Bearer {_VALID_KEY}"},
+                headers={"X-API-Key": _VALID_KEY},
             )
         assert resp.status_code == 200
         body = resp.json()
@@ -151,10 +151,10 @@ async def test_valid_key_returns_all_users_contacts_with_owner(
         await _cleanup([owner_a, owner_b])
 
 
-# ── (b) missing / wrong bearer -> 401 ────────────────────────────────────────
+# ── (b) missing / wrong key -> 401 ────────────────────────────────────────
 
 
-async def test_missing_or_wrong_bearer_is_401(
+async def test_missing_or_wrong_key_is_401(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     monkeypatch.setattr(settings, "crm_integration_api_key", _VALID_KEY)
@@ -162,31 +162,26 @@ async def test_missing_or_wrong_bearer_is_401(
         no_header = await client.get("/api/v1/integrations/saved-contacts")
         wrong_token = await client.get(
             "/api/v1/integrations/saved-contacts",
-            headers={"Authorization": "Bearer not-the-key"},
-        )
-        no_bearer_prefix = await client.get(
-            "/api/v1/integrations/saved-contacts",
-            headers={"Authorization": _VALID_KEY},  # right value, no "Bearer "
+            headers={"X-API-Key": "not-the-key"},
         )
         empty_token = await client.get(
             "/api/v1/integrations/saved-contacts",
-            headers={"Authorization": "Bearer "},
+            headers={"X-API-Key": ""},
         )
     assert no_header.status_code == 401
     assert wrong_token.status_code == 401
-    assert no_bearer_prefix.status_code == 401
     assert empty_token.status_code == 401
 
 
-# ── (b2) non-ASCII bearer -> 401, never a 500 (compare_digest footgun) ────────
+# ── (b2) non-ASCII key -> 401, never a 500 (compare_digest footgun) ────────
 
 
-async def test_non_ascii_bearer_is_401_not_500(
+async def test_non_ascii_key_is_401_not_500(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """A crafted non-ASCII bearer must fail closed as 401, not crash as 500.
+    """A crafted non-ASCII key must fail closed as 401, not crash as 500.
 
-    Starlette decodes the Authorization header as latin-1, so ``Bearer é``
+    Starlette decodes the ``X-API-Key`` header as latin-1, so a non-ASCII byte
     reaches the gate as the non-ASCII str ``"é"``. A str/str ``compare_digest``
     raises ``TypeError`` on that -- an uncaught 500 any UNAUTHENTICATED caller
     could trigger (DoS / log-spam). The gate compares bytes, which never raises.
@@ -199,7 +194,7 @@ async def test_non_ascii_bearer_is_401_not_500(
     async with _client() as client:
         resp = await client.get(
             "/api/v1/integrations/saved-contacts",
-            headers={"Authorization": "Bearer é".encode("latin-1")},
+            headers={"X-API-Key": "é".encode("latin-1")},
         )
     assert resp.status_code == 401
 
@@ -210,12 +205,12 @@ async def test_non_ascii_bearer_is_401_not_500(
 async def test_unset_key_fails_closed_with_503(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    # Unset: even a well-formed bearer can't reach the read.
+    # Unset: even a well-formed key can't reach the read.
     monkeypatch.setattr(settings, "crm_integration_api_key", None)
     async with _client() as client:
         unset = await client.get(
             "/api/v1/integrations/saved-contacts",
-            headers={"Authorization": f"Bearer {_VALID_KEY}"},
+            headers={"X-API-Key": _VALID_KEY},
         )
     assert unset.status_code == 503
 
@@ -224,7 +219,7 @@ async def test_unset_key_fails_closed_with_503(
     async with _client() as client:
         empty = await client.get(
             "/api/v1/integrations/saved-contacts",
-            headers={"Authorization": "Bearer "},
+            headers={"X-API-Key": _VALID_KEY},
         )
     assert empty.status_code == 503
 
@@ -251,12 +246,12 @@ async def test_source_filter_and_newest_first(
             match = await client.get(
                 "/api/v1/integrations/saved-contacts",
                 params={"source": unique_source},
-                headers={"Authorization": f"Bearer {_VALID_KEY}"},
+                headers={"X-API-Key": _VALID_KEY},
             )
             no_match = await client.get(
                 "/api/v1/integrations/saved-contacts",
                 params={"source": f"nope_{secrets.token_hex(4)}"},
-                headers={"Authorization": f"Bearer {_VALID_KEY}"},
+                headers={"X-API-Key": _VALID_KEY},
             )
         assert match.status_code == 200
         rows = match.json()
@@ -300,7 +295,7 @@ async def test_limit_caps_result_count(
             resp = await client.get(
                 "/api/v1/integrations/saved-contacts",
                 params={"source": unique_source, "limit": 2},
-                headers={"Authorization": f"Bearer {_VALID_KEY}"},
+                headers={"X-API-Key": _VALID_KEY},
             )
         assert resp.status_code == 200
         rows = resp.json()

@@ -5,7 +5,8 @@ first (and only, so far) consumer is the CRM, which surfaces DOX "saved
 contacts" for every user. Unlike the owner-scoped ``/api/v1/saved-contacts``
 surface -- BetterAuth session cookie + ``email_extractor`` feature gate, one
 user's rows only -- this endpoint is a CROSS-USER read guarded solely by a
-shared bearer key (``settings.crm_integration_api_key``). There is no session,
+shared API key on the ``X-API-Key`` header
+(``settings.crm_integration_api_key``). There is no session,
 no feature grant, and no per-user DB lookup: it is a service credential.
 
 Auth contract (see ``_require_crm_integration_key``):
@@ -37,12 +38,12 @@ router = APIRouter(prefix="/integrations", tags=["integrations"])
 
 
 def _require_crm_integration_key(request: Request) -> None:
-    """Gate the integration surface on the shared CRM bearer key.
+    """Gate the integration surface on the shared CRM key (``X-API-Key`` header).
 
     FAILS CLOSED: when ``crm_integration_api_key`` is unset/empty the whole
     surface returns 503 rather than allowing an empty-string token to match --
     a missing deployment secret must never open a cross-user read. A missing or
-    mismatched ``Authorization: Bearer <token>`` returns 401. The token is
+    mismatched ``X-API-Key`` header returns 401. The token is
     compared with ``hmac.compare_digest`` so a probe can't recover it by timing
     (mirrors the constant-time comparisons in ``services/auth.py``). No session
     cookie, feature grant, or DB lookup -- this is a service-to-service key.
@@ -54,15 +55,17 @@ def _require_crm_integration_key(request: Request) -> None:
             detail="CRM integration is not configured.",
         )
 
-    auth_header = request.headers.get("Authorization", "")
-    token = ""
-    if auth_header.startswith("Bearer "):
-        token = auth_header[len("Bearer ") :].strip()
-    # ``token`` comes off the (latin-1 decoded) Authorization header; a non-ASCII
-    # byte makes a str/str ``compare_digest`` raise TypeError -- an uncaught 500
-    # an UNAUTHENTICATED caller could trigger. Compare BYTES, which never raises
-    # on non-ASCII (mirrors the try/except guard in services/lead_shares.py). The
-    # 503 fail-closed check above still runs first, so an empty key can't match.
+    token = request.headers.get("X-API-Key", "")
+    # The key rides ``X-API-Key``, NOT ``Authorization``: the public entry point
+    # (frontend/app/api/backend/[...path]/route.ts) is a Next.js proxy that
+    # OVERWRITES ``Authorization`` with a Google IAM identity token to reach the
+    # IAM-private Cloud Run backend, so a CRM bearer never survives to here -- the
+    # proxy forwards ``X-*`` headers untouched. ``token`` comes off the (latin-1
+    # decoded) header; a non-ASCII byte makes a str/str ``compare_digest`` raise
+    # TypeError -- an uncaught 500 an UNAUTHENTICATED caller could trigger. Compare
+    # BYTES, which never raises on non-ASCII (mirrors the try/except guard in
+    # services/lead_shares.py). The 503 fail-closed check above still runs first,
+    # so an empty key can't match.
     if not token or not hmac.compare_digest(
         token.encode("utf-8"), expected.encode("utf-8")
     ):
