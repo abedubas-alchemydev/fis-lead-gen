@@ -1,0 +1,7 @@
+# Generated exports — rebuild from the markdown sources with export/build_export.py
+export/*
+!export/build_export.py
+!export/build_licenses.py
+
+# UI screenshots (binary, regenerable) — not version-controlled
+images/
